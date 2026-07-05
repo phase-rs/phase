@@ -454,6 +454,10 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     color_options: all_mana_colors(),
                     contribution,
                 }
+            } else if let Some(options) =
+                parse_any_one_and_any_other_color_options(after_color.trim(), &count)
+            {
+                ManaProduction::ChoiceAmongCombinations { options }
             } else {
                 ManaProduction::AnyOneColor {
                     count,
@@ -732,6 +736,65 @@ fn try_parse_any_color_for_each_suffix(lower: &str) -> Option<(QuantityRef, Opti
     let qty = super::super::oracle_quantity::parse_for_each_clause(for_each_rest)?;
     let target = for_each_clause_target_filter(for_each_rest);
     Some((qty, target))
+}
+
+// CR 106.1a: "N mana of any one color and M mana of any other color" chooses
+// two distinct colors, then produces the requested repeated-color combination.
+fn parse_any_one_and_any_other_color_options(
+    after_any_one_color: &str,
+    first_count: &QuantityExpr,
+) -> Option<Vec<Vec<ManaColor>>> {
+    let QuantityExpr::Fixed { value: first_value } = first_count else {
+        return None;
+    };
+    if *first_value <= 0 {
+        return None;
+    }
+
+    let lower = after_any_one_color.to_lowercase();
+    let (_, after_and) = nom_on_lower(after_any_one_color, &lower, |i| {
+        value((), tag("and ")).parse(i)
+    })?;
+    let (second_count, rest) = parse_mana_count_prefix(after_and)?;
+    let QuantityExpr::Fixed {
+        value: second_value,
+    } = second_count
+    else {
+        return None;
+    };
+    if second_value <= 0 {
+        return None;
+    }
+
+    let rest = rest.trim().trim_end_matches('.').trim();
+    let rest_lower = rest.to_lowercase();
+    let (_, tail) = nom_on_lower(rest, &rest_lower, |i| {
+        value((), tag("mana of any other color")).parse(i)
+    })?;
+    if !tail.trim().is_empty() {
+        return None;
+    }
+
+    let mut options = Vec::new();
+    for (first_index, first_color) in ManaColor::ALL.iter().enumerate() {
+        for (second_index, second_color) in ManaColor::ALL.iter().enumerate() {
+            if first_index == second_index {
+                continue;
+            }
+            if *first_value == second_value && second_index < first_index {
+                continue;
+            }
+            let mut option = Vec::with_capacity((*first_value + second_value) as usize);
+            for _ in 0..*first_value {
+                option.push(*first_color);
+            }
+            for _ in 0..second_value {
+                option.push(*second_color);
+            }
+            options.push(option);
+        }
+    }
+    (!options.is_empty()).then_some(options)
 }
 
 pub(super) fn parse_mana_production_clause(
@@ -3372,6 +3435,47 @@ mod tests {
             matches!(any_one_produced, ManaProduction::AnyOneColor { .. }),
             "any one color must be AnyOneColor, got {any_one_produced:?}"
         );
+    }
+
+    #[test]
+    fn any_one_color_and_any_other_color_is_combination_choice() {
+        let effect = try_parse_add_mana_effect(
+            "Add two mana of any one color and two mana of any other color.",
+        )
+        .expect("any-one-plus-any-other-color must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::ChoiceAmongCombinations { options } = produced else {
+            panic!("expected ChoiceAmongCombinations, got {produced:?}");
+        };
+        assert_eq!(options.len(), 10);
+        for option in &options {
+            assert_eq!(option.len(), 4);
+            assert_eq!(option[0], option[1]);
+            assert_eq!(option[2], option[3]);
+            assert_ne!(option[0], option[2]);
+        }
+        assert!(options.contains(&vec![
+            ManaColor::White,
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Blue,
+        ]));
+        assert!(options.contains(&vec![
+            ManaColor::Black,
+            ManaColor::Black,
+            ManaColor::Green,
+            ManaColor::Green,
+        ]));
+
+        for option in &options {
+            let duplicates = options
+                .iter()
+                .filter(|candidate| *candidate == option)
+                .count();
+            assert_eq!(duplicates, 1);
+        }
     }
 
     /// CR 605.3b + CR 106.1a: Interplanar Beacon's bare effect clause (the

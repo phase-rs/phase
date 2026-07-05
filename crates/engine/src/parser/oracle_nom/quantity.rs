@@ -7,7 +7,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::combinator::{all_consuming, map, map_res, opt, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -20,8 +20,8 @@ use super::primitives::{
 };
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
-    parse_shared_quality, parse_shared_quality_clause, parse_target_with_syntax, parse_type_phrase,
-    TargetSyntax,
+    parse_counter_suffix, parse_shared_quality, parse_shared_quality_clause,
+    parse_target_with_syntax, parse_type_phrase, TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -1104,6 +1104,12 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_number_of_cards_drawn_this_turn,
             parse_number_of_cards_discarded_this_turn,
         )),
+        // CR 109.4: "<type> <controller> with <keyword>" — controller-scoped
+        // count restricted to a keyword; must precede
+        // `parse_number_of_controlled_type`, whose bare controller suffix would
+        // otherwise strand " with <keyword>" as an unconsumed remainder
+        // (Axebane Guardian, Doorkeeper, Vent Sentinel).
+        parse_number_of_controlled_type_with_keyword,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7 + CR 402.1: "cards in …" hand/zone counts share a
@@ -1319,6 +1325,41 @@ fn parse_number_of_cards_in_hand_of_extremum_player(input: &str) -> OracleResult
     let (rest, _) = tag("cards in the hand of the ").parse(input)?;
     let (rest, player) = parse_extremum_hand_size_scope_and_aggregate(rest)?;
     Ok((rest, QuantityRef::HandSize { player }))
+}
+
+/// CR 109.4: Parse "<type> <controller> with <keyword>" after "the number of"
+/// -> a controller-scoped population count of permanents of the given type that
+/// have the named keyword.
+///
+/// The controller-scoped sibling of `parse_number_of_type_on_battlefield_with_keyword`
+/// (the battlefield-wide "on the battlefield with <keyword>" form) and the
+/// keyword-qualified counterpart of `parse_number_of_controlled_type` (whose
+/// bare controller suffix would otherwise strand " with <keyword>" as an
+/// unconsumed remainder, dropping the count). The controller axis is generalized
+/// via `parse_quantity_controller_suffix` (you control / your opponents control /
+/// the chosen player controls) and the keyword axis over the whole `KEYWORDS`
+/// table via `parse_keyword_name` + `FilterProp::WithKeyword`, so it covers the
+/// class rather than one card. Backs the "the number of creatures you control
+/// with defender" cycle: Axebane Guardian, Doorkeeper, Coral Colony, Vent
+/// Sentinel.
+fn parse_number_of_controlled_type_with_keyword(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, head) = parse_type_filter_word(input)?;
+    let (rest, controller) = parse_quantity_controller_suffix(rest)?;
+    let (rest, _) = tag(" with ").parse(rest)?;
+    // Map the keyword name through `Keyword`'s `FromStr` with `map_res` so an
+    // unconvertible name fails the parse gracefully rather than panicking.
+    let (rest, keyword) =
+        map_res(parse_keyword_name, |s: &str| s.parse::<Keyword>()).parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![head],
+                controller: Some(controller),
+                properties: vec![FilterProp::WithKeyword { value: keyword }],
+            }),
+        },
+    ))
 }
 
 /// Parse "[type(s)] you control" / "[type(s)] the chosen player controls" after
@@ -2965,6 +3006,13 @@ fn parse_for_each_clause_ref_with_they_controller(
         // "basic land type" is not mis-consumed as a creature/permanent type.
         // Anaphoric "they control" binds to the iterating/scoped player here.
         |i| parse_basic_land_types_among_lands_controlled_by_ref(i, they_controller.clone()),
+        // CR 122.1 + CR 109.4: "[other] <type> you control with a <kind> counter on
+        // it" — a controller-scoped count gated on a counter predicate. Must
+        // precede `parse_for_each_controlled_type`, whose bare " you control"
+        // match would otherwise strand the trailing counter clause as an
+        // unconsumed remainder (Armorcraft Judge, High Sentinels of Arashin,
+        // Inspiring Call).
+        parse_for_each_controlled_type_with_counter,
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -3992,6 +4040,60 @@ fn parse_for_each_battlefield_type_with_keyword(input: &str) -> OracleResult<'_,
     ))
 }
 
+/// CR 122.1 + CR 109.4: Parse "[other] <type> you [already] control with a
+/// <kind> counter on it" in a "for each" clause -> a controller-scoped
+/// (`ControllerRef::You`) population count of permanents of the given type that
+/// carry the named counter, with an optional "other"/"another" exclusion of the
+/// source object.
+///
+/// The trailing counter predicate is delegated to the shared
+/// `oracle_target::parse_counter_suffix` building block (the same authority that
+/// backs "target creature with a +1/+1 counter on it"), so the whole
+/// with/without/with-no and typed/any counter grammar is covered — this arm only
+/// adds the controller scoping. Must precede `parse_for_each_controlled_type`,
+/// whose bare " you control" arm would otherwise match first and strand the
+/// " with a … counter on it" clause as an unconsumed remainder, dropping the
+/// quantity. Backs dynamic P/T anthems and per-count effects such as High
+/// Sentinels of Arashin ("~ gets +1/+1 for each other creature you control with
+/// a +1/+1 counter on it"), Armorcraft Judge, Inspiring Call, and Hamza.
+fn parse_for_each_controlled_type_with_counter(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, has_other) =
+        opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
+    // Mirror the bare `parse_for_each_controlled_type` controller phrase,
+    // tolerating the "already" adverb ("<type> you already control with …").
+    let (rest, _) = tag(" you").parse(rest)?;
+    let (rest, _) = opt(tag(" already")).parse(rest)?;
+    let (rest, _) = tag(" control").parse(rest)?;
+    // Delegate " with a <kind> counter on it" to the shared counter-suffix
+    // combinator, which returns the typed `FilterProp::Counters` and the number
+    // of bytes it consumed from `rest`.
+    let Some((counter_prop, consumed)) = parse_counter_suffix(rest) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            rest,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    let rest = &rest[consumed..];
+
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    properties.push(counter_prop);
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: Some(ControllerRef::You),
+                properties,
+            }),
+        },
+    ))
+}
+
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
     // CR 109.4: Only objects on the stack or on the battlefield have a
     // controller, so a "you control" count is over battlefield permanents
@@ -4454,6 +4556,65 @@ mod tests {
                 assert_eq!(tf.controller, Some(ControllerRef::SourceChosenPlayer));
                 assert!(tf.type_filters.contains(&TypeFilter::Land));
                 assert!(tf.properties.contains(&FilterProp::Tapped));
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 109.4: controller-scoped "the number of <type> <controller> with
+    /// <keyword>" count — the keyword-qualified sibling of
+    /// `parse_number_of_controlled_type`, generalized over the controller axis
+    /// (you control / your opponents control) and the KEYWORDS table. Backs
+    /// Axebane Guardian, Doorkeeper, Coral Colony, and Vent Sentinel.
+    #[test]
+    fn parse_number_of_controlled_type_with_keyword_scoped_count() {
+        for (clause, ctrl, kw) in [
+            (
+                "the number of creatures you control with defender",
+                ControllerRef::You,
+                Keyword::Defender,
+            ),
+            (
+                "the number of creatures your opponents control with flying",
+                ControllerRef::Opponent,
+                Keyword::Flying,
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(clause).unwrap();
+            assert_eq!(rest, "", "{clause:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, Some(ctrl), "{clause:?}: controller scope");
+                    assert!(
+                        tf.properties
+                            .contains(&FilterProp::WithKeyword { value: kw }),
+                        "{clause:?}: must gate on the named keyword"
+                    );
+                }
+                other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 109.4: the bare "the number of <type> you control" count still parses
+    /// without a keyword predicate — the new keyword arm must not shadow it.
+    #[test]
+    fn parse_number_of_controlled_type_bare_no_keyword_still_parses() {
+        let (rest, q) = parse_quantity_ref("the number of creatures you control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
+                    "bare arm must not gate on a keyword"
+                );
             }
             other => panic!("expected ObjectCount, got {other:?}"),
         }
@@ -4999,6 +5160,76 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             }
         );
+    }
+
+    /// CR 122.1 + CR 109.4: controller-scoped "for each [other] <type> you
+    /// control with a <kind> counter on it" count — delegates the counter
+    /// predicate to the shared `parse_counter_suffix`, so it inherits the full
+    /// typed counter grammar. Backs High Sentinels of Arashin, Armorcraft Judge,
+    /// Inspiring Call.
+    #[test]
+    fn parse_for_each_controlled_type_with_counter_scoped_count() {
+        for (clause, other) in [
+            (
+                "other creature you control with a +1/+1 counter on it",
+                true,
+            ),
+            ("creature you control with a +1/+1 counter on it", false),
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+            assert_eq!(rest, "", "{clause:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(
+                        tf.controller,
+                        Some(ControllerRef::You),
+                        "{clause:?}: scoped to the source's controller"
+                    );
+                    assert_eq!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Another)),
+                        other,
+                        "{clause:?}: Another presence must match the other/another prefix"
+                    );
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::Counters {
+                                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                                ..
+                            }
+                        )),
+                        "{clause:?}: must gate on the +1/+1 counter predicate"
+                    );
+                }
+                other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 109.4: the bare "for each <type> you control" arm still parses without
+    /// a counter predicate — the new counter arm must not shadow it.
+    #[test]
+    fn parse_for_each_controlled_type_bare_still_parses_without_counter() {
+        let (rest, q) = parse_for_each_clause_ref("creature you control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Counters { .. })),
+                    "bare arm must not gate on a counter predicate"
+                );
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
     }
 
     #[test]
