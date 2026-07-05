@@ -7177,9 +7177,7 @@ mod admin_auth_tests {
         app.with_state(app_state)
     }
 
-    async fn spawn_admin_test_server(
-        app: Router,
-    ) -> (String, tokio::task::JoinHandle<()>) {
+    async fn spawn_admin_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
