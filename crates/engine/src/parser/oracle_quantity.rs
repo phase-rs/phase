@@ -2777,25 +2777,11 @@ fn parse_for_each_clause_with_they_controller(
         return Some(QuantityRef::TrackedSetSize);
     }
 
-    // "opponent who lost life this turn"
-    if clause.contains("opponent") && clause.contains("lost life") {
-        return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentLostLife,
-        });
-    }
-
     // CR 121.1 / CR 403.3: "opponent who drew N or more cards this turn" and
     // "opponent who had N or more [type] enter the battlefield under their
     // control this turn" (Smuggler's Share class).
     if let Some(qty) = parse_for_each_opponent_player_attribute_clause(clause) {
         return Some(qty);
-    }
-
-    // "opponent who gained life this turn"
-    if clause.contains("opponent") && clause.contains("gained life") {
-        return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentGainedLife,
-        });
     }
 
     // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
@@ -6295,28 +6281,6 @@ mod tests {
                 },
             }),
             "milled card's mana value must resolve to ObjectManaValue{{CostPaidObject}}"
-        );
-    }
-
-    /// CR 119.3 + CR 700.1: "for each of your opponents who lost life this
-    /// turn" → `PlayerCount { OpponentLostLife }` (Belbe, Corrupted Observer).
-    #[test]
-    fn parse_for_each_opponents_who_lost_life() {
-        let qty = parse_for_each_clause("of your opponents who lost life this turn")
-            .expect("for-each opponent-lost-life clause must parse");
-        assert_eq!(
-            qty,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
-            }
-        );
-        let gained = parse_for_each_clause("opponents who gained life this turn")
-            .expect("for-each opponent-gained-life clause must parse");
-        assert_eq!(
-            gained,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentGainedLife,
-            }
         );
     }
 
