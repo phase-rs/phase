@@ -5081,11 +5081,15 @@ fn apply_continuous_effect_filtered(
                 if static_mode_uses_controller_relative_blocker_filter(&resolved_mode) {
                     def = def.source_controller(effect.controller);
                 }
-                if !obj
-                    .static_definitions
-                    .iter_all()
-                    .any(|sd| sd.mode == resolved_mode)
-                {
+                // CR 611.2c + CR 509.1c: Idempotency is keyed on the FULL grafted
+                // definition, not just `mode`. Two different casters can install
+                // the same controller-relative lure mode on one permanent with
+                // distinct `source_controller` anchors (each a separate CR 509.1c
+                // requirement — one per opponent-set); a mode-only guard would
+                // silently drop the second caster's requirement. Full-def equality
+                // still collapses the same effect re-applied across layer passes
+                // (identical anchor), so no grant is multiplied.
+                if !obj.static_definitions.iter_all().any(|sd| sd == &def) {
                     obj.static_definitions.push(def);
                 }
             }

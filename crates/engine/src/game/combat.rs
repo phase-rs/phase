@@ -8499,6 +8499,132 @@ mod tests {
         );
     }
 
+    /// CR 611.2c + CR 509.1c (PR #5131 [MED] follow-up): two DIFFERENT casters
+    /// applying the SAME controller-relative one-shot lure ("All creatures your
+    /// opponents control able to block that creature this turn do so") to ONE
+    /// target must each install a distinct static requirement. Both grafts
+    /// produce an identical `MustBeBlockedByAll { blockers: Some(Opponent) }`
+    /// mode, but carry different `source_controller` anchors (each anchor a
+    /// separate CR 509.1c requirement — one "your opponents" set per caster).
+    /// The `AddStaticMode` idempotency guard keys on the FULL grafted definition
+    /// (`sd == &def`), so the second caster's anchor is NOT collapsed by a
+    /// mode-only dedup.
+    ///
+    /// Geometry (discriminates the second anchor): the target T (controlled by
+    /// P1) attacks P0, so P0 is the defending player. The candidate blocker C is
+    /// P0's OWN creature — an opponent of P2 but NOT of P0. P0's own anchor does
+    /// NOT compel C (P0 is not its own opponent); only P2's surviving anchor
+    /// compels C. So C left idle makes the empty declaration illegal purely on
+    /// P2's anchor.
+    ///
+    /// Revert-discrimination against a mode-only guard (`sd.mode ==
+    /// resolved_mode`): under that buggy guard P2's install is dropped (same
+    /// mode as P0's already-installed static), so only ONE anchor (P0) survives.
+    /// Then C is uncompelled and `validate_blockers(&[])` returns Ok.
+    /// - Assertion #1 (two distinct anchors present) fails: only Some(P0) exists.
+    /// - Assertion #2 (`validate_blockers(&[]).is_err()`) flips to Ok and fails.
+    #[test]
+    fn two_casters_same_lure_on_one_target_each_anchor_enforced() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetRef};
+
+        // 3-player FFA: P0 = caster A, P2 = caster B, P1 = target's controller.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1); // P1 is the attacking player.
+
+        // The single lure target: a creature P1 controls that will attack P0.
+        let target = create_creature(&mut state, PlayerId(1), "Lured Attacker", 3, 3);
+        // Candidate blocker C: P0's OWN creature. Opponent-of-P2 but not of P0,
+        // so it is compelled ONLY by P2's anchor. It can legally block T (T
+        // attacks P0, C is controlled by the defending player P0).
+        let caster_a_creature = create_creature(&mut state, PlayerId(0), "A's Bear", 2, 2);
+
+        // Build one production `AddStaticMode` graft for a given caster seat,
+        // driven through the REAL resolve → evaluate_layers pipeline (verbatim
+        // Oracle text), pinned to the single target `target`.
+        let resolve_lure_from = |state: &mut GameState, caster: PlayerId| {
+            let mut effect = crate::parser::oracle_effect::parse_effect(
+                "All creatures your opponents control able to block that creature this turn do so",
+            );
+            match &mut effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    for sd in static_abilities.iter_mut() {
+                        sd.affected = Some(TargetFilter::SpecificObject { id: target });
+                    }
+                }
+                other => panic!("expected GenericEffect from parser, got {other:?}"),
+            }
+            let ability =
+                ResolvedAbility::new(effect, vec![TargetRef::Object(target)], target, caster)
+                    .duration(Duration::UntilEndOfTurn);
+            resolve(state, &ability, &mut Vec::new()).unwrap();
+            evaluate_layers(state);
+        };
+
+        // Caster A (P0) then caster B (P2) each resolve the same lure on T. Both
+        // grafts flow through the same `AddStaticMode` idempotency guard.
+        resolve_lure_from(&mut state, PlayerId(0));
+        resolve_lure_from(&mut state, PlayerId(2));
+
+        // Assertion #1 — two distinct anchors coexist on the target. Under the
+        // mode-only guard the second (P2) install is dropped as a duplicate mode,
+        // leaving only Some(P0); this assertion then fails.
+        let anchors: std::collections::HashSet<Option<PlayerId>> = state
+            .objects
+            .get(&target)
+            .unwrap()
+            .static_definitions
+            .iter_all()
+            .filter(|sd| matches!(sd.mode, StaticMode::MustBeBlockedByAll { .. }))
+            .map(|sd| sd.source_controller)
+            .collect();
+        assert!(
+            anchors.contains(&Some(PlayerId(0))) && anchors.contains(&Some(PlayerId(2))),
+            "both caster anchors must persist: expected Some(P0) and Some(P2), got {anchors:?}"
+        );
+        assert_eq!(
+            anchors.len(),
+            2,
+            "exactly the two distinct caster anchors (no collapse, no multiplication), got {anchors:?}"
+        );
+
+        // Geometry: T (P1's creature) attacks P0, so P0 is the defending player
+        // and P0's own `caster_a_creature` is the candidate blocker.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(target, PlayerId(0))],
+            ..Default::default()
+        });
+
+        // Positive reach-guard: C actually CAN legally block T, so any Err below
+        // is a compulsion, not an unrelated block restriction.
+        assert!(
+            can_block_pair(&state, caster_a_creature, target),
+            "P0's own creature must be able to legally block the attacker"
+        );
+
+        // Assertion #2 (the behavioral one) — with C idle, the declaration is
+        // illegal, driven SOLELY by P2's surviving anchor (C is not compelled by
+        // P0's own anchor). Under the mode-only guard P2's anchor is dropped, C
+        // is uncompelled, and this returns Ok → the assertion fails on revert.
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "P0's own creature is compelled by caster B (P2)'s 'your opponents' anchor and must not be left idle"
+        );
+
+        // Attribution control: assigning C to block T satisfies P2's anchor, and
+        // no other creature is compelled here (P0's anchor compels none of P0's
+        // own creatures), so the declaration becomes legal. This proves the Err
+        // above was C's compulsion under P2's anchor specifically.
+        assert!(
+            validate_blockers(&state, &[(caster_a_creature, target)]).is_ok(),
+            "assigning P0's compelled creature to the attacker satisfies P2's anchor and is legal"
+        );
+    }
+
     /// H1 — CR 509.1c: two disjoint filtered lures on two attackers are each
     /// honored against their own filter. Piper compels fliers; a Wall-lure compels
     /// Walls. A declaration is legal only when every compelled creature blocks its
