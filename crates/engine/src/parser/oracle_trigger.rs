@@ -3896,16 +3896,14 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // discard triggers whose subject is the discarded card (Anje Falkenrath).
     // MUST precede the zone-change-object "if it " arms below, which would
     // otherwise mis-route this predicate.
-    if let Some(pos) = tp.find("if it has madness") {
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_discarded_card_has_madness_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
         return (
-            strip_condition_clause(text, pos, "if it has madness".len()),
-            Some(TriggerCondition::EventObjectMatchesFilter {
-                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
-                    FilterProp::HasKeywordKind {
-                        value: KeywordKind::Madness,
-                    },
-                ])),
-            }),
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
         );
     }
 
@@ -4349,6 +4347,23 @@ fn parse_zone_change_object_token_contraction_intervening_if(
     let (rest, _) = tag("if it's not a ").parse(input)?;
     let (rest, _) = tag("token").parse(rest)?;
     Ok((rest, zone_change_object_token_condition(true)))
+}
+
+/// CR 603.4 + CR 701.9a + CR 702.35a: "if it has madness" on discard triggers.
+fn parse_discarded_card_has_madness_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if it has madness").parse(input)?;
+    Ok((
+        rest,
+        TriggerCondition::EventObjectMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Madness,
+                },
+            ])),
+        },
+    ))
 }
 
 /// CR 603.4 + CR 603.6a + CR 208.1: Entering-object intervening-if comparing the
