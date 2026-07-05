@@ -39,12 +39,7 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
     let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
 
     let spell = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Violent Eruption",
-            true,
-            VIOLENT_ERUPTION_ORACLE,
-        )
+        .add_spell_to_hand_from_oracle(P0, "Violent Eruption", true, VIOLENT_ERUPTION_ORACLE)
         .with_mana_cost(ManaCost::Cost {
             shards: vec![ManaCostShard::Red, ManaCostShard::Red, ManaCostShard::Red],
             generic: 1,
@@ -94,11 +89,11 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
             assert_eq!(
                 targets.len(),
                 2,
-                "both chosen targets must participate in the distribution"
+                "both chosen targets must participate in the distribution",
             );
         }
         other => panic!(
-            "expected DistributeAmong after slot-by-slot target selection, got {other:?}"
+            "expected DistributeAmong after slot-by-slot target selection, got {other:?}",
         ),
     }
 
@@ -113,7 +108,7 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
     assert_eq!(
         runner.state().objects[&bear].damage_marked,
         3,
-        "creature must take only its assigned share"
+        "creature must take only its assigned share",
     );
     let p1_life = runner
         .state()
@@ -124,6 +119,6 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
         .expect("P1 must exist");
     assert_eq!(
         p1_life, 19,
-        "opponent must lose only their assigned share (20 - 1)"
+        "opponent must lose only their assigned share (20 - 1)",
     );
 }
