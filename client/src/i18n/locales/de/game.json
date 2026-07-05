@@ -592,7 +592,9 @@
     "yieldAllCopies": "Alle Kopien überspringen",
     "revoke": "Widerrufen",
     "clearAll": "Alle löschen",
-    "allCopiesHint": "Empfohlen für Spielstein-Auslöser"
+    "allCopiesHint": "Empfohlen für Spielstein-Auslöser",
+    "menuButton": "Diesen Auslöser automatisch überspringen",
+    "menuButtonActive": "Wird automatisch übersprungen – ändern oder widerrufen"
   },
   "targeting": {
     "choosePermanentToCopy": "Wähle eine bleibende Karte zum Kopieren",

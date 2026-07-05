@@ -592,7 +592,9 @@
     "yieldAllCopies": "Passer toutes les copies",
     "revoke": "Révoquer",
     "clearAll": "Tout effacer",
-    "allCopiesHint": "Recommandé pour les capacités de jetons"
+    "allCopiesHint": "Recommandé pour les capacités de jetons",
+    "menuButton": "Passer automatiquement ce déclencheur",
+    "menuButtonActive": "Passage automatique – modifier ou révoquer"
   },
   "targeting": {
     "choosePermanentToCopy": "Choisissez un permanent à copier",

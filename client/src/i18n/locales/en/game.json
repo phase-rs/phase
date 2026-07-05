@@ -624,7 +624,9 @@
     "yieldAllCopies": "Yield all copies",
     "revoke": "Revoke",
     "clearAll": "Clear all",
-    "allCopiesHint": "Recommended for token triggers"
+    "allCopiesHint": "Recommended for token triggers",
+    "menuButton": "Auto-pass this trigger",
+    "menuButtonActive": "Auto-passing — change or revoke"
   },
   "targeting": {
     "choosePermanentToCopy": "Choose a permanent to copy",

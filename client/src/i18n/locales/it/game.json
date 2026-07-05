@@ -592,7 +592,9 @@
     "yieldAllCopies": "Rinuncia a tutte le copie",
     "revoke": "Revoca",
     "clearAll": "Cancella tutto",
-    "allCopiesHint": "Consigliato per le pedine"
+    "allCopiesHint": "Consigliato per le pedine",
+    "menuButton": "Salta automaticamente questo innesco",
+    "menuButtonActive": "Salto automatico: modifica o revoca"
   },
   "targeting": {
     "choosePermanentToCopy": "Scegli un permanente da copiare",

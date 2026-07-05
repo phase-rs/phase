@@ -592,7 +592,9 @@
     "yieldAllCopies": "Ceder todas as cópias",
     "revoke": "Revogar",
     "clearAll": "Limpar tudo",
-    "allCopiesHint": "Recomendado para gatilhos de fichas"
+    "allCopiesHint": "Recomendado para gatilhos de fichas",
+    "menuButton": "Passar automaticamente este gatilho",
+    "menuButtonActive": "Passando automaticamente — alterar ou revogar"
   },
   "targeting": {
     "choosePermanentToCopy": "Escolha um permanente para copiar",

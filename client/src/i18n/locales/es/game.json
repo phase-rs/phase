@@ -592,7 +592,9 @@
     "yieldAllCopies": "Ceder todas las copias",
     "revoke": "Revocar",
     "clearAll": "Borrar todo",
-    "allCopiesHint": "Recomendado para disparos de fichas"
+    "allCopiesHint": "Recomendado para disparos de fichas",
+    "menuButton": "Pasar automáticamente este disparo",
+    "menuButtonActive": "Pasando automáticamente: cambiar o revocar"
   },
   "targeting": {
     "choosePermanentToCopy": "Elige un permanente para copiar",

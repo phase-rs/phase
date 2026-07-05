@@ -54,17 +54,15 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const priorityYields = useGameStore((s) => s.gameState?.priority_yields);
-  // CR 117.3d: long-press on a triggered ability opens the yield menu (a
-  // pre-commitment to pass priority for that trigger class); other entries keep
-  // the inspect-and-pin behavior.
+  // CR 117.3d: a triggered ability can be pre-committed to auto-pass priority via
+  // the always-visible yield button rendered below (the menu it opens dispatches
+  // SetPriorityYield). Long-press stays uniformly bound to inspect-and-pin for
+  // every entry, so it never competes with the mobile card-preview gesture and
+  // the yield control doesn't depend on a hidden, undiscoverable gesture.
   const [yieldMenuOpen, setYieldMenuOpen] = useState(false);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
-    if (entry.kind.type === "TriggeredAbility") {
-      setYieldMenuOpen(true);
-    } else {
-      inspectObject(entry.source_id);
-      setPreviewSticky(true);
-    }
+    inspectObject(entry.source_id);
+    setPreviewSticky(true);
   });
 
   const sourceObj = objects?.[entry.source_id];
@@ -306,10 +304,36 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </div>
       )}
 
-      {/* CR 117.3d: priority-yield context menu (triggered abilities only).
-          Long-press opens it; each option dispatches a SetPriorityYield action.
-          The frontend only names the source + scope (Add) or echoes a stored
-          YieldTarget (Revoke) — no game state is computed here. */}
+      {/* CR 117.3d: always-visible yield affordance (triggered abilities only) so
+          the auto-pass control is discoverable, replacing the former hidden
+          long-press. Amber = a yield already stands for this trigger; tap toggles
+          the options menu below. Center-right edge is the one card zone clear of
+          the status badges (top), chip row, and ability overlay (bottom). */}
+      {isTriggered && (
+        <button
+          type="button"
+          aria-label={matchingYield ? t("priorityYield.menuButtonActive") : t("priorityYield.menuButton")}
+          aria-pressed={matchingYield != null}
+          title={matchingYield ? t("priorityYield.menuButtonActive") : t("priorityYield.menuButton")}
+          className={`absolute right-1 top-1/2 z-30 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full shadow-md ring-1 transition-colors ${
+            matchingYield
+              ? "bg-amber-500/90 text-black ring-amber-200"
+              : "bg-gray-900/85 text-purple-100 ring-white/25 hover:bg-gray-800"
+          }`}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            setYieldMenuOpen((open) => !open);
+          }}
+        >
+          <YieldMuteIcon muted={matchingYield != null} />
+        </button>
+      )}
+
+      {/* CR 117.3d: priority-yield context menu (triggered abilities only), opened
+          by the yield button above. Each option dispatches a SetPriorityYield
+          action; the frontend only names the source + scope (Add) or echoes a
+          stored YieldTarget (Revoke) — no game state is computed here. */}
       {yieldMenuOpen && isTriggered && (
         <>
           <div
@@ -378,6 +402,38 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         {controllerInitial}
       </span>
     </motion.div>
+  );
+}
+
+// Bell (will stop for this trigger) vs. bell-off (auto-passing / muted). An SVG
+// glyph is theme-aware via `currentColor` and crisp at badge size, unlike an
+// emoji whose rendering varies by platform. Paths adapted from Lucide (MIT).
+function YieldMuteIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {muted ? (
+        <>
+          <path d="M8.7 3A6 6 0 0 1 18 8c0 2.6.5 4.4 1.1 5.7" />
+          <path d="M17 17H3s3-2 3-9a4.8 4.8 0 0 1 .3-1.7" />
+          <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+          <line x1="2" y1="2" x2="22" y2="22" />
+        </>
+      ) : (
+        <>
+          <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+          <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+        </>
+      )}
+    </svg>
   );
 }
 

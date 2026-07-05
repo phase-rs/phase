@@ -592,7 +592,9 @@
     "yieldAllCopies": "Zrezygnuj ze wszystkich kopii",
     "revoke": "Cofnij",
     "clearAll": "Wyczyść wszystko",
-    "allCopiesHint": "Zalecane dla żetonów"
+    "allCopiesHint": "Zalecane dla żetonów",
+    "menuButton": "Automatycznie pomijaj ten wyzwalacz",
+    "menuButtonActive": "Automatyczne pomijanie — zmień lub cofnij"
   },
   "targeting": {
     "choosePermanentToCopy": "Wybierz trwałego do skopiowania",
