@@ -3162,6 +3162,31 @@ fn static_bare_compound_tribal_subject_verdeloth() {
         .contains(&ContinuousModification::AddToughness { value: 1 }));
 }
 
+// #5147 regression: the bare tribal compound helper must NOT claim a compound
+// whose branches lack an explicit "creature" head noun. Life and Limb's subject
+// "All Forests and all Saprolings" has "Forests" as a LAND subtype; without the
+// creature-term gate the helper reinterpreted it as `creature Forest or creature
+// Saproling`, silently adding wrong out-of-scope support. The helper must decline
+// so Forest stays a land subject (handled by the type-change seam, not here).
+#[test]
+fn static_bare_compound_declines_non_creature_subtype_branches() {
+    let def = parse_static_line("Forests and Saprolings get +1/+1.");
+    if let Some(def) = def {
+        if let Some(TargetFilter::Or { ref filters }) = def.affected {
+            assert!(
+                !filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.iter().any(|t| matches!(
+                            t, TypeFilter::Subtype(s) if s == "Forest"
+                        ))
+                )),
+                "land subtype Forest must not be reinterpreted as a creature-anthem branch: {def:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     let def = parse_static_line(

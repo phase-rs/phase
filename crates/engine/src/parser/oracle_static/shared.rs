@@ -2710,6 +2710,19 @@ fn filter_carries_subtype(filter: &TargetFilter) -> bool {
     )
 }
 
+/// CR 205.3m: True when the branch text explicitly names creatures. This gate
+/// keeps the bare tribal compound to CREATURE anthems (Verdeloth's "Saproling
+/// creatures" / "Treefolk creatures") and off subjects whose subtype belongs to
+/// a different set — Life and Limb's "All Forests and all Saprolings", where
+/// "Forests" is a LAND subtype that this creature-tribal helper must not
+/// reinterpret as a creature (#5147). `filter_carries_subtype` alone accepts any
+/// subtype (including land/artifact), so the explicit head noun is required.
+fn branch_names_creatures(original: &str) -> bool {
+    original
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("creature") || w.eq_ignore_ascii_case("creatures"))
+}
+
 /// CR 611.3a: A bare (battlefield-wide, no-controller) compound tribal anthem
 /// subject where each branch carries its own creature subtype and the second may
 /// take a per-branch "other" source exclusion — "<subtype> creatures and [other]
@@ -2735,6 +2748,14 @@ fn parse_bare_compound_subtype_subject_filter(subject: &TextPair<'_>) -> Option<
     let left_original = subject.original[..left_lower.len()].trim();
     let right_original = subject.original[right_start..].trim();
     if left_original.is_empty() || right_original.is_empty() {
+        return None;
+    }
+    // Both branches must explicitly name creatures (CR 205.3m) AND resolve to a
+    // subtype-scoped typed filter. The creature-term gate keeps this off subjects
+    // whose subtype belongs to another set — e.g. Life and Limb's "All Forests
+    // and all Saprolings", whose "Forests" is a LAND subtype that must remain a
+    // land subject, not be reinterpreted here as a creature (#5147).
+    if !branch_names_creatures(left_original) || !branch_names_creatures(right_original) {
         return None;
     }
     let left_filter = parse_continuous_subject_filter(left_original)?;
