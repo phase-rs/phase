@@ -96,8 +96,8 @@ mod tests {
 
     #[test]
     fn spectate_draft_rejects_oversized_password() {
-        let err = guard_spectate_draft("ABC123", &Some("p".repeat(MAX_PASSWORD_LEN + 1)))
-            .unwrap_err();
+        let err =
+            guard_spectate_draft("ABC123", &Some("p".repeat(MAX_PASSWORD_LEN + 1))).unwrap_err();
         assert!(err.contains("password"));
     }
 }
