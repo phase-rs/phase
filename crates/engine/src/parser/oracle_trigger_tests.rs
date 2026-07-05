@@ -15219,7 +15219,7 @@ fn trigger_postcombat_main_phase() {
 /// must bind `X` from the trailing "where X is …" clause across BOTH the
 /// "pay X life" cost AND the "draw X cards" sub-ability. The bound
 /// expression must resolve to
-/// `PlayerCount { OpponentDealtCombatDamage }`, not to an empty-shaped
+/// `PlayerCount { OpponentDealtDamage }`, not to an empty-shaped
 /// `ObjectCount` (which previously matched every battlefield permanent
 /// and made Tymna draw all 12 of the player's permanents instead of 1).
 #[test]
@@ -15239,7 +15239,10 @@ fn trigger_tymna_the_weaver_pays_and_draws_bound_x() {
 
     let bound_qty = QuantityExpr::Ref {
         qty: QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+            filter: PlayerFilter::OpponentDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+                source: None,
+            },
         },
     };
 

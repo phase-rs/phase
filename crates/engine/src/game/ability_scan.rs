@@ -3025,7 +3025,10 @@ fn scan_player_filter(x: &PlayerFilter) -> Axes {
             projected: true,
         },
         PlayerFilter::HasLostTheGame => Axes::NONE,
-        PlayerFilter::OpponentDealtCombatDamage { source } => {
+        // `kind` is a static damage-kind selector (combat/noncombat/any) — not an
+        // event-context, sibling, or projected-growth resource — so it carries no
+        // axis; only the optional `source` sub-filter contributes.
+        PlayerFilter::OpponentDealtDamage { kind: _, source } => {
             let mut acc = Axes {
                 event: false,
                 sibling: false,

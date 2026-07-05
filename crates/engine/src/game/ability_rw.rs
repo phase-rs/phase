@@ -2127,7 +2127,7 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
         PlayerFilter::OpponentLostLife
         | PlayerFilter::OpponentGainedLife
-        | PlayerFilter::OpponentDealtCombatDamage { .. }
+        | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
@@ -6079,7 +6079,7 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => {
             reads_player_of(StateKind::JournalLife)
         }
-        PlayerFilter::OpponentDealtCombatDamage { source: _ } => {
+        PlayerFilter::OpponentDealtDamage { source: _, kind: _ } => {
             reads_player_of(StateKind::JournalLife)
         }
         // D5 carrier.

@@ -1653,7 +1653,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::PlayerRelation;
+    use crate::types::ability::{DamageKindFilter, PlayerRelation};
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
@@ -1661,9 +1661,14 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
         PlayerFilter::HasLostTheGame => "each player who has lost the game",
-        PlayerFilter::OpponentDealtCombatDamage { .. } => {
-            "each opponent who was dealt combat damage this turn"
-        }
+        // CR 120.2a/120.2b: human string reflects the damage-kind selector.
+        PlayerFilter::OpponentDealtDamage { kind, .. } => match kind {
+            DamageKindFilter::CombatOnly => "each opponent who was dealt combat damage this turn",
+            DamageKindFilter::NoncombatOnly => {
+                "each opponent who was dealt noncombat damage this turn"
+            }
+            DamageKindFilter::Any => "each opponent who was dealt damage this turn",
+        },
         PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
             (AttackSubject::You, AttackScope::ThisTurn) => "each opponent you attacked this turn",
             (AttackSubject::Source, AttackScope::ThisTurn) => {
@@ -6753,7 +6758,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::HasLostTheGame => ("HasLostTheGame", Handled),
-        PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
+        PlayerFilter::OpponentDealtDamage { .. } => ("OpponentDealtDamage", Handled),
         PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
         PlayerFilter::OpponentAttackingEnchantedPlayer => {
             ("OpponentAttackingEnchantedPlayer", Handled)

@@ -11692,7 +11692,23 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // CR 111.11: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
     // types, colors, keywords). Replace the embedded count with the for-each quantity.
-    if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original, ctx) {
+    //
+    // The base may carry a subject ("You create a Treasure token …" — You've Been
+    // Caught Stealing). Try the raw base first (preserves subject-bearing forms
+    // like "each player creates …" that `try_parse_token` handles directly), then
+    // fall back to the subject-stripped imperative, mirroring the numeric arm
+    // above, so a leading "you " no longer strands the for-each quantity.
+    let token_stripped_storage = subject::strip_subject_clause(base_no_duration);
+    let token_effect =
+        if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original, ctx) {
+            Some(effect)
+        } else if let Some(stripped) = token_stripped_storage.as_deref() {
+            let stripped_lower = stripped.to_lowercase();
+            token::try_parse_token(&stripped_lower, stripped, ctx)
+        } else {
+            None
+        };
+    if let Some(effect) = token_effect {
         let effect = match effect {
             Effect::Token {
                 name,

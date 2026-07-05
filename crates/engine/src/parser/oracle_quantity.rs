@@ -38,9 +38,9 @@ use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_p
 use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
-    DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause,
-    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
+    ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -464,14 +464,15 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
-        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage
-        // [this turn]". The trailing " this turn" suffix is optional because
-        // upstream callers may strip durations before this parser sees the
-        // phrase. PlayerCount{OpponentDealtCombatDamage} is inherently scoped
-        // to this turn through `state.damage_dealt_this_turn`.
-        if let Ok((_, source)) = parse_opponent_dealt_combat_damage_clause(rest) {
+        // CR 120.1 + CR 510.1 + CR 120.2a/120.2b: "opponents that were dealt
+        // [combat|noncombat] damage [this turn]". The trailing " this turn"
+        // suffix is optional because upstream callers may strip durations before
+        // this parser sees the phrase. PlayerCount{OpponentDealtDamage} is
+        // inherently scoped to this turn through `state.damage_dealt_this_turn`.
+        if let Ok((_, (kind, source))) = parse_opponent_dealt_damage_clause(rest) {
             return Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind,
                     source: source.map(Box::new),
                 },
             });
@@ -1274,23 +1275,35 @@ fn parse_counters_removed_phrase(input: &str) -> nom::IResult<&str, (), OracleEr
     Ok((input, ()))
 }
 
-/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Parse "[your] opponents who were
-/// dealt combat damage [by <source>] [this turn]" into the optional source
-/// filter. Returns `Ok((_, None))` for the unfiltered class (Tymna the Weaver,
-/// Moonshae Pixie) and `Ok((_, Some(f)))` for a `by <source>` restriction
-/// (Estinien Varlineau: "by ~ or a Dragon" → `Or[SelfRef, Typed{Dragon}]`).
-/// `Err` means the clause did not match. The whole clause must be consumed
-/// (explicit `eof`) so trailing unrecognized text doesn't silently drop.
-fn parse_opponent_dealt_combat_damage_clause(
+/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Parse "[your]
+/// opponents who were dealt [combat|noncombat] damage [by <source>] [this turn]"
+/// into the `(DamageKindFilter, Option<TargetFilter>)` pair. The damage-kind
+/// axis is parameterized: "combat damage" → `CombatOnly` (Tymna the Weaver),
+/// "noncombat damage" → `NoncombatOnly`, bare "damage" → `Any` (Furious
+/// Spinesplitter, You've Been Caught Stealing). Source `None` = unfiltered;
+/// `Some(f)` = a `by <source>` restriction (Estinien Varlineau: "by ~ or a
+/// Dragon" → `Or[SelfRef, Typed{Dragon}]`). `Err` means the clause did not
+/// match. The whole clause must be consumed (explicit `eof`) so trailing
+/// unrecognized text doesn't silently drop.
+fn parse_opponent_dealt_damage_clause(
     input: &str,
-) -> OracleResult<'_, Option<TargetFilter>> {
+) -> OracleResult<'_, (DamageKindFilter, Option<TargetFilter>)> {
     let (input, _) = opt(tag("your ")).parse(input)?;
     let (input, _) = alt((tag("opponents"), tag("opponent"))).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     let (input, _) = alt((tag("that"), tag("who"))).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     let (input, _) = alt((tag("were"), tag("was"))).parse(input)?;
-    let (input, _) = tag(" dealt combat damage").parse(input)?;
+    let (input, _) = tag(" dealt ").parse(input)?;
+    // CR 120.2a/120.2b: the damage-kind literal. Order matters — the
+    // combat/noncombat qualifiers precede the bare "damage" so they win; the
+    // three literals start with c/n/d, so no prefix collision.
+    let (input, kind) = alt((
+        value(DamageKindFilter::CombatOnly, tag("combat damage")),
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat damage")),
+        value(DamageKindFilter::Any, tag("damage")),
+    ))
+    .parse(input)?;
     // CR 120.9: optional "by <source>" restriction. The source phrase is
     // isolated from the optional trailing " this turn" with a combinator
     // (`take_until` / `eof`), then parsed via the `parse_target` + " or " +
@@ -1298,7 +1311,7 @@ fn parse_opponent_dealt_combat_damage_clause(
     let (input, source) = opt(preceded(tag(" by "), parse_damage_source_chain)).parse(input)?;
     let (input, _) = opt(tag(" this turn")).parse(input)?;
     let (input, _) = eof.parse(input)?;
-    Ok((input, source))
+    Ok((input, (kind, source)))
 }
 
 /// CR 120.9 + CR 608.2i: Parse a damage-source phrase ("~", "a Dragon", "~ or a
@@ -2824,13 +2837,14 @@ fn parse_for_each_clause_with_they_controller(
         return Some(qty);
     }
 
-    // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
-    // / "opponent who was dealt combat damage this turn". Mirrors the
-    // lost-life / gained-life arms above, but consumes the full clause instead
-    // of doing substring dispatch.
-    if let Ok((_, source)) = parse_opponent_dealt_combat_damage_clause(clause) {
+    // CR 120.1 + CR 510.1 + CR 120.2a/120.2b: "opponent that was dealt
+    // [combat|noncombat] damage this turn" / "opponent who was dealt ... damage
+    // this turn". Mirrors the lost-life / gained-life arms above, but consumes
+    // the full clause instead of doing substring dispatch.
+    if let Ok((_, (kind, source))) = parse_opponent_dealt_damage_clause(clause) {
         return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentDealtCombatDamage {
+            filter: PlayerFilter::OpponentDealtDamage {
+                kind,
                 source: source.map(Box::new),
             },
         });
@@ -3608,9 +3622,56 @@ mod tests {
             assert_eq!(
                 parse_for_each_clause(phrase),
                 Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }),
-                "phrase {phrase:?} must consume as OpponentDealtCombatDamage"
+                "phrase {phrase:?} must consume as OpponentDealtDamage{{CombatOnly}}"
+            );
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_dealt_any_damage_is_player_count_any() {
+        // CR 120.2a/120.2b: bare "damage" (no combat/noncombat qualifier) →
+        // DamageKindFilter::Any. Furious Spinesplitter, You've Been Caught
+        // Stealing. Positive reach-guard: the phrase resolves to a PlayerCount
+        // over the OpponentDealtDamage filter (not None / a Fixed fall-through).
+        for phrase in [
+            "opponent that was dealt damage this turn",
+            "opponent who was dealt damage this turn",
+            "opponents who were dealt damage",
+        ] {
+            assert_eq!(
+                parse_for_each_clause(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::Any,
+                        source: None
+                    },
+                }),
+                "phrase {phrase:?} must consume as OpponentDealtDamage{{Any}}"
+            );
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_dealt_noncombat_damage_is_player_count_noncombat() {
+        // CR 120.2b: "noncombat damage" qualifier → DamageKindFilter::NoncombatOnly.
+        for phrase in [
+            "opponent that was dealt noncombat damage this turn",
+            "opponents who were dealt noncombat damage",
+        ] {
+            assert_eq!(
+                parse_for_each_clause(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::NoncombatOnly,
+                        source: None
+                    },
+                }),
+                "phrase {phrase:?} must consume as OpponentDealtDamage{{NoncombatOnly}}"
             );
         }
     }
@@ -4398,7 +4459,7 @@ mod tests {
 
     /// CR 120.1 + CR 510.1: Tymna the Weaver — "the number of opponents that
     /// were dealt combat damage this turn" must route to the dedicated
-    /// `PlayerCount { OpponentDealtCombatDamage }` and NOT fall through into
+    /// `PlayerCount { OpponentDealtDamage }` and NOT fall through into
     /// the generic type-phrase fallback that produces an empty `ObjectCount`
     /// (the latter matched every battlefield object and drained the deck).
     #[test]
@@ -4410,14 +4471,17 @@ mod tests {
             qty,
             QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }
             }
         );
     }
 
     /// Symmetric singular form ("opponent that was dealt combat damage this
-    /// turn") must hit the same `PlayerFilter::OpponentDealtCombatDamage` arm.
+    /// turn") must hit the same `PlayerFilter::OpponentDealtDamage` arm.
     #[test]
     fn cda_quantity_opponent_singular_dealt_combat_damage() {
         let qty =
@@ -4427,7 +4491,10 @@ mod tests {
             qty,
             QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }
             }
         );
@@ -4436,11 +4503,11 @@ mod tests {
     /// CR 120.1 + CR 510.1: Upstream `strip_trailing_duration` removes the
     /// "this turn" suffix before the draw-count parser path reaches
     /// `parse_quantity_ref`. The phrase must still resolve to
-    /// `PlayerFilter::OpponentDealtCombatDamage` without the suffix —
+    /// `PlayerFilter::OpponentDealtDamage` without the suffix —
     /// otherwise cards like Moonshae Pixie ("draw cards equal to the number
     /// of opponents who were dealt combat damage this turn") regress to
     /// `Effect::Unimplemented`. The "this turn" tail is informational at
-    /// this layer: `PlayerCount{OpponentDealtCombatDamage}` already queries
+    /// this layer: `PlayerCount{OpponentDealtDamage}` already queries
     /// `state.damage_dealt_this_turn`.
     #[test]
     fn cda_quantity_opponents_dealt_combat_damage_strip_suffix() {
@@ -4456,10 +4523,13 @@ mod tests {
                 qty,
                 QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                        filter: PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
+                            source: None
+                        },
                     }
                 },
-                "phrase {phrase:?} must route to OpponentDealtCombatDamage",
+                "phrase {phrase:?} must route to OpponentDealtDamage",
             );
         }
     }
@@ -4480,7 +4550,8 @@ mod tests {
         assert_eq!(
             qty,
             QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(TargetFilter::Or {
                         filters: vec![
                             TargetFilter::SelfRef,
@@ -4505,7 +4576,8 @@ mod tests {
         assert_eq!(
             qty,
             QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(TargetFilter::SelfRef)),
                 },
             }
@@ -4525,9 +4597,12 @@ mod tests {
             assert_eq!(
                 parse_quantity_ref(phrase),
                 Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }),
-                "phrase {phrase:?} must parse to unfiltered OpponentDealtCombatDamage"
+                "phrase {phrase:?} must parse to unfiltered OpponentDealtDamage"
             );
         }
     }

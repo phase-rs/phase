@@ -4632,19 +4632,20 @@ pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
     best as i32
 }
 
-/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Single authority for
-/// `PlayerFilter::OpponentDealtCombatDamage` matching. `player` was dealt combat
-/// damage this turn (relative to `controller`'s opponents) when a
-/// `damage_dealt_this_turn` record targets it with `is_combat = true` AND its
-/// source matches `source`. `source = None` accepts any source (Tymna the
-/// Weaver); otherwise (CR 120.9) the record's CR 608.2i look-back source
-/// snapshot is matched against the filter (`TargetFilter::Any` matching every
-/// source via the matcher), so the source's qualities are evaluated as of
-/// damage time.
-pub(crate) fn opponent_dealt_combat_damage_matches(
+/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Single
+/// authority for `PlayerFilter::OpponentDealtDamage` matching. `player` was
+/// dealt damage this turn (relative to `controller`'s opponents) when a
+/// `damage_dealt_this_turn` record targets it, its combat status matches `kind`
+/// (CR 120.2a combat / CR 120.2b noncombat / `Any` = either), AND its source
+/// matches `source`. `source = None` accepts any source (Tymna the Weaver);
+/// otherwise (CR 120.9) the record's CR 608.2i look-back source snapshot is
+/// matched against the filter (`TargetFilter::Any` matching every source via the
+/// matcher), so the source's qualities are evaluated as of damage time.
+pub(crate) fn opponent_dealt_damage_matches(
     state: &GameState,
     player: PlayerId,
     controller: PlayerId,
+    kind: crate::types::ability::DamageKindFilter,
     source: &Option<Box<TargetFilter>>,
     ability_source_id: ObjectId,
 ) -> bool {
@@ -4653,7 +4654,7 @@ pub(crate) fn opponent_dealt_combat_damage_matches(
     }
     let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
     state.damage_dealt_this_turn.iter().any(|r| {
-        r.is_combat
+        damage_record_matches_kind(r, kind)
             && matches!(r.target, TargetRef::Player(pid) if pid == player)
             && match source {
                 None => true,
@@ -4719,12 +4720,13 @@ pub(crate) fn resolve_player_count(
                         }
                         // Handled by the early return above; unreachable here.
                         PlayerFilter::HasLostTheGame => false,
-                        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each
-                        // opponent who was dealt combat damage this turn,
-                        // optionally restricted to a matching source.
-                        PlayerFilter::OpponentDealtCombatDamage { source } => {
-                            opponent_dealt_combat_damage_matches(
-                                state, p.id, controller, source, source_id,
+                        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
+                        // CR 120.2a/120.2b: Each opponent who was dealt damage of
+                        // the given kind this turn, optionally restricted to a
+                        // matching source.
+                        PlayerFilter::OpponentDealtDamage { kind, source } => {
+                            opponent_dealt_damage_matches(
+                                state, p.id, controller, *kind, source, source_id,
                             )
                         }
                         // CR 508.6: opponent the subject attacked within scope.
@@ -8409,7 +8411,7 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
-    /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtCombatDamage }`
+    /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtDamage }`
     /// against `damage_dealt_this_turn` records counts only opponents whose
     /// player target appears in the ledger with `is_combat = true`. Mirrors
     /// the partner-quality "for each opponent that was dealt combat damage
@@ -8453,11 +8455,110 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
+                    source: None,
+                },
             },
         };
         // Controller = player 0: only player 1 satisfies (combat + opponent).
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 120.2a/120.2b: The `kind` axis discriminates on the SAME ledger.
+    /// One opponent (P1) was dealt combat damage, a different opponent (P2)
+    /// noncombat damage. `Any` counts both (2); `CombatOnly` counts only P1 (1);
+    /// `NoncombatOnly` counts only P2 (1). This is the non-vacuous test that
+    /// fails on any single-kind regression: pre-fix combat-only would return 1
+    /// for the `Any` case, and a broadened-to-Any resolver would return 2 for
+    /// the `CombatOnly`/`NoncombatOnly` cases.
+    #[test]
+    fn resolve_quantity_player_count_opponent_dealt_damage_kind_discriminates() {
+        use crate::types::ability::DamageKindFilter;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // P1: combat damage.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 4,
+            is_combat: true,
+            ..Default::default()
+        });
+        // P2: noncombat damage.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(2)),
+            target_controller: PlayerId(2),
+            amount: 2,
+            is_combat: false,
+            ..Default::default()
+        });
+
+        let count = |kind: DamageKindFilter| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::OpponentDealtDamage { kind, source: None },
+                    },
+                },
+                PlayerId(0),
+                ObjectId(1),
+            )
+        };
+
+        assert_eq!(count(DamageKindFilter::Any), 2, "Any counts both opponents");
+        assert_eq!(
+            count(DamageKindFilter::CombatOnly),
+            1,
+            "CombatOnly counts only the combat-damaged opponent (P1)"
+        );
+        assert_eq!(
+            count(DamageKindFilter::NoncombatOnly),
+            1,
+            "NoncombatOnly counts only the noncombat-damaged opponent (P2)"
+        );
+    }
+
+    /// Serde back-compat: legacy data serialized the combat-only variant as
+    /// `{"type":"OpponentDealtCombatDamage"}` with no `kind` field. The
+    /// `#[serde(alias)]` routes the old tag and the `#[serde(default =
+    /// "damage_kind_combat_only")]` fills `kind = CombatOnly` — NOT the
+    /// `DamageKindFilter::Any` type-default, which would broaden the filter and
+    /// misresolve reloaded games. The current tag round-trips through `Any`.
+    #[test]
+    fn opponent_dealt_damage_serde_legacy_and_roundtrip() {
+        use crate::types::ability::DamageKindFilter;
+
+        // Legacy tag, absent `kind` → CombatOnly (NOT Any).
+        let legacy: PlayerFilter =
+            serde_json::from_str(r#"{"type":"OpponentDealtCombatDamage"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            PlayerFilter::OpponentDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+                source: None
+            }
+        );
+
+        // Current tag with explicit `kind: Any` round-trips.
+        let any: PlayerFilter =
+            serde_json::from_str(r#"{"type":"OpponentDealtDamage","kind":"Any"}"#).unwrap();
+        assert_eq!(
+            any,
+            PlayerFilter::OpponentDealtDamage {
+                kind: DamageKindFilter::Any,
+                source: None
+            }
+        );
+        let reser = serde_json::to_string(&any).unwrap();
+        let back: PlayerFilter = serde_json::from_str(&reser).unwrap();
+        assert_eq!(any, back);
     }
 
     /// CR 120.1 + CR 510.1: With no combat damage dealt this turn, the
@@ -8468,13 +8569,16 @@ mod tests {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
+                    source: None,
+                },
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
-    /// CR 608.2i (the whole point): a source-restricted `OpponentDealtCombatDamage`
+    /// CR 608.2i (the whole point): a source-restricted `OpponentDealtDamage`
     /// must match against the record's damage-time source snapshot, NOT the live
     /// object. Record combat damage from a Dragon to an opponent, then remove
     /// the live Dragon from the battlefield. A resolve-now model would see no
@@ -8511,7 +8615,8 @@ mod tests {
             TargetFilter::Typed(TypedFilter::default().subtype("Dragon".to_string()));
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(dragon_filter)),
                 },
             },
@@ -8551,7 +8656,8 @@ mod tests {
                 &state,
                 &QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentDealtCombatDamage {
+                        filter: PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
                             source: Some(Box::new(source)),
                         },
                     },

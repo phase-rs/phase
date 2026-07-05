@@ -6373,7 +6373,7 @@ pub(crate) fn check_trigger_condition(
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
         // evaluates the triggering damage source as it was when the damage was
         // dealt. Reuse the same DamageRecord snapshot matcher as
-        // PlayerFilter::OpponentDealtCombatDamage so later type changes or zone
+        // PlayerFilter::OpponentDealtDamage so later type changes or zone
         // moves do not change what "that damage was dealt by" refers to.
         TriggerCondition::EventDamageSourceMatchesFilter { filter } => trigger_event
             .and_then(|event| match event {
@@ -6531,9 +6531,9 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::OpponentLostLife
             | PlayerFilter::OpponentGainedLife
             | PlayerFilter::HasLostTheGame
-            // CR 120.1 + CR 510.1: a set-valued combat-damaged-this-turn
-            // predicate has no single-player "whose turn" semantic.
-            | PlayerFilter::OpponentDealtCombatDamage { .. }
+            // CR 120.1 + CR 510.1: a set-valued damaged-this-turn predicate has
+            // no single-player "whose turn" semantic.
+            | PlayerFilter::OpponentDealtDamage { .. }
             // CR 508.6: a set-valued attacked-this-turn predicate has no
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttacked { .. }

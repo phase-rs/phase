@@ -4227,7 +4227,7 @@ fn evaluate_replacement_condition(
             state.damage_dealt_this_turn.iter().any(|record| {
                 // CR 608.2i + CR 608.2h: match the damage source against its
                 // damage-time snapshot (look-back), consistent with
-                // DamageDealtThisTurn / OpponentDealtCombatDamage.
+                // DamageDealtThisTurn / OpponentDealtDamage.
                 record.target == TargetRef::Object(affected_id)
                     && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
             })

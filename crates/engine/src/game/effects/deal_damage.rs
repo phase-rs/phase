@@ -1658,14 +1658,16 @@ fn collect_matching_players(
                     // CR 506.2 + CR 508.6: Count-only filter (Suppressor Skyguard);
                     // it has no live damage-recipient meaning.
                     PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
-                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
-                    // who was dealt combat damage this turn, optionally
-                    // restricted to a matching source.
-                    PlayerFilter::OpponentDealtCombatDamage { ref source } => {
-                        crate::game::quantity::opponent_dealt_combat_damage_matches(
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
+                    // CR 120.2a/120.2b: Each opponent who was dealt damage of the
+                    // given kind this turn, optionally restricted to a matching
+                    // source.
+                    PlayerFilter::OpponentDealtDamage { kind, ref source } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
                             state,
                             p.id,
                             source_controller,
+                            kind,
                             source,
                             source_id,
                         )
@@ -1891,14 +1893,16 @@ pub fn resolve_each_player(
                     // CR 506.2 + CR 508.6: Count-only filter (Suppressor Skyguard);
                     // it has no live damage-recipient meaning.
                     PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
-                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
-                    // who was dealt combat damage this turn, optionally
-                    // restricted to a matching source.
-                    PlayerFilter::OpponentDealtCombatDamage { source } => {
-                        crate::game::quantity::opponent_dealt_combat_damage_matches(
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
+                    // CR 120.2a/120.2b: Each opponent who was dealt damage of the
+                    // given kind this turn, optionally restricted to a matching
+                    // source.
+                    PlayerFilter::OpponentDealtDamage { kind, source } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
                             state,
                             p.id,
                             ability.controller,
+                            *kind,
                             source,
                             ability.source_id,
                         )

@@ -54,16 +54,16 @@ pub(crate) fn players_for_filter(
         // CR 506.2 + CR 508.6: Count-only filter (Suppressor Skyguard); it has
         // no live speed-effect recipient meaning.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => Vec::new(),
-        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was
-        // dealt combat damage this turn, optionally restricted to a matching
-        // source.
-        PlayerFilter::OpponentDealtCombatDamage { source } => state
+        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Each
+        // opponent who was dealt damage of the given kind this turn, optionally
+        // restricted to a matching source.
+        PlayerFilter::OpponentDealtDamage { kind, source } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
-                crate::game::quantity::opponent_dealt_combat_damage_matches(
-                    state, player.id, controller, source, source_id,
+                crate::game::quantity::opponent_dealt_damage_matches(
+                    state, player.id, controller, *kind, source, source_id,
                 )
             })
             .map(|player| player.id)

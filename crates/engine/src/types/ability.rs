@@ -3044,6 +3044,16 @@ fn is_total_damage_channel(channel: &DamageChannel) -> bool {
     matches!(channel, DamageChannel::Total)
 }
 
+/// CR 120.2a: Back-compat serde default for `PlayerFilter::OpponentDealtDamage`'s
+/// `kind` field. Legacy data serialized before the field existed encoded the
+/// former `OpponentDealtCombatDamage` variant (combat-only semantics), so an
+/// absent `kind` must deserialize to `CombatOnly` — NOT `DamageKindFilter`'s own
+/// `Any` default, which would silently broaden the filter to noncombat damage
+/// too and misresolve reloaded games/scenarios.
+fn damage_kind_combat_only() -> DamageKindFilter {
+    DamageKindFilter::CombatOnly
+}
+
 /// CR 120.6 + CR 120.10: Compatibility deserializer for the `channel` field that
 /// replaced the former `excess_only: bool` on `QuantityRef::DamageDealtThisTurn`
 /// (and `AbilityCondition::PreviousEffectAmount`). Accepts both the current
@@ -5612,15 +5622,23 @@ pub enum PlayerFilter {
     /// player who has lost the game".
     HasLostTheGame,
     /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
-    /// combat damage this turn, optionally restricted to damage from a source
-    /// matching `source`. Resolved against `state.damage_dealt_this_turn`
-    /// records whose `is_combat = true` and `target = Player(p.id)`. `source =
-    /// None` counts any combat-damage source (Tymna the Weaver); `source =
-    /// Some(f)` (CR 120.9) counts only opponents dealt combat damage by a source
-    /// matching `f` — matched against each record's CR 608.2i look-back source
-    /// snapshot, so the source's qualities are checked as they were at damage
-    /// time (Estinien Varlineau: "by ~ or a Dragon").
-    OpponentDealtCombatDamage {
+    /// damage this turn matching `kind`, optionally restricted to damage from a
+    /// source matching `source`. Resolved against `state.damage_dealt_this_turn`
+    /// records whose `target = Player(p.id)` and whose combat status matches
+    /// `kind` (CR 120.2a combat / CR 120.2b noncombat / `Any` = either).
+    /// `kind = CombatOnly` + `source = None` counts any combat-damage source
+    /// (Tymna the Weaver); `kind = Any` counts any damage combat or noncombat
+    /// (Furious Spinesplitter, You've Been Caught Stealing); `source = Some(f)`
+    /// (CR 120.9) further restricts to opponents dealt matching damage by a
+    /// source matching `f` — matched against each record's CR 608.2i look-back
+    /// source snapshot, so the source's qualities are checked as they were at
+    /// damage time (Estinien Varlineau: "by ~ or a Dragon").
+    #[serde(alias = "OpponentDealtCombatDamage")]
+    OpponentDealtDamage {
+        /// CR 120.2a/120.2b: which damage kind counts. Defaults to `CombatOnly`
+        /// on absence for back-compat with the pre-rename combat-only variant.
+        #[serde(default = "damage_kind_combat_only")]
+        kind: DamageKindFilter,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<Box<TargetFilter>>,
     },
