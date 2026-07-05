@@ -89,11 +89,10 @@ fn redact_secret_keys(obj: &mut Map<String, Value>) {
 }
 
 fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
-    let Some(Value::String(nested_raw)) = obj.get(DRAFT_SESSION_JSON_KEY) else {
+    let Some(nested_raw) = obj.get(DRAFT_SESSION_JSON_KEY).and_then(|v| v.as_str()) else {
         return;
     };
-    let nested_raw = nested_raw.clone();
-    let Ok(mut nested) = serde_json::from_str::<Value>(&nested_raw) else {
+    let Ok(mut nested) = serde_json::from_str::<Value>(nested_raw) else {
         return;
     };
     let Some(nested_obj) = nested.as_object_mut() else {
