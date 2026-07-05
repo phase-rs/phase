@@ -39,13 +39,14 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
     let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
 
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Violent Eruption", true, VIOLENT_ERUPTION_ORACLE)
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Violent Eruption",
+            true,
+            VIOLENT_ERUPTION_ORACLE,
+        )
         .with_mana_cost(ManaCost::Cost {
-            shards: vec![
-                ManaCostShard::Red,
-                ManaCostShard::Red,
-                ManaCostShard::Red,
-            ],
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red, ManaCostShard::Red],
             generic: 1,
         })
         .id();
@@ -103,10 +104,7 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
 
     runner
         .act(GameAction::DistributeAmong {
-            distribution: vec![
-                (TargetRef::Player(P1), 1),
-                (TargetRef::Object(bear), 3),
-            ],
+            distribution: vec![(TargetRef::Player(P1), 1), (TargetRef::Object(bear), 3)],
         })
         .expect("1/3 distribution should be accepted");
 
