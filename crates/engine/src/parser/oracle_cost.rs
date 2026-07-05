@@ -248,7 +248,56 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
             }
             AbilityCost::TapCreatures { .. } => last_verb = Some(PrecedingVerb::TapCreatures),
             AbilityCost::Unimplemented { description } if last_verb.is_some() => {
+                if description.trim().is_empty() {
+                    continue;
+                }
+                let verb = last_verb.unwrap();
                 let lower = description.to_lowercase();
+                // CR 601.2b/f + #2343 (Mechtitan Core): a continuation that names an
+                // explicit count of two or more objects ("four other artifact
+                // creatures and/or Vehicles you control") must recover that true
+                // count and the full (possibly disjunctive) filter — the historical
+                // `count: 1` + `parse_target` path dropped both. Scope the recovery
+                // to explicit counts >= 2 so single-object continuations keep their
+                // previous parse unchanged (this fix moves no parser surface outside
+                // the explicit-multi-count class). `parse_type_phrase` (the exile
+                // arm's own consumption-aware primitive) must consume the whole
+                // object phrase into a concrete filter, so an unsupported rider
+                // stays an honest `Unimplemented` rather than a false-green cost.
+                if let Some((count, rest)) = parse_number(&lower).filter(|(n, _)| *n >= 2) {
+                    let filter_text = strip_count_article_prefix(rest.trim())
+                        .trim_end_matches('.')
+                        .trim();
+                    let (filter, remainder) = parse_type_phrase(filter_text);
+                    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+                        costs[i] = match verb {
+                            PrecedingVerb::Sacrifice => {
+                                AbilityCost::Sacrifice(SacrificeCost::count(filter, count))
+                            }
+                            PrecedingVerb::Exile { zone } => AbilityCost::Exile {
+                                count,
+                                zone: extract_filter_zone(&filter).or(zone),
+                                filter: Some(filter),
+                            },
+                            PrecedingVerb::TapCreatures => AbilityCost::TapCreatures {
+                                requirement: TapCreaturesRequirement::count(count),
+                                filter,
+                            },
+                        };
+                    }
+                    // An explicit-count continuation is terminal: only the
+                    // full-consumption/non-`Any` branch above may rehydrate it. If
+                    // that did not fire (an unmodeled rider left a remainder, or an
+                    // `Any` filter), leave the continuation as an honest
+                    // `Unimplemented` — never fall through to the article/count-1
+                    // fallback below, which would emit a broad `count: 1` cost that
+                    // both drops the unmodeled rider and loses the real count.
+                    continue;
+                }
+                // Baseline single-object rehydration (unchanged pre-existing
+                // behavior): a bare "<article> <type>" continuation of the verb
+                // ("Sacrifice a green creature, a white creature, and a blue
+                // creature"). Left exactly as before so this fix does not move it.
                 let stripped = strip_article(description, &lower);
                 if stripped.is_empty() {
                     continue;
@@ -257,24 +306,20 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 if matches!(filter, TargetFilter::Any) {
                     continue;
                 }
-                match last_verb.unwrap() {
+                costs[i] = match verb {
                     PrecedingVerb::Sacrifice => {
-                        costs[i] = AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
+                        AbilityCost::Sacrifice(SacrificeCost::count(filter, 1))
                     }
-                    PrecedingVerb::Exile { zone } => {
-                        costs[i] = AbilityCost::Exile {
-                            count: 1,
-                            zone,
-                            filter: Some(filter),
-                        };
-                    }
-                    PrecedingVerb::TapCreatures => {
-                        costs[i] = AbilityCost::TapCreatures {
-                            requirement: TapCreaturesRequirement::count(1),
-                            filter,
-                        };
-                    }
-                }
+                    PrecedingVerb::Exile { zone } => AbilityCost::Exile {
+                        count: 1,
+                        zone,
+                        filter: Some(filter),
+                    },
+                    PrecedingVerb::TapCreatures => AbilityCost::TapCreatures {
+                        requirement: TapCreaturesRequirement::count(1),
+                        filter,
+                    },
+                };
             }
             _ => {
                 last_verb = None;
@@ -1772,8 +1817,8 @@ fn parse_mana_cost_nom(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ControllerRef, DiscardSelfScope, ObjectScope, QuantityExpr, SharedQuality, TypeFilter,
-        TypedFilter,
+        ControllerRef, DiscardSelfScope, FilterProp, ObjectScope, QuantityExpr,
+        SacrificeRequirement, SharedQuality, TypeFilter, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -1781,6 +1826,165 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    #[test]
+    fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
+        // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
+        // phrase carries an unmodeled rider that `parse_type_phrase` cannot fully
+        // consume ("… that were dealt damage this turn") must stay honest
+        // `Unimplemented` — it must NOT fall through to the count-1 fallback,
+        // which would emit a broad supported cost that drops both the rider and
+        // the real count.
+        match parse_oracle_cost(
+            "Sacrifice a creature and two artifacts that were dealt damage this turn",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs
+                        .iter()
+                        .any(|c| matches!(c, AbilityCost::Unimplemented { .. })),
+                    "explicit-count continuation with an unmodeled rider must stay \
+                     Unimplemented, got {costs:#?}"
+                );
+                assert_eq!(
+                    costs
+                        .iter()
+                        .filter(|c| matches!(c, AbilityCost::Sacrifice(_)))
+                        .count(),
+                    1,
+                    "must not rehydrate the unsupported continuation as a count-1 \
+                     sacrifice, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_single_object_continuation_keeps_count_one_baseline() {
+        // Scope guard: a single-object continuation ("a creature") is NOT touched
+        // by the multi-count recovery — it keeps its historical `count: 1` parse,
+        // so this fix moves no parser surface outside the explicit-multi-count
+        // class (only counts >= 2 are recovered).
+        match parse_oracle_cost("Sacrifice this creature and a creature you control") {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Sacrifice(sc)
+                            if matches!(sc.requirement, SacrificeRequirement::Count { count: 1 })
+                                && matches!(&sc.target, TargetFilter::Typed(t)
+                                    if t.controller == Some(ControllerRef::You))
+                    )),
+                    "single-object continuation must stay count 1, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_exile_self_and_count_other_you_control_recovers_count_and_filter() {
+        // CR 601.2f: Mechtitan Core — "Exile this Vehicle and four other artifact
+        // creatures and/or Vehicles you control" is one exile cost split across a
+        // conjunction. The continuation must recover count 4 and the disjunctive
+        // "you control" filter, not collapse to `count: 1` with an empty filter.
+        match parse_oracle_cost(
+            "{5}, Exile this Vehicle and four other artifact creatures and/or Vehicles you control",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Exile {
+                            count: 1,
+                            filter: Some(TargetFilter::SelfRef),
+                            ..
+                        }
+                    )),
+                    "expected the self-exile conjunct, got {costs:#?}"
+                );
+                let other = costs
+                    .iter()
+                    .find_map(|c| match c {
+                        AbilityCost::Exile {
+                            count,
+                            filter: Some(f),
+                            ..
+                        } if *count == 4 => Some(f),
+                        _ => None,
+                    })
+                    .expect("expected an Exile with count 4 for the continuation");
+                match other {
+                    TargetFilter::Or { filters } => {
+                        assert_eq!(filters.len(), 2);
+                        assert!(filters.iter().all(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.controller == Some(ControllerRef::You)
+                                    && t.properties.contains(&FilterProp::Another)
+                        )));
+                        // Both disjunction legs preserve their concrete types
+                        // through the "and/or" continuation, not just an empty
+                        // filter: "artifact creatures" and "Vehicles".
+                        assert!(filters.iter().any(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.type_filters == [TypeFilter::Artifact, TypeFilter::Creature]
+                        )));
+                        assert!(filters.iter().any(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+                        )));
+                    }
+                    other => panic!("expected a disjunctive continuation filter, got {other:#?}"),
+                }
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_and_count_other_continuation_recovers_count() {
+        // CR 601.2b/f: the same split-conjunction pattern for the sacrifice verb.
+        // "Sacrifice a creature and two other artifacts you control" must recover
+        // count 2 with the "other … you control" filter, not collapse to count 1.
+        match parse_oracle_cost("Sacrifice a creature and two other artifacts you control") {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Sacrifice(sc)
+                            if matches!(sc.requirement, SacrificeRequirement::Count { count: 2 })
+                                && matches!(&sc.target, TargetFilter::Typed(t)
+                                    if t.controller == Some(ControllerRef::You)
+                                        && t.properties.contains(&FilterProp::Another))
+                    )),
+                    "expected a count-2 'other artifacts you control' sacrifice, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_article_continuations_stay_count_one() {
+        // Regression: "A, B, and C" article continuations must still each parse as
+        // independent count-1 sacrifices — the fix must not inflate their count.
+        match parse_oracle_cost("Sacrifice a green creature, a white creature, and a blue creature")
+        {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 3);
+                assert!(costs.iter().all(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice(sc)
+                        if matches!(sc.requirement, SacrificeRequirement::Count { count: 1 })
+                )));
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
     }
 
     // CR 702.24a: `parse_or_separated_mana_costs` building-block tests.

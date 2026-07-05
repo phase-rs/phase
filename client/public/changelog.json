@@ -1,6 +1,36 @@
 {
   "entries": [
     {
+      "id": 162,
+      "date": "2026-07-04",
+      "title": "World rule arrives",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• The World rule now works: if multiple world permanents are on the battlefield, only the newest survives, with tied newest worlds all going to graveyards (Nether Void, The Abyss, Living Plane, Concordant Crossroads)\n• Altaïr Ibn-La'Ahad now creates the right attacking copies, and freerunning casts are available through the casting modal\n• Ghyrson Starn, Kelermorph now sees small noncombat damage and adds his bonus damage trigger\n• More card text is live, including targeted perpetual power/toughness grants, choose-a-color-or-colorless branches, and “for each creature you control with a +1/+1 counter” counts (High Sentinels of Arashin, Armorcraft Judge, Inspiring Call, Hamza)\n\n🛠️ Cards That Now Work Right\n• Manifest dread now sends non-permanent cards to the graveyard instead of putting them onto the battlefield face down, and blocked face-down entries no longer strand hidden cards face down\n• Helm-style token copies now receive haste on the created token, not the source\n• Skullscorch now correctly lets the chosen player take source damage instead of discarding\n• Cast-copy-of-card copies now disappear from illegal zones when they should, while permanent-spell copies become token permanents at the right moment\n• Player elimination in multiplayer now ends control effects correctly, so stolen permanents do not stay under a player who left\n• Named filters, card-name literals, legacy activation timing, optional target counts, opponent-turn activation restrictions, and synthesized basic-land mana choices now parse more accurately\n\n⚔️ Combat & Gameplay\n• Simultaneous trigger ordering is more rules-accurate: order-sensitive same-event and delayed triggers now ask for an order instead of being auto-stacked\n• Repeated self-counter triggers now batch together, speeding up boards with many identical counter triggers\n\n🖥️ Interface\n• Split multiplayer board view is cleaner: opponent panes have roomier rows, compact lands/support summaries, better waiting chips, and target-only click-through\n• Whitespace-only deck searches now behave like an empty search instead of swapping to a blank results view\n• First-party telemetry can now report engine panics, stuck decisions, JavaScript errors, chunk reloads, and game ends when enabled, without sending identity info\n\n🌍 Localization\n• Multiplayer server presets, split-view status chips, freerunning prompts, and telemetry settings now have localized labels across supported languages\n\n🌐 Multiplayer\n• Password-protected draft lobbies now actually require the password before a player can claim a seat\n• P2P draft backup snapshots no longer expose seat or kicked-player tokens through HTTP storage\n• Self-hosted builds can configure a default multiplayer server, and the lobby broker now tracks usage stats such as active games and online players",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1523120247467409580"
+    },
+    {
+      "id": 161,
+      "date": "2026-07-04",
+      "title": "Foretell and excess damage arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Foretell and miracle can now be granted to cards in your hand, so Dream Devourer and Aminatou, Veil Piercer create real reduced-cost cast options\n• Excess-damage burn now works: Flame Spill, Gandalf's Sanction, and Ravenous Tyrannosaurus deal lethal damage to a creature and send the rest to its controller\n• More card classes are live, including secret ballot votes, secretly chosen creature types, top-of-library historic play, repeated “this way” conditions, and “choose a counter kind” effects\n• New and newly supported cards include A Killer Among Us, Celestial Reunion, Malamet Battle Glyph, The Fourth Doctor, Fixed Point in Time, The Face of Boe, Last Night Together, and Ace's Baseball Bat\n\n🛠️ Cards That Now Work Right\n• Tomb of Annihilation rooms now match their printed costs: Oubliette also sacrifices a creature, artifact, and land; Veils of Fear and Sandfall Cell use the correct discard-or-sacrifice life-loss punishers\n• Coalition Victory now wins only when its land-type and creature-color condition is actually satisfied\n• Volo, Guide to Monsters now checks shared creature types in the right zones before copying a creature spell\n• Rebound and Etali-style exile casts now keep their cast-origin and target parsing straight\n• Glittering Frost, Leyline of Singularity, Volo, Monomania, kicked-spell triggers, rounded-half quantities, and “each source you control deals damage” patterns now parse more accurately\n• Top-of-library land play permissions are now consumed once per turn, so effects like The Fourth Doctor cannot replay the same permission indefinitely\n\n⚔️ Combat & Gameplay\n• Targetless spells no longer ask whether to choose new targets, and tap/untap choices with no legal permanents no longer wedge resolution\n• Hidden information is better protected: RNG seeds and library-draw events are no longer exposed to clients\n• “Must be blocked by” effects now respect spare multi-blocker capacity, and restricted extra-combat attack rules clear correctly when the turn ends\n• Multi-token creation chains now keep every token in the list instead of silently dropping the middle ones\n\n🖥️ Interface\n• Split multiplayer games have a new board layout, and commander damage is more compact in split view\n• Counter-kind choice prompts now have localized titles across supported languages\n\n🤖 AI\n• The AI now avoids committing to X-cost spells that can only be cast for X=0, skips net-negative self-sacrifice/pay-life/discard abilities, and chooses better targets for undying-style grants, copy effects, and mill payoffs\n\n🌐 Multiplayer\n• Secret vote tallies now handle very large candidate pools without wrapping the selected object index",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1522923398630604890"
+    },
+    {
       "id": 160,
       "date": "2026-07-03",
       "title": "Directional attacks and modal forms",

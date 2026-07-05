@@ -3375,6 +3375,35 @@ fn begin_phase_applier(
     ApplyResult::Prevented
 }
 
+// --- Planeswalk (CR 701.31 / CR 901.9c) ---
+
+/// CR 701.31 + CR 901.9c: Match a pending planar-die planeswalk event. Player
+/// scope (`valid_player`) is enforced by the floating scan in
+/// `find_applicable_replacements`, mirroring the `Draw` handler.
+fn planeswalk_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::Planeswalk { .. })
+}
+
+/// CR 614.6: A "chaos ensues instead" planeswalk replacement fully replaces the
+/// planeswalk — it never happens. This applier ONLY signals full replacement.
+/// It does NOT fire the substitute and does NOT emit `ReplacementApplied`: the
+/// pipeline's `apply_single_replacement` Prevented arm owns both — it stashes
+/// the shield's `runtime_execute` (built from `replacement_effect`) as a
+/// `PostReplacementContinuation::Resolved` and emits `ReplacementApplied`. The
+/// resolver (`effects::planeswalk::resolve`) then drains that continuation
+/// exactly once. Mirrors the Words-of-Worship `draw_applier`, which likewise
+/// never fires its own substitute. Because the substitute is data
+/// (`runtime_execute`), this one applier serves every "if a player would
+/// planeswalk … [effect] instead" card.
+fn planeswalk_applier(
+    _event: ProposedEvent,
+    _rid: ReplacementId,
+    _state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    ApplyResult::Prevented
+}
+
 // --- Registry ---
 
 /// CR 614.1: Build the registry of applicable replacement effects.
@@ -3610,6 +3639,19 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         ReplacementHandlerEntry {
             matcher: empty_mana_pool_matcher,
             applier: empty_mana_pool_applier,
+        },
+    );
+
+    // CR 701.31 + CR 901.9c + CR 614.1a: Planar-die planeswalk replacement
+    // (Fixed Point in Time). The `ReplacementEvent::Planeswalk` variant was
+    // pre-declared but previously UNREGISTERED, so the floating scan's
+    // `registry.get(&repl_def.event)` returned `None` and skipped the shield.
+    // Registering the matcher/applier makes the shield visible to the pipeline.
+    registry.insert(
+        ReplacementEvent::Planeswalk,
+        ReplacementHandlerEntry {
+            matcher: planeswalk_matcher,
+            applier: planeswalk_applier,
         },
     );
 
@@ -4404,6 +4446,9 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
         ProposedEvent::ProduceMana { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::ProduceMana);
         }
+        ProposedEvent::Planeswalk { .. } => {
+            push_replacement_event_key(&mut keys, ReplacementEvent::Planeswalk);
+        }
         ProposedEvent::Sacrifice { .. } | ProposedEvent::EmptyManaPool { .. } => {}
     }
     keys
@@ -5087,6 +5132,26 @@ pub fn find_applicable_replacements(
                     // captured at resolution, not the source permanent's live
                     // controller.
                     if let ProposedEvent::Draw { player_id, .. } = event {
+                        let player_ok = match &repl_def.valid_player {
+                            Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
+                                *player_id != source_controller
+                            }
+                            Some(crate::types::ability::ReplacementPlayerScope::You) => {
+                                *player_id == source_controller
+                            }
+                            Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
+                            None => *player_id == source_controller,
+                        };
+                        if !player_ok {
+                            continue;
+                        }
+                    }
+                    // CR 701.31 + CR 901.9c: Planar-die planeswalk replacements
+                    // (Fixed Point in Time) hosted in pending state scope by the
+                    // installing player captured at resolution. `valid_card` /
+                    // `condition` gates are inert — a planeswalk has no affected
+                    // object, same as Draw. AnyPlayer ("a player") always matches.
+                    if let ProposedEvent::Planeswalk { player_id, .. } = event {
                         let player_ok = match &repl_def.valid_player {
                             Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
                                 *player_id != source_controller
@@ -7616,6 +7681,10 @@ mod tests {
                 vec![ReplacementEvent::ProduceMana],
             ),
             (
+                ProposedEvent::planeswalk(PlayerId(0)),
+                vec![ReplacementEvent::Planeswalk],
+            ),
+            (
                 ProposedEvent::Sacrifice {
                     object_id: ObjectId(1),
                     player_id: PlayerId(0),
@@ -9819,6 +9888,7 @@ mod tests {
             ReplacementEvent::PayLife,
             ReplacementEvent::ProduceMana,
             ReplacementEvent::TurnFaceUp,
+            ReplacementEvent::Planeswalk,
             ReplacementEvent::GameLoss,
             ReplacementEvent::GameWin,
         ];

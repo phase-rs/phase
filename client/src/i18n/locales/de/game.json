@@ -16,6 +16,8 @@
     "holdCtrlFront": "Strg halten für Vorderseite",
     "holdCtrlFlip": "Strg halten zum Umdrehen",
     "flip": "Umdrehen",
+    "report": "Problem melden",
+    "reported": "Gemeldet ✓",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -1586,6 +1588,7 @@
     "variantForetell": "Aus Vorhersagen wirken",
     "variantOverload": "Mit Überladen wirken",
     "variantBestow": "Mit Verleihen wirken",
+    "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
@@ -1699,6 +1702,7 @@
       "numberRange": "Wähle eine Zahl",
       "labeled": "Triff eine Wahl",
       "keyword": "Wähle eine Fähigkeit",
+      "counterKind": "Wähle eine Marke",
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
@@ -1957,6 +1961,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

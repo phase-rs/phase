@@ -5604,6 +5604,35 @@ fn validate_target_constraints(
                     }
                 }
             }
+            TargetSelectionConstraint::SameZoneOwner { zone } => {
+                let Some(state) = state else {
+                    continue;
+                };
+                let mut zone_owner = None;
+                for target in targets {
+                    let TargetRef::Object(object_id) = target else {
+                        continue;
+                    };
+                    let object = state.objects.get(object_id).ok_or_else(|| {
+                        EngineError::InvalidAction("Selected object target is missing".into())
+                    })?;
+                    if object.zone != *zone {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Selected object targets must be in {zone:?}"
+                        )));
+                    }
+                    match zone_owner {
+                        Some(owner) if owner != object.owner => {
+                            return Err(EngineError::InvalidAction(
+                                "Selected object targets must come from the same zone owner"
+                                    .to_string(),
+                            ));
+                        }
+                        Some(_) => {}
+                        None => zone_owner = Some(object.owner),
+                    }
+                }
+            }
             TargetSelectionConstraint::TotalManaValue { comparator, value } => {
                 let Some(state) = state else {
                     continue;
@@ -7799,6 +7828,126 @@ mod tests {
         assert!(!progress
             .current_legal_targets
             .contains(&TargetRef::Object(p0_b)));
+    }
+
+    #[test]
+    fn target_selection_filters_cards_outside_single_graveyard_owner() {
+        let mut state = GameState::new_two_player(42);
+        let p0_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 A".to_string(),
+            Zone::Graveyard,
+        );
+        let p0_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "P0 B".to_string(),
+            Zone::Graveyard,
+        );
+        let p1_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "P1 A".to_string(),
+            Zone::Graveyard,
+        );
+        let p0_battlefield = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "P0 Battlefield".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Card).properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }));
+
+        let target_slots = build_target_slots(&state, &ability).expect("target slots");
+        let constraints = [TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard,
+        }];
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &target_slots, &constraints)
+                .expect("selection starts");
+
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &target_slots,
+            &constraints,
+            &progress,
+            Some(TargetRef::Object(p0_a)),
+        )
+        .expect("first target accepted") else {
+            panic!("expected second target prompt");
+        };
+
+        assert!(progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(p0_b)));
+        assert!(!progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(p1_a)));
+        assert!(!progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(p0_battlefield)));
+
+        assert!(
+            validate_target_constraints(
+                Some(&state),
+                &[TargetRef::Object(p0_a), TargetRef::Object(p0_b)],
+                &constraints,
+                Some(&ability),
+            )
+            .is_ok(),
+            "same-owner graveyard pair must satisfy SameZoneOwner"
+        );
+        assert!(
+            validate_target_constraints(
+                Some(&state),
+                &[TargetRef::Object(p0_a), TargetRef::Object(p1_a)],
+                &constraints,
+                Some(&ability),
+            )
+            .is_err(),
+            "different graveyard owners must fail SameZoneOwner"
+        );
+        assert!(
+            validate_target_constraints(
+                Some(&state),
+                &[TargetRef::Object(p0_a), TargetRef::Object(p0_battlefield)],
+                &constraints,
+                Some(&ability),
+            )
+            .is_err(),
+            "objects outside the constrained zone must fail SameZoneOwner"
+        );
     }
 
     /// CR 202.3 + CR 601.2c: `validate_target_constraints` enforces the

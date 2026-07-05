@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -30,6 +31,7 @@ import {
   ScrollableCardStrip,
 } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
+import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
@@ -2586,48 +2588,84 @@ function CommanderZoneChoiceModal({
   const obj = objects[data.commander_id];
   const zoneName =
     data.current_zone.charAt(0).toUpperCase() + data.current_zone.slice(1);
+  const commanderCardStyle = {
+    "--card-w": "5.5rem",
+    "--card-h": "7.7rem",
+  } as CSSProperties;
 
   return (
-    <ChoiceOverlay
-      title={t("cardChoice.commanderZone.title")}
-      subtitle={t("cardChoice.commanderZone.subtitle", {
-        name: obj?.name ?? t("cardChoice.commanderZone.commanderFallback"),
-        zone: zoneName,
-      })}
-    >
-      <div className="flex items-center gap-6">
-        <motion.div
-          className="relative rounded-lg"
-          initial={{ opacity: 0, y: 60, scale: 0.85 }}
-          animate={{ opacity: 0.85, y: 0, scale: 1 }}
-          transition={{ delay: 0.1, duration: 0.35 }}
-          {...hoverProps(data.commander_id)}
-        >
-          <CardImage
-            cardName={obj?.name ?? "Unknown"}
-            size="normal"
-            className={CHOICE_CARD_IMAGE_CLASS}
-          />
-        </motion.div>
-        <div className="flex flex-col gap-3">
-          <ConfirmButton
-            label={t("cardChoice.commanderZone.labelCommandZone")}
-            onClick={() =>
-              dispatch({ type: "DecideOptionalEffect", data: { accept: true } })
-            }
-          />
-          <ConfirmButton
-            label={t("cardChoice.commanderZone.labelLeave", { zone: zoneName })}
-            onClick={() =>
-              dispatch({
-                type: "DecideOptionalEffect",
-                data: { accept: false },
-              })
-            }
-          />
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+      <motion.div
+        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[22px] border border-white/10 bg-[#0b1020]/94 shadow-[0_28px_70px_rgba(0,0,0,0.5)] backdrop-blur-md"
+        data-testid="commander-zone-choice-dialog"
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.22, ease: "easeOut" }}
+      >
+        <div className="border-b border-white/10 px-4 py-3">
+          <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
+            {t("choiceOverlay.eyebrow")}
+          </div>
+          <h2 className="text-lg font-semibold text-white">
+            {t("cardChoice.commanderZone.title")}
+          </h2>
+          <p className="mt-1 text-sm leading-snug text-slate-400">
+            {t("cardChoice.commanderZone.subtitle", {
+              name: obj?.name ?? t("cardChoice.commanderZone.commanderFallback"),
+              zone: zoneName,
+            })}
+          </p>
         </div>
-      </div>
-    </ChoiceOverlay>
+        <div className="grid gap-4 px-4 py-4 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center">
+          <motion.div
+            className="relative mx-auto rounded-lg sm:mx-0"
+            style={commanderCardStyle}
+            initial={{ opacity: 0, y: 60, scale: 0.85 }}
+            animate={{ opacity: 0.85, y: 0, scale: 1 }}
+            transition={{ delay: 0.1, duration: 0.35 }}
+            {...hoverProps(data.commander_id)}
+          >
+            <CardImage
+              cardName={obj?.name ?? "Unknown"}
+              size="normal"
+              className={CHOICE_CARD_IMAGE_CLASS}
+            />
+          </motion.div>
+          <div className="grid min-w-0 gap-2">
+            <button
+              type="button"
+              className={menuButtonClass({
+                tone: "cyan",
+                size: "md",
+                className: "w-full justify-center",
+              })}
+              onClick={() =>
+                dispatch({ type: "DecideOptionalEffect", data: { accept: true } })
+              }
+            >
+              {t("cardChoice.commanderZone.labelCommandZone")}
+            </button>
+            <button
+              type="button"
+              className={menuButtonClass({
+                tone: "amber",
+                size: "md",
+                className: "w-full justify-center",
+              })}
+              onClick={() =>
+                dispatch({
+                  type: "DecideOptionalEffect",
+                  data: { accept: false },
+                })
+              }
+            >
+              {t("cardChoice.commanderZone.labelLeave", { zone: zoneName })}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </div>
   );
 }
 

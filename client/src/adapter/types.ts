@@ -487,6 +487,7 @@ export type CastingVariant =
   | { type: "Awaken" }
   | { type: "Cleave" }
   | { type: "MoreThanMeetsTheEye" }
+  | { type: "Freerunning" }
   | { type: "Fuse" };
 
 export interface CastingVariantChoiceOption {
@@ -1048,6 +1049,9 @@ export type TargetSelectionConstraint =
   | { type: "DifferentTargetPlayers" }
   // CR 115.1 + CR 601.2c: object targets must be controlled by different players.
   | { type: "DifferentObjectControllers" }
+  // CR 115.1 + CR 601.2c + CR 400.1: object targets must come from the same
+  // player-owned zone of the given kind.
+  | { type: "SameZoneOwner"; zone: Zone }
   // CR 202.3 + CR 601.2c: the chosen target set's combined mana value must satisfy
   // `comparator` against `value`. `value` is an engine `QuantityExpr` (internally
   // tagged); the frontend never evaluates it — legality is delivered via
@@ -2127,6 +2131,15 @@ export interface GameState {
   lands_played_this_turn: number;
   max_lands_per_turn: number;
   priority_pass_count: number;
+  /**
+   * Mirrors `engine::types::game_state::GameState::unimplemented_oracle_ids`.
+   * Oracle ids (fallback: object names) of cards whose abilities hit an
+   * unimplemented effect at resolution this game. Diagnostics only — forwarded
+   * verbatim to the `game_end` telemetry event. Distinct from the per-object
+   * `unimplemented_mechanics` static parse-coverage projection. Absent when the
+   * set is empty (serde `skip_serializing_if`).
+   */
+  unimplemented_oracle_ids?: string[];
   /**
    * Engine-authored derived projections, attached by adapters from the
    * wire-format `ClientGameState.derived` sibling field. Optional because

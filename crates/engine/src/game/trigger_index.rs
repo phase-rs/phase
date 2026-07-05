@@ -722,6 +722,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
         | EffectKind::EachDealsDamageEqualToPower
+        | EffectKind::EachSourceDealsDamage
         | EffectKind::Draw
         | EffectKind::Pump
         | EffectKind::PairWith
@@ -823,6 +824,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
         | EffectKind::CreateDrawReplacement
+        | EffectKind::CreatePlaneswalkReplacement
         | EffectKind::Regenerate
         | EffectKind::RemoveAllDamage
         | EffectKind::LoseTheGame
@@ -836,6 +838,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
         | EffectKind::Planeswalk
+        | EffectKind::ChaosEnsues
         | EffectKind::OpenAttractions
         | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters
@@ -843,6 +846,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChooseFromZone
         | EffectKind::RememberCard
         | EffectKind::ChooseObjectsIntoTrackedSet
+        // CR 608.2d + CR 122.1: counter-kind choice / consume — the actual
+        // counter placement fires `GameEvent::CounterAdded`, so no matcher
+        // dispatches on these `EffectResolved` kinds directly.
+        | EffectKind::ChooseCounterKind
+        | EffectKind::PutChosenCounter
         | EffectKind::ChooseAndSacrificeRest
         | EffectKind::Exploit
         | EffectKind::GainEnergy

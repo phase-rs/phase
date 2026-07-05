@@ -194,7 +194,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           />
         )}
         {isSpell && displayManaCost && (
-          <ManaCostPips cost={displayManaCost} size="sm" className="absolute right-[5%] top-[2.5%]" />
+          <ManaCostPips cost={displayManaCost} size="xs" className="absolute right-[5%] top-[2.5%]" />
         )}
       </div>
 

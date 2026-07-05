@@ -16,6 +16,8 @@
     "holdCtrlFront": "Maintenez Ctrl pour la face avant",
     "holdCtrlFlip": "Maintenez Ctrl pour pivoter",
     "flip": "Pivoter",
+    "report": "Signaler un problème",
+    "reported": "Signalé ✓",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -1586,6 +1588,7 @@
     "variantForetell": "Lancer depuis la Prédiction",
     "variantOverload": "Lancer avec Surcharge",
     "variantBestow": "Lancer avec Don",
+    "variantFreerunning": "Lancer avec Freerunning",
     "variantFuse": "Lancer avec Fusion",
     "variantFallback": "Lancer avec {{type}}"
   },
@@ -1699,6 +1702,7 @@
       "numberRange": "Choisir un nombre",
       "labeled": "Faire un choix",
       "keyword": "Choisir une capacité",
+      "counterKind": "Choisir un marqueur",
       "fallback": "Faire un choix"
     },
     "searchSubtitle": "Tapez pour rechercher dans toutes les cartes",
@@ -1957,6 +1961,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

@@ -294,16 +294,19 @@ fn daretti_emblem_simultaneous_artifact_death_produces_n_returns() {
     let stacked =
         engine::game::triggers::check_delayed_triggers(runner.state_mut(), &end_step_events);
 
+    // CR 603.3b (PR-6.75 HIGH-2): two simultaneous same-controller delayed triggered
+    // abilities with distinct returns are ordered by their controller before hitting
+    // the stack — check_delayed_triggers now routes its firing batch through
+    // begin_trigger_ordering (matching the phase-delayed path). The batch pauses on the
+    // OrderTriggers choice, so `stacked` is empty until the order is submitted; the
+    // drain_stack helper below drains the identity order and resolves both returns.
     assert!(
-        !stacked.is_empty(),
-        "CR 603.7b: the AtNextPhase{{End}} delayed triggers must fire at the end step"
+        matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
+        "CR 603.3b: the two simultaneous AtNextPhase{{End}} Daretti returns must prompt \
+         for ordering; waiting_for={:?}",
+        runner.state().waiting_for
     );
-    assert_eq!(
-        stacked.len(),
-        2,
-        "both delayed triggers must fire at the end step; got {} stack entries",
-        stacked.len()
-    );
+    let _ = stacked;
     assert!(
         runner.state().delayed_triggers.is_empty(),
         "CR 603.7b: both one-shot delayed triggers must be consumed after firing"

@@ -16,6 +16,8 @@
     "holdCtrlFront": "Segure Ctrl para a face dianteira",
     "holdCtrlFlip": "Segure Ctrl para virar",
     "flip": "Virar",
+    "report": "Relatar um problema",
+    "reported": "Relatado ✓",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -1586,6 +1588,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantFreerunning": "Conjurar com Freerunning",
     "variantFuse": "Conjurar com Fusão",
     "variantFallback": "Conjurar com {{type}}"
   },
@@ -1699,6 +1702,7 @@
       "numberRange": "Escolha um Número",
       "labeled": "Faça uma Escolha",
       "keyword": "Escolha uma Habilidade",
+      "counterKind": "Escolha um Marcador",
       "fallback": "Faça uma Escolha"
     },
     "searchSubtitle": "Digite para buscar em todas as cartas",
@@ -1957,6 +1961,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

@@ -16,6 +16,8 @@
     "holdCtrlFront": "Przytrzymaj Ctrl, aby zobaczyć przednią stronę",
     "holdCtrlFlip": "Przytrzymaj Ctrl, aby odwrócić",
     "flip": "Odwróć",
+    "report": "Zgłoś problem",
+    "reported": "Zgłoszono ✓",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -1586,6 +1588,7 @@
     "variantForetell": "Rzuć z Foretell",
     "variantOverload": "Rzuć z Overload",
     "variantBestow": "Rzuć z Bestow",
+    "variantFreerunning": "Rzuć z Freerunning",
     "variantFuse": "Rzuć z Fuse",
     "variantFallback": "Rzuć z {{type}}"
   },
@@ -1699,6 +1702,7 @@
       "numberRange": "Wybierz liczbę",
       "labeled": "Dokonaj wyboru",
       "keyword": "Wybierz zdolność",
+      "counterKind": "Wybierz żeton",
       "fallback": "Dokonaj wyboru"
     },
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
@@ -1957,6 +1961,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

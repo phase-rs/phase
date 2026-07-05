@@ -153,6 +153,29 @@ fn classify_effect(probs: &mut ThreatProbabilities, effect: &Effect, is_instant:
                 probs.direct_damage = 1.0;
             }
         }
+        // CR 120.1: "each <class> deals N damage to <recipient>". Reaches creatures
+        // (removal) and, when the recipient resolves toward players, players (burn).
+        Effect::EachSourceDealsDamage { recipient, .. } => {
+            probs.targeted_removal = 1.0;
+            // `EachController` always resolves to a player (the controller of
+            // each source). `Shared` recipients bound to `Any`, `Player`,
+            // `Controller`, or `ParentTarget` (e.g. Missy's "that opponent",
+            // Case of the Stashed Skeleton's "that player") also resolve to a
+            // player and represent direct damage / burn threats.
+            let is_player_bound = matches!(
+                recipient,
+                engine::types::ability::EachDamageRecipient::EachController
+                    | engine::types::ability::EachDamageRecipient::Shared(
+                        engine::types::ability::TargetFilter::Any
+                            | engine::types::ability::TargetFilter::Player
+                            | engine::types::ability::TargetFilter::Controller
+                            | engine::types::ability::TargetFilter::ParentTarget
+                    )
+            );
+            if is_player_bound {
+                probs.direct_damage = 1.0;
+            }
+        }
         Effect::Pump { .. } if is_instant => probs.combat_trick = 1.0,
         Effect::ChangeZone {
             destination: engine::types::zones::Zone::Exile | engine::types::zones::Zone::Graveyard,

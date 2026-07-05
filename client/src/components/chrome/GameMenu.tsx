@@ -9,6 +9,7 @@ import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
+import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
 
 interface GameMenuProps {
   gameId: string;
@@ -16,6 +17,8 @@ interface GameMenuProps {
   isOnlineMode: boolean;
   showAiHand: boolean;
   onToggleAiHand: () => void;
+  multiplayerBoardLayout?: MultiplayerBoardLayout;
+  onToggleMultiplayerBoardLayout?: () => void;
   onSettingsClick: () => void;
   onHelpClick: () => void;
   onConcede?: () => void;
@@ -35,6 +38,8 @@ export function GameMenu({
   isOnlineMode,
   showAiHand,
   onToggleAiHand,
+  multiplayerBoardLayout,
+  onToggleMultiplayerBoardLayout,
   onSettingsClick,
   onHelpClick,
   onConcede,
@@ -50,6 +55,12 @@ export function GameMenu({
   const cardDataMeta = useCardDataMeta();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
   const isDraftPodMatch = searchParams.get("mode") === "draft-match";
+  const boardLayoutToggleLabel = multiplayerBoardLayout === "split"
+    ? t("gameMenu.boardLayoutSplit")
+    : t("gameMenu.boardLayoutLegacy");
+  const boardLayoutToggleTitle = multiplayerBoardLayout === "split"
+    ? t("gameMenu.switchToLegacyView")
+    : t("gameMenu.switchToSplitView");
 
   const handleConcede = useConcedeHandler({
     gameId,
@@ -73,23 +84,24 @@ export function GameMenu({
   return (
     <div
       ref={menuRef}
-      className="fixed z-40"
+      className="fixed z-40 flex flex-col items-start gap-0.5"
       style={{
         left: "calc(env(safe-area-inset-left) + 0.5rem)",
-        top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.5rem)",
+        top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.25rem)",
       }}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex h-7 items-center gap-1 rounded-sm border border-white/8 bg-slate-950/64 px-0.5 shadow-[0_8px_18px_rgba(0,0,0,0.24)] backdrop-blur-md">
         <button
           onClick={() => setOpen(!open)}
-          className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-800/80 text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
+          className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-gray-400 transition-colors hover:bg-white/10 hover:text-gray-200"
           aria-label={t("gameMenu.menu")}
+          title={t("gameMenu.menu")}
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 20 20"
             fill="currentColor"
-            className="h-5 w-5"
+            className="h-4 w-4"
           >
             <path
               fillRule="evenodd"
@@ -103,7 +115,7 @@ export function GameMenu({
         {showSandboxTools && onSandboxToolsClick && (
           <button
             onClick={onSandboxToolsClick}
-            className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-800/80 text-amber-300/90 transition-colors hover:bg-gray-700/80 hover:text-amber-200"
+            className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-amber-300/90 transition-colors hover:bg-white/10 hover:text-amber-200"
             aria-label={t("gameMenu.sandboxTools")}
             title={t("gameMenu.sandboxToolsTitle")}
           >
@@ -115,7 +127,7 @@ export function GameMenu({
               strokeWidth={1.5}
               strokeLinecap="round"
               strokeLinejoin="round"
-              className="h-5 w-5"
+              className="h-4 w-4"
             >
               <path d="M8 2.5v4.2L4 14.2a1.6 1.6 0 0 0 1.45 2.3h9.1A1.6 1.6 0 0 0 16 14.2L12 6.7V2.5" />
               <path d="M7 2.5h6" />
@@ -125,6 +137,22 @@ export function GameMenu({
         )}
         {isOnlineMode && <ConnectionDot />}
       </div>
+      {multiplayerBoardLayout && onToggleMultiplayerBoardLayout && (
+        <button
+          type="button"
+          onClick={onToggleMultiplayerBoardLayout}
+          className={`flex h-5 w-full items-center justify-center gap-1 rounded-sm border border-white/8 px-1.5 text-[9px] font-black uppercase tracking-[0.14em] shadow-[0_8px_18px_rgba(0,0,0,0.2)] backdrop-blur-md transition-colors ${
+            multiplayerBoardLayout === "split"
+              ? "bg-cyan-400/15 text-cyan-100 ring-1 ring-cyan-300/35 hover:bg-cyan-400/22"
+              : "bg-slate-950/64 text-gray-300 hover:bg-white/10 hover:text-gray-100"
+          }`}
+          aria-label={boardLayoutToggleTitle}
+          title={boardLayoutToggleTitle}
+        >
+          <BoardLayoutIcon layout={multiplayerBoardLayout} />
+          <span>{boardLayoutToggleLabel}</span>
+        </button>
+      )}
       {open && (
         <div className="absolute left-0 top-full mt-1 w-52 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm">
           <MenuButton label={t("gameMenu.resume")} onClick={() => setOpen(false)} />
@@ -222,6 +250,25 @@ export function GameMenu({
         </div>
       )}
     </div>
+  );
+}
+
+function BoardLayoutIcon({ layout }: { layout: MultiplayerBoardLayout }) {
+  if (layout === "split") {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-3.5 w-3.5" aria-hidden>
+        <path d="M3 4.5h14v4H3z" />
+        <path d="M3 11.5h14v4H3z" />
+        <path d="M7.65 4.5v4M12.35 4.5v4" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-3.5 w-3.5" aria-hidden>
+      <path d="M3 4.5h14v11H3z" />
+      <path d="M6 7h8M6 10h5" />
+    </svg>
   );
 }
 

@@ -16,6 +16,8 @@
     "holdCtrlFront": "Tieni premuto Ctrl per il fronte",
     "holdCtrlFlip": "Tieni premuto Ctrl per girare",
     "flip": "Gira",
+    "report": "Segnala un problema",
+    "reported": "Segnalato ✓",
     "altParsedAbilities": "Alt: abilità analizzate",
     "debugId": "ID: {{id}}",
     "engineParse": "Analisi del motore",
@@ -1586,6 +1588,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
     "variantFallback": "Lancia con {{type}}"
   },
@@ -1699,6 +1702,7 @@
       "numberRange": "Scegli un numero",
       "labeled": "Fai una scelta",
       "keyword": "Scegli un'abilità",
+      "counterKind": "Scegli un segnalino",
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
@@ -1957,6 +1961,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

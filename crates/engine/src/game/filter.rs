@@ -184,6 +184,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
+        | FilterProp::InTrackedSet { .. }
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::HasSupertype { .. }
@@ -401,6 +402,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
+        | FilterProp::InTrackedSet { .. }
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::HasSupertype { .. }
@@ -3029,6 +3031,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // commander identity — fail closed until a "cast a commander" use-case
         // requires it (CR 903.8 commander-tax tracking lives elsewhere).
         | FilterProp::IsCommander
+        // CR 608.2c: Tracked-set membership ("chosen this way" / "the rest") is
+        // a resolution-time battlefield selection — a spell-cast snapshot is not
+        // a member of a chosen-object set, so fail closed.
+        | FilterProp::InTrackedSet { .. }
         | FilterProp::Other { .. } => false,
     }
 }
@@ -3739,6 +3745,32 @@ fn matches_filter_prop(
         // filter evaluation so that the marker does not spuriously exclude
         // every object from individual match checks.
         FilterProp::OtherThanTriggerObject => true,
+        // CR 608.2c: Membership in the active resolution-chain tracked set.
+        // Resolve the `TrackedSetId(0)` sentinel chain-first (the set the
+        // preceding `ChooseObjectsIntoTrackedSet` head published within THIS
+        // resolution — deterministic even when empty, because
+        // `publish_fresh_tracked_set` sets `chain_tracked_set_id`), else fall
+        // back to the latest non-empty set for legacy callers. This mirrors the
+        // sentinel-resolution precedence the whole-filter authority
+        // `targeting::resolve_tracked_set_sentinel` uses for its id-bearing
+        // legs; the combat-damage-source leg of that authority injects a source
+        // constraint rather than a set id and does not apply to a set-membership
+        // predicate. Composes with `FilterProp::Not` for "all other <type>".
+        FilterProp::InTrackedSet { id } => {
+            let resolved = if id.0 == 0 {
+                state
+                    .chain_tracked_set_id
+                    .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+            } else {
+                Some(*id)
+            };
+            resolved.is_some_and(|sid| {
+                state
+                    .tracked_object_sets
+                    .get(&sid)
+                    .is_some_and(|set| set.contains(&object_id))
+            })
+        }
         FilterProp::HasColor { color } => obj.color.contains(color),
         // CR 208 + CR 208.4b: Power/toughness metric comparison against a
         // dynamic threshold. `scope = Base` reads `base_power`/`base_toughness`
@@ -4454,6 +4486,10 @@ fn zone_change_record_matches_property(
         // triggers that need to filter by commander status will require record
         // plumbing (no current consumer).
         | FilterProp::IsCommander
+        // CR 608.2c: Tracked-set membership is a live resolution-chain selection
+        // over battlefield objects; a zone-change snapshot is not consulted for
+        // "chosen this way" / "the rest" filters. Fail closed.
+        | FilterProp::InTrackedSet { .. }
         | FilterProp::Other { .. } => false,
     }
 }
@@ -7635,6 +7671,43 @@ mod tests {
 
         assert!(!matches_target_filter(&state, attacker, &filter, attacker));
         assert!(matches_target_filter(&state, idle, &filter, attacker));
+    }
+
+    /// CR 608.2c: `FilterProp::InTrackedSet` building block — the sentinel
+    /// `TrackedSetId(0)` resolves chain-first to the active resolution-chain
+    /// tracked set. `Not(InTrackedSet)` selects exactly the objects NOT chosen
+    /// this way — Day of the Doctor IV's "exile all other creatures" after
+    /// "Choose up to three Doctors".
+    #[test]
+    fn not_in_tracked_set_excludes_chosen_and_includes_rest() {
+        let mut state = setup();
+        let chosen = add_creature(&mut state, PlayerId(0), "Chosen Doctor");
+        let other_a = add_creature(&mut state, PlayerId(0), "Other A");
+        let other_b = add_creature(&mut state, PlayerId(1), "Other B");
+
+        let set_id = crate::types::identifiers::TrackedSetId(7);
+        state.tracked_object_sets.insert(set_id, vec![chosen]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let all_others =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+                prop: Box::new(FilterProp::InTrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                }),
+            }]));
+        assert!(!matches_target_filter(&state, chosen, &all_others, chosen));
+        assert!(matches_target_filter(&state, other_a, &all_others, chosen));
+        assert!(matches_target_filter(&state, other_b, &all_others, chosen));
+
+        // CR 608.2d: choosing zero Doctors publishes a fresh EMPTY chain set.
+        // Chain-first resolution must bind to that empty set (not the stale
+        // non-empty set 7), so every creature is "other" and gets exiled.
+        let empty_id = crate::types::identifiers::TrackedSetId(8);
+        state.tracked_object_sets.insert(empty_id, Vec::new());
+        state.chain_tracked_set_id = Some(empty_id);
+        assert!(matches_target_filter(&state, chosen, &all_others, chosen));
+        assert!(matches_target_filter(&state, other_a, &all_others, chosen));
+        assert!(matches_target_filter(&state, other_b, &all_others, chosen));
     }
 
     /// De Morgan: `[Not(Attacked), Not(Entered)]` AND-combines, so it matches

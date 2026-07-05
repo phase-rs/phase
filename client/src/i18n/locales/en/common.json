@@ -40,6 +40,10 @@
     "sandboxToolsTitle": "Sandbox Tools — set up any board state (`)",
     "resume": "Resume",
     "settings": "Settings",
+    "boardLayoutSplit": "Split",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Switch to split table view",
+    "switchToLegacyView": "Switch to legacy focused view",
     "helpShortcuts": "Help & Shortcuts",
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",
@@ -228,5 +232,10 @@
     "settings": "Settings",
     "languageSettings": "Language ({{lang}}) — open settings",
     "languageTitle": "Language: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Something went wrong",
+    "body": "The app hit an unexpected error and can't continue on this screen. Reloading usually fixes it.",
+    "reload": "Reload"
   }
 }

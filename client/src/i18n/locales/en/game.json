@@ -16,6 +16,8 @@
     "holdCtrlFront": "Hold Ctrl for front face",
     "holdCtrlFlip": "Hold Ctrl to flip",
     "flip": "Flip",
+    "report": "Report a problem",
+    "reported": "Reported ✓",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
@@ -1623,6 +1625,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
     "variantFallback": "Cast with {{type}}"
   },
@@ -1736,6 +1739,7 @@
       "numberRange": "Choose a Number",
       "labeled": "Make a Choice",
       "keyword": "Choose an Ability",
+      "counterKind": "Choose a Counter",
       "fallback": "Make a Choice"
     },
     "searchSubtitle": "Type to search all cards",
@@ -1957,6 +1961,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

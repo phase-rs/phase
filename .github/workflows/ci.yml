@@ -304,9 +304,9 @@ jobs:
           else
             # Baseline not published yet (base.sha only just merged) or aged out
             # of retention. NEVER fall back to the lagging preview/ snapshot —
-            # that reintroduces cross-PR contamination. Emit a pending marker;
-            # the comment job only UPDATES an existing sticky, never creates one
-            # for a pending note.
+            # that reintroduces cross-PR contamination. Emit a pending marker so
+            # reviewers can distinguish "attempted but baseline unavailable"
+            # from "parse-diff never ran."
             printf '<!-- coverage-parse-diff -->\n### Parse changes introduced by this PR\n\n_Baseline pending for `%s` — this populates once main publishes its coverage snapshot (a few minutes after that commit landed)._\n' "$BASE_SHA" > parse-diff.md
           fi
           echo "produced=true" >> "$GITHUB_OUTPUT"

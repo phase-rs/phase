@@ -16,6 +16,8 @@
     "holdCtrlFront": "Mantén Ctrl para la cara frontal",
     "holdCtrlFlip": "Mantén Ctrl para girar",
     "flip": "Girar",
+    "report": "Informar de un problema",
+    "reported": "Informado ✓",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
@@ -1586,6 +1588,7 @@
     "variantForetell": "Lanzar desde Predecir",
     "variantOverload": "Lanzar con Sobrecargar",
     "variantBestow": "Lanzar con Otorgar",
+    "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
     "variantFallback": "Lanzar con {{type}}"
   },
@@ -1699,6 +1702,7 @@
       "numberRange": "Elige un número",
       "labeled": "Toma una decisión",
       "keyword": "Elige una habilidad",
+      "counterKind": "Elige un contador",
       "fallback": "Toma una decisión"
     },
     "searchSubtitle": "Escribe para buscar en todas las cartas",
@@ -1957,6 +1961,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }
