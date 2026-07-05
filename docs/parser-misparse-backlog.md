@@ -4621,7 +4621,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (67 cards)
+### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (55 cards)
 
 **Signature.** 'perpetually' grant emitted with UntilEndOfTurn/null instead of a Perpetual duration; modification expires too soon.
 
@@ -4629,9 +4629,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Bloodsprout Talisman
 - By Elspeth's Command
-- Chronicler of Worship
 - Cottontail Caretaker
 - Courtly Provocateur
 - Creeping Tar Pit
@@ -4640,9 +4638,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Edifice of Authority
 - Effluence Devourer
 - Emperor Apatzec Intli IV
-- Ethereal Escort
 - Garruk, Wrath of the Wilds
-- Geistchanneler
 - Gitrog, Horror of Zhava
 - Goblin Trapfinder
 - Grow Old Together
@@ -4657,27 +4653,19 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Karlach, Tiefling Spellrager
 - Karlach, Tiefling Zealot
 - Kemba's Outfitter
-- Kobold Warcaller
 - Legion of Clay (duration)
-- Leonin Sanctifier
 - Lizardfolk Librarians
 - Lobelia Sackville-Baggins
 - Loose in the Park
 - Lurking Spinecrawler
 - Mapping the Maze
 - Melt Through
-- Mentor of Evos Isle
 - Mischievous Lookout
 - Niambi, Beloved Protector
-- Nightclub Bouncer
 - Paths of Tuinvale
-- Plaguecrafter's Familiar
-- Prairie Survivalist
 - Pull of the Mist Moon
 - Puppet Raiser
 - Ravenous Pursuit
-- Reckless Ringleader
-- Sap Vitality
 - Scrutiny of the Guildpact
 - Shadow of the Enemy
 - Shattered Seraph

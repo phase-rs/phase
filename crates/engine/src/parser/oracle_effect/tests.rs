@@ -29634,8 +29634,7 @@ fn perpetual_parser_maps_self_base_pt() {
         }
     ));
 
-    // "become(s)" verb variant. (Uses an unambiguous self-subject; the
-    // anaphoric "it" form is intentionally not accepted.)
+    // "become(s)" verb variant with an unambiguous self-subject.
     let e = parse_effect("This creature perpetually becomes base power and toughness 2/2.");
     assert!(matches!(
         e,
@@ -29678,6 +29677,19 @@ fn perpetual_parser_maps_referenced_base_pt() {
             ..
         }
     ));
+
+    let e = parse_effect("It perpetually has base power and toughness 3/3.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 3,
+                toughness: 3,
+            },
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -29702,6 +29714,19 @@ fn perpetual_parser_maps_modify_pt() {
             target: TargetFilter::ParentTarget,
             modification: PerpetualModification::ModifyPowerToughness {
                 power_delta: 1,
+                toughness_delta: 0,
+            },
+            ..
+        }
+    ));
+
+    let e = parse_effect("it perpetually gets +3/+0.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: 3,
                 toughness_delta: 0,
             },
             ..
@@ -29758,6 +29783,16 @@ fn perpetual_parser_maps_grant_keywords() {
             modification: PerpetualModification::GrantKeywords { keywords },
             ..
         } if keywords == vec![Keyword::Flying]
+    ));
+
+    let e = parse_effect("it perpetually gains haste.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::GrantKeywords { keywords },
+            ..
+        } if keywords == vec![Keyword::Haste]
     ));
 }
 
@@ -29941,6 +29976,112 @@ fn perpetual_modify_cost_anaphor_that_card() {
         ),
         "'that card' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
     );
+
+    let e = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
+    assert!(
+        matches!(
+            &e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(1)
+        ),
+        "'it' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
+    );
+
+    let e = parse_effect("It perpetually gains \"This spell costs {2} more to cast.\"");
+    assert!(
+        matches!(
+            &e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Raise,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(2)
+        ),
+        "'it' anaphor must map to ParentTarget Raise generic(2), got {e:?}"
+    );
+}
+
+#[test]
+fn perpetual_anaphor_after_chosen_card_targets_parent_target() {
+    use crate::types::ability::PerpetualModification;
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
+
+    let def = parse_effect_chain(
+        "Choose a nonland card in your hand. It perpetually gains \"This spell costs {1} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("chosen card must feed perpetual sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(1)
+        ),
+        "chosen-card 'it' must map to ParentTarget ApplyPerpetual, got {:?}",
+        sub.effect
+    );
+
+    let def = parse_effect_chain(
+        "Choose a nonland card in your hand. It perpetually gains \"This spell costs {2} more to cast.\"",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("chosen card must feed perpetual cost-increase sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Raise,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(2)
+        ),
+        "chosen-card 'it' must map to ParentTarget Raise generic(2), got {:?}",
+        sub.effect
+    );
+
+    let def = parse_effect_chain(
+        "Choose a creature card in your hand. It perpetually gets +3/+0.",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("chosen card must feed perpetual P/T sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 3,
+                    toughness_delta: 0,
+                },
+            }
+        ),
+        "chosen-card P/T 'it' must map to ParentTarget ApplyPerpetual, got {:?}",
+        sub.effect
+    );
 }
 
 /// Mass-hand arm: the EXACT real Oracle clauses (verified against
@@ -30060,8 +30201,7 @@ fn perpetual_mass_hand_cost_arm_parses_typed_hand_filter() {
 /// model and fall through (NOT ApplyPerpetual::ModifyCost):
 /// - Absorb Energy's "that share a card type with that spell" rider;
 /// - an `{X}` body the cost-body parser cannot interpret;
-/// - a trailing rider "…and draws a card";
-/// - the "It perpetually gains …" form (subject not in the mass-arm list).
+/// - a trailing rider "…and draws a card".
 #[test]
 fn perpetual_mass_hand_cost_arm_honest_red() {
     use crate::types::ability::PerpetualModification;
@@ -30099,13 +30239,6 @@ fn perpetual_mass_hand_cost_arm_honest_red() {
     assert!(
         !is_modify_cost(&e),
         "trailing rider must not parse as ModifyCost, got {e:?}"
-    );
-
-    // "It perpetually gains …" — the subject is not in the mass-arm class.
-    let e = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
-    assert!(
-        !is_modify_cost(&e),
-        "'It perpetually gains' is not a mass-hand subject, got {e:?}"
     );
 }
 

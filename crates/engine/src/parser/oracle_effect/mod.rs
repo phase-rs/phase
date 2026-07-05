@@ -6957,7 +6957,7 @@ fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
 
 /// Digital-only Alchemy: parse the base-P/T "perpetually" form —
 /// self-subject ("[~ / this creature / …] perpetually become(s)/has base power
-/// and toughness N/N"), referenced-object ("the duplicate perpetually has …"),
+/// and toughness N/N"), referenced-object ("the duplicate/it perpetually has …"),
 /// and prior-clause anaphor ("its base power and toughness perpetually
 /// become …") → [`Effect::ApplyPerpetual`] with
 /// [`PerpetualModification::SetBasePowerToughness`] (High Fae Prankster, Three
@@ -7002,6 +7002,29 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
         });
     }
 
+    // Referenced object: "It perpetually has base power and toughness 1/1."
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(lower) {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("becomes "),
+            tag::<_, _, OracleError<'_>>("become "),
+            tag::<_, _, OracleError<'_>>("has "),
+            tag::<_, _, OracleError<'_>>("have "),
+        ))
+        .parse(rest)
+        .ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
+            .parse(rest)
+            .ok()?;
+        let (power, toughness, _) = parse_base_pt_values(rest)?;
+        return Some(Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+                power,
+                toughness,
+            },
+        });
+    }
+
     // Prior-clause anaphor: "Its base power and toughness perpetually become 2/2."
     if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("its base power and toughness perpetually ").parse(lower)
@@ -7025,10 +7048,6 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
     }
 
     // Self-subject: "~ perpetually has base power and toughness 4/1."
-    // Only unambiguous self-subjects. The anaphoric "it " is intentionally
-    // excluded: after a prior object choice it refers to that object, not the
-    // source, so accepting it here would let a referenced-object perpetual clause
-    // parse as supported while mutating the wrong object.
     let after_subject = [
         "~ ",
         "this creature ",
@@ -7141,6 +7160,25 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
         });
     }
 
+    // Anaphoric back-reference: "it perpetually gets +1/+0".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(lower) {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gets "),
+            tag::<_, _, OracleError<'_>>("get "),
+        ))
+        .parse(rest)
+        .ok()?;
+        let (rest, (power_delta, toughness_delta)) =
+            nom_primitives::parse_pt_modifier(rest).ok()?;
+        return tail_done(rest).then_some(Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                power_delta,
+                toughness_delta,
+            },
+        });
+    }
+
     let after_subject = [
         "~ ",
         "this creature ",
@@ -7183,6 +7221,8 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
 /// resolves against:
 /// - the anaphoric `"that <type> perpetually gains ..."` form back-references the
 ///   parent target ([`TargetFilter::ParentTarget`]);
+/// - the anaphoric `"it perpetually gains ..."` form also back-references the
+///   parent target;
 /// - the self forms (`~`, `this creature/artifact/…`) target the source itself
 ///   ([`TargetFilter::Any`], resolved to the source by the perpetual resolver).
 ///
@@ -7197,6 +7237,17 @@ fn parse_perpetual_self_subject(lower: &str) -> Option<(&str, TargetFilter)> {
         let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
             .parse(rest)
             .ok()?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gains "),
+            tag::<_, _, OracleError<'_>>("gain "),
+        ))
+        .parse(rest)
+        .ok()?;
+        return Some((rest, TargetFilter::ParentTarget));
+    }
+
+    // Anaphoric back-reference: "it perpetually gains ...".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(lower) {
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gains "),
             tag::<_, _, OracleError<'_>>("gain "),
