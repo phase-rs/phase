@@ -1291,8 +1291,6 @@ fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
 /// - The execute effect is Token creation (the Zombie Berserker), not Unimplemented.
 #[test]
 fn parse_deathknell_berserker_dies_power_lki_intervening_if() {
-    use crate::types::ability::Effect;
-
     let def = parse_trigger_line(
         "When this creature dies, if its power was 3 or greater, create a 2/2 black Zombie Berserker creature token.",
         "Deathknell Berserker",
