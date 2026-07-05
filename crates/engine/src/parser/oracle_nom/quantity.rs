@@ -16,7 +16,7 @@ use super::context::ParseContext;
 use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
-    parse_article, parse_counter_type_typed, parse_keyword_name, parse_number,
+    parse_article, parse_color, parse_counter_type_typed, parse_keyword_name, parse_number,
 };
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
@@ -2943,6 +2943,15 @@ fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityR
     Ok((rest, QuantityRef::EventContextAmount))
 }
 
+/// CR 106.4: "unspent [color] mana you have" counts floating mana in the
+/// controller's mana pool.
+fn parse_for_each_unspent_mana(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("unspent ").parse(input)?;
+    let (rest, color) = opt(terminated(parse_color, tag(" "))).parse(rest)?;
+    let (rest, _) = tag("mana you have").parse(rest)?;
+    Ok((rest, QuantityRef::UnspentMana { color }))
+}
+
 fn parse_for_each_clause_ref_with_they_controller(
     input: &str,
     they_controller: ControllerRef,
@@ -3007,6 +3016,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
+        parse_for_each_unspent_mana,
         parse_for_each_distinct_colors_among_permanents,
         // CR 122.1: "kind of counter on/among <filter>" (Bribe Taker). Placed
         // before the generic `<type> you control` arm so the leading "kind"
@@ -5276,6 +5286,56 @@ mod tests {
 
     #[test]
     fn parse_for_each_mana_spent_to_cast_it() {
+        let (rest, q) = parse_for_each_clause_ref("mana spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::Total
+            }
+        );
+    }
+
+    #[test]
+    fn parse_for_each_unspent_mana() {
+        let (rest, q) = parse_for_each_clause_ref("unspent green mana you have").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::UnspentMana {
+                color: Some(ManaColor::Green),
+            }
+        );
+
+        let (rest, q) = parse_for_each_clause_ref("unspent mana you have").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::UnspentMana { color: None });
+
+        for (word, color) in [
+            ("white", ManaColor::White),
+            ("blue", ManaColor::Blue),
+            ("black", ManaColor::Black),
+            ("red", ManaColor::Red),
+            ("green", ManaColor::Green),
+        ] {
+            let input = format!("unspent {word} mana you have");
+            let (rest, q) = parse_for_each_clause_ref(&input)
+                .unwrap_or_else(|_| panic!("failed to parse {input:?}"));
+            assert_eq!(rest, "", "{input:?} left remainder {rest:?}");
+            assert_eq!(
+                q,
+                QuantityRef::UnspentMana { color: Some(color) },
+                "wrong ref for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_for_each_unspent_mana_rejects_invalid_color_and_spent_to_cast() {
+        assert!(parse_for_each_clause_ref("unspent purple mana you have").is_err());
+        assert!(parse_for_each_clause_ref("unspent green mana spent to cast it").is_err());
+
         let (rest, q) = parse_for_each_clause_ref("mana spent to cast it").unwrap();
         assert_eq!(rest, "");
         assert_eq!(

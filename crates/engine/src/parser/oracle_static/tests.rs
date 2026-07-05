@@ -11692,24 +11692,6 @@ fn equipped_creature_gets_dynamic_pt_for_each_color_among_permanents() {
 }
 
 #[test]
-fn for_each_clause_unspent_mana() {
-    // Building-block: the for-each quantity parser maps "unspent <color> mana
-    // you have" to UnspentMana{color}, and the colorless "unspent mana you have"
-    // to UnspentMana{None} (all colors).
-    use crate::types::ability::QuantityRef;
-    assert_eq!(
-        crate::parser::oracle_quantity::parse_for_each_clause("unspent green mana you have"),
-        Some(QuantityRef::UnspentMana {
-            color: Some(ManaColor::Green),
-        }),
-    );
-    assert_eq!(
-        crate::parser::oracle_quantity::parse_for_each_clause("unspent mana you have"),
-        Some(QuantityRef::UnspentMana { color: None }),
-    );
-}
-
-#[test]
 fn static_self_gets_dynamic_pt_for_each_permanent_you_control_but_dont_own() {
     let def = parse_static_line("~ gets +1/+1 for each land you control but don't own.")
         .expect("control-without-ownership dynamic P/T static must parse");
