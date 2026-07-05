@@ -7133,14 +7133,14 @@ mod admin_auth_tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
 
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::StatusCode;
     use axum::Router;
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Mutex;
-    use tower::ServiceExt;
+    use url::Url;
 
     use super::{
         admin_request_authorized, draft_pools, mount_admin_routes, persistence, tokens_match,
@@ -7177,18 +7177,41 @@ mod admin_auth_tests {
         app.with_state(app_state)
     }
 
-    async fn get_admin_drafts(app: Router<AppState>, auth: Option<&str>) -> StatusCode {
-        let mut builder = Request::builder().method("GET").uri("/admin/drafts");
-        if let Some(value) = auth {
-            builder = builder.header(http::header::AUTHORIZATION, value);
-        }
-        let request = builder.body(Body::empty()).unwrap();
-        let response = app
-            .into_service::<Body>()
-            .oneshot(request)
+    async fn spawn_admin_test_server(app: Router<AppState>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("router response");
-        response.status()
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn get_admin_drafts(base_url: &str, auth: Option<&str>) -> StatusCode {
+        let url = Url::parse(&format!("{base_url}/admin/drafts")).expect("url");
+        let host = url.host_str().expect("host");
+        let port = url.port().expect("port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect");
+        let mut request = String::from("GET /admin/drafts HTTP/1.1\r\n");
+        request.push_str(&format!("Host: {host}\r\n"));
+        if let Some(value) = auth {
+            request.push_str(&format!("Authorization: {value}\r\n"));
+        }
+        request.push_str("Connection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await.expect("read");
+        let response = std::str::from_utf8(&buf[..n]).expect("utf8");
+        let status_code = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .expect("status line");
+        StatusCode::from_u16(status_code).expect("status code")
     }
 
     #[test]
@@ -7230,33 +7253,41 @@ mod admin_auth_tests {
     async fn admin_routes_absent_without_token() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app = test_admin_router(test_app_state(&temp_dir), None);
-        assert_eq!(get_admin_drafts(app, None).await, StatusCode::NOT_FOUND);
+        let (base_url, server) = spawn_admin_test_server(app).await;
+        assert_eq!(get_admin_drafts(&base_url, None).await, StatusCode::NOT_FOUND);
+        server.abort();
     }
 
     #[tokio::test]
     async fn admin_routes_reject_missing_bearer() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app = test_admin_router(test_app_state(&temp_dir), Some(TOKEN));
-        assert_eq!(get_admin_drafts(app, None).await, StatusCode::UNAUTHORIZED);
+        let (base_url, server) = spawn_admin_test_server(app).await;
+        assert_eq!(get_admin_drafts(&base_url, None).await, StatusCode::UNAUTHORIZED);
+        server.abort();
     }
 
     #[tokio::test]
     async fn admin_routes_reject_wrong_bearer() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app = test_admin_router(test_app_state(&temp_dir), Some(TOKEN));
+        let (base_url, server) = spawn_admin_test_server(app).await;
         assert_eq!(
-            get_admin_drafts(app, Some("Bearer wrong-token")).await,
+            get_admin_drafts(&base_url, Some("Bearer wrong-token")).await,
             StatusCode::UNAUTHORIZED
         );
+        server.abort();
     }
 
     #[tokio::test]
     async fn admin_routes_accept_valid_bearer() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app = test_admin_router(test_app_state(&temp_dir), Some(TOKEN));
+        let (base_url, server) = spawn_admin_test_server(app).await;
         assert_eq!(
-            get_admin_drafts(app, Some(&format!("Bearer {TOKEN}"))).await,
+            get_admin_drafts(&base_url, Some(&format!("Bearer {TOKEN}"))).await,
             StatusCode::OK
         );
+        server.abort();
     }
 }
