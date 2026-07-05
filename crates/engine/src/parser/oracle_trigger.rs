@@ -3895,9 +3895,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // on discard triggers whose subject is the discarded card (Anje Falkenrath: "if it has
     // madness"). MUST precede the zone-change-object "if it " arms below, which would
     // otherwise mis-route this predicate.
-    if let Some((before, condition, rest)) =
-        scan_preceded(&lower, parse_event_object_has_alt_cost_keyword_intervening_if)
-    {
+    if let Some((before, condition, rest)) = scan_preceded(
+        &lower,
+        parse_event_object_has_alt_cost_keyword_intervening_if,
+    ) {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();
         return (
