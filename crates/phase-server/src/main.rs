@@ -1280,7 +1280,10 @@ fn admin_token_from_env() -> Option<String> {
 }
 
 /// Mount `/admin/*` routes when `admin_token` is present, guarded by bearer auth.
-fn merge_admin_routes<S>(mut app: Router<S>, admin_token: Option<&str>) -> Router<S> {
+fn merge_admin_routes<S>(mut app: Router<S>, admin_token: Option<&str>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
         let expected: Arc<str> = Arc::from(token);
         let admin_routes = Router::new()
@@ -7148,8 +7151,9 @@ mod admin_auth_tests {
     const TOKEN: &str = "s3cr3t-admin-token";
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db_path = temp_dir.path().join("games.db");
         let game_db =
-            Arc::new(persistence::GameDb::open(temp_dir.path().join("games.db")).expect("game db"));
+            Arc::new(persistence::GameDb::open(&game_db_path).expect("game db"));
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
@@ -7174,12 +7178,13 @@ mod admin_auth_tests {
         (app, temp_dir)
     }
 
-    async fn get_admin_drafts(app: &mut Router<AppState>, auth: Option<&str>) -> StatusCode {
+    async fn get_admin_drafts(app: Router<AppState>, auth: Option<&str>) -> StatusCode {
+        let mut service = app.into_service();
         let mut builder = Request::builder().method("GET").uri("/admin/drafts");
         if let Some(value) = auth {
             builder = builder.header(http::header::AUTHORIZATION, value);
         }
-        let response = app
+        let response = service
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .expect("router response");
@@ -7223,36 +7228,33 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_absent_without_token() {
-        let (mut app, _temp) = test_admin_app(None);
-        assert_eq!(
-            get_admin_drafts(&mut app, None).await,
-            StatusCode::NOT_FOUND
-        );
+        let (app, _temp) = test_admin_app(None);
+        assert_eq!(get_admin_drafts(app, None).await, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn admin_routes_reject_missing_bearer() {
-        let (mut app, _temp) = test_admin_app(Some(TOKEN));
+        let (app, _temp) = test_admin_app(Some(TOKEN));
         assert_eq!(
-            get_admin_drafts(&mut app, None).await,
+            get_admin_drafts(app, None).await,
             StatusCode::UNAUTHORIZED
         );
     }
 
     #[tokio::test]
     async fn admin_routes_reject_wrong_bearer() {
-        let (mut app, _temp) = test_admin_app(Some(TOKEN));
+        let (app, _temp) = test_admin_app(Some(TOKEN));
         assert_eq!(
-            get_admin_drafts(&mut app, Some("Bearer wrong-token")).await,
+            get_admin_drafts(app, Some("Bearer wrong-token")).await,
             StatusCode::UNAUTHORIZED
         );
     }
 
     #[tokio::test]
     async fn admin_routes_accept_valid_bearer() {
-        let (mut app, _temp) = test_admin_app(Some(TOKEN));
+        let (app, _temp) = test_admin_app(Some(TOKEN));
         assert_eq!(
-            get_admin_drafts(&mut app, Some(&format!("Bearer {TOKEN}"))).await,
+            get_admin_drafts(app, Some(&format!("Bearer {TOKEN}"))).await,
             StatusCode::OK
         );
     }
