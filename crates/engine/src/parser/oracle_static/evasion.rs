@@ -1734,28 +1734,39 @@ pub(crate) fn try_parse_compound_subtypes(
 }
 
 /// CR 510.1a + CR 613.11: The "assign[s] combat damage equal to <poss> toughness
-/// rather than <poss> power" predicate, in both the singular ("assigns … its …
-/// its") and plural ("assign … their … their") surface forms. CR 510.1a is the
-/// default ("assigns combat damage equal to its power"); this is a continuous
-/// rule-modification effect (CR 613.11) that substitutes toughness for power.
+/// rather than <poss> power" predicate. CR 510.1a is the default ("assigns combat
+/// damage equal to its power"); this is a continuous rule-modification effect
+/// (CR 613.11) that substitutes toughness for power. All surface forms map to the
+/// same [`ContinuousModification::AssignDamageFromToughness`] rule.
 ///
-/// Both forms map to the same [`ContinuousModification::AssignDamageFromToughness`]
-/// rule — only the subject's grammatical number differs (singular "each creature
-/// … assigns" vs plural "creatures you control … assign"). Centralizing the
-/// phrase here keeps the static-line parser and the one-shot continuous-effect
-/// parser (`parse_continuous_modifications`) in lockstep so a new subject scope
-/// never silently drops the plural form. Returns the post-phrase remainder.
+/// The phrase is decoupled into two independent axes rather than enumerated as
+/// whole-string permutations:
+///   * verb axis — `alt(("assigns", "assign"))`: the intact static form keeps the
+///     inflected "assigns", while the one-shot EFFECT pipeline deconjugates the
+///     verb via `normalize_verb_token` ("assigns" → "assign") *before* reaching
+///     this predicate, so the deconjugated-singular form "assign … its … its"
+///     must be accepted alongside the intact static forms.
+///   * possessive-agreement axis — `alt(("its … its", "their … their"))`: singular
+///     ("each creature … its …") vs plural ("creatures you control … their …").
+///
+/// Because the axes are composed independently, all four combinations parse,
+/// which is a strict superset of the two intact static forms this previously
+/// accepted. Centralizing the phrase here keeps the static-line parser and the
+/// one-shot continuous-effect parser (`parse_continuous_modifications`) in
+/// lockstep so a new subject scope never silently drops a surface form. Returns
+/// the post-phrase remainder.
 pub(crate) fn parse_assigns_damage_from_toughness_predicate(input: &str) -> OracleResult<'_, ()> {
-    alt((
-        value(
-            (),
-            tag("assigns combat damage equal to its toughness rather than its power"),
+    value(
+        (),
+        (
+            alt((tag("assigns"), tag("assign"))),
+            tag(" combat damage equal to "),
+            alt((
+                tag("its toughness rather than its power"),
+                tag("their toughness rather than their power"),
+            )),
         ),
-        value(
-            (),
-            tag("assign combat damage equal to their toughness rather than their power"),
-        ),
-    ))
+    )
     .parse(input)
 }
 
