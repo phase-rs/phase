@@ -810,6 +810,19 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         _ => return false,
     };
 
+    // CR 117.3d: A standing priority yield for the top-of-stack trigger is an
+    // explicit pre-commitment to pass. It deliberately overrides the castability
+    // and meaningful-action holds below (including the issue #4388 opponent-turn
+    // mana window) — the player has already decided not to interact with this
+    // trigger class, so recommend auto-pass regardless of what they could cast.
+    if state
+        .stack
+        .back()
+        .is_some_and(|top| state.is_priority_yielded(player, top))
+    {
+        return true;
+    }
+
     // CR 117.1d (issue #4388): On an opponent's turn the priority player may
     // hold to cast an instant/flash spell paid for with their own mana
     // abilities (Gaea's Cradle, Itlimoc, basic lands). Hold ONLY when they
@@ -3493,6 +3506,64 @@ mod tests {
         assert!(
             clones < 5,
             "delve validation should not clone state per graveyard card (got {clones} clones)"
+        );
+    }
+
+    /// CR 117.3d: a matching priority yield for the top-of-stack trigger makes
+    /// `auto_pass_recommended` return `true`, overriding the meaningful-action
+    /// hold that would otherwise keep the window open. Reverting the yield short-
+    /// circuit flips this back to `false`.
+    #[test]
+    fn auto_pass_recommended_true_for_yielded_top() {
+        let mut state = setup_priority();
+        // Opponent-controlled token trigger on top of the stack.
+        let source = ObjectId(500);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(1),
+        );
+        ability.source_incarnation = Some(2);
+        ability.source_card_id = Some(CardId(77));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: source,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Token".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        // A meaningful action keeps auto-pass OFF absent a yield (reach-guard:
+        // proves the yield is what flips the result).
+        let actions = vec![GameAction::PlayLand {
+            object_id: ObjectId(700),
+            card_id: CardId(1),
+        }];
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "without a yield, a meaningful action must keep the window open"
+        );
+
+        state.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(77),
+            },
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "CR 117.3d: a matching yield overrides the meaningful-action hold"
         );
     }
 }

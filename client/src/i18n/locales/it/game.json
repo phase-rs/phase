@@ -565,6 +565,14 @@
     "paidAdditionalCost": "costo extra",
     "paidConvoked": "convocata ×{{count}}"
   },
+  "priorityYield": {
+    "listHeader": "Rinunce di priorità",
+    "yieldThis": "Rinuncia a questo",
+    "yieldAllCopies": "Rinuncia a tutte le copie",
+    "revoke": "Revoca",
+    "clearAll": "Cancella tutto",
+    "allCopiesHint": "Consigliato per le pedine"
+  },
   "targeting": {
     "choosePermanentToCopy": "Scegli un permanente da copiare",
     "retargetCopySlot": "Ribersaglia copia: slot {{current}} di {{total}}",

@@ -1605,6 +1605,26 @@ export type DebugAction =
     }
   | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
 
+// CR 117.3d: priority-yield preference types, mirroring the engine's
+// `YieldScope` / `YieldTarget` / `PriorityYieldOp` / `PriorityYield`. The
+// frontend never constructs an incarnation or card_id — it names a stack source
+// and scope for `Add`, and echoes a stored `YieldTarget` verbatim for `Remove`.
+export type YieldScope = "ThisObject" | "AllCopies";
+
+export type YieldTarget =
+  | { ThisObject: { source_id: ObjectId; incarnation: number } }
+  | { AllCopies: { card_id: CardId } };
+
+export type PriorityYieldOp =
+  | { type: "Add"; data: { source_id: ObjectId; scope: YieldScope } }
+  | { type: "Remove"; data: { target: YieldTarget } }
+  | { type: "ClearAll" };
+
+export interface PriorityYield {
+  player: PlayerId;
+  target: YieldTarget;
+}
+
 export type GameAction =
   | { type: "PassPriority" }
   | { type: "RollPlanarDie" }
@@ -1702,6 +1722,7 @@ export type GameAction =
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: Phase[] } }
+  | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
@@ -2234,6 +2255,8 @@ export interface GameState {
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
   phase_stops?: Record<number, Phase[]>;
+  /** CR 117.3d: the viewer's standing priority-yield preferences. */
+  priority_yields?: PriorityYield[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
     target_player: PlayerId;

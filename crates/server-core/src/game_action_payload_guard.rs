@@ -445,6 +445,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::PassParadigmOffer
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
+        | GameAction::SetPriorityYield { .. }
         | GameAction::Concede { .. } => {}
     }
     Ok(())

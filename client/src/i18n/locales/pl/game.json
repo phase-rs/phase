@@ -565,6 +565,14 @@
     "paidAdditionalCost": "dodatkowy koszt",
     "paidConvoked": "convoke ×{{count}}"
   },
+  "priorityYield": {
+    "listHeader": "Rezygnacje z priorytetu",
+    "yieldThis": "Zrezygnuj z tego",
+    "yieldAllCopies": "Zrezygnuj ze wszystkich kopii",
+    "revoke": "Cofnij",
+    "clearAll": "Wyczyść wszystko",
+    "allCopiesHint": "Zalecane dla żetonów"
+  },
   "targeting": {
     "choosePermanentToCopy": "Wybierz trwałego do skopiowania",
     "retargetCopySlot": "Zmień cel kopii: slot {{current}} z {{total}}",

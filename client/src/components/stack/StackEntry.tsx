@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { useState } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -52,9 +53,18 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const priorityYields = useGameStore((s) => s.gameState?.priority_yields);
+  // CR 117.3d: long-press on a triggered ability opens the yield menu (a
+  // pre-commitment to pass priority for that trigger class); other entries keep
+  // the inspect-and-pin behavior.
+  const [yieldMenuOpen, setYieldMenuOpen] = useState(false);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
-    inspectObject(entry.source_id);
-    setPreviewSticky(true);
+    if (entry.kind.type === "TriggeredAbility") {
+      setYieldMenuOpen(true);
+    } else {
+      inspectObject(entry.source_id);
+      setPreviewSticky(true);
+    }
   });
 
   const sourceObj = objects?.[entry.source_id];
@@ -83,6 +93,14 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       ? pendingCast.cost
       : sourceObj?.mana_cost;
   const isTriggered = entry.kind.type === "TriggeredAbility";
+  // CR 117.3d: a stored yield the viewer already holds for this entry, so the
+  // menu can surface a Revoke that echoes the exact engine-owned YieldTarget
+  // (the frontend never constructs an incarnation or card_id itself).
+  const matchingYield = priorityYields?.find((y) =>
+    "ThisObject" in y.target
+      ? y.target.ThisObject.source_id === entry.source_id
+      : sourceObj?.card_id !== undefined && y.target.AllCopies.card_id === sourceObj.card_id,
+  );
   // Triggered abilities show "Triggered — From <source>" so the player can
   // tell which permanent owns the trigger without hovering the card image.
   // Activated abilities don't carry a pre-resolved source name (different
@@ -279,6 +297,66 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             </span>
           ))}
         </div>
+      )}
+
+      {/* CR 117.3d: priority-yield context menu (triggered abilities only).
+          Long-press opens it; each option dispatches a SetPriorityYield action.
+          The frontend only names the source + scope (Add) or echoes a stored
+          YieldTarget (Revoke) — no game state is computed here. */}
+      {yieldMenuOpen && isTriggered && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={(e) => {
+              e.stopPropagation();
+              setYieldMenuOpen(false);
+            }}
+          />
+          <div
+            className="absolute inset-x-1 top-1 z-50 flex flex-col gap-0.5 rounded-lg bg-gray-900/98 p-1 text-[10px] shadow-xl ring-1 ring-white/15"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className="rounded px-2 py-1 text-left font-semibold text-purple-200 hover:bg-white/10"
+              onClick={() => {
+                dispatchAction({
+                  type: "SetPriorityYield",
+                  data: { op: { type: "Add", data: { source_id: entry.source_id, scope: "ThisObject" } } },
+                });
+                setYieldMenuOpen(false);
+              }}
+            >
+              {t("priorityYield.yieldThis")}
+            </button>
+            <button
+              className="rounded px-2 py-1 text-left font-semibold text-purple-200 hover:bg-white/10"
+              title={t("priorityYield.allCopiesHint")}
+              onClick={() => {
+                dispatchAction({
+                  type: "SetPriorityYield",
+                  data: { op: { type: "Add", data: { source_id: entry.source_id, scope: "AllCopies" } } },
+                });
+                setYieldMenuOpen(false);
+              }}
+            >
+              {t("priorityYield.yieldAllCopies")}
+            </button>
+            {matchingYield && (
+              <button
+                className="rounded px-2 py-1 text-left font-semibold text-amber-200 hover:bg-white/10"
+                onClick={() => {
+                  dispatchAction({
+                    type: "SetPriorityYield",
+                    data: { op: { type: "Remove", data: { target: matchingYield.target } } },
+                  });
+                  setYieldMenuOpen(false);
+                }}
+              >
+                {t("priorityYield.revoke")}
+              </button>
+            )}
+          </div>
+        </>
       )}
 
       {/* Controller seat avatar — colored initial anchors identity to every surface

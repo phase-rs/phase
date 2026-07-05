@@ -1975,6 +1975,9 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         targets,
         source_id: _,
         source_incarnation,
+        // Latched card identity for `AllCopies` priority yields; a batched
+        // self-counter spell never carries one (set only on triggered pushes).
+        source_card_id,
         controller: _,
         original_controller,
         scoped_player,
@@ -2027,6 +2030,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     self_counter
         && targets.is_empty()
         && source_incarnation.is_none()
+        && source_card_id.is_none()
         && original_controller.is_none()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
@@ -2888,6 +2892,10 @@ pub(crate) fn create_warp_delayed_trigger(
     // higher incarnation and the exile finds no valid target.
     delayed_ability
         .set_source_incarnation_recursive(state.objects.get(&object_id).map(|o| o.incarnation));
+    // CR 400.7 identity latch + CR 704.5d: snapshot the source's card identity
+    // so an `AllCopies` priority yield can match by card identity after the
+    // source ceases to exist.
+    delayed_ability.source_card_id = state.objects.get(&object_id).map(|o| o.card_id);
 
     state
         .delayed_triggers

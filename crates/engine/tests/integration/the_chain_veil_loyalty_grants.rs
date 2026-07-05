@@ -115,6 +115,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         target_chooser: None,
         source_id: source,
         source_incarnation: None,
+        source_card_id: None,
         targets: vec![],
         kind: AbilityKind::Activated,
         sub_ability: None,

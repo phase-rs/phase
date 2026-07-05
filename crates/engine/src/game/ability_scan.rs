@@ -172,6 +172,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         targets: _,               // concrete announced target refs (already resolved)
         source_id: _,             // object id
         source_incarnation: _,    // epoch guard token
+        source_card_id: _,        // latched card identity token (AllCopies yield), no read
         controller: _,            // player id
         original_controller: _,   // player id
         scoped_player: _,         // player id (iteration binding)
@@ -3571,6 +3572,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
         source_incarnation: _, // epoch guard token
+        source_card_id: _, // latched card identity token (AllCopies yield), no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)

@@ -690,6 +690,48 @@ pub struct MayTriggerAutoChoiceRecord {
     pub choice: AutoMayChoice,
 }
 
+/// CR 117.3d: The scope of a player's pre-committed decision to pass priority
+/// while a class of triggered ability is on the stack ("yield").
+///
+/// `ThisObject` yields only for triggers from one specific object incarnation
+/// (CR 400.7 — a re-entered permanent is a new object and no longer matches).
+/// `AllCopies` yields for every trigger from any object sharing the source's
+/// card identity, so it keeps matching after a token source ceases to exist
+/// (CR 704.5d) and matches newly created copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum YieldScope {
+    ThisObject,
+    AllCopies,
+}
+
+/// CR 117.3d + CR 400.7: The resolved identity a `PriorityYield` matches against,
+/// latched at the moment the yield is registered.
+///
+/// `ThisObject` binds a concrete object incarnation: a matching stack entry must
+/// carry the same `source_id` and `source_incarnation`. A `source_incarnation`
+/// of `None` therefore never matches (unlike the epoch guard's "None = always
+/// current" convention) — synthetic game-rule triggers cannot be yielded this
+/// way. `AllCopies` binds a `CardId`: any trigger whose `source_card_id` equals
+/// it matches, regardless of which object (or whether the object still exists).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum YieldTarget {
+    ThisObject {
+        source_id: ObjectId,
+        incarnation: u64,
+    },
+    AllCopies {
+        card_id: CardId,
+    },
+}
+
+/// CR 117.3d: A player's standing decision to pass priority automatically
+/// whenever a triggered ability matching `target` is the top of the stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorityYield {
+    pub player: PlayerId,
+    pub target: YieldTarget,
+}
+
 /// CR 609.7a: A source of damage chosen while creating a prevention or
 /// replacement effect. The original filter is retained so property-based
 /// choices such as "red source of your choice" recheck source qualities when
@@ -7129,6 +7171,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
 
+    /// CR 117.3d: Standing per-player decisions to auto-pass priority while a
+    /// matching triggered ability is on the stack (a "yield"). Preference state,
+    /// so it persists across turns and is exempt from the auto-pass session
+    /// clearing; cleared only by explicit revoke/clear-all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priority_yields: Vec<PriorityYield>,
+
     /// CR 103.6: Beginning-of-game abilities queued after all players finish
     /// mulligans. Stored in reverse resolution order so `pop()` preserves APNAP
     /// collection order without shifting.
@@ -8229,6 +8278,7 @@ impl GameState {
             pending_optional_trigger_match_count: None,
             pending_choose_zone_trigger_context: None,
             may_trigger_auto_choices: Vec::new(),
+            priority_yields: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,
             last_named_choice: None,
@@ -8345,6 +8395,96 @@ impl GameState {
             self.may_trigger_auto_choices
                 .push(MayTriggerAutoChoiceRecord { key, choice });
         }
+    }
+
+    /// CR 117.3d: True when `player` has a standing yield matching the top stack
+    /// entry, meaning they have pre-committed to pass priority while it resolves.
+    /// Only triggered abilities can be yielded — spells, activated abilities, and
+    /// keyword actions never match (a player never pre-declines those). A
+    /// `ThisObject` yield matches only while the source keeps the same
+    /// incarnation (CR 400.7); an `AllCopies` yield matches any trigger sharing
+    /// the latched card identity, even after the original source ceases to exist.
+    pub fn is_priority_yielded(&self, player: PlayerId, entry: &StackEntry) -> bool {
+        match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } => self.priority_yields.iter().any(|y| {
+                y.player == player
+                    && match &y.target {
+                        YieldTarget::ThisObject {
+                            source_id: yielded_id,
+                            incarnation,
+                        } => {
+                            *source_id == *yielded_id
+                                && ability.source_incarnation == Some(*incarnation)
+                        }
+                        YieldTarget::AllCopies { card_id } => {
+                            ability.source_card_id == Some(*card_id)
+                        }
+                    }
+            }),
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::KeywordAction { .. } => false,
+        }
+    }
+
+    /// CR 400.7 identity latch: resolve a `YieldScope` for `source_id` into a
+    /// concrete `YieldTarget` by scanning the stack (top-down) for that source's
+    /// triggered ability and reading the identity it captured at push. Returns
+    /// `None` — caller no-ops — when no matching triggered entry is on the stack,
+    /// or when the requested scope needs an identity the trigger never latched (a
+    /// `ThisObject` yield on a trigger with no `source_incarnation`, or an
+    /// `AllCopies` yield on one with no `source_card_id`).
+    pub fn resolve_yield_target_from_stack(
+        &self,
+        source_id: ObjectId,
+        scope: YieldScope,
+    ) -> Option<YieldTarget> {
+        self.stack.iter().rev().find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id: sid,
+                ability,
+                ..
+            } if *sid == source_id => match scope {
+                YieldScope::ThisObject => {
+                    ability
+                        .source_incarnation
+                        .map(|incarnation| YieldTarget::ThisObject {
+                            source_id,
+                            incarnation,
+                        })
+                }
+                YieldScope::AllCopies => ability
+                    .source_card_id
+                    .map(|card_id| YieldTarget::AllCopies { card_id }),
+            },
+            _ => None,
+        })
+    }
+
+    /// CR 117.3d: Register a standing priority yield for `player`. No-op when an
+    /// equal `(player, target)` yield is already stored (idempotent toggle).
+    pub fn add_priority_yield(&mut self, player: PlayerId, target: YieldTarget) {
+        if self
+            .priority_yields
+            .iter()
+            .any(|y| y.player == player && y.target == target)
+        {
+            return;
+        }
+        self.priority_yields.push(PriorityYield { player, target });
+    }
+
+    /// CR 117.3d: Revoke a single standing yield for `player`.
+    pub fn remove_priority_yield(&mut self, player: PlayerId, target: &YieldTarget) {
+        self.priority_yields
+            .retain(|y| !(y.player == player && y.target == *target));
+    }
+
+    /// CR 117.3d: Revoke all standing yields for `player`.
+    pub fn clear_priority_yields(&mut self, player: PlayerId) {
+        self.priority_yields.retain(|y| y.player != player);
     }
 
     /// Register a transient continuous effect and mark layers dirty.
@@ -8787,6 +8927,7 @@ impl PartialEq for GameState {
             && self.pending_counter_additions == other.pending_counter_additions
             && self.pending_proliferate_actions == other.pending_proliferate_actions
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
+            && self.priority_yields == other.priority_yields
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
             && self.resolving_begin_game_abilities == other.resolving_begin_game_abilities
             && self.pending_cast == other.pending_cast
@@ -10449,5 +10590,303 @@ mod tests {
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, original);
         assert_eq!(round_tripped.from_zone, Zone::Graveyard);
+    }
+
+    // ---- CR 117.3d priority-yield accessors ----
+
+    /// Build a `TriggeredAbility` stack entry from `source_id` whose ability
+    /// latched `incarnation` (CR 400.7) and `card_id` (CR 704.5d) at push.
+    fn triggered_entry(
+        entry_id: ObjectId,
+        source_id: ObjectId,
+        controller: PlayerId,
+        incarnation: Option<u64>,
+        card_id: Option<CardId>,
+    ) -> StackEntry {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+        ability.source_incarnation = incarnation;
+        ability.source_card_id = card_id;
+        StackEntry {
+            id: entry_id,
+            source_id,
+            controller,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Token".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        }
+    }
+
+    #[test]
+    fn this_object_yield_matches_same_object_and_incarnation() {
+        let mut state = GameState::new_two_player(1);
+        let entry = triggered_entry(
+            ObjectId(10),
+            ObjectId(5),
+            PlayerId(1),
+            Some(3),
+            Some(CardId(9)),
+        );
+        state.add_priority_yield(
+            PlayerId(0),
+            YieldTarget::ThisObject {
+                source_id: ObjectId(5),
+                incarnation: 3,
+            },
+        );
+        assert!(state.is_priority_yielded(PlayerId(0), &entry));
+        // Wrong player never matches.
+        assert!(!state.is_priority_yielded(PlayerId(1), &entry));
+    }
+
+    /// CR 400.7: a re-entered permanent is a new object with a higher
+    /// incarnation, so a `ThisObject` yield stops matching after a blink.
+    #[test]
+    fn this_object_yield_invalidated_by_incarnation_advance() {
+        let mut state = GameState::new_two_player(1);
+        state.add_priority_yield(
+            PlayerId(0),
+            YieldTarget::ThisObject {
+                source_id: ObjectId(5),
+                incarnation: 3,
+            },
+        );
+        let same = triggered_entry(
+            ObjectId(10),
+            ObjectId(5),
+            PlayerId(1),
+            Some(3),
+            Some(CardId(9)),
+        );
+        let blinked = triggered_entry(
+            ObjectId(11),
+            ObjectId(5),
+            PlayerId(1),
+            Some(4),
+            Some(CardId(9)),
+        );
+        assert!(state.is_priority_yielded(PlayerId(0), &same));
+        assert!(!state.is_priority_yielded(PlayerId(0), &blinked));
+    }
+
+    /// CR 704.5d: an `AllCopies` yield matches every trigger sharing the latched
+    /// card identity — both same-CardId tokens — regardless of object id.
+    #[test]
+    fn all_copies_yield_matches_every_same_card_id_trigger() {
+        let mut state = GameState::new_two_player(1);
+        state.add_priority_yield(PlayerId(0), YieldTarget::AllCopies { card_id: CardId(9) });
+        let token_a = triggered_entry(
+            ObjectId(10),
+            ObjectId(5),
+            PlayerId(1),
+            Some(1),
+            Some(CardId(9)),
+        );
+        let token_b = triggered_entry(
+            ObjectId(11),
+            ObjectId(6),
+            PlayerId(1),
+            Some(2),
+            Some(CardId(9)),
+        );
+        assert!(state.is_priority_yielded(PlayerId(0), &token_a));
+        assert!(state.is_priority_yielded(PlayerId(0), &token_b));
+    }
+
+    /// Hostile: a same-NAME but different-CardId real card must NOT be swept up
+    /// by an `AllCopies` yield keyed to the token's card identity.
+    #[test]
+    fn all_copies_yield_does_not_match_different_card_id() {
+        let mut state = GameState::new_two_player(1);
+        state.add_priority_yield(PlayerId(0), YieldTarget::AllCopies { card_id: CardId(9) });
+        let real_card = triggered_entry(
+            ObjectId(12),
+            ObjectId(7),
+            PlayerId(1),
+            Some(1),
+            Some(CardId(42)),
+        );
+        assert!(!state.is_priority_yielded(PlayerId(0), &real_card));
+    }
+
+    /// Only triggered abilities are yieldable; spells and activated abilities on
+    /// top of the stack never match a yield.
+    #[test]
+    fn spell_and_activated_tops_never_yielded() {
+        let mut state = GameState::new_two_player(1);
+        state.add_priority_yield(PlayerId(0), YieldTarget::AllCopies { card_id: CardId(9) });
+        let spell = StackEntry {
+            id: ObjectId(20),
+            source_id: ObjectId(5),
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(9),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        let mut act_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(1),
+        );
+        act_ability.source_card_id = Some(CardId(9));
+        let activated = StackEntry {
+            id: ObjectId(21),
+            source_id: ObjectId(5),
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(5),
+                ability: act_ability,
+            },
+        };
+        assert!(!state.is_priority_yielded(PlayerId(0), &spell));
+        assert!(!state.is_priority_yielded(PlayerId(0), &activated));
+    }
+
+    /// CR 400.7 None-boundary: a `ThisObject` yield never matches a trigger with
+    /// no latched incarnation (synthetic game-rule triggers), but an `AllCopies`
+    /// yield still matches when the card identity is present.
+    #[test]
+    fn this_object_none_incarnation_never_matches_but_all_copies_can() {
+        let mut state = GameState::new_two_player(1);
+        let entry = triggered_entry(
+            ObjectId(10),
+            ObjectId(0),
+            PlayerId(1),
+            None,
+            Some(CardId(9)),
+        );
+        state.add_priority_yield(
+            PlayerId(0),
+            YieldTarget::ThisObject {
+                source_id: ObjectId(0),
+                incarnation: 0,
+            },
+        );
+        assert!(!state.is_priority_yielded(PlayerId(0), &entry));
+        state.clear_priority_yields(PlayerId(0));
+        state.add_priority_yield(PlayerId(0), YieldTarget::AllCopies { card_id: CardId(9) });
+        assert!(state.is_priority_yielded(PlayerId(0), &entry));
+    }
+
+    #[test]
+    fn add_priority_yield_is_idempotent_and_remove_and_clear_work() {
+        let mut state = GameState::new_two_player(1);
+        let t = YieldTarget::AllCopies { card_id: CardId(9) };
+        state.add_priority_yield(PlayerId(0), t.clone());
+        state.add_priority_yield(PlayerId(0), t.clone());
+        assert_eq!(state.priority_yields.len(), 1, "dedup: no duplicate yield");
+        state.add_priority_yield(PlayerId(1), t.clone());
+        state.remove_priority_yield(PlayerId(0), &t);
+        assert_eq!(state.priority_yields.len(), 1);
+        assert_eq!(state.priority_yields[0].player, PlayerId(1));
+        state.add_priority_yield(
+            PlayerId(1),
+            YieldTarget::ThisObject {
+                source_id: ObjectId(5),
+                incarnation: 1,
+            },
+        );
+        state.clear_priority_yields(PlayerId(1));
+        assert!(state.priority_yields.is_empty());
+    }
+
+    /// CR 400.7 identity latch: `resolve_yield_target_from_stack` reads the
+    /// identity off the on-stack trigger, so a ceased token (absent from
+    /// `objects`) still yields a bindable target.
+    #[test]
+    fn resolve_yield_target_reads_from_stack_topmost() {
+        let mut state = GameState::new_two_player(1);
+        state.stack.push_back(triggered_entry(
+            ObjectId(10),
+            ObjectId(5),
+            PlayerId(0),
+            Some(7),
+            Some(CardId(9)),
+        ));
+        assert_eq!(
+            state.resolve_yield_target_from_stack(ObjectId(5), YieldScope::ThisObject),
+            Some(YieldTarget::ThisObject {
+                source_id: ObjectId(5),
+                incarnation: 7,
+            })
+        );
+        assert_eq!(
+            state.resolve_yield_target_from_stack(ObjectId(5), YieldScope::AllCopies),
+            Some(YieldTarget::AllCopies { card_id: CardId(9) })
+        );
+        // No matching source on the stack → None (caller no-ops).
+        assert_eq!(
+            state.resolve_yield_target_from_stack(ObjectId(999), YieldScope::ThisObject),
+            None
+        );
+    }
+
+    /// A `ThisObject` scope on a trigger that never latched an incarnation
+    /// resolves to `None`, so the caller stores nothing.
+    #[test]
+    fn resolve_yield_target_none_incarnation_returns_none() {
+        let mut state = GameState::new_two_player(1);
+        state.stack.push_back(triggered_entry(
+            ObjectId(10),
+            ObjectId(0),
+            PlayerId(0),
+            None,
+            Some(CardId(9)),
+        ));
+        assert_eq!(
+            state.resolve_yield_target_from_stack(ObjectId(0), YieldScope::ThisObject),
+            None
+        );
+        assert_eq!(
+            state.resolve_yield_target_from_stack(ObjectId(0), YieldScope::AllCopies),
+            Some(YieldTarget::AllCopies { card_id: CardId(9) })
+        );
+    }
+
+    #[test]
+    fn priority_yields_serde_round_trip_and_partial_eq() {
+        let mut state = GameState::new_two_player(1);
+        // Empty default omitted from serialization.
+        let empty_json = serde_json::to_string(&state).unwrap();
+        assert!(!empty_json.contains("priority_yields"));
+
+        state.add_priority_yield(
+            PlayerId(0),
+            YieldTarget::ThisObject {
+                source_id: ObjectId(5),
+                incarnation: 3,
+            },
+        );
+        state.add_priority_yield(PlayerId(1), YieldTarget::AllCopies { card_id: CardId(9) });
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: GameState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.priority_yields, state.priority_yields);
+        assert_eq!(restored, state, "PartialEq must include priority_yields");
+
+        // PartialEq is sensitive to a yield difference.
+        let mut other = state.clone();
+        other.priority_yields.clear();
+        assert_ne!(other, state);
     }
 }

@@ -230,6 +230,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             source_incarnation: None,
+            source_card_id: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,

@@ -565,6 +565,14 @@
     "paidAdditionalCost": "coût supplémentaire",
     "paidConvoked": "convoqué ×{{count}}"
   },
+  "priorityYield": {
+    "listHeader": "Renoncements de priorité",
+    "yieldThis": "Passer celui-ci",
+    "yieldAllCopies": "Passer toutes les copies",
+    "revoke": "Révoquer",
+    "clearAll": "Tout effacer",
+    "allCopiesHint": "Recommandé pour les capacités de jetons"
+  },
   "targeting": {
     "choosePermanentToCopy": "Choisissez un permanent à copier",
     "retargetCopySlot": "Recibler la copie : emplacement {{current}} sur {{total}}",

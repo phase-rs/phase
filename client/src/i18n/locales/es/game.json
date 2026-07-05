@@ -565,6 +565,14 @@
     "paidAdditionalCost": "coste extra",
     "paidConvoked": "convocado ×{{count}}"
   },
+  "priorityYield": {
+    "listHeader": "Cesiones de prioridad",
+    "yieldThis": "Ceder este",
+    "yieldAllCopies": "Ceder todas las copias",
+    "revoke": "Revocar",
+    "clearAll": "Borrar todo",
+    "allCopiesHint": "Recomendado para disparos de fichas"
+  },
   "targeting": {
     "choosePermanentToCopy": "Elige un permanente para copiar",
     "retargetCopySlot": "Reasignar objetivo de la copia: ranura {{current}} de {{total}}",

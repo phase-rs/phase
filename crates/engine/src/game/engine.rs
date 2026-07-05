@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, PriorityYieldOp};
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
@@ -452,6 +452,7 @@ fn check_actor_authorization(
     if matches!(
         action,
         GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityYield { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
@@ -569,10 +570,13 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             }
         }
         AutoPassMode::UntilEndOfTurn => {
-            let opponent_on_stack = state
-                .stack
-                .last()
-                .is_some_and(|top| top.controller != player);
+            // CR 117.3d: An opponent-controlled top-of-stack normally ends the
+            // session so the player can respond — unless they have pre-committed
+            // to yield priority for that exact triggered ability, in which case
+            // the session keeps auto-passing through it.
+            let opponent_on_stack = state.stack.last().is_some_and(|top| {
+                top.controller != player && !state.is_priority_yielded(player, top)
+            });
             if opponent_on_stack || phase_stop_hit(state, player) {
                 AutoPassDecision::Finish
             } else {
@@ -1141,6 +1145,33 @@ fn apply_action(
             state.phase_stops.remove(&actor);
         } else {
             state.phase_stops.insert(actor, stops.clone());
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // CR 117.3d: SetPriorityYield propagates the actor's standing priority-yield
+    // preference — a pre-committed decision to pass priority while a class of
+    // triggered ability resolves. Pure preference state, routed by `actor`, and
+    // handled BEFORE the loop-ring clear and auto-pass session clearing below so
+    // yields are exempt from that per-session teardown (CR 400.7: an `Add`
+    // snapshots the source's latched identity from the on-stack trigger).
+    if let GameAction::SetPriorityYield { op } = &action {
+        match op {
+            PriorityYieldOp::Add { source_id, scope } => {
+                if let Some(target) = state.resolve_yield_target_from_stack(*source_id, *scope) {
+                    state.add_priority_yield(actor, target);
+                }
+            }
+            PriorityYieldOp::Remove { target } => {
+                state.remove_priority_yield(actor, target);
+            }
+            PriorityYieldOp::ClearAll => {
+                state.clear_priority_yields(actor);
+            }
         }
         return Ok(ActionResult {
             events: vec![],

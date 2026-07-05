@@ -565,6 +565,14 @@
     "paidAdditionalCost": "Zusatzkosten",
     "paidConvoked": "beschworen ×{{count}}"
   },
+  "priorityYield": {
+    "listHeader": "Prioritätsverzichte",
+    "yieldThis": "Diesen überspringen",
+    "yieldAllCopies": "Alle Kopien überspringen",
+    "revoke": "Widerrufen",
+    "clearAll": "Alle löschen",
+    "allCopiesHint": "Empfohlen für Spielstein-Auslöser"
+  },
   "targeting": {
     "choosePermanentToCopy": "Wähle eine bleibende Karte zum Kopieren",
     "retargetCopySlot": "Kopie neu anvisieren: Platz {{current}} von {{total}}",

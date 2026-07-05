@@ -597,6 +597,14 @@
     "paidAdditionalCost": "extra cost",
     "paidConvoked": "convoked ×{{count}}"
   },
+  "priorityYield": {
+    "listHeader": "Priority yields",
+    "yieldThis": "Yield this",
+    "yieldAllCopies": "Yield all copies",
+    "revoke": "Revoke",
+    "clearAll": "Clear all",
+    "allCopiesHint": "Recommended for token triggers"
+  },
   "targeting": {
     "choosePermanentToCopy": "Choose a permanent to copy",
     "retargetCopySlot": "Retarget copy: slot {{current}} of {{total}}",

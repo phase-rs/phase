@@ -1097,6 +1097,31 @@ impl SessionManager {
             ));
         }
 
+        // SetPriorityYield: per-player standing priority-yield preference keyed
+        // to the authenticated player, not the priority holder. Bypasses the
+        // turn/legal-action prechecks (any player may adjust their own yields at
+        // any time) and delegates the mutation to the engine (single authority).
+        // A preference toggle is not an undo point, so — unlike ReorderHand — it
+        // takes NO takeback snapshot. CR 117.3d.
+        if matches!(action, GameAction::SetPriorityYield { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
+            let (new_legal_actions, spell_costs, by_object) =
+                engine_legal_actions_full(&session.state);
+            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
+            return Ok((
+                session.state.clone(),
+                result.events,
+                new_legal_actions,
+                result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ));
+        }
+
         // ReorderHand: per-player display-preference update keyed to the
         // authenticated player, not the priority holder. Mirrors
         // CancelAutoPass / SetPhaseStops by bypassing the turn/legal-action
