@@ -4349,6 +4349,16 @@ fn parse_zone_change_object_token_contraction_intervening_if(
     Ok((rest, zone_change_object_token_condition(true)))
 }
 
+/// CR 603.4 + CR 701.9a + CR 702.35a: Build an event-object intervening-if
+/// filter for a named alt-cost keyword on the triggering object.
+fn event_object_has_alt_cost_keyword_condition(keyword: KeywordKind) -> TriggerCondition {
+    TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::HasKeywordKind { value: keyword },
+        ])),
+    }
+}
+
 /// CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" on
 /// event-object intervening-ifs (e.g. discard triggers: "if it has madness").
 fn parse_event_object_has_alt_cost_keyword_intervening_if(
@@ -4356,14 +4366,7 @@ fn parse_event_object_has_alt_cost_keyword_intervening_if(
 ) -> OracleResult<'_, TriggerCondition> {
     let (rest, _) = tag("if it has ").parse(input)?;
     let (rest, keyword) = nom_primitives::parse_alt_cost_keyword_name_to_kind.parse(rest)?;
-    Ok((
-        rest,
-        TriggerCondition::EventObjectMatchesFilter {
-            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
-                FilterProp::HasKeywordKind { value: keyword },
-            ])),
-        },
-    ))
+    Ok((rest, event_object_has_alt_cost_keyword_condition(keyword)))
 }
 
 /// CR 603.4 + CR 603.6a + CR 208.1: Entering-object intervening-if comparing the
