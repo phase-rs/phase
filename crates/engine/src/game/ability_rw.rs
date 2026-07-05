@@ -3399,6 +3399,7 @@ fn walk_ability(
         targets: _,
         source_id: _,
         source_incarnation: _,
+        source_card_id: _, // latched card identity token (AllCopies yield), no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
