@@ -27274,6 +27274,68 @@ fn choose_two_target_creatures_controlled_by_different_players_sets_target_const
 }
 
 #[test]
+fn target_cards_from_single_graveyard_sets_same_zone_owner_constraint() {
+    let def = parse_effect_chain(
+        "Exile up to three target cards from a single graveyard.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }))
+    );
+    assert_eq!(
+        def.target_constraints,
+        vec![TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard
+        }]
+    );
+    match &*def.effect {
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert_eq!(*origin, Some(Zone::Graveyard));
+            assert_eq!(*destination, Zone::Exile);
+            assert!(tf.type_filters.contains(&TypeFilter::Card));
+            assert!(tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }));
+        }
+        other => panic!("expected graveyard-card exile ChangeZone, got {other:?}"),
+    }
+}
+
+#[test]
+fn modal_single_graveyard_target_constraint_survives_mode_parsing() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Choose one —\n• Target opponent loses 1 life and you gain 1 life.\n• Exile up to three target cards from a single graveyard.\n• Target creature gains fear until end of turn.",
+        "Ebony Charm",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+
+    let exile_mode = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::ChangeZone { .. }))
+        .expect("modal graveyard exile ability must parse");
+    assert_eq!(
+        exile_mode.target_constraints,
+        vec![TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard
+        }]
+    );
+    assert_eq!(
+        exile_mode.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }))
+    );
+}
+
+#[test]
 fn effect_for_each_opponent_up_to_one_gain_control_has_optional_fanout_slots() {
     let def = parse_effect_chain(
         "For each opponent, gain control of up to one target creature that player controls.",

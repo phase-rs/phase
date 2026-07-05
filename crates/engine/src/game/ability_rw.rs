@@ -1744,7 +1744,8 @@ fn legacy_target_constraint(c: &TargetSelectionConstraint) -> bool {
     match c {
         TargetSelectionConstraint::TotalManaValue { value, .. } => legacy_quantity_expr(value),
         TargetSelectionConstraint::DifferentTargetPlayers
-        | TargetSelectionConstraint::DifferentObjectControllers => false,
+        | TargetSelectionConstraint::DifferentObjectControllers
+        | TargetSelectionConstraint::SameZoneOwner { .. } => false,
     }
 }
 
@@ -3631,6 +3632,7 @@ fn rw_target_constraint(c: &TargetSelectionConstraint) -> RwProfile {
     match c {
         TargetSelectionConstraint::DifferentTargetPlayers => RwProfile::empty(),
         TargetSelectionConstraint::DifferentObjectControllers => RwProfile::empty(),
+        TargetSelectionConstraint::SameZoneOwner { zone: _ } => RwProfile::empty(),
         TargetSelectionConstraint::TotalManaValue {
             value,
             comparator: _,

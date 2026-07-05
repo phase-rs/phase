@@ -1817,6 +1817,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         if parse_controlled_by_different_players_target_constraint(&clause_ir.source_text) {
             def = def.target_constraint(TargetSelectionConstraint::DifferentObjectControllers);
         }
+        if let Some(constraint) = parse_same_zone_owner_target_constraint(&clause_ir.source_text) {
+            def = def.target_constraint(constraint);
+        }
         if let Some(constraint) = parse_total_mana_value_target_constraint(&clause_ir.source_text) {
             def = def.target_constraint(constraint);
         }
@@ -5204,6 +5207,23 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
         tag(CONTROLLED_BY_DIFFERENT_PLAYERS),
     );
     parser.parse(lower.as_str()).is_ok()
+}
+
+/// CR 115.1 + CR 601.2c + CR 400.1: Detect target-set constraints that require
+/// all chosen objects to come from one player's zone pile, currently the printed
+/// "from a single graveyard" class.
+fn parse_same_zone_owner_target_constraint(text: &str) -> Option<TargetSelectionConstraint> {
+    let lower = text.to_lowercase();
+    let mut parser = preceded(
+        take_until::<_, _, OracleError<'_>>("from a single graveyard"),
+        tag("from a single graveyard"),
+    );
+    parser
+        .parse(lower.as_str())
+        .ok()
+        .map(|_| TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard,
+        })
 }
 
 /// CR 202.3 + CR 115.1: Detect a "with total mana value <N|X> or less" target-set

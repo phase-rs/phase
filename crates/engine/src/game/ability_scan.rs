@@ -313,6 +313,7 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint) -> Axes {
     match c {
         TargetSelectionConstraint::DifferentTargetPlayers => Axes::NONE,
         TargetSelectionConstraint::DifferentObjectControllers => Axes::NONE,
+        TargetSelectionConstraint::SameZoneOwner { zone: _ } => Axes::NONE,
         TargetSelectionConstraint::TotalManaValue {
             value,
             comparator: _,

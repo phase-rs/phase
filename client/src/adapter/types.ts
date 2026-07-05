@@ -1049,6 +1049,9 @@ export type TargetSelectionConstraint =
   | { type: "DifferentTargetPlayers" }
   // CR 115.1 + CR 601.2c: object targets must be controlled by different players.
   | { type: "DifferentObjectControllers" }
+  // CR 115.1 + CR 601.2c + CR 400.1: object targets must come from the same
+  // player-owned zone of the given kind.
+  | { type: "SameZoneOwner"; zone: Zone }
   // CR 202.3 + CR 601.2c: the chosen target set's combined mana value must satisfy
   // `comparator` against `value`. `value` is an engine `QuantityExpr` (internally
   // tagged); the frontend never evaluates it — legality is delivered via
