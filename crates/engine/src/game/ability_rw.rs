@@ -1808,6 +1808,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
         | TriggerCondition::EventDamageSourceMatchesFilter { .. }
+        | TriggerCondition::EventObjectMatchesFilter { .. }
         | TriggerCondition::DamagedPlayerIsEventSourceOwner
         | TriggerCondition::TriggeringSpellTargetsFilter { .. }
         | TriggerCondition::ManaColorSpent { .. }
@@ -5572,6 +5573,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
         | TriggerCondition::EventDamageSourceMatchesFilter { .. }
+        | TriggerCondition::EventObjectMatchesFilter { .. }
         | TriggerCondition::DamagedPlayerIsEventSourceOwner
         | TriggerCondition::TriggeringSpellTargetsFilter { .. } => reads_event_live(),
         TriggerCondition::ManaColorSpent { .. } | TriggerCondition::ManaSpentCondition { .. } => {

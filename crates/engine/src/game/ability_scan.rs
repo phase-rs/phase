@@ -2688,6 +2688,15 @@ fn scan_trigger_condition(x: &TriggerCondition) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
+        TriggerCondition::EventObjectMatchesFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(filter));
+            acc
+        }
         TriggerCondition::DamagedPlayerIsEventSourceOwner => Axes {
             event: true,
             sibling: false,

@@ -46,6 +46,7 @@ use crate::types::ability::{
     TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
     TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
+use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::keywords::KeywordKind;
