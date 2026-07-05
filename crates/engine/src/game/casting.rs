@@ -515,24 +515,17 @@ fn restriction_scope_matches_player(
     }
 }
 
-/// CR 601.2a: Build the spell-record projection used by prohibition filters.
+/// CR 601.2a + CR 202.3d: Build the spell-record projection used by prohibition
+/// filters. Routes through the shared `restrictions::spell_cast_record` authority
+/// so a fused split spell is projected with the COMBINED mana value / colors of
+/// both halves (CR 702.102b). `CastingVariant::Normal` is the historical
+/// placeholder for these live per-spell filters (they do not consult the variant).
 fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> SpellCastRecord {
-    SpellCastRecord {
-        name: spell_obj.name.clone(),
-        core_types: spell_obj.card_types.core_types.clone(),
-        supertypes: spell_obj.card_types.supertypes.clone(),
-        subtypes: spell_obj.card_types.subtypes.clone(),
-        keywords: spell_obj.keywords.clone(),
-        colors: spell_obj.color.clone(),
-        // CR 202.3e: While on the stack, X equals the announced value, not 0.
-        mana_value: spell_obj
-            .mana_cost
-            .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
-        has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
-        from_zone: spell_obj.zone,
-        cast_variant: crate::types::game_state::CastingVariant::Normal,
-        was_kicked: !spell_obj.kickers_paid.is_empty(),
-    }
+    super::restrictions::spell_cast_record(
+        spell_obj,
+        spell_obj.zone,
+        crate::types::game_state::CastingVariant::Normal,
+    )
 }
 
 fn is_blocked_by_cast_only_from_zones(
@@ -15200,19 +15193,14 @@ fn is_blocked_by_per_turn_cast_limit(
             // E.g., Deafening Silence only limits noncreature spells — creature spells
             // are unaffected regardless of how many noncreature spells were cast.
             if let Some(filter) = spell_filter {
-                let current_record = SpellCastRecord {
-                    name: spell_obj.name.clone(),
-                    core_types: spell_obj.card_types.core_types.clone(),
-                    supertypes: spell_obj.card_types.supertypes.clone(),
-                    subtypes: spell_obj.card_types.subtypes.clone(),
-                    keywords: spell_obj.keywords.clone(),
-                    colors: spell_obj.color.clone(),
-                    mana_value: spell_obj.mana_cost.mana_value(),
-                    has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
-                    from_zone: spell_obj.zone,
-                    cast_variant: crate::types::game_state::CastingVariant::Normal,
-                    was_kicked: !spell_obj.kickers_paid.is_empty(),
-                };
+                // CR 202.3d + CR 702.102b: project the spell being cast through the
+                // shared cast-record authority so a fused split spell's mana value /
+                // colors reflect both halves for the per-turn cast-limit filter.
+                let current_record = super::restrictions::spell_cast_record(
+                    spell_obj,
+                    spell_obj.zone,
+                    crate::types::game_state::CastingVariant::Normal,
+                );
                 if !super::filter::spell_record_matches_filter(
                     &current_record,
                     filter,

@@ -212,28 +212,28 @@ pub fn record_spell_cast(
     );
 }
 
-pub fn record_spell_cast_from_zone(
-    state: &mut crate::types::game_state::GameState,
-    player: PlayerId,
+/// CR 117.1 + CR 202.3d + CR 702.102b: The single authority for projecting a
+/// spell object into a [`SpellCastRecord`]. Every consumer — spell-cast history
+/// (`record_spell_cast_from_zone`), live cost-modifier / cast-prohibition filters
+/// (`spell_record_for_restrictions`, `spell_cast_record_from_object`), and
+/// per-turn cast-limit filters — routes through here so the spell's mana value and
+/// colors come from the split-aware `spell_mana_value`/`spell_colors` authority. A
+/// FUSED split spell therefore records the COMBINED value of both halves rather
+/// than its front half, so `Cmc`/`HasColor`/`ColorCount`/multicolored filters see
+/// the fused spell (CR 709.4d). `spell_mana_value` honors announced X on the stack
+/// for non-fused spells (CR 202.3e).
+pub(crate) fn spell_cast_record(
     obj: &GameObject,
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
-) {
-    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
-    *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
-    // CR 117.1: Record spell characteristics for general-purpose filtered counting.
-    let record = SpellCastRecord {
+) -> SpellCastRecord {
+    SpellCastRecord {
         name: obj.name.clone(),
         core_types: obj.card_types.core_types.clone(),
         supertypes: obj.card_types.supertypes.clone(),
         subtypes: obj.card_types.subtypes.clone(),
         keywords: obj.keywords.clone(),
-        colors: obj.color.clone(),
-        // CR 202.3d + CR 702.102b + CR 202.3e: A fused split spell records the
-        // COMBINED mana value of both halves; every other spell records its own
-        // cost, with X equal to the announced value while on the stack. `spell_*`
-        // keys on the fuse marker (set before payment) so history filters such as
-        // "cast a spell with mana value N" see the fused value.
+        colors: obj.spell_colors(),
         mana_value: obj.spell_mana_value(),
         // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
         // trigger-filter evaluation (e.g. "your first spell with {X} in its
@@ -246,7 +246,20 @@ pub fn record_spell_cast_from_zone(
         cast_variant,
         // CR 702.33d: Kicker-paid state captured at cast time.
         was_kicked: !obj.kickers_paid.is_empty(),
-    };
+    }
+}
+
+pub fn record_spell_cast_from_zone(
+    state: &mut crate::types::game_state::GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    from_zone: Zone,
+    cast_variant: crate::types::game_state::CastingVariant,
+) {
+    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
+    *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
+    // CR 117.1: Record spell characteristics for general-purpose filtered counting.
+    let record = spell_cast_record(obj, from_zone, cast_variant);
     state
         .spells_cast_this_turn_by_player
         .entry(player)
