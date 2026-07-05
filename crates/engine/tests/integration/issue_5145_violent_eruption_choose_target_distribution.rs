@@ -83,19 +83,19 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
         .act(GameAction::ChooseTarget { target: None })
         .expect("skipping optional tail should complete target selection");
 
-    match runner.state().waiting_for.clone() {
-        WaitingFor::DistributeAmong { total, targets, .. } => {
-            assert_eq!(total, 4, "damage pool to divide must be 4");
-            assert_eq!(
-                targets.len(),
-                2,
-                "both chosen targets must participate in the distribution",
-            );
-        }
-        other => panic!(
-            "expected DistributeAmong after slot-by-slot target selection, got {other:?}",
-        ),
-    }
+    let WaitingFor::DistributeAmong { total, targets, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected DistributeAmong after slot-by-slot target selection, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(total, 4, "damage pool to divide must be 4");
+    assert_eq!(
+        targets.len(),
+        2,
+        "both chosen targets must participate in the distribution",
+    );
 
     runner
         .act(GameAction::DistributeAmong {
