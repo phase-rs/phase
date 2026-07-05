@@ -7134,6 +7134,7 @@ mod admin_auth_tests {
     use std::sync::Arc;
 
     use axum::http::StatusCode;
+    use axum::routing::get;
     use axum::Router;
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
