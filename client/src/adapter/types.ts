@@ -2138,6 +2138,18 @@ export interface GameState {
    */
   unimplemented_oracle_ids?: string[];
   /**
+   * Mirrors `engine::types::game_state::GameState::pending_trigger_abandons`.
+   * Descriptors (source name + dead stack-entry id) of push-first triggered
+   * abilities whose in-construction stack entry vanished before selection
+   * completed, forcing the engine to abandon construction. Diagnostics only —
+   * records recovery from an unidentified state-coherence defect (a dangling
+   * push-first construction cursor) that previously panicked and poisoned the
+   * WASM engine. Forwarded to the `game_end` telemetry event; an `Array` (not a
+   * set) because the raw occurrence count matters. Absent when empty (serde
+   * `skip_serializing_if`).
+   */
+  pending_trigger_abandons?: string[];
+  /**
    * Engine-authored derived projections, attached by adapters from the
    * wire-format `ClientGameState.derived` sibling field. Optional because
    * some wire paths (legacy cached state, older server builds) may not

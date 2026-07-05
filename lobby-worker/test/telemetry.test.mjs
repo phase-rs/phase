@@ -164,7 +164,27 @@ test("booleans and numbers coerce; missing/other values default", () => {
   const [drawn] = sanitizeTelemetryBatch(
     batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 7, unimplemented_oracle_ids: ["x", 5, "y"] }]),
   );
-  // winner_kind null → ""; array keeps only strings, comma-joined.
-  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y"]);
+  // winner_kind null → ""; array keeps only strings, comma-joined;
+  // pending_trigger_abandons absent → "".
+  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y", ""]);
   assert.deepEqual(drawn.doubles, [7]);
+});
+
+test("the game_end pending_trigger_abandons list survives the join at the client's 20-item cap", () => {
+  // Mirrors the unimplemented_oracle_ids blob: the abandon descriptors are
+  // comma-joined into the 5th game_end blob and kept up to the list cap.
+  const abandons = Array.from(
+    { length: 20 },
+    (_, i) => `Test Source (stack entry ${i})`,
+  );
+  const [e] = sanitizeTelemetryBatch(
+    batch([{ event: "game_end", result: "winner", winner_kind: "human", game_mode: "ai", turn_count: 3, pending_trigger_abandons: abandons }]),
+  );
+  assert.equal(e.blobs[4], abandons.join(","));
+  assert.equal(e.blobs[4].split(",").length, 20);
+  // Non-strings are dropped, strings comma-joined (same treatment as oracle ids).
+  const [mixed] = sanitizeTelemetryBatch(
+    batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 1, pending_trigger_abandons: ["a", 5, "b"] }]),
+  );
+  assert.equal(mixed.blobs[4], "a,b");
 });

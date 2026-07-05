@@ -48,7 +48,13 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
   js_error: { blobs: ["name", "message", "top_frame", "source", "route"], doubles: [] },
   chunk_reload: { blobs: ["reason", "chunk"], doubles: ["deferred"] },
   game_end: {
-    blobs: ["result", "winner_kind", "game_mode", "unimplemented_oracle_ids"],
+    blobs: [
+      "result",
+      "winner_kind",
+      "game_mode",
+      "unimplemented_oracle_ids",
+      "pending_trigger_abandons",
+    ],
     doubles: ["turn_count"],
   },
   card_report: {

@@ -4270,61 +4270,139 @@ pub(crate) fn is_pending_trigger_construction_active(state: &GameState) -> bool 
     state.pending_trigger_entry.is_some()
 }
 
+/// Abandon a push-first triggered ability whose in-construction stack entry
+/// vanished before mode/target/division selection completed — the construction
+/// cursor `pending_trigger_entry` is left dangling.
+///
+/// This should be UNREACHABLE: mode/target/division are chosen while the ability
+/// is put on the stack (CR 603.3d), before any player has priority, so it cannot
+/// be countered/removed mid-construction; and a controller leaving the game is
+/// already handled upstream (`elimination::do_eliminate` clears all three
+/// pending-trigger fields when the tracked entry is retained off the stack). If
+/// this fires, the entry left the stack via an UNEXPECTED / UNIDENTIFIED
+/// state-coherence defect, not a known rules-legal cause. The CRs below are
+/// cited only as the rules basis for the RECOVERY SEMANTICS, not the cause:
+///
+/// * CR 608.2b: a spell or ability that has left the stack does not resolve.
+/// * CR 800.4a: an object on the stack that ceases to exist is simply gone.
+///
+/// so a stack object that no longer exists can be neither mutated nor resolved.
+/// Recovery: record a distinguishable diagnostic (item recorded once per
+/// abandon, count preserved — see `GameState::pending_trigger_abandons`), drop
+/// the vanished entry's side-table rows, and clear every in-flight construction
+/// cursor coherently so the game continues (the caller surfaces `Priority`).
+/// `deferred_triggers` is intentionally left intact — sibling triggers stashed
+/// behind this one are still valid and drain at the next priority point.
+///
+/// Precondition: `pending_trigger_entry` is still `Some(_)` — `mutate_` never
+/// takes it, and `finalize_` only takes it on the assign-success path, so the
+/// dead entry id survives here for the diagnostic and side-table cleanup.
+pub(crate) fn abandon_ceased_pending_trigger(
+    state: &mut GameState,
+    source_ability: &ResolvedAbility,
+) {
+    if let Some(entry_id) = state.pending_trigger_entry {
+        // Distinguishable diagnostic: dead stack-entry id + the source's name so
+        // the telemetry `game_summary` can attribute the abandon to a card.
+        let source_name = state
+            .objects
+            .get(&source_ability.source_id)
+            .map(|obj| obj.name.clone())
+            .unwrap_or_else(|| "<unknown source>".to_string());
+        state
+            .pending_trigger_abandons
+            .push(format!("{source_name} (stack entry {})", entry_id.0));
+        // Recovery owns the side-table cleanup for the vanished entry (rather
+        // than leaving it to callers), mirroring how `resolve_top` prunes these
+        // per-entry tables when an entry leaves the stack.
+        state.stack_paid_facts.remove(&entry_id);
+        state.stack_trigger_event_batches.remove(&entry_id);
+    }
+    state.pending_trigger = None;
+    state.pending_trigger_entry = None;
+    state.pending_trigger_event_batch.clear();
+}
+
 /// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
 /// ability with `source_ability`, leaving `pending_trigger_entry` untouched.
 /// Use for intermediate construction steps (e.g. a mode chosen while target
 /// selection is still outstanding) where the entry must remain non-resolvable.
 ///
-/// Invariants (panic on violation — the push-first contract guarantees them):
+/// Returns `false` if the entry is no longer on the stack — an unexpected
+/// dangling-cursor state (see [`abandon_ceased_pending_trigger`]); callers must
+/// then abandon construction rather than build a prompt for a dead entry.
+///
+/// Invariant (panic on violation — the push-first contract guarantees it):
 /// * `state.pending_trigger_entry` is `Some(_)`.
-/// * That id references a `TriggeredAbility` `StackEntry` in `state.stack`.
+#[must_use]
 pub(crate) fn mutate_pending_trigger_entry(
     state: &mut GameState,
     source_ability: &ResolvedAbility,
-) {
+) -> bool {
     let entry_id = state
         .pending_trigger_entry
         .expect("mutate_pending_trigger_entry: pending_trigger_entry must be set under the push-first contract");
-    assign_pending_trigger_entry_ability(state, entry_id, source_ability);
+    assign_pending_trigger_entry_ability(state, entry_id, source_ability)
 }
 
 /// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
 /// ability with `source_ability` AND clear `pending_trigger_entry` —
 /// construction is complete, so the resolver is now free to fire this entry.
 ///
-/// Invariants (panic on violation — no recovery path):
-/// * `state.pending_trigger_entry` is `Some(_)` (every caller pushed under the
-///   push-first contract).
-/// * That id references a `TriggeredAbility` `StackEntry` in `state.stack`.
+/// Returns `false` if the entry is no longer on the stack — an unexpected
+/// dangling-cursor state (see [`abandon_ceased_pending_trigger`]); callers must
+/// then abandon construction rather than continue toward resolution of a dead
+/// entry. The cursor is taken ONLY on the success path, so on `false` it remains
+/// set for `abandon_ceased_pending_trigger` to read the dead entry id.
+///
+/// Invariant (panic on violation — every caller pushed under the push-first
+/// contract):
+/// * `state.pending_trigger_entry` is `Some(_)`.
+#[must_use]
 pub(crate) fn finalize_pending_trigger_entry(
     state: &mut GameState,
     source_ability: &ResolvedAbility,
-) {
+) -> bool {
     let entry_id = state
         .pending_trigger_entry
-        .take()
         .expect("finalize_pending_trigger_entry: pending_trigger_entry must be set under the push-first contract");
-    assign_pending_trigger_entry_ability(state, entry_id, source_ability);
+    if assign_pending_trigger_entry_ability(state, entry_id, source_ability) {
+        // Construction complete — release the cursor so the resolver may fire.
+        state.pending_trigger_entry = None;
+        true
+    } else {
+        // Leave the cursor set; `abandon_ceased_pending_trigger` reads it.
+        false
+    }
 }
 
 /// Locate the in-construction `TriggeredAbility` entry identified by `entry_id`
 /// (searching from the top of the stack down) and overwrite its resolved
 /// ability. Shared find-and-assign logic for `mutate`/`finalize` above.
+///
+/// Returns `false` when no stack entry carries `entry_id` — the triggered
+/// ability is unexpectedly no longer on the stack (dangling push-first cursor;
+/// see [`abandon_ceased_pending_trigger`]). Previously this `.expect()`-panicked,
+/// poisoning the WASM engine on the next submitted action.
+#[must_use]
 fn assign_pending_trigger_entry_ability(
     state: &mut GameState,
     entry_id: ObjectId,
     source_ability: &ResolvedAbility,
-) {
-    let entry = state
+) -> bool {
+    let Some(entry) = state
         .stack
         .iter_mut()
         .rev()
         .find(|entry| entry.id == entry_id)
-        .expect("pending_trigger_entry must reference a stack entry");
+    else {
+        return false;
+    };
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
     *ability = source_ability.clone();
+    true
 }
 
 /// Outcome of dispatching one pending-trigger context through

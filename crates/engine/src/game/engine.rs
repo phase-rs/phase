@@ -4720,27 +4720,34 @@ fn apply_action(
                 // already on the stack (pushed at distribute-among pause time);
                 // mutate its ability with the distribution and clear
                 // `pending_trigger_entry` so the resolver may now fire it.
-                //
-                // Invariants (panic on violation — no recovery path):
-                // * `pending_trigger_entry` is `Some(_)` (push-first contract).
-                // * Entry id references a `TriggeredAbility` `StackEntry`.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability);
-                priority::clear_priority_passes(state);
-                // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
-                // behind this distribute-among trigger so each independent
-                // instance reaches the stack (issue #416).
-                debug_assert!(
-                    !triggers::is_pending_trigger_construction_active(state),
-                    "deferred-trigger drain entered with construction still active",
-                );
-                if let Some(waiting_for) =
-                    triggers::drain_deferred_trigger_queue(state, &mut events)
-                {
-                    waiting_for
-                } else {
+                if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
+                    // Unexpected dangling cursor: the entry is no longer on the
+                    // stack. Recover per CR 608.2b / CR 800.4a (a stack object
+                    // that has left the stack does not resolve) — record the
+                    // diagnostic, abandon, and return priority instead of
+                    // panicking (re-normalized next pass; CR 117.3b would give
+                    // the active player).
+                    triggers::abandon_ceased_pending_trigger(state, &pending_trigger.ability);
+                    priority::clear_priority_passes(state);
                     WaitingFor::Priority { player: p }
+                } else {
+                    priority::clear_priority_passes(state);
+                    // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
+                    // behind this distribute-among trigger so each independent
+                    // instance reaches the stack (issue #416).
+                    debug_assert!(
+                        !triggers::is_pending_trigger_construction_active(state),
+                        "deferred-trigger drain entered with construction still active",
+                    );
+                    if let Some(waiting_for) =
+                        triggers::drain_deferred_trigger_queue(state, &mut events)
+                    {
+                        waiting_for
+                    } else {
+                        WaitingFor::Priority { player: p }
+                    }
                 }
             } else {
                 // Resolution-time distribution continuation path.
