@@ -12760,9 +12760,17 @@ fn trigger_samurai_or_warrior_attacks_alone() {
         "Whenever a Samurai or Warrior you control attacks alone, draw a card.",
         "Raiyuu, Storm's Edge",
     );
-    // Now that parse_type_phrase recognizes subtypes ("Samurai", "Warrior"),
-    // the trigger parser correctly identifies this as an Attacks trigger.
     assert!(matches!(def.mode, TriggerMode::Attacks));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
+        }),
+        "attacks alone must gate on zero co-attackers (CR 506.5)"
+    );
 }
 
 #[test]
