@@ -280,6 +280,53 @@ fn stash_post_replacement_continuation(
     state.post_replacement_event_target = event_target;
 }
 
+fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
+    let effect_creates_tokens = match &*def.effect {
+        Effect::Token { .. } => true,
+        Effect::ChooseOneOf { branches, .. } => branches.iter().any(ability_tree_creates_tokens),
+        _ => false,
+    };
+    effect_creates_tokens || {
+        def.sub_ability
+            .as_deref()
+            .is_some_and(ability_tree_creates_tokens)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(ability_tree_creates_tokens)
+    }
+}
+
+// CR 614.12a + issue #4886 (review #6): must classify the WHOLE ability tree,
+// not just the ChooseOneOf's branches — `ability_tree_creates_tokens` already
+// walks `def.sub_ability`/`def.else_ability`, so a token created by a tail
+// chained after the choice (`ChooseOneOf(non-token branches).sub_ability(Token)`)
+// is caught too. A branches-only check (the previous bug) missed that shape
+// entirely, so the tail token was never seeded and could re-prompt the
+// originating replacement.
+fn is_token_replacement_choice(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::ChooseOneOf { .. }) && ability_tree_creates_tokens(def)
+}
+
+/// CR 614.12a: Single authority for ABANDONING a live post-replacement
+/// continuation (as opposed to draining it normally via
+/// `apply_pending_post_replacement_effect`, which only clears
+/// `post_replacement_source` itself once the continuation is dispatched).
+/// Every field here is tightly coupled to the continuation's lifetime — a
+/// caller that clears a subset by hand risks stranding a sibling field when a
+/// new one is added later. `post_replacement_token_choice_applied` (issue
+/// #4886, review #6) was missed by the one pre-existing abandonment path
+/// (player elimination mid-resolution, `elimination.rs`) precisely because it
+/// was hand-listed there instead of routed through one function.
+pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
+    state.post_replacement_continuation = None;
+    state.post_replacement_source = None;
+    state.post_replacement_event_source = None;
+    state.post_replacement_event_target = None;
+    state.post_replacement_token_choice_applied = None;
+    state.pending_connive_reentry = None;
+}
+
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
 pub type ReplacementApplier =
     fn(ProposedEvent, ReplacementId, &mut GameState, &mut Vec<GameEvent>) -> ApplyResult;
@@ -5827,6 +5874,28 @@ fn apply_single_replacement(
                     }
                 }
             }
+            // CR 614.6 + CR 111.1: A CreateToken replacement whose execute is
+            // a non-Token substitute chain (Jinnie Fay's ChooseOneOf branch
+            // choice) fully replaces the original token event. Zero the
+            // surviving count here so the delivery path creates no original
+            // tokens while the substitute chain runs via the continuation.
+            if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+                let is_non_token_substitute = match ability {
+                    Some(def) => {
+                        !matches!(*def.effect, Effect::Token { .. })
+                            && !EventModifiers::has_only_event_modifier(Some(def))
+                    }
+                    None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                        !matches!(runtime.effect, Effect::Token { .. })
+                            && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+                    }),
+                };
+                if is_non_token_substitute {
+                    if let ProposedEvent::CreateToken { count, .. } = &mut proposed {
+                        *count = 0;
+                    }
+                }
+            }
             // CR 614.6: When the applier itself substitutes the event with the
             // execute's effect (Draw count-modifier via `draw_replacement_count`,
             // Scry → Draw / Scry → Scry via `scry_applier`), the work is already
@@ -6782,6 +6851,22 @@ fn continue_replacement_impl(
             // can't leak into a non-prevention stash.
             state.post_replacement_event_source = None;
             state.post_replacement_event_target = None;
+        }
+        // CR 614.12a + CR 616.1: Seed the inherited replacement-applied set ONLY
+        // when this replacement originates a token-choice continuation (Jinnie
+        // Fay-class `CreateToken -> ChooseOneOf(Token, Token)`). The seed is
+        // owned and cleared by that originating ChooseOneOf's completion (see
+        // effects/choose_one_of.rs), NOT by the replacement pipeline. Any other
+        // replacement running here — including a NESTED one whose continuation
+        // drains while an outer token-choice is still resolving — must NOT touch
+        // the field: clobbering it would let the same token-choice replacement
+        // re-prompt on a later token sub-ability (issue #4886 loop).
+        if let (ProposedEvent::CreateToken { applied, .. }, Some(def)) =
+            (&proposed, post_effect.as_deref())
+        {
+            if is_token_replacement_choice(def) {
+                state.post_replacement_token_choice_applied = Some(applied.clone());
+            }
         }
         state.post_replacement_continuation =
             post_effect.map(PostReplacementContinuation::Template);

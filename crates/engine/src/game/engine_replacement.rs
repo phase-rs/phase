@@ -1231,6 +1231,15 @@ pub(super) fn apply_pending_post_replacement_effect(
         ),
         None => None,
     };
+    // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
+    // here. This drain runs for EVERY replacement continuation — including a
+    // nested one that pauses inside an outer token-choice ChooseOneOf (issue
+    // #4886). Clearing here on "waiting_for is not ChooseOneOfBranch" wipes the
+    // outer originating seed when the nested continuation drains, letting the
+    // same token-choice replacement re-prompt on a later token sub-ability. The
+    // seed is owned and cleared by the originating ChooseOneOf's completion
+    // (effects/choose_one_of.rs), which is the only frame that can correctly
+    // detect "the token-choice continuation has fully drained."
     state.post_replacement_event_source = None;
     state.post_replacement_event_target = None;
     // CR 614.12a + CR 707.9: When the post-effect pauses on `CopyTargetChoice`,
@@ -2731,6 +2740,856 @@ mod tests {
         assert!(token.card_types.subtypes.iter().any(|s| s == "Soldier"));
         assert_eq!(token.color, vec![ManaColor::White]);
         assert!(token.keywords.contains(&Keyword::Flying));
+    }
+
+    /// CR 614.6 + CR 111.1: A Jinnie Fay-class optional token replacement
+    /// that pauses on `ChooseOneOfBranch` must replace the original token
+    /// event, not create it and then prompt again on the chosen branch's
+    /// substitute token event.
+    #[test]
+    fn create_token_choice_replacement_does_not_reprompt_or_create_original_tokens() {
+        use crate::types::ability::{AbilityDefinition, Effect, PlayerFilter, PtValue};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            replacement_source,
+            CardId(1001),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+        let make_branch = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            make_branch("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
+                            make_branch("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]),
+                        ],
+                    },
+                )),
+        );
+        state.objects.insert(replacement_source, jinnie);
+        state.battlefield.push_back(replacement_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: replacement_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept token replacement");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting the replacement must park on the branch choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
+            .expect("choose dog branch");
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            1,
+            "the replacement must create exactly the chosen substitute token"
+        );
+        let token = &state.objects[&new_ids[0]];
+        assert_eq!(token.name, "Dog");
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Dog"),
+            "chosen branch token must be the Dog substitute"
+        );
+        assert!(
+            !token.card_types.subtypes.iter().any(|s| s == "Treasure"),
+            "original Treasure token must not be created when the replacement is accepted"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "chosen substitute token event must not re-prompt the same replacement"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "replacement-choice applied seed must be cleared after the chosen branch resolves"
+        );
+    }
+
+    /// CR 614.6 + CR 111.1: The inherited `applied` set for a Jinnie Fay-class
+    /// token replacement must stay live for the full paused branch-choice
+    /// continuation, not just the first token proposal. Nested `ChooseOneOf`
+    /// branches and a branch with a second token sub-ability must not re-prompt
+    /// the same replacement mid-continuation.
+    #[test]
+    fn nested_token_choice_replacement_keeps_applied_set_for_full_branch_chain() {
+        use crate::types::ability::{AbilityDefinition, Effect, PlayerFilter, PtValue};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            replacement_source,
+            CardId(1002),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+        let make_token = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        let mut dog_then_cat = make_token("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]);
+        dog_then_cat.sub_ability = Some(Box::new(make_token(
+            "Cat",
+            vec!["Creature", "Cat"],
+            vec![ManaColor::White],
+        )));
+        let nested_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![
+                    make_token("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
+                    dog_then_cat,
+                ],
+            },
+        );
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            nested_choice,
+                            make_token("Dog", vec!["Creature", "Dog"], vec![ManaColor::Green]),
+                        ],
+                    },
+                )),
+        );
+        state.objects.insert(replacement_source, jinnie);
+        state.battlefield.push_back(replacement_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: replacement_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept token replacement");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting the replacement must park on the outer branch choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("choose nested branch");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "nested branch must park on the inner token choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
+            .expect("choose dog-then-cat branch");
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            2,
+            "nested continuation must create both substitute tokens without recreating Treasure"
+        );
+        let names: Vec<_> = new_ids
+            .iter()
+            .map(|id| state.objects[id].name.clone())
+            .collect();
+        assert_eq!(names, vec!["Dog".to_string(), "Cat".to_string()]);
+        assert!(
+            !new_ids.iter().any(|id| state.objects[id]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s == "Treasure")),
+            "original Treasure token must not be created when the replacement is accepted"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "nested substitute tokens must not re-prompt the same replacement"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "replacement-choice applied seed must clear after the nested branch chain drains"
+        );
+    }
+
+    /// CR 614.6 + CR 111.1 + issue #4886 (review #6): a token created by the
+    /// `sub_ability` tail chained AFTER the whole `ChooseOneOf` — not by one of
+    /// its own branches — must still be recognized as part of the token-choice
+    /// replacement so the applied set is seeded. Pre-fix, `is_token_replacement_choice`
+    /// only scanned the `ChooseOneOf`'s branches (both non-token GainLife here),
+    /// so it missed the token-creating tail entirely: the tail token was never
+    /// seeded and could re-prompt the same replacement on its own substitute
+    /// event.
+    #[test]
+    fn token_choice_replacement_seeds_applied_set_for_tail_token_after_branches() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, PlayerFilter, PtValue, QuantityExpr,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            replacement_source,
+            CardId(1003),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+
+        let make_token = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        let make_gain_life = |amount: i32| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+        };
+
+        // Branches create no tokens; the token comes from `sub_ability`, chained
+        // after the WHOLE ChooseOneOf resolves — not from any branch.
+        let mut choose_then_token = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![make_gain_life(1), make_gain_life(2)],
+            },
+        );
+        choose_then_token.sub_ability = Some(Box::new(make_token(
+            "Dog",
+            vec!["Creature", "Dog"],
+            vec![ManaColor::Green],
+        )));
+
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(choose_then_token),
+        );
+        state.objects.insert(replacement_source, jinnie);
+        state.battlefield.push_back(replacement_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: replacement_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept token replacement");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting the replacement must park on the branch choice, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("choose a non-token branch; the tail sub_ability then creates the token");
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            1,
+            "only the tail sub_ability's Dog token must be created, not the original Treasure"
+        );
+        let token = &state.objects[&new_ids[0]];
+        assert_eq!(token.name, "Dog");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "the tail token created after the branch choice must not re-prompt the same \
+             replacement (pre-fix: is_token_replacement_choice only scanned branches and \
+             missed this tail, so the applied set was never seeded)"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "replacement-choice applied seed must clear after the tail continuation drains"
+        );
+    }
+
+    /// Issue #4886 (HIGH review finding): the inherited token-choice applied
+    /// seed must survive an intervening replacement whose own continuation
+    /// drains mid-branch. Pre-fix, `apply_pending_post_replacement_effect`
+    /// cleared `post_replacement_token_choice_applied` whenever its waiting_for
+    /// was not a `ChooseOneOfBranch`, and `continue_replacement_impl`'s
+    /// `_ => None` arm re-wiped it for every non-token-choice nested
+    /// replacement. Either path let the originating token-choice replacement
+    /// re-prompt on a later token sub-ability (the loop). This test pre-seeds
+    /// the applied set the way the originating token-choice does, drives a
+    /// non-token-choice continuation through the drain, and asserts the seed is
+    /// preserved — pinning the fix at both removal sites.
+    #[test]
+    fn token_choice_applied_seed_survives_intervening_continuation_drain() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
+        use crate::types::card_type::CoreType;
+        use crate::types::proposed_event::{ReplacementId, TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let jinnie_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let jinnie_rid = ReplacementId {
+            source: jinnie_source,
+            index: 0,
+        };
+        let mut seed = std::collections::HashSet::new();
+        seed.insert(jinnie_rid);
+        // Simulate the originating token-choice continuation being mid-drain:
+        // its applied set is live so substitute-token proposals pre-mark Jinnie.
+        state.post_replacement_token_choice_applied = Some(seed.clone());
+
+        // A non-token-choice continuation — e.g. an Optional accept that draws
+        // a card. Its drain must NOT clear the token-choice seed (pre-fix, the
+        // `if !ChooseOneOfBranch { clear }` arm wiped it here).
+        let draw_continuation = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                target: crate::types::ability::TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        state.post_replacement_continuation = Some(
+            crate::types::ability::PostReplacementContinuation::Template(Box::new(
+                draw_continuation,
+            )),
+        );
+        state.post_replacement_source = Some(jinnie_source);
+
+        let mut events = Vec::new();
+        let waiting_for = apply_pending_post_replacement_effect(
+            &mut state,
+            Some(jinnie_source),
+            None,
+            Some(ReplacementEvent::CreateToken),
+            &mut events,
+        );
+
+        // The draw continuation is not a ChooseOneOf; before the fix this is
+        // exactly the frame that wiped the seed. It must now survive.
+        assert_eq!(
+            state.post_replacement_token_choice_applied,
+            Some(seed),
+            "intervening non-token-choice continuation drain must preserve the originating token-choice applied seed (issue #4886)"
+        );
+        assert!(
+            !matches!(waiting_for, Some(WaitingFor::ChooseOneOfBranch { .. })),
+            "non-token-choice continuation should not surface a branch choice"
+        );
+
+        // A substitute token proposed while the seed is live inherits the
+        // originating id, so the same token-choice replacement cannot match it.
+        let dog_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Dog".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Dog".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_dog".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: jinnie_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let applied = state
+            .post_replacement_token_choice_applied
+            .clone()
+            .unwrap_or_default();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(dog_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied,
+        };
+        assert!(
+            proposed
+                .applied_set()
+                .iter()
+                .any(|rid| rid.source == jinnie_source),
+            "substitute token proposal must inherit the originating replacement id from the live seed"
+        );
+    }
+
+    /// Issue #4886 (HIGH review finding #3): the originating token-choice
+    /// applied seed must survive a branch that parks on a *non-token*
+    /// `ChooseOneOf` and then resumes a stashed token sub-ability. Pre-fix,
+    /// `choose_one_of.rs` cleared the global seed the moment its branch
+    /// resolved back to priority — but the ChooseBranch handler drains the
+    /// stashed token sub-ability only afterward (`engine_resolution_choices.rs`
+    /// → `drain_pending_continuation`). The later token proposal then lost the
+    /// inherited replacement id and re-prompted the same Jinnie replacement.
+    ///
+    /// Branch shape under test: Jinnie execute = ChooseOneOf([
+    ///   { effect: ChooseOneOf([GainLife, GainLife]), sub_ability: Token(Dog) },
+    ///   Token(Cat),
+    /// ])
+    /// Choosing branch 0 parks on the inner non-token choice; resolving it
+    /// stashes the Dog sub-ability, which must still see the Jinnie id.
+    #[test]
+    fn token_choice_seed_survives_non_token_choose_one_of_before_token_sub_ability() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, PlayerFilter, PtValue,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        let mut state = GameState::new_two_player(42);
+        let jinnie_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut jinnie = GameObject::new(
+            jinnie_source,
+            CardId(1020),
+            PlayerId(0),
+            "Jinnie Fay".to_string(),
+            Zone::Battlefield,
+        );
+        let make_token = |name: &str, types: Vec<&str>, colors: Vec<ManaColor>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: types.into_iter().map(str::to_string).collect(),
+                    colors,
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: crate::types::ability::TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        };
+        let make_gain_life = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+        };
+        // Branch 0: a NON-TOKEN inner choice, with the token in a sub-ability.
+        let mut branch_with_nontoken_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![make_gain_life(), make_gain_life()],
+            },
+        );
+        branch_with_nontoken_choice.sub_ability = Some(Box::new(make_token(
+            "Dog",
+            vec!["Creature", "Dog"],
+            vec![ManaColor::Green],
+        )));
+        jinnie.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .description("Jinnie Fay".to_string())
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            branch_with_nontoken_choice,
+                            make_token("Cat", vec!["Creature", "Cat"], vec![ManaColor::White]),
+                        ],
+                    },
+                )),
+        );
+        state.objects.insert(jinnie_source, jinnie);
+        state.battlefield.push_back(jinnie_source);
+
+        let treasure_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "c_a_treasure".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: jinnie_source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let battlefield_before = state.battlefield.clone();
+
+        // Propose Treasure → Jinnie is the only matching replacement.
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure_spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Jinnie");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting Jinnie must park on the outer token choice, got {:?}",
+            state.waiting_for
+        );
+
+        // Pick branch 0 — the non-token inner choice. Must park on the inner
+        // ChooseOneOf (not create the token yet).
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("choose branch with nested non-token choice");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "branch 0 must park on the inner non-token choice before the token sub-ability, got {:?}",
+            state.waiting_for
+        );
+
+        // Resolve the inner non-token choice. The Dog sub-ability is stashed
+        // into pending_continuation and drains after this returns. Pre-fix,
+        // choose_one_of.rs cleared the seed at this point — before the stashed
+        // Dog sub-ability proposed — so Dog re-prompted Jinnie.
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("resolve inner non-token choice");
+
+        // The chain must have drained fully: Dog created, no Jinnie re-prompt,
+        // no Treasure, seed cleared at full-drain. With the bug, `waiting_for`
+        // parked on a second Jinnie ChooseOneOfBranch / ReplacementChoice for
+        // the Dog token instead of draining.
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::ChooseOneOfBranch { .. } | WaitingFor::ReplacementChoice { .. }
+            ),
+            "Dog sub-ability must not re-prompt Jinnie after the nested non-token choice; got {:?}",
+            state.waiting_for
+        );
+
+        let new_ids: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| !battlefield_before.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            new_ids.len(),
+            1,
+            "the Dog substitute must be created exactly once (no loop, no original Treasure)"
+        );
+        let token = &state.objects[&new_ids[0]];
+        assert_eq!(token.name, "Dog");
+        assert!(
+            !token.card_types.subtypes.iter().any(|s| s == "Treasure"),
+            "original Treasure token must not be created"
+        );
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "originating token-choice seed must clear at full-drain, after the stashed sub-ability"
+        );
+    }
+
+    /// Issue #4886 (MED review finding #4): the originating token-choice applied
+    /// seed must survive a `pending_repeat_until` drain. Pre-fix,
+    /// `drain_pending_continuation` cleared the seed BEFORE calling
+    /// `drain_pending_repeat_until`; that drain re-enters `resolve_ability_chain`
+    /// (effects/mod.rs:721 / :744) and can emit further token proposals, which
+    /// then lost the inherited replacement id and re-prompted the same Jinnie
+    /// replacement. The seed must be treated as part of the originating frame
+    /// and cleared only once the repeat-until continuation has fully drained or
+    /// stopped — i.e. only at true full-drain.
+    #[test]
+    fn token_choice_seed_survives_pending_repeat_until_drain() {
+        use crate::types::ability::{
+            AbilityKind, Effect, QuantityExpr, RepeatContinuation, ResolvedAbility,
+        };
+        use crate::types::game_state::PendingRepeatUntil;
+        use crate::types::proposed_event::ReplacementId;
+
+        let mut state = GameState::new_two_player(42);
+        let jinnie_source = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let jinnie_rid = ReplacementId {
+            source: jinnie_source,
+            index: 0,
+        };
+        let mut seed = std::collections::HashSet::new();
+        seed.insert(jinnie_rid);
+        state.post_replacement_token_choice_applied = Some(seed.clone());
+
+        // A repeat-until ability whose body would propose further tokens if
+        // re-entered. `repeat_until: ControllerChoice` re-prompts after each
+        // iteration, so `drain_pending_repeat_until` parks the engine on
+        // `RepeatDecision` — a non-Priority waiting_for that MUST preserve the
+        // seed (the controller may accept another iteration that proposes a
+        // token carrying the inherited id).
+        let mut repeat_ability = ResolvedAbility::new(
+            Effect::Draw {
+                target: crate::types::ability::TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            Vec::new(),
+            jinnie_source,
+            PlayerId(0),
+        );
+        repeat_ability.kind = AbilityKind::Spell;
+        repeat_ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+        state.pending_repeat_until = Some(PendingRepeatUntil {
+            ability: Box::new(repeat_ability),
+        });
+        // Simulate the moment the review describes: a paused repeat-until
+        // continuation re-entering from priority.
+        state.pending_continuation = None;
+        state.pending_repeat_iteration = None;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mut events = Vec::new();
+        effects::drain_pending_continuation(&mut state, &mut events);
+
+        // The repeat-until re-prompted (RepeatDecision), so the originating
+        // token-choice frame has NOT fully drained. The seed must survive —
+        // pre-fix it was wiped before this drain ran.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "drain_pending_repeat_until must re-prompt the controller for the repeat decision, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.post_replacement_token_choice_applied,
+            Some(seed),
+            "seed must survive the pending_repeat_until drain (issue #4886 review #4): a repeated iteration may still propose tokens carrying the inherited id"
+        );
     }
 
     // ── Zone-qualified clone source (Superior Spider-Man) ──

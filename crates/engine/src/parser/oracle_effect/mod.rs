@@ -21762,6 +21762,53 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 508.6 + CR 608.2c: Player-SCOPED "does the same" fan-out — "each
+        // opponent[ attacking that player] does the same" replicates the
+        // immediately-preceding sibling effect across a player SET (the
+        // Commander 2017 curse cycle: Curse of Opulence / Vitality / Verbosity
+        // / Disturbance). Unlike the single targeted-opponent form below, the
+        // set is driven by the existing `player_scope` iteration, which rebinds
+        // the acting controller to each iterated player (see `resolve_ability_chain`
+        // in game/effects/mod.rs) — so cloning the antecedent effect and
+        // stamping the recognized scope reuses the SAME machinery as the
+        // explicit-verb riders of this exact cycle ("each opponent attacking
+        // that player gains 2 life"), requiring no new engine variant, resolver,
+        // or scope. Placed before the targeted-opponent form so the scoped
+        // fan-out wins (the two subjects are disjoint: "each …" vs "target …").
+        if let Some(prev_effect) = clauses
+            .iter()
+            .rev()
+            .find(|clause| !clause.absorbed_by_followup)
+            .map(|clause| clause.parsed.effect.clone())
+        {
+            if let Some(scope) = sequence::try_parse_scoped_does_the_same(normalized_text) {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(prev_effect),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: Some(scope),
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                continue;
+            }
+        }
+
         // CR 608.2c + CR 601.2c: "[then] target opponent does the same / does
         // so." — replicate the immediately-preceding sibling effect for a
         // targeted opponent (The Wedding of River Song). A correct runtime needs
@@ -22398,7 +22445,7 @@ pub(crate) fn parse_effect_chain_ir(
         // on the text output from strip_if_you_do_conditional. For compound
         // "when you do, if it has N counters" patterns, WhenYouDo is always true for
         // non-optional parents (CR 603.12), so the QuantityCheck is the meaningful gate.
-        let (counter_cond, text) = strip_counter_conditional(&text);
+        let (counter_cond, text) = strip_counter_conditional(&text, ctx.in_trigger);
         // CR 202.3 + CR 608.2c: Mana value threshold condition — same priority as counter_cond.
         let (mv_cond, text) = strip_mana_value_conditional(&text);
         // CR 608.2c: Spell-target superlative gate — "if it has the least/greatest

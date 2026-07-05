@@ -12025,6 +12025,126 @@ fn strip_counter_conditional_no_ice_counters() {
     );
 }
 
+/// SHAPE C1 — the indefinite-article arm: "a +1/+1 counter on it" means
+/// one or more (CR 122.1 + CR 122.1a). The "it" subject keeps the source scope.
+#[test]
+fn strip_counter_conditional_article_it_source() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, Comparator, Effect, QuantityExpr, QuantityRef,
+    };
+
+    let def = parse_effect_chain(
+        "draw a card if it has a +1/+1 counter on it",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) if *counter_type == crate::types::counter::CounterType::Plus1Plus1
+        ),
+        "Expected QuantityCheck(P1P1 >= 1, Source), got {:?}",
+        def.condition,
+    );
+    // Reach-guard (CR: the effect must actually be the draw, never Unimplemented).
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "Expected Draw effect, got {:?}",
+        def.effect,
+    );
+    assert!(
+        !matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "Draw clause must not be Unimplemented, got {:?}",
+        def.effect,
+    );
+}
+
+/// SHAPE C2 — the demonstrative arm in NON-trigger context: "that creature" is
+/// the spell's target (CR 115.1), so the scope is `Target`, not `Source`. This is
+/// Oblivion's Hunger clause 2. `parse_effect_chain` parses in spell (non-trigger)
+/// context, so the demonstrative is recognized.
+#[test]
+fn strip_counter_conditional_demonstrative_target_non_trigger() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, Comparator, Effect, QuantityExpr, QuantityRef,
+    };
+
+    let def = parse_effect_chain(
+        "draw a card if that creature has a +1/+1 counter on it",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(counter_type) } },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) if *counter_type == crate::types::counter::CounterType::Plus1Plus1
+        ),
+        "Expected QuantityCheck(P1P1 >= 1, Target), got {:?}",
+        def.condition,
+    );
+    // Reach-guard: draw effect reached, zero Unimplemented.
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "Expected Draw effect, got {:?}",
+        def.effect,
+    );
+    assert!(
+        !matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "Draw clause must not be Unimplemented, got {:?}",
+        def.effect,
+    );
+}
+
+/// SHAPE C3 — GUARD: a LEADING demonstrative "if that creature has … counter …,
+/// [source] deals N … instead" (Bring Low's verbatim clause 2) must NOT be
+/// captured by the counter-conditional as an additive `QuantityCheck`-gated
+/// `DealDamage`. The leading demonstrative is deliberately withheld from
+/// `strip_counter_conditional` (offered only in the trailing form), so
+/// `strip_counter_conditional` returns no condition here and this
+/// replacement-class clause stays on the same inert deferral path as upstream
+/// `main` (CR 608.2e). Discriminating: under the pre-fix over-acceptance the
+/// leading demonstrative matched and the condition became
+/// `QuantityCheck(Target, GE 1)`, with the "instead" replacement wrongly lowered
+/// as an additive 5-damage sibling (target with a counter → 3+5=8 instead of the
+/// correct 5). This test fails under that regression (condition would be
+/// `Some(QuantityCheck)`) and passes only on the deferred path (condition `None`,
+/// exactly as upstream produces for this isolated clause).
+#[test]
+fn strip_counter_conditional_leading_demonstrative_instead_deferred() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityCondition, AbilityKind};
+
+    let def = parse_effect_chain(
+        "If that creature has a +1/+1 counter on it, Bring Low deals 5 damage to it instead.",
+        AbilityKind::Spell,
+    );
+    // Must NOT be captured as a counter-gated additive QuantityCheck (the
+    // pre-fix false-green). This is the discriminating assertion.
+    assert!(
+        !matches!(&def.condition, Some(AbilityCondition::QuantityCheck { .. })),
+        "Leading 'if that creature has a +1/+1 counter … instead' must NOT parse to a \
+         QuantityCheck-gated additive DealDamage; got {:?}",
+        def.condition,
+    );
+    // Upstream parity: the counter-conditional does not recognize this leading
+    // demonstrative at all, so no counter condition is attached — the clause is
+    // left as an honest deferred gap, identical to upstream `main`.
+    assert!(
+        def.condition.is_none(),
+        "Leading demonstrative 'instead' clause must stay a deferred gap (no counter \
+         condition), matching upstream main; got {:?}",
+        def.condition,
+    );
+}
+
 #[test]
 fn earthbender_ascension_landfall_chain() {
     use crate::parser::oracle_effect::parse_effect_chain;
@@ -18485,5 +18605,117 @@ fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
     assert!(
         has_unimplemented(execute),
         "nested unbindable difference anaphor must become a loud Unimplemented residual: {execute:#?}"
+    );
+}
+
+/// CR 508.6 + CR 608.2c: The Commander 2017 "whenever enchanted player is
+/// attacked" curse cycle carries the rider "Each opponent attacking that player
+/// does the same." — a player-scoped replication of the antecedent effect.
+/// Before the fix the rider was an `Effect::unimplemented("attacking", …)`
+/// residual; it must now lower to a `SequentialSibling` sub_ability that CLONES
+/// the antecedent effect and iterates it over `player_scope: Opponent` (the same
+/// AST the explicit-verb riders of the cycle already produce). Fail-on-revert:
+/// walks the parsed trigger and asserts the cloned effect + scope, and that the
+/// rider residual is gone.
+fn parse_curse(name: &str, oracle: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(
+        oracle,
+        name,
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string(), "Curse".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .unwrap_or_else(|| panic!("{name}: expected an 'is attacked' trigger: {parsed:#?}"));
+    *trigger
+        .execute
+        .clone()
+        .unwrap_or_else(|| panic!("{name}: trigger must carry an execute body"))
+}
+
+#[test]
+fn curse_of_opulence_rider_clones_token_across_attacking_opponents() {
+    let execute = parse_curse(
+        "Curse of Opulence",
+        "Enchant player\n\
+         Whenever enchanted player is attacked, create a Gold token. Each opponent \
+         attacking that player does the same. (A Gold token is an artifact with \
+         \"Sacrifice this token: Add one mana of any color.\")",
+    );
+
+    // Base effect: the curse controller creates a Gold token.
+    assert!(
+        matches!(&*execute.effect, Effect::Token { name, .. } if name == "Gold"),
+        "base effect must create a Gold token, got {:#?}",
+        execute.effect
+    );
+
+    // Rider: cloned into a per-opponent SequentialSibling — NOT an Unimplemented.
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("does-the-same rider must lower to a sub_ability");
+    assert_eq!(
+        rider.player_scope,
+        Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+        "the 'attacking that player' qualifier must scope the rider to opponents \
+         attacking the enchanted player (CR 508.6), not all opponents"
+    );
+    assert_eq!(
+        rider.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert!(
+        matches!(&*rider.effect, Effect::Token { name, .. } if name == "Gold"),
+        "rider must CLONE the antecedent Gold-token effect, got {:#?}",
+        rider.effect
+    );
+
+    // Fail-on-revert: no surviving "attacking … does the same" residual.
+    assert!(
+        !has_unimplemented(&execute),
+        "no Unimplemented residual may survive: {execute:#?}"
+    );
+}
+
+#[test]
+fn curse_of_vitality_rider_clones_gain_life_across_attacking_opponents() {
+    let execute = parse_curse(
+        "Curse of Vitality",
+        "Enchant player\n\
+         Whenever enchanted player is attacked, you gain 2 life. Each opponent \
+         attacking that player does the same.",
+    );
+
+    assert!(
+        matches!(&*execute.effect, Effect::GainLife { amount, .. } if *amount == QuantityExpr::Fixed { value: 2 }),
+        "base effect must gain 2 life, got {:#?}",
+        execute.effect
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("does-the-same rider must lower to a sub_ability");
+    assert_eq!(
+        rider.player_scope,
+        Some(PlayerFilter::OpponentAttackingEnchantedPlayer)
+    );
+    assert_eq!(
+        rider.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert!(
+        matches!(&*rider.effect, Effect::GainLife { amount, .. } if *amount == QuantityExpr::Fixed { value: 2 }),
+        "rider must CLONE the antecedent gain-2-life effect, got {:#?}",
+        rider.effect
+    );
+
+    assert!(
+        !has_unimplemented(&execute),
+        "no Unimplemented residual may survive: {execute:#?}"
     );
 }

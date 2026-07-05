@@ -362,6 +362,18 @@ pub(crate) fn matches_player_scope(
                             && state
                                 .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
+                    // CR 508.6 + CR 102.2 + CR 508.1b: opponent of the controller
+                    // who is attacking the enchanted/defending player this combat.
+                    // The "that player" anchor is the trigger source's AttachedTo
+                    // host (the aura source is never itself an attacker, so it can
+                    // never appear in `combat.attackers` for `DefendingPlayer`),
+                    // resolved via the shared event-context target resolver.
+                    PlayerFilter::OpponentAttackingEnchantedPlayer => {
+                        p.id != controller
+                            && enchanted_player_anchor(state, source_id).is_some_and(|enchanted| {
+                                state.player_attacked_player_this_combat(p.id, enchanted)
+                            })
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -486,6 +498,27 @@ pub(crate) fn matches_player_scope(
                     }
                 }
         })
+}
+
+/// CR 301.5 + CR 303.4 + CR 508.6: Resolve the "that player" anchor for the
+/// Commander 2017 curse cycle's "each opponent attacking that player" rider —
+/// the enchanted/defending player the "whenever enchanted player is attacked"
+/// trigger fired on. The trigger source is an Aura attached to that player, so
+/// the anchor is the source's `AttachedTo` host. Routed through the shared
+/// event-context target resolver (rather than reading `attached_to` inline) so
+/// the aura host resolution stays in one authoritative place. Returns `None`
+/// when the source isn't attached to a player (defensive — the parser only
+/// stamps `OpponentAttackingEnchantedPlayer` on the curse cycle's aura riders).
+pub(crate) fn enchanted_player_anchor(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    match crate::game::targeting::resolve_event_context_target_for_event_or_state(
+        state,
+        &TargetFilter::AttachedTo,
+        source_id,
+        state.current_trigger_event.as_ref(),
+    )? {
+        TargetRef::Player(pid) => Some(pid),
+        TargetRef::Object(_) => None,
+    }
 }
 
 /// CR 109.4 + CR 109.5: Evaluate the controlled-permanent count predicate of
@@ -680,6 +713,22 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         && state.pending_repeat_iteration.is_none()
     {
         drain_pending_repeat_until(state);
+    }
+    // CR 614.12a + issue #4886 (review #4): the originating token-choice
+    // applied seed must outlive EVERY drain in this function — including
+    // `drain_pending_repeat_until`, which re-enters `resolve_ability_chain`
+    // (lines 721 / 744) and can emit further token proposals. Clearing before
+    // that drain (the previous bug) wiped the seed before a repeated token
+    // proposal, reopening the self-replacement loop. Clear ONLY at true
+    // full-drain: back at priority with no pending continuation, no pending
+    // repeat iteration, AND no pending repeat-until frame. By this point no
+    // ability is still resolving, so no token proposal can still need the seed.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_continuation.is_none()
+        && state.pending_repeat_iteration.is_none()
+        && state.pending_repeat_until.is_none()
+    {
+        state.post_replacement_token_choice_applied = None;
     }
 }
 
@@ -8314,6 +8363,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentDealtCombatDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }

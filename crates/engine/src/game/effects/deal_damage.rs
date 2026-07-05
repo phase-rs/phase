@@ -1681,6 +1681,15 @@ fn collect_matching_players(
                                 p.id,
                             )
                     }
+                    // CR 508.6 + CR 102.2: opponent of the controller attacking
+                    // the enchanted/defending player this combat.
+                    PlayerFilter::OpponentAttackingEnchantedPlayer => {
+                        p.id != source_controller
+                            && crate::game::effects::enchanted_player_anchor(state, source_id)
+                                .is_some_and(|enchanted| {
+                                    state.player_attacked_player_this_combat(p.id, enchanted)
+                                })
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -1893,6 +1902,18 @@ pub fn resolve_each_player(
                             source,
                             ability.source_id,
                         )
+                    }
+                    // CR 508.6 + CR 102.2: opponent of the controller attacking
+                    // the enchanted/defending player this combat.
+                    PlayerFilter::OpponentAttackingEnchantedPlayer => {
+                        p.id != ability.controller
+                            && crate::game::effects::enchanted_player_anchor(
+                                state,
+                                ability.source_id,
+                            )
+                            .is_some_and(|enchanted| {
+                                state.player_attacked_player_this_combat(p.id, enchanted)
+                            })
                     }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {

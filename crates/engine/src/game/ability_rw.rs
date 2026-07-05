@@ -2124,6 +2124,7 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         | PlayerFilter::DefendingPlayer
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::All
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
@@ -5811,6 +5812,11 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         // CR 603.10a: the owners of the per-source exile set are a member-bound
         // look-back referent ⇒ refuse batch-T1.
         PlayerFilter::OwnersOfCardsExiledBySource => member_bound_read(),
+        // CR 508.6 + CR 603.10a: resolves the enchanted-player anchor (the
+        // source's `AttachedTo` host — a per-source look-back referent, exactly
+        // like `ControllerRef::EnchantedPlayer`) and reads this-combat attack
+        // declarations against it ⇒ member-bound (refuse batch-T1).
+        PlayerFilter::OpponentAttackingEnchantedPlayer => member_bound_read(),
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer

@@ -487,11 +487,7 @@ fn do_eliminate(
     if state.pending_replacement.is_some() && state.waiting_for.acting_player() == Some(player) {
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
-        state.post_replacement_continuation = None;
-        state.post_replacement_source = None;
-        state.post_replacement_event_source = None;
-        state.post_replacement_event_target = None;
-        state.pending_connive_reentry = None;
+        super::replacement::abandon_post_replacement_continuation(state);
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
@@ -704,7 +700,7 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
-    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+    use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -1090,6 +1086,14 @@ mod tests {
         state.post_replacement_source = Some(o);
         state.post_replacement_event_source = Some(o);
         state.post_replacement_event_target = Some(TargetRef::Object(o));
+        // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
+        // seed, owned by this same abandoned continuation, must be abandoned
+        // alongside its siblings — this field was added after the teardown
+        // block below was written and was missed until this regression.
+        state.post_replacement_token_choice_applied = Some(HashSet::from([ReplacementId {
+            source: o,
+            index: 0,
+        }]));
         state.pending_connive_reentry = Some(PendingConniveReentry {
             conniver: o,
             count: 1,
@@ -1130,6 +1134,11 @@ mod tests {
         assert!(state.post_replacement_source.is_none());
         assert!(state.post_replacement_event_source.is_none());
         assert!(state.post_replacement_event_target.is_none());
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "abandoning the parked chooser's continuation must also clear the token-choice \
+             applied seed, not just its established siblings (issue #4886, review #6)"
+        );
         assert!(state.pending_connive_reentry.is_none());
         assert!(
             state.pending_spell_resolution.is_none(),

@@ -6014,6 +6014,29 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_event_target: Option<crate::types::ability::TargetRef>,
 
+    /// CR 614.6 + CR 616.1: When an optional CreateToken replacement defers a
+    /// `ChooseOneOf` post-effect (Jinnie Fay class), the chosen branch's token
+    /// event must inherit the originating event's applied replacement ids so
+    /// the same replacement cannot re-prompt on its own substitute tokens.
+    ///
+    /// Ownership: this seed is OWNED by the originating token-choice
+    /// continuation and outlives every nested choice, every stashed sub-ability
+    /// continuation, AND every repeat/repeat-until drain. It is seeded exactly
+    /// once (`replacement.rs`, only when a `CreateToken` event is replaced by a
+    /// token-choice continuation — Jinnie Fay-class), read by every token
+    /// proposal (`effects/token.rs`), and cleared ONLY at true full-drain
+    /// (`effects/mod.rs::drain_pending_continuation`: back at priority with no
+    /// `pending_continuation`, no `pending_repeat_iteration`, AND no
+    /// `pending_repeat_until`). The replacement pipeline and ChooseOneOf
+    /// completion NEVER clear it — a branch may stash a token-bearing
+    /// sub-ability or pause inside a repeat-until loop that drains only later
+    /// via `resolve_ability_chain`, so clearing earlier wipes the seed before
+    /// those later token proposals and re-prompts the originating token-choice
+    /// replacement (issue #4886).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_token_choice_applied:
+        Option<std::collections::HashSet<crate::types::proposed_event::ReplacementId>>,
+
     /// CR 701.50a + CR 614.5 + CR 616.1f: deferred connive link of a connive
     /// replacement whose leading draw parked a replacement-ordering choice. See
     /// `PendingConniveReentry`. Drained only by
@@ -8054,6 +8077,7 @@ impl GameState {
             post_replacement_source: None,
             post_replacement_event_source: None,
             post_replacement_event_target: None,
+            post_replacement_token_choice_applied: None,
             pending_connive_reentry: None,
             pending_spell_resolution: None,
             pending_mutate_merge: None,

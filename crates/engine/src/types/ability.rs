@@ -5275,6 +5275,30 @@ pub enum PlayerFilter {
         subject: AttackSubject,
         scope: AttackScope,
     },
+    /// CR 508.6 + CR 102.2 + CR 508.1b: The INVERSE combat relation of
+    /// `OpponentAttacked` — each opponent of the controller who is *attacking the
+    /// enchanted/defending player* (the player the trigger anaphors to with "that
+    /// player"), i.e. controls a creature attacking that player this combat.
+    ///
+    /// Models the Commander 2017 "whenever enchanted player is attacked, …. Each
+    /// opponent attacking that player does the same." curse cycle (Curse of
+    /// Opulence / Vitality / Verbosity / Disturbance). Per CR 508.6 a player "is
+    /// attacking [a player]" iff it controls a creature attacking that player;
+    /// combined with CR 102.2 (opponent of the controller) the affected set is
+    /// {opponents of the controller who declared a creature attacking the
+    /// enchanted player, per CR 508.1b}. Note this legitimately fans out to the
+    /// EMPTY set in a two-player game: the controller's only opponent is the
+    /// enchanted defending player, who cannot attack themselves — so the rider is
+    /// a no-op two-player-side, exactly as the CR requires.
+    ///
+    /// The anchor "that player" is the trigger's defending/enchanted player. For
+    /// the curse cycle the trigger source is an Aura attached to that player, so
+    /// the reference is resolved robustly via the source's `AttachedTo` host (the
+    /// aura source is never itself a combat attacker, so `DefendingPlayer` — which
+    /// keys on `source_id ∈ combat.attackers` — cannot resolve it). Resolved in
+    /// `game/effects/mod.rs::matches_player_scope` via
+    /// `GameState::player_attacked_player_this_combat` against that host.
+    OpponentAttackingEnchantedPlayer,
     /// All players.
     All,
     /// CR 608.2c + CR 109.4 + CR 608.2h: All non-eliminated players except those

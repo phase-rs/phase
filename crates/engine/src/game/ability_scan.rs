@@ -2928,6 +2928,11 @@ fn scan_player_filter(x: &PlayerFilter) -> Axes {
             subject: _,
             scope: _,
         } => Axes::NONE,
+        // CR 508.6: inverse combat relation of `OpponentAttacked` — reads the
+        // per-combat attack-declaration ledger and the source's (static)
+        // AttachedTo host. Neither is an event-context or projected-growth
+        // resource, matching the `OpponentAttacked` / `DefendingPlayer` arms.
+        PlayerFilter::OpponentAttackingEnchantedPlayer => Axes::NONE,
         PlayerFilter::All => Axes::NONE,
         PlayerFilter::AllExcept { exclude } => {
             let mut acc = Axes::NONE;

@@ -158,6 +158,15 @@ pub(crate) fn resolve_branch(
 
     super::resolve_ability_chain(state, &resolved, events, 1)?;
     resume_pending(state, events);
+    // NOTE: the token-choice applied seed is intentionally NOT cleared here.
+    // A branch may stash a token-bearing sub-ability into `pending_continuation`
+    // (effects/mod.rs) that drains only later, from the ChooseBranch handler at
+    // `engine_resolution_choices.rs` via `drain_pending_continuation`. Clearing
+    // here — just because `waiting_for` is momentarily back at Priority — would
+    // wipe the seed before that stashed token sub-ability proposes, re-prompting
+    // the originating token-choice replacement (issue #4886, review #3). The
+    // seed is cleared at true full-drain in `drain_pending_continuation`
+    // (Priority + no pending_continuation + no pending_repeat_iteration).
     Ok(())
 }
 
