@@ -16729,6 +16729,55 @@ fn parse_arcane_adaptation_adds_chosen_creature_type() {
     );
 }
 
+// CR 305.6 + CR 205.1b: land-axis counterpart of Arcane Adaptation. Realmwright's
+// "Lands you control are the chosen type in addition to their other types" adds the
+// chosen BASIC LAND TYPE additively (single AddChosenSubtype{BasicLandType}, no
+// wipe) to lands the source's controller controls — mirroring the creature path's
+// AddChosenSubtype{CreatureType}.
+#[test]
+fn parse_chosen_land_type_adds_chosen_basic_land_type() {
+    let def = parse_static_line(
+        "Lands you control are the chosen type in addition to their other types.",
+    )
+    .unwrap();
+    assert_eq!(
+        &def.modifications,
+        &vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::BasicLandType,
+        }],
+        "additive land form must be a single AddChosenSubtype{{BasicLandType}}: {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "affected must be you-control: {tf:?}"
+            );
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Land)),
+                "affected must be lands (not creatures): {tf:?}"
+            );
+        }
+        other => panic!("expected Typed land filter, got {other:?}"),
+    }
+    // The bare-creature form must NOT be claimed by the land handler.
+    assert!(
+        parse_static_line(
+            "Creatures you control are the chosen type in addition to their other types."
+        )
+        .unwrap()
+        .modifications
+        .contains(&ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }),
+        "creature form must still route to the creature-type handler"
+    );
+}
+
 // CR 205.1a + CR 607.2d: full Conspiracy oracle. The battlefield SET static must be
 // present (composed RemoveAllSubtypes + AddChosenSubtype) AND the non-battlefield
 // "the same is true for ..." tail must surface as an Unimplemented residual (the

@@ -523,6 +523,11 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 305.6 + CR 607.2d: land-axis counterpart — "Lands you control are the
+    // chosen type in addition to their other types" (Realmwright).
+    if let Some(def) = parse_chosen_land_type_static(&tp, &text) {
+        return Some(def);
+    }
     // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
     if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
         return Some(def);
