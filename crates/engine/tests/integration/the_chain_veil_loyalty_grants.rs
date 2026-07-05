@@ -122,6 +122,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         duration: None,
         condition: None,
         context: Default::default(),
+        replacement_applied: Default::default(),
         optional_targeting: false,
         optional: false,
         optional_for: None,

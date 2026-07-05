@@ -194,6 +194,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         may_trigger_origin: _,    // provenance tag
         target_selection_mode: _, // Chosen/Random tag
         chosen_players: _,        // concrete chosen player ids
+        replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
     } = a;
@@ -3588,6 +3589,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         may_trigger_origin: _, // provenance tag
         target_selection_mode: _, // Chosen/Random tag (announce-time)
         chosen_players: _, // concrete chosen player ids (already selected)
+        replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
     } = a;

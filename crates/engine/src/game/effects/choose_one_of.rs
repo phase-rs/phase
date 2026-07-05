@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::players;
 use crate::types::ability::{
@@ -7,6 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ReplacementId;
 
 /// CR 701.55a-b + CR 608.2d: Prompt the instructed player to choose one
 /// branch at resolution. The branch itself is not pre-validated for
@@ -40,12 +43,15 @@ pub fn resolve(
     }
     prompt_next(
         state,
-        ability.controller,
-        ability.source_id,
-        branches,
-        ability.targets.clone(),
-        ability.context.clone(),
-        players,
+        PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            players,
+        },
     );
 
     events.push(GameEvent::EffectResolved {
@@ -55,15 +61,26 @@ pub fn resolve(
     Ok(())
 }
 
-pub(crate) fn prompt_next(
-    state: &mut GameState,
-    controller: PlayerId,
-    source_id: ObjectId,
-    branches: Vec<AbilityDefinition>,
-    parent_targets: Vec<TargetRef>,
-    context: crate::types::ability::SpellContext,
-    mut players: Vec<PlayerId>,
-) {
+pub(crate) struct PromptRequest {
+    pub controller: PlayerId,
+    pub source_id: ObjectId,
+    pub branches: Vec<AbilityDefinition>,
+    pub parent_targets: Vec<TargetRef>,
+    pub context: crate::types::ability::SpellContext,
+    pub replacement_applied: HashSet<ReplacementId>,
+    pub players: Vec<PlayerId>,
+}
+
+pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
+    let PromptRequest {
+        controller,
+        source_id,
+        branches,
+        parent_targets,
+        context,
+        replacement_applied,
+        mut players,
+    } = request;
     let Some(player) = players.first().copied() else {
         return;
     };
@@ -77,6 +94,7 @@ pub(crate) fn prompt_next(
         branch_descriptions,
         parent_targets,
         context,
+        replacement_applied,
         remaining_players: players,
     };
     // `priority_player` routing to the chooser is owned by the centralized
@@ -94,12 +112,15 @@ pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>
     };
     prompt_next(
         state,
-        pending.controller,
-        pending.source_id,
-        pending.branches,
-        pending.parent_targets,
-        pending.context,
-        pending.remaining_players,
+        PromptRequest {
+            controller: pending.controller,
+            source_id: pending.source_id,
+            branches: pending.branches,
+            parent_targets: pending.parent_targets,
+            context: pending.context,
+            replacement_applied: pending.replacement_applied,
+            players: pending.remaining_players,
+        },
     );
 }
 
@@ -110,6 +131,7 @@ pub(crate) struct BranchSelection {
     pub branches: Vec<AbilityDefinition>,
     pub parent_targets: Vec<TargetRef>,
     pub context: crate::types::ability::SpellContext,
+    pub replacement_applied: HashSet<ReplacementId>,
     pub remaining_players: Vec<PlayerId>,
     pub index: usize,
 }
@@ -126,6 +148,7 @@ pub(crate) fn resolve_branch(
         branches,
         parent_targets,
         context,
+        replacement_applied,
         remaining_players,
         index,
     } = selection;
@@ -141,12 +164,14 @@ pub(crate) fn resolve_branch(
         branches: branches.clone(),
         parent_targets: parent_targets.clone(),
         context: context.clone(),
+        replacement_applied: replacement_applied.clone(),
         remaining_players,
     });
 
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
     resolved.targets = parent_targets;
+    resolved.set_replacement_applied_recursive(replacement_applied);
     resolved.set_scoped_player_recursive(player);
     if !resolved
         .targets

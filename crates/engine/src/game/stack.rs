@@ -2009,6 +2009,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         target_chooser,
         chosen_players,
         repeat_until,
+        replacement_applied: _,
         sub_link,
         modal,
         mode_abilities,

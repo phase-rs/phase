@@ -232,12 +232,15 @@ pub(crate) fn continue_assemble_batch(
     reveal_contraption(state, player, object_id, events);
     choose_one_of::prompt_next(
         state,
-        player,
-        source_id,
-        assemble_sprocket_branches(object_id, remaining),
-        Vec::new(),
-        crate::types::ability::SpellContext::default(),
-        vec![player],
+        choose_one_of::PromptRequest {
+            controller: player,
+            source_id,
+            branches: assemble_sprocket_branches(object_id, remaining),
+            parent_targets: Vec::new(),
+            context: crate::types::ability::SpellContext::default(),
+            replacement_applied: Default::default(),
+            players: vec![player],
+        },
     );
 }
 
@@ -405,12 +408,15 @@ fn prompt_reassemble_sprocket_choice(
     state.chain_tracked_set_id = Some(TrackedSetId(0));
     choose_one_of::prompt_next(
         state,
-        ability.controller,
-        ability.source_id,
-        branches,
-        ability.targets.clone(),
-        ability.context.clone(),
-        vec![ability.controller],
+        choose_one_of::PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            players: vec![ability.controller],
+        },
     );
     Ok(())
 }

@@ -3422,6 +3422,7 @@ fn walk_ability(
         target_selection_mode: _,
         chosen_players: _,
         sub_link: _,
+        replacement_applied: _,
         dig_found_nothing_for_parent_target: _,
     } = a;
 
