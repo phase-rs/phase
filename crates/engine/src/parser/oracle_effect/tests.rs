@@ -33179,16 +33179,16 @@ fn choose_one_of_rejects_when_second_half_unparseable() {
     );
 }
 
-/// CR 608.2k: After a token-creating effect, a plain "the token <verb>"
+/// CR 608.2c + CR 611.2a: After a token-creating effect, a plain "the token <verb>"
 /// anaphor (without the "created this way" populate qualifier) must
-/// rewrite to a `GenericEffect` targeting `LastCreated`. Pietra,
-/// Crafter of Clowns is the canonical case: "Create a 1/1 white Clown
-/// Robot artifact creature token. … the token gains haste until end of
-/// turn."
+/// preserve its printed duration when it rewrites to a `GenericEffect`
+/// targeting `LastCreated`. Pietra, Crafter of Clowns is the canonical case:
+/// "Create a 1/1 white Clown Robot artifact creature token. … the token
+/// gains haste until end of turn."
 #[test]
-fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
+fn the_token_plain_anaphor_after_token_creator_preserves_duration() {
     let ability = parse_effect_chain(
-        "create a 1/1 white Clown Robot artifact creature token. the token gains haste",
+        "create a 1/1 white Clown Robot artifact creature token. the token gains haste until end of turn",
         AbilityKind::Spell,
     );
     // Outer effect is the Token creation.
@@ -33231,6 +33231,75 @@ fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
     }
 }
 
+/// CR 608.2c + CR 707.2 + CR 611.2c: After a copy-token effect,
+/// "that token" names the newly created copy token, not the copied source
+/// carried in the parent `CopyTokenOf` target slot. The lowering pass must
+/// therefore rewrite both the GenericEffect target and its affected filter
+/// to `LastCreated`.
+#[test]
+fn copy_token_that_token_anaphor_rewrites_generic_effect_to_last_created() {
+    let ability = parse_effect_chain(
+        "create a token that's a copy of target creature. that token gains haste",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*ability.effect, Effect::CopyTokenOf { .. }),
+        "expected Effect::CopyTokenOf, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("that-token haste sub-ability missing");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } => {
+            assert_eq!(*target, Some(TargetFilter::LastCreated));
+            assert_eq!(*duration, Some(Duration::Permanent));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::LastCreated)
+            );
+            assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }
+            )));
+        }
+        other => panic!("expected GenericEffect anaphor rewrite, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 611.2a: Explicitly stated token-anaphor durations are
+/// preserved, while unstated durations last until the end of the game.
+#[test]
+fn token_anaphor_preserves_explicit_until_end_of_turn_duration() {
+    let ability = parse_effect_chain(
+        "create a 1/1 white Clown Robot artifact creature token. the token gains haste until end of turn",
+        AbilityKind::Spell,
+    );
+    let sub = ability.sub_ability.as_deref().expect("haste sub-ability");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            duration,
+            target,
+            static_abilities,
+        } => {
+            assert_eq!(*target, Some(TargetFilter::LastCreated));
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::LastCreated)
+            );
+        }
+        other => panic!("expected GenericEffect, got {other:?}"),
+    }
+}
+
 /// CR 608.2k: Recognizer-level coverage for the "this token "
 /// anaphor — exercised directly via `Unimplemented` description so
 /// the test pins the recognizer's behavior independent of upstream
@@ -33254,7 +33323,7 @@ fn rewrite_recognizer_accepts_this_token_prefix() {
             target,
         } => {
             assert_eq!(target, Some(TargetFilter::LastCreated));
-            assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(duration, Some(Duration::Permanent));
             assert!(static_abilities[0].modifications.iter().any(|m| matches!(
                 m,
                 ContinuousModification::AddKeyword {
@@ -33401,6 +33470,36 @@ fn plain_anaphor_without_token_creator_is_not_rewritten() {
         !contains_last_created_rewrite(&ability),
         "no token creator preceded — must not produce LastCreated rewrite"
     );
+}
+
+/// CR 608.2c: Non-token antecedents must keep their normal `ParentTarget`
+/// binding; the LastCreated rewrite is gated on a prior token creator.
+#[test]
+fn non_token_parent_target_generic_effect_stays_parent_target() {
+    let ability = parse_effect_chain(
+        "gain control of target permanent until end of turn. it gains haste until end of turn",
+        AbilityKind::Spell,
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("expected haste followup");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => {
+            assert_ne!(*target, Some(TargetFilter::LastCreated));
+            assert!(
+                static_abilities
+                    .iter()
+                    .all(|s| s.affected != Some(TargetFilter::LastCreated)),
+                "non-token anaphor must not rewrite to LastCreated: {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect followup, got {other:?}"),
+    }
 }
 
 /// CR 608.2k + CR 603.7c: Inalla-style "Exile it at the beginning of

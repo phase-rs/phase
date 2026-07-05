@@ -2824,7 +2824,7 @@ fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
     parse_event_context_quantity(expr).or_else(|| parse_cda_quantity(expr))
 }
 
-/// CR 611.2c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
+/// CR 611.2a/c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
 /// anaphors following a token-creating effect.
 ///
 /// Two rewrites, both scoped to defs whose chain contains a prior token
@@ -2832,8 +2832,9 @@ fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
 ///
 /// 1. `Effect::Unimplemented { description: "<anaphor> <mod>" }`
 ///    → `GenericEffect { target: Some(LastCreated), static_abilities: [...],
-///    duration: Some(UntilEndOfTurn) }` where the modifications are parsed
-///    from the verb phrase ("gains haste" / "gets +1/+1" / …).
+///    duration: Some(Permanent) }` where the modifications are parsed from the
+///    verb phrase ("gains haste" / "gets +1/+1" / …). Explicit printed
+///    durations are preserved.
 ///    Recognized anaphor prefixes (longest-first to disambiguate):
 ///    "the token created this way " / "the tokens created this way "
 ///    (populate-specific qualifier) and the plain forms "this token " /
@@ -2873,6 +2874,7 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
     let Effect::GenericEffect {
         static_abilities,
         target,
+        duration,
         ..
     } = effect
     else {
@@ -2887,6 +2889,9 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
     }
     if rebound && matches!(target, None | Some(TargetFilter::SelfRef)) {
         *target = Some(TargetFilter::LastCreated);
+    }
+    if rebound && duration.is_none() {
+        *duration = Some(Duration::Permanent);
     }
 }
 
@@ -3163,9 +3168,7 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
         .description(text.to_string());
     Some(Effect::GenericEffect {
         static_abilities: vec![static_def],
-        duration: duration
-            .or(clause_duration)
-            .or(Some(Duration::UntilEndOfTurn)),
+        duration: duration.or(clause_duration).or(Some(Duration::Permanent)),
         target: Some(TargetFilter::LastCreated),
     })
 }
@@ -3287,6 +3290,51 @@ fn thread_chosen_damage_source_into_oneshot_effects(defs: &mut [AbilityDefinitio
 
 pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
     match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            duration,
+            ..
+        } => {
+            // CR 608.2c + CR 611.2c: In token-creator followups ("that token
+            // gains haste"), the GenericEffect's application authority is the
+            // just-created token set, not the parent copied/source object.
+            // Rewrite both possible application slots because the runtime
+            // intentionally prefers a StaticDefinition's inherited `affected`
+            // reference over the outer GenericEffect target.
+            let mut rebound = false;
+            for static_def in static_abilities {
+                if matches!(
+                    static_def.affected,
+                    Some(
+                        TargetFilter::ParentTarget
+                            | TargetFilter::SelfRef
+                            | TargetFilter::TriggeringSource
+                            | TargetFilter::LastCreated
+                    )
+                ) {
+                    static_def.affected = Some(TargetFilter::LastCreated);
+                    rebound = true;
+                }
+            }
+            if matches!(
+                target,
+                Some(
+                    TargetFilter::ParentTarget
+                        | TargetFilter::SelfRef
+                        | TargetFilter::TriggeringSource
+                        | TargetFilter::LastCreated
+                )
+            ) {
+                *target = Some(TargetFilter::LastCreated);
+                rebound = true;
+            } else if rebound && target.is_none() {
+                *target = Some(TargetFilter::LastCreated);
+            }
+            if rebound && duration.is_none() {
+                *duration = Some(Duration::Permanent);
+            }
+        }
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
@@ -9994,6 +10042,51 @@ mod where_x_tests {
             gain.contains(&demonstrative_mv),
             "you-gain GainLife.amount must bind Demonstrative mana value, got {gain:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod token_anaphor_rewrite_tests {
+    use super::*;
+
+    /// CR 608.2c + CR 611.2c: Token-anaphor lowering must rebind the outer
+    /// `GenericEffect.target` even when the granted static's own `affected`
+    /// filter intentionally names a different object set. This is the
+    /// quoted-static shape: the token receives the static ability, and that
+    /// static ability affects another class of objects.
+    #[test]
+    fn generic_effect_rewrites_outer_target_without_inner_affected_rewrite() {
+        let mut effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(
+                        StaticDefinition::continuous()
+                            .affected(TargetFilter::Typed(TypedFilter::creature()))
+                            .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                    ),
+                }])],
+            duration: None,
+            target: Some(TargetFilter::ParentTarget),
+        };
+
+        rewrite_parent_target_to_last_created(&mut effect);
+
+        match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(target, Some(TargetFilter::LastCreated));
+                assert_eq!(duration, Some(Duration::Permanent));
+                assert!(
+                    matches!(static_abilities[0].affected, Some(TargetFilter::Typed(_))),
+                    "inner affected filter must stay on the granted static's object set"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
     }
 }
 

@@ -23912,6 +23912,69 @@ fn enchanted_permanent_is_ongoing_grants_supertype() {
     );
 }
 
+/// CR 604.1 + CR 611.3a + CR 613.4c + CR 122.1 + CR 109.4: High Sentinels of
+/// Arashin — "~ gets +1/+1 for each other creature you control with a +1/+1
+/// counter on it." The controller scope ("you control") and the counter
+/// qualifier ("with a +1/+1 counter on it") both trail the type word; the "for
+/// each" grammar previously had no combinator for a controller-scoped count
+/// gated on a counter predicate, so this dynamic pump failed to parse and the
+/// whole modification was dropped.
+#[test]
+fn static_self_dynamic_pump_for_each_other_creature_you_control_with_counter() {
+    let def = parse_static_line(
+        "~ gets +1/+1 for each other creature you control with a +1/+1 counter on it.",
+    )
+    .expect("High Sentinels of Arashin's dynamic pump must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    let is_expected_count = |value: &QuantityExpr| -> bool {
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } = value
+        else {
+            return false;
+        };
+        tf.controller == Some(ControllerRef::You)
+            && tf.type_filters == vec![TypeFilter::Creature]
+            && tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another))
+            && tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::Counters {
+                        counters: crate::types::counter::CounterMatch::OfType(
+                            CounterType::Plus1Plus1
+                        ),
+                        ..
+                    }
+                )
+            })
+    };
+
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddDynamicPower { value } if is_expected_count(value))));
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { value } if is_expected_count(value))));
+    assert!(
+        !def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+        def.modifications
+    );
+}
+
 // --- Granted hand-zone alt-cost keyword tests (Dream Devourer foretell,
 // Aminatou miracle; CR 702.143a / CR 702.94a / CR 601.2f / CR 113.6b) ---
 

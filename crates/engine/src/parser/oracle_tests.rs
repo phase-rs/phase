@@ -17196,11 +17196,10 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
         .expect("begin-combat trigger must have an execute body");
 
     // CR 707.9b + CR 205.4: top-level effect is `CopyTokenOf` with the
-    // `RemoveSupertype { Legendary }` modification baked in. The token
-    // copies "equipped creature" — the target filter is internal detail
-    // tested elsewhere; this regression test pins ONLY the
-    // additional_modifications, which is the load-bearing field for the
-    // non-legendary semantic.
+    // `RemoveSupertype { Legendary }` modification baked in. The follow-up
+    // "That token gains haste" is a separate continuous effect bound to
+    // `LastCreated`, not to the equipped creature source copied by the
+    // parent effect.
     match &*exec.effect {
         Effect::CopyTokenOf {
             additional_modifications,
@@ -17215,6 +17214,44 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
             );
         }
         other => panic!("expected CopyTokenOf at trigger.execute.effect, got {other:?}"),
+    }
+
+    let haste = exec
+        .sub_ability
+        .as_deref()
+        .expect("Helm trigger must include the haste followup");
+    match &*haste.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } => {
+            assert_eq!(
+                *target,
+                Some(TargetFilter::LastCreated),
+                "Helm haste rider must target the created token, not the equipped creature"
+            );
+            assert_eq!(
+                *duration,
+                Some(Duration::Permanent),
+                "Helm's Oracle text states no duration for the haste grant"
+            );
+            assert!(
+                static_abilities.iter().any(|static_def| {
+                    static_def.affected == Some(TargetFilter::LastCreated)
+                        && static_def.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::Haste,
+                                }
+                            )
+                        })
+                }),
+                "Helm haste rider must affect LastCreated with AddKeyword(Haste): {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect haste followup, got {other:?}"),
     }
 }
 

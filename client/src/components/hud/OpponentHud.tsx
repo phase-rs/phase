@@ -576,7 +576,7 @@ function OpponentTab({
   const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
-  const { waitingSeatId } = useTurnStatus();
+  const { waitingSeatId, reason } = useTurnStatus();
   const isWaitingOnThem = waitingSeatId === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
   const isUnderAttack = gameState?.combat?.attackers.some(
@@ -703,16 +703,16 @@ function OpponentTab({
   //   - Focused + not targetable click → no-op (already viewing).
   // The visual affordance reflects which step the next click will perform:
   // cyan accent on any targetable opponent, but the prominent commit-ready
-  // treatment (crosshair cursor, pulsing glow, bright ring) appears only
-  // when also focused — so the user gets clear "the next click commits"
-  // feedback before they pull the trigger.
+  // treatment (pointer cursor, pulsing glow, bright ring) appears only when
+  // also focused — so the user gets clear "the next click commits" feedback
+  // before they pull the trigger.
   const commitReady = isValidTarget && isFocused;
   const borderClass = commitReady
-    ? "border-cyan-300/70 bg-cyan-950/40 ring-2 ring-cyan-300/70 shadow-[0_0_22px_rgba(34,211,238,0.55)] cursor-crosshair"
+    ? "border-cyan-300/70 bg-cyan-950/40 ring-2 ring-cyan-300/70 shadow-[0_0_22px_rgba(34,211,238,0.55)] cursor-pointer"
     : isValidTarget
       ? "border-cyan-400/45 bg-cyan-950/30 ring-1 ring-cyan-300/35"
       : isTheirTurn
-        ? "border-rose-400/45 bg-rose-950/40 ring-2 ring-rose-300/70 ring-offset-2 ring-offset-black/40 shadow-[0_14px_28px_rgba(244,63,94,0.22)]"
+        ? "border-rose-300/70 bg-rose-950/62 ring-1 ring-rose-300/45 ring-offset-1 ring-offset-black/40 shadow-[0_14px_30px_rgba(244,63,94,0.3)]"
         : ally
           ? isFocused
             ? "border-emerald-400/40 bg-emerald-950/40 ring-1 ring-emerald-300/30"
@@ -720,6 +720,12 @@ function OpponentTab({
           : isFocused
             ? "border-amber-400/40 bg-amber-950/38 ring-1 ring-amber-300/30"
             : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-slate-900/72";
+  const turnAccentClass = isTheirTurn
+    ? "after:pointer-events-none after:absolute after:inset-x-2 after:bottom-0 after:h-1 after:rounded-full after:bg-rose-300 after:shadow-[0_0_12px_rgba(251,113,133,0.95)]"
+    : "";
+  const waitingReasonText = isWaitingOnThem
+    ? t(reason?.key ?? "status.reason.thinking", reason?.params)
+    : null;
 
   const ariaLabel = commitReady
     ? t("opponentHud.targetPlayer", { name: label })
@@ -749,14 +755,14 @@ function OpponentTab({
 
   const statusCluster = (
     <div className="flex shrink-0 items-center gap-1">
-      {isWaitingOnThem && (
+      {waitingReasonText && (
         <span
-          aria-hidden
-          title={t("status.waitingFor", { player: label })}
-          className="h-1.5 w-1.5 rounded-full bg-amber-300 shadow-[0_0_6px_1px_rgba(251,191,36,0.7)] animate-pulse"
-        />
+          title={waitingReasonText}
+          className="max-w-[6.5rem] shrink-0 truncate rounded-sm border border-amber-200/50 bg-amber-300/18 px-1 py-0.5 text-[9px] font-black uppercase tracking-[0.12em] text-amber-100 shadow-[0_0_10px_rgba(251,191,36,0.35)]"
+        >
+          {waitingReasonText}
+        </span>
       )}
-      {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-pulse" />}
       <span className={`flex items-center gap-0.5 text-xs font-semibold tabular-nums @min-[10rem]:text-sm ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="h-2.5 w-2.5 text-rose-400/90">
           <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
@@ -839,7 +845,7 @@ function OpponentTab({
       // ~14rem (~227px at the default 16px root, verified in-browser). Cap at
       // 16rem gives headroom; the reveal is gated at 15rem so a tab too narrow
       // to fit the breakdown collapses to the HAND-only tier (tap to focus).
-      className={`@container relative flex min-w-0 items-center rounded-lg border backdrop-blur-xl transition-all duration-200 ${splitOverview ? "gap-1 px-1 py-0" : "gap-1.5 px-1.5"} ${compact && !splitOverview ? "py-0.5" : !splitOverview ? "py-1" : ""} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : liveSizeClass} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      className={`@container relative flex min-w-0 items-center rounded-lg border backdrop-blur-xl transition-all duration-200 ${splitOverview ? "gap-1 px-1 py-0" : "gap-1.5 px-1.5"} ${compact && !splitOverview ? "py-0.5" : !splitOverview ? "py-1" : ""} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : liveSizeClass} ${borderClass} ${turnAccentClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && !commitReady && (
         <motion.div

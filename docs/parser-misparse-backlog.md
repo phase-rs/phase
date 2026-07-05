@@ -5171,7 +5171,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. Other / uncategorized misparse  (5 cards)
+### 31. Other / uncategorized misparse  (4 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5181,7 +5181,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - Cabal Stronghold
 - Flaccify
-- Open the Omenpaths
 - Rainbow Vale
 - The Great Mound
 

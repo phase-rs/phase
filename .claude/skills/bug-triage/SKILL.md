@@ -34,7 +34,8 @@ bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifyin
 # (`needs_human_review`, or a `create_issue` thread you did not publish) must
 # still be resolved inline — see *Delta Completion Invariant* below.
 
-# Publish: for each --thread, CREATE a new GH issue from the triage item AND
+# Publish: for each --thread, CREATE a new GH issue from the triage item,
+# include machine-readable Discord thread/message ids in the issue body, AND
 # react 👀 + post a tracking link inside the originating Discord thread.
 # IMPORTANT: `publish` ALWAYS creates a NEW issue (resolveIssue(..., "created"))
 # — it has NO reconcile / write-back-only mode, despite older doc claims. The
@@ -45,6 +46,9 @@ bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifyin
 # a duplicate. Use the manual write-back procedure below instead.
 bun scripts/sync-bug-reports.ts publish --thread=<id>[,<id>...] --dry-run   # preview without side effects
 bun scripts/sync-bug-reports.ts publish --thread=<id>[,<id>...]             # create GH issue + Discord write-back
+# If a previous publish created the GH issue but Discord write-back failed,
+# rerun the same publish command. It repairs the missing reaction/reply from
+# published_threads instead of creating a duplicate issue.
 
 # Check a specific card's parser status
 jq '.["card name"]' client/public/card-data.json
@@ -177,7 +181,8 @@ have not actually written back to.
 ### Two paths — pick by whether a GH issue already exists
 
 **Path A — no GH issue exists yet for the thread.** Use `publish`. It creates
-the issue, posts the 👀 + link, and records `published_threads` with the real
+the issue with explicit `phase-discord-thread-id` / `phase-discord-message-id`
+metadata, posts the 👀 + link, and records `published_threads` with the real
 message ids — all in one step. Nothing else to do.
 
 ```bash
@@ -252,6 +257,40 @@ gh issue edit <N> --repo phase-rs/phase --remove-label "status:fixed-unreleased"
 gh issue close <N> --repo phase-rs/phase --comment "Verified in gameplay. Closing."
 gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-verify" --add-label "status:verified"
 ```
+
+### Discord Close Follow-Up Automation
+
+`.github/workflows/discord-issue-close-followup.yml` runs whenever a
+`source:discord` GitHub issue is closed. It reads the Discord thread id from
+the issue body and posts back into that Discord thread, then **archives the
+thread to mark the report resolved** — closing the loop so the reporter is
+told the outcome and the thread stops showing as open.
+
+The message wording depends on `issue.state_reason`:
+
+- **Closed as completed** (a fix shipped):
+  > #N tracking this report was closed: <issue-url>
+  > Please test the fix in the latest build. If it's still broken, open a **new thread** in #bugreports — this thread is now resolved.
+- **Closed for any other reason** (`not_planned`, `duplicate`) — neutral, no retest ask:
+  > #N tracking this report was closed: <issue-url>
+  > This thread is now resolved. If you have new information, please open a **new thread** in #bugreports.
+
+The parser accepts the hidden `phase-discord-thread-id` metadata comment, the
+visible `**Discord thread id:**` field, and the older
+`discord: <thread>/<message>` footer, so older script-created issues still work
+when they contain that footer. If the thread is archived, the script unarchives
+it before posting, then re-archives it afterward.
+
+**Ops preconditions:**
+- Repository secret `DISCORD_BOT_TOKEN` — required to post.
+- Repository/org Actions variable `DISCORD_BUGREPORTS_CHANNEL_ID` (optional) —
+  when set, the "#bugreports" ask renders as a clickable `<#id>` channel
+  mention; unset falls back to the plain text `#bugreports`. **Create this
+  variable manually** (Settings → Secrets and variables → Actions → Variables).
+- The bot must have **MANAGE_THREADS** in the #bugreports channel to archive
+  threads. Archiving is best-effort: if the permission is missing the follow-up
+  message still posts and the workflow logs a warning instead of failing (so it
+  never double-posts on a rerun).
 
 ### Mandatory Pre-Implementation Plan Review Gate — Independent Review ROUNDS Until Clean
 
@@ -760,6 +799,20 @@ commands generate the `.jsonl` files; `triage/llm-triage-items.jsonl`,
 | `triage/sync-state.json` | Incremental fetch cursors + `published_threads` map | `fetch` / `publish` | yes |
 | `triage/dashboard.md` | Generated dashboard | `render` | yes |
 | `triage/triage-dashboard.md` | Triage-classified dashboard (only when triage data exists) | `render` | yes |
+
+### Card detection in `extract`
+
+`extract` finds card names three ways (see `scripts/lib/cardNames.ts`): a raw
+substring scan (noisy — yields single-word false positives like "x"/"life"),
+plus explicit `[[Card Name]]` brackets and Scryfall card URLs resolved against a
+punctuation-normalized index. Normalization collapses `. . .`, `//`, commas, and
+hyphens so `[[welcome to...]]` and the slug `welcome-to-jurassic-park` both match
+the card-data key `welcome to . . .`; a double-faced combined name resolves to
+both face keys. Report items carry an optional `explicitCards` field — the
+trusted bracket/URL subset of `cards` — which `publish` always includes in the
+issue's verified-oracle section (bypassing the false-positive filter). The field
+is optional, so `triage` still reads `report-items.jsonl` written before it
+existed; a fresh `extract` rewrites the file and repopulates it.
 
 ## Label Taxonomy
 
