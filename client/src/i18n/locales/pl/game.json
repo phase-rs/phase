@@ -95,7 +95,9 @@
       "Exile": "Wygnanie",
       "Command": "Strefa dowodzenia"
     },
-    "emblemTag": "Emblemat"
+    "emblemTag": "Emblemat",
+    "allPlayers": "Wszyscy",
+    "cancel": "Anuluj"
   },
   "board": {
     "reportCard": "Zgłoś problem z kartą",

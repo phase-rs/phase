@@ -95,7 +95,9 @@
       "Exile": "Exilio",
       "Command": "Zona de mando"
     },
-    "emblemTag": "Emblema"
+    "emblemTag": "Emblema",
+    "allPlayers": "Todos",
+    "cancel": "Cancelar"
   },
   "board": {
     "reportCard": "Informar de un problema con una carta",

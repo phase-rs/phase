@@ -174,7 +174,7 @@ export function GameMenu({
         {showReportCard && onReportCardClick && (
           <button
             onClick={onReportCardClick}
-            className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-gray-400 transition-colors hover:bg-white/10 hover:text-gray-200"
+            className="flex h-7 w-7 items-center justify-center rounded-md bg-red-500/12 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-300"
             aria-label={t("gameMenu.reportCard")}
             title={t("gameMenu.reportCard")}
           >

@@ -95,7 +95,9 @@
       "Exile": "Exile",
       "Command": "Command"
     },
-    "emblemTag": "Emblem"
+    "emblemTag": "Emblem",
+    "allPlayers": "All",
+    "cancel": "Cancel"
   },
   "board": {
     "reportCard": "Report a card problem",

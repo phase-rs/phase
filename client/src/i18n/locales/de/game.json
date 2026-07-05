@@ -95,7 +95,9 @@
       "Exile": "Exil",
       "Command": "Kommandozone"
     },
-    "emblemTag": "Emblem"
+    "emblemTag": "Emblem",
+    "allPlayers": "Alle",
+    "cancel": "Abbrechen"
   },
   "board": {
     "reportCard": "Kartenproblem melden",
