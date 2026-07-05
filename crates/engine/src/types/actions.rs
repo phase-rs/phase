@@ -4,7 +4,7 @@ use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
-    CounterMoveChoice, ShardChoice, YieldScope, YieldTarget,
+    CounterMoveChoice, CounterRemoveChoice, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -644,6 +644,13 @@ pub enum GameAction {
     /// CR 122.5 + CR 608.2d: Submit resolution-time counter-move distribution.
     ChooseCounterMoveDistribution {
         selections: Vec<CounterMoveChoice>,
+    },
+    /// CR 107.1c + CR 608.2d: Submit the resolution-time "remove any number of
+    /// counters" selection (Rhys, the Evermore; Tetravus). Answers a
+    /// `WaitingFor::RemoveCountersChoice`. An empty `selections` vector removes
+    /// nothing (CR 107.1c: choosing zero is always legal).
+    ChooseCountersToRemove {
+        selections: Vec<CounterRemoveChoice>,
     },
     /// CR 107.1c + CR 107.14: Submit the chosen amount for a
     /// `WaitingFor::PayAmountChoice` prompt ("pay any amount of {E}" and
@@ -1394,6 +1401,7 @@ impl GameAction {
             | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }
             | GameAction::ChooseCounterMoveDistribution { .. }
+            | GameAction::ChooseCountersToRemove { .. }
             | GameAction::SubmitPayAmount { .. }
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }

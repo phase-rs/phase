@@ -74,8 +74,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, lower_as_enters_becomes_choice_modal, lower_replacement_ir,
-    parse_replacement_line,
+    find_copy_verb_present, lower_as_enters_becomes_choice_modal,
+    lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -96,7 +96,7 @@ use super::oracle_static::{
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, split_same_is_true_static_tail,
-    strip_reminder_text, TextPair,
+    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 
 /// Collected parsed abilities from Oracle text.
@@ -425,6 +425,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
                 DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::Upkeep,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 tag("at the beginning of your first upkeep, "),
             ),
@@ -3869,6 +3870,19 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 continue;
             }
+            // CR 614.1c + CR 708.11: dual "As ~ enters[ or is turned face up],
+            // put X +1/+1 counters on it, where X is …" (Crowd-Control Warden).
+            // A single sentence that never splits on `.`, so it needs a
+            // multi-emit-into-`result` path (one `Moved`/Battlefield + one
+            // `TurnFaceUp` replacement sharing the PutCounter execute). Runs BEFORE
+            // the generic sequence/line parsers, whose per-arm parsers each return
+            // one definition and cannot emit the dual pair. The tight
+            // PutCounter-SelfRef guard makes it fall through on any non-counter
+            // as-enters line, so the choose/becomes/enters-with siblings are safe.
+            if lower_as_enters_or_face_up_counters(&line, &mut result) {
+                i += 1;
+                continue;
+            }
             // CR 614.1c: Effects that read "[This permanent] enters with ...",
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
@@ -4704,7 +4718,88 @@ pub fn parse_oracle_text(
         types,
         subtypes,
     );
-    lower_oracle_ir(&ir)
+    let mut parsed = lower_oracle_ir(&ir);
+    scrub_granting_placeholder_descriptions(&mut parsed);
+    parsed
+}
+
+/// CR 201.5a: Single post-parse degrade net for [`GRANTING_SELF_PLACEHOLDER`].
+/// The masker inserts the placeholder into verb-object self-ref positions so the
+/// self-ref combinators can map it to `TargetFilter::GrantingObject`. After
+/// parsing, any residual placeholder lives ONLY in display `description` strings
+/// (which embed the raw quoted text, e.g. an equipment's outer "…has \"…\""
+/// static description); it must render as `~` and never leak the raw private-use
+/// char into card-data. This is the shared-parse-entry cleanup the plan promised
+/// — one sweep, not a per-consumer patch.
+fn scrub_granting_placeholder_descriptions(parsed: &mut ParsedAbilities) {
+    for def in &mut parsed.abilities {
+        scrub_ability_descriptions(def);
+    }
+    for trig in &mut parsed.triggers {
+        scrub_trigger_descriptions(trig);
+    }
+    for st in &mut parsed.statics {
+        scrub_static_descriptions(st);
+    }
+    for rep in &mut parsed.replacements {
+        scrub_replacement_descriptions(rep);
+    }
+}
+
+fn scrub_description(desc: &mut Option<String>) {
+    if let Some(s) = desc {
+        if s.contains(GRANTING_SELF_PLACEHOLDER) {
+            *s = s.replace(GRANTING_SELF_PLACEHOLDER, "~");
+        }
+    }
+}
+
+fn scrub_ability_descriptions(def: &mut AbilityDefinition) {
+    scrub_description(&mut def.description);
+    // allow-noncombinator: destructure-read of the Unimplemented gap description
+    // (a display string), not a hand-constructed literal or parsing dispatch.
+    if let Effect::Unimplemented { description, .. } = def.effect.as_mut() {
+        scrub_description(description);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        scrub_ability_descriptions(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        scrub_ability_descriptions(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        scrub_ability_descriptions(mode);
+    }
+}
+
+fn scrub_trigger_descriptions(trig: &mut TriggerDefinition) {
+    scrub_description(&mut trig.description);
+    if let Some(execute) = trig.execute.as_mut() {
+        scrub_ability_descriptions(execute);
+    }
+}
+
+fn scrub_static_descriptions(st: &mut StaticDefinition) {
+    scrub_description(&mut st.description);
+    for modification in st.modifications.iter_mut() {
+        match modification {
+            ContinuousModification::GrantAbility { definition } => {
+                scrub_ability_descriptions(definition)
+            }
+            ContinuousModification::GrantTrigger { trigger } => scrub_trigger_descriptions(trigger),
+            ContinuousModification::GrantStaticAbility { definition } => {
+                scrub_static_descriptions(definition)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scrub_replacement_descriptions(rep: &mut ReplacementDefinition) {
+    scrub_description(&mut rep.description);
+    if let Some(execute) = rep.execute.as_mut() {
+        scrub_ability_descriptions(execute);
+    }
 }
 
 /// Try to parse "Equip {cost}" or "Equip — {cost}" lines.
@@ -5045,7 +5140,7 @@ fn parse_loyalty_number(s: &str) -> Option<i32> {
 /// a cost reduction pattern. If found, remove it from the chain and return the parsed
 /// `CostReduction`. The cost reduction may be several levels deep (e.g., Boseiju has
 /// SearchLibrary → ChangeZone → ChangeZone → Unimplemented(cost reduction)).
-fn extract_cost_reduction_from_chain(def: &mut AbilityDefinition) {
+pub(crate) fn extract_cost_reduction_from_chain(def: &mut AbilityDefinition) {
     if let Some(reduction) = strip_cost_reduction_node(&mut def.sub_ability) {
         def.cost_reduction = Some(reduction);
     }

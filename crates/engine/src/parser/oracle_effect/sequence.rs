@@ -10,7 +10,7 @@ use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_target::parse_target;
-use super::super::oracle_util::{contains_possessive, TextPair};
+use super::super::oracle_util::{contains_possessive, parse_count_expr, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -966,6 +966,23 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             &before_lower,
                             &remainder_trimmed.to_ascii_lowercase(),
                         );
+                        // CR 205.1a + CR 613.1d: "It's a(n) <types> [with '<ability>']
+                        // and it loses all other card types" (Vraska, the Silencer) is a
+                        // single type-REPLACEMENT copula. The "loses all other card
+                        // types" tail is the CR 205.1a signal that the copula SETS (not
+                        // adds) the card types, so it must reach
+                        // `parse_its_a_type_loses_others` attached to the copula head
+                        // rather than being bisected into a verb-less "loses ..."
+                        // sub_ability. This phrase is unique to the replacement form, so
+                        // a bare " and " immediately before it is always an internal
+                        // conjunct, never a clause boundary.
+                        let remainder_lower_for_loses = remainder_trimmed.to_ascii_lowercase();
+                        let loses_all_other_card_types_continuation = alt((
+                            tag::<_, _, OracleError<'_>>("it loses all other card types"),
+                            tag("loses all other card types"),
+                        ))
+                        .parse(remainder_lower_for_loses.as_str())
+                        .is_ok();
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -983,6 +1000,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || roll_die_modifier_continuation
                         || bare_becomes_continuation
                         || mass_exile_union_continuation
+                        || loses_all_other_card_types_continuation
                         || inside_prefix_comma_and_continuation;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
@@ -3284,12 +3302,8 @@ pub(super) fn apply_clause_continuation(
                         }
 
                         // 2. Map quantity → keep_count / up_to for the choice Dig.
-                        let (choice_keep_count, choice_up_to) = match quantity {
-                            PutCount::All => (Some(u32::MAX), false),
-                            PutCount::AnyNumber => (Some(u32::MAX), true),
-                            PutCount::Up(n) => (Some(n), true),
-                            PutCount::Exactly(n) => (Some(n), false),
-                        };
+                        let (choice_keep_count, choice_keep_count_expr, choice_up_to) =
+                            quantity.to_dig_keep();
 
                         // 3. Decline branch: put all looked-at cards on library
                         // bottom with no interactive choice (player declined
@@ -3300,6 +3314,7 @@ pub(super) fn apply_clause_continuation(
                                 player: TargetFilter::Controller,
                                 count: QuantityExpr::Fixed { value: 0 },
                                 keep_count: Some(0),
+                                keep_count_expr: None,
                                 up_to: false,
                                 filter: TargetFilter::Any,
                                 destination: None,
@@ -3320,6 +3335,7 @@ pub(super) fn apply_clause_continuation(
                                 player: TargetFilter::Controller,
                                 count: QuantityExpr::Fixed { value: 0 },
                                 keep_count: choice_keep_count,
+                                keep_count_expr: choice_keep_count_expr,
                                 up_to: choice_up_to,
                                 filter: card_filter,
                                 destination: kept_dest,
@@ -3350,6 +3366,7 @@ pub(super) fn apply_clause_continuation(
             };
             if let Effect::Dig {
                 keep_count,
+                keep_count_expr,
                 up_to,
                 filter,
                 destination,
@@ -3382,24 +3399,10 @@ pub(super) fn apply_clause_continuation(
                 // sentinel here: the Dig resolver clamps it to the number of
                 // seen cards, preserving "all" and "any number" without the old
                 // arbitrary 255 cap or overloading `None`'s default meaning.
-                match quantity {
-                    PutCount::All => {
-                        *keep_count = Some(u32::MAX);
-                        *up_to = false;
-                    }
-                    PutCount::AnyNumber => {
-                        *keep_count = Some(u32::MAX);
-                        *up_to = true;
-                    }
-                    PutCount::Up(n) => {
-                        *keep_count = Some(n);
-                        *up_to = true;
-                    }
-                    PutCount::Exactly(n) => {
-                        *keep_count = Some(n);
-                        *up_to = false;
-                    }
-                }
+                let (new_keep, new_keep_expr, new_up_to) = quantity.to_dig_keep();
+                *keep_count = new_keep;
+                *keep_count_expr = new_keep_expr;
+                *up_to = new_up_to;
                 *filter = card_filter;
                 // CR 701.20b + CR 608.2c: When `destination` is None the kept
                 // cards are NOT auto-routed by the Dig resolver; downstream sub_abilities
@@ -4140,10 +4143,16 @@ pub(super) fn parse_intrinsic_continuation_ast(
             let full_lower = full_text.to_ascii_lowercase();
             // CR 400.7 + CR 701.23 + CR 701.24: Name-hate compounds ("search … graveyard,
             // hand, and library … with the same name as that {creature,spell,…} and exile
-            // them") lower to `ChangeZoneAll { SameNameAsParentTarget }`, not SearchLibrary
-            // + SearchDestination. Suppress the generic put/exile step when the full
-            // sentence matches the multi-zone same-name exile recognizer.
-            if super::imperative::try_parse_multi_zone_same_name_exile(&full_lower).is_some() {
+            // them"). The mandatory "all cards" form lowers to
+            // `ChangeZoneAll { SameNameAsParentTarget }` (NOT SearchLibrary) and handles
+            // the exile itself — suppress the generic put/exile step for it. The
+            // interactive "any number" / "up to N" forms DO lower to `SearchLibrary`
+            // (§9 R1 / D2) and need this intrinsic `ChangeZone { Exile }` destination to
+            // remove the found set, so do NOT suppress them.
+            if matches!(
+                super::imperative::try_parse_multi_zone_same_name_exile(&full_lower),
+                Some((_, MultiZoneExileQuantifier::All))
+            ) {
                 return None;
             }
             // CR 608.2c: Conditional result destinations ("put it onto the
@@ -4325,9 +4334,9 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::All, after_put_q)
         } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
             if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
-                (PutCount::Up(n), remainder.trim())
+                (PutCount::up(n), remainder.trim())
             } else {
-                (PutCount::Up(1), rest)
+                (PutCount::up(1), rest)
             }
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
@@ -4336,27 +4345,29 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
             (
                 if prefix_optional {
-                    PutCount::Up(1)
+                    PutCount::up(1)
                 } else {
-                    PutCount::Exactly(1)
+                    PutCount::exactly(1)
                 },
                 rest,
             )
-        } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
+        } else if let Some((expr, remainder)) = parse_count_expr(after_put) {
+            // CR 701.20e: literal → `Fixed` (identical lowering); "X" → `Variable`
+            // → dynamic keep carried through `Dig.keep_count_expr`.
             (
                 if prefix_optional {
-                    PutCount::Up(n)
+                    PutCount::Up(expr)
                 } else {
-                    PutCount::Exactly(n)
+                    PutCount::Exactly(expr)
                 },
                 remainder.trim(),
             )
         } else {
             (
                 if prefix_optional {
-                    PutCount::Up(1)
+                    PutCount::up(1)
                 } else {
-                    PutCount::Exactly(1)
+                    PutCount::exactly(1)
                 },
                 after_put,
             )
@@ -4440,9 +4451,9 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::All, after_put_q)
         } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
             if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
-                (PutCount::Up(n), remainder.trim())
+                (PutCount::up(n), remainder.trim())
             } else {
-                (PutCount::Up(1), rest)
+                (PutCount::up(1), rest)
             }
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
@@ -4450,12 +4461,14 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::AnyNumber, rest)
         } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
             // "a creature card" / "an artifact card" — up_to 1 (player may choose none)
-            (PutCount::Up(1), rest)
-        } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
-            // Explicit numeric count: "two creature cards" → exactly 2
-            (PutCount::Exactly(n), remainder.trim())
+            (PutCount::up(1), rest)
+        } else if let Some((expr, remainder)) = parse_count_expr(after_put) {
+            // CR 701.20e: explicit count — literal ("two creature cards" → exactly
+            // 2, `Fixed`, identical lowering) or dynamic ("X cards from among them"
+            // → `Variable`, carried through `Dig.keep_count_expr`; Stargaze).
+            (PutCount::Exactly(expr), remainder.trim())
         } else {
-            (PutCount::Up(1), after_put)
+            (PutCount::up(1), after_put)
         };
 
         // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less")
@@ -4546,11 +4559,12 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
                 nom_primitives::parse_number
                     .parse(rest)
-                    .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
-            } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
-                PutCount::Exactly(n)
+                    .map_or(PutCount::up(1), |(_, n)| PutCount::up(n))
+            } else if let Some((expr, _)) = parse_count_expr(after_put) {
+                // CR 701.20e: literal → `Fixed`; "X" → `Variable` (dynamic keep).
+                PutCount::Exactly(expr)
             } else {
-                PutCount::Up(1)
+                PutCount::up(1)
             };
 
             let rest_destination = parse_of_them_rest_destination(lower);
@@ -5026,6 +5040,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
@@ -5085,6 +5100,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
@@ -5521,7 +5537,7 @@ pub(super) fn parse_followup_continuation_ast(
         {
             use crate::types::ability::{FilterProp, TypedFilter};
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
                     FilterProp::NameMatchesAnyPermanent { controller: None },
                 ])),
@@ -5539,7 +5555,7 @@ pub(super) fn parse_followup_continuation_ast(
         // for a following rest-placement clause.
         Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower) => {
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
                 rest_destination: None,
@@ -7931,6 +7947,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             destination: None,
             keep_count: None,
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
@@ -8111,7 +8128,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(2),
+                quantity: PutCount::exactly(2),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
@@ -8135,7 +8152,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(1),
+                quantity: PutCount::exactly(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
@@ -8164,7 +8181,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(1),
+                quantity: PutCount::exactly(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
@@ -8187,7 +8204,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(2),
+                quantity: PutCount::exactly(2),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Graveyard),
@@ -8295,7 +8312,7 @@ mod tests {
         else {
             panic!("expected DigFromAmong continuation, got {result:?}");
         };
-        assert_eq!(quantity, PutCount::Up(1));
+        assert_eq!(quantity, PutCount::up(1));
         // CR 401.4: kept card goes on TOP of the library; the rest go to the bottom.
         assert_eq!(destination, Some(Zone::Library));
         assert_eq!(rest_destination, Some(Zone::Library));
@@ -8353,7 +8370,7 @@ mod tests {
         };
         assert_eq!(
             quantity,
-            PutCount::Up(1),
+            PutCount::up(1),
             "\"may put a\" is optional → up_to 1"
         );
         assert_eq!(destination, Some(Zone::Hand));
@@ -8388,7 +8405,7 @@ mod tests {
         else {
             panic!("expected DigFromAmong continuation, got {result:?}");
         };
-        assert_eq!(quantity, PutCount::Up(1));
+        assert_eq!(quantity, PutCount::up(1));
         assert_eq!(destination, Some(Zone::Hand));
         assert_eq!(rest_destination, None);
         assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
@@ -8421,7 +8438,7 @@ mod tests {
         };
         assert_eq!(
             quantity,
-            PutCount::Exactly(1),
+            PutCount::exactly(1),
             "after the optional payment is made, returning a card is not optional"
         );
         assert_eq!(filter, TargetFilter::Any);
@@ -8623,7 +8640,7 @@ mod tests {
         apply_clause_continuation(
             &mut defs,
             ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: or_filter.clone(),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
@@ -9582,7 +9599,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
                     FilterProp::NameMatchesAnyPermanent { controller: None },
                 ])),
@@ -10548,6 +10565,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             destination: None,
             keep_count: None,
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
@@ -10664,7 +10682,7 @@ mod tests {
             matches!(
                 result,
                 Some(ContinuationAst::DigFromAmong {
-                    quantity: PutCount::Exactly(2),
+                    quantity: PutCount::Exactly(QuantityExpr::Fixed { value: 2 }),
                     filter: TargetFilter::Any,
                     destination: Some(Zone::Hand),
                     ..

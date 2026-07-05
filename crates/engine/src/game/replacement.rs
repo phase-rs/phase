@@ -4045,10 +4045,10 @@ fn evaluate_replacement_condition(
             let turn_ok = match active_player_req {
                 Some(ControllerRef::You) => state.active_player == controller,
                 Some(ControllerRef::Opponent) => state.active_player != controller,
-                // CR 109.4: TargetPlayer active-player gate is nonsensical at
-                // replacement-check time (no ability context). Fail closed.
+                // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
+                // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
@@ -4083,10 +4083,10 @@ fn evaluate_replacement_condition(
             let turn_ok = match active_player_req {
                 Some(ControllerRef::You) => state.active_player == controller,
                 Some(ControllerRef::Opponent) => state.active_player != controller,
-                // CR 109.4: TargetPlayer active-player gate is nonsensical at
-                // replacement-check time (no ability context). Fail closed.
+                // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
+                // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
@@ -4254,6 +4254,7 @@ fn evaluate_replacement_condition(
                 ControllerRef::Opponent => event_source_controller != controller,
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
+                | ControllerRef::TargetOpponent
                 | ControllerRef::ParentTargetController
                 | ControllerRef::ParentTargetOwner
                 | ControllerRef::DefendingPlayer
@@ -4603,6 +4604,24 @@ fn object_replacement_candidate_applies(
     if repl_def.is_consumed {
         return false;
     }
+    // CR 708.3 + CR 708.2a: An object put onto the battlefield FACE DOWN is turned
+    // face down BEFORE it enters (CR 708.3), so it enters as a 2/2 with no text
+    // (CR 708.2a) — its OWN text-derived "As ~ enters" replacement has no effect.
+    // `is_entering` is true only when this candidate's source IS the entering
+    // object (obj.id == rid.source), so this suppresses ONLY the object's own
+    // self-replacement. EXTERNAL replacements (another permanent's enters-tapped)
+    // have `is_entering == false` (source ≠ entrant) and still apply.
+    if is_entering
+        && matches!(
+            event,
+            ProposedEvent::ZoneChange {
+                face_down_profile: Some(_),
+                ..
+            }
+        )
+    {
+        return false;
+    }
     // CR 614.12: off-battlefield entering/discarded objects only apply their
     // own self-replacement effects.
     if is_entering
@@ -4732,6 +4751,9 @@ fn object_replacement_candidate_applies(
                 crate::types::ability::ControllerRef::Opponent => *owner != replacement_player,
                 crate::types::ability::ControllerRef::ScopedPlayer
                 | crate::types::ability::ControllerRef::TargetPlayer
+                // CR 109.4: TargetOpponent has no active-ability context at
+                // replacement-check time — fails closed identically to TargetPlayer.
+                | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer

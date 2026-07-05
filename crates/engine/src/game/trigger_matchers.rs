@@ -768,6 +768,9 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::Owner => false,
         TargetFilter::Any
         | TargetFilter::SelfRef
+        // CR 201.5a: a source-relative object ref, concretized to SpecificObject
+        // before any trigger evaluates; delegates like the other object refs.
+        | TargetFilter::GrantingObject
         | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(_)
         | TargetFilter::Not { .. }
@@ -2857,21 +2860,70 @@ pub(super) fn match_taps_for_mana(
     }
 }
 
-/// ChangesController: fires when an object changes controller.
+/// CR 603.2 + CR 613.1b: ChangesController — fires on the `ControllerChanged`
+/// event a Layer-2 control change (or its end) emits. Every control-change path
+/// now emits this event (targeted `GainControl`, `GainControlAll`, `GiveControl`,
+/// `apply_permanent_control_change`, and the until-EOT expiry in
+/// `layers::prune_end_of_turn_effects`), so the redundant
+/// `EffectResolved { GainControl }` arm was dropped — matching both would have
+/// double-fired now that the gain also emits `ControllerChanged`.
+///
+/// The only producers of this mode are "When you lose control of ~"
+/// abilities (Khârn the Betrayer, Duplicity, Gustha's Scepter, and the S25
+/// Stolen Uniform reflexive). Two guards keep it from over-firing:
+///   * `valid_card` scopes the event to the tracked object (SelfRef for "~";
+///     the bound Equipment for Stolen Uniform's `ParentTarget`). Without this
+///     the trigger fired on *any* object's control change (the Portent trap).
+///   * "lose control" is directional: it fires only for the player *losing*
+///     control. Which side that is depends on whether the trigger source is the
+///     changing object itself:
+///     - Self-ref ("~", `source_id == object_id`): the source's live
+///       `controller` is unusable as the direction test. `collect_pending_triggers`
+///       calls `flush_layers` at its very top (before any trigger scan), so the
+///       object's controller has already flushed to `new_controller` by match
+///       time. Instead we rely on CR 603.10d look-back: a "loses control" ability
+///       is intrinsically the pre-change controller's, and `old != new` (checked
+///       above) already guarantees exactly one loser — fire for it.
+///     - Delayed/`SpecificObject` (Stolen Uniform): the source is the graveyard
+///       spell whose controller stays constant (the temp holder), so the
+///       `old_controller == source.controller` test correctly fires on the loss
+///       (old == caster == source.controller) and NOT on the initial gain
+///       (old == owner != caster).
 pub(super) fn match_changes_controller(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::ControllerChanged { .. }
-            | GameEvent::EffectResolved {
-                kind: EffectKind::GainControl,
-                ..
-            }
-    )
+    let GameEvent::ControllerChanged {
+        object_id,
+        old_controller,
+        new_controller,
+    } = event
+    else {
+        return false;
+    };
+    if old_controller == new_controller {
+        return false;
+    }
+    if !valid_card_matches(trigger, state, *object_id, source_id) {
+        return false;
+    }
+    if source_id == *object_id {
+        // CR 603.10d: "when you lose control of ~" looks back in time — the
+        // ability is intrinsically the pre-change controller's, i.e. the loser.
+        // The source IS the changing object, whose live `controller` already
+        // flushed to `new_controller` (flush_layers runs at the top of
+        // collect_pending_triggers, before this scan), so it can't gate the
+        // direction. `old != new` above already guarantees exactly one loser;
+        // fire for it.
+        return true;
+    }
+    // CR 603.2: delayed/`SpecificObject` case (Stolen Uniform). The source is the
+    // graveyard spell whose controller is the player who temporarily held the
+    // object; firing only when `old_controller == source.controller` fires on the
+    // loss and not on the initial gain.
+    state.objects.get(&source_id).map(|o| o.controller) == Some(*old_controller)
 }
 
 /// CR 712.14: Transformed trigger — fires when an object transforms.

@@ -3,12 +3,13 @@
 //!
 //! - §16 mana-of-any-type spend permission (Vizier of the Menagerie SHIPPED —
 //!   spell-class-filtered `SpendManaAsAnyColor { spell_filter }`; Outrageous
-//!   Robbery HONEST-DEFER — impulse-exile play infra beyond the existing
-//!   surface).
+//!   Robbery SHIPPED — subject-voice exile-top-X face down + impulse-exile play
+//!   grant with the "any type" mana rider folded onto it).
 //! - §19 Role token attach (Royal Treatment SHIPPED, Become Brutes
 //!   HONEST-DEFER — per-target iteration over the multi-target set).
 //! - §22 "Otherwise" sequence-branch (Wick, the Whorled Mind SHIPPED, Bre of
-//!   Clan Stoutarm HONEST-DEFER — spell-MV-vs-life-gained comparison gate).
+//!   Clan Stoutarm SHIPPED — spell-MV-vs-life-gained comparison gate re-homed
+//!   onto the cast clause so "Otherwise" routes to `else_ability`).
 //!
 //! The SHIPPED cards each carry a discriminating test that drives the
 //! production path (`resolve_ability_chain` or the cast cost-payment path) and
@@ -360,17 +361,74 @@ fn vizier_filtered_any_type_spend_static_parses() {
     );
 }
 
-// §16 — Outrageous Robbery. The "spend mana ... of any type to cast it" rider
-// rides on top of impulse-exile play infrastructure ("look at and play those
-// cards"), which is not built. Both residuals stay honest.
+// §16 — Outrageous Robbery. Now supported: the subject-voice "target opponent
+// exiles the top X cards of their library face down" lowers to
+// `ExileTop { player: Opponent, count: Variable(X), face_down: true }`, the
+// "look at and play those cards for as long as they remain exiled" clause to a
+// `GrantCastingPermission { PlayFromExile }` over the tracked set, and the "if
+// you cast a spell this way, you may spend mana as though it were mana of any
+// type" rider folds onto that grant as `mana_spend_permission: AnyTypeOrColor`.
+// Revert any of the three parser gaps and an assertion below flips:
+//   * X-count fix reverted    → count is Fixed(1), not Variable(X)
+//   * face-down fix reverted  → face_down is false
+//   * "any type" scan reverted→ a residual Unimplemented reappears + no mana perm
 #[test]
-fn outrageous_robbery_is_honestly_deferred() {
+fn outrageous_robbery_look_and_play_any_type_parses() {
+    use engine::types::ability::{
+        CastingPermission, ManaSpendPermission, QuantityExpr, QuantityRef,
+    };
     const ORACLE: &str = "Target opponent exiles the top X cards of their library face down. You may look at and play those cards for as long as they remain exiled. If you cast a spell this way, you may spend mana as though it were mana of any type to cast it.";
-    let dbg = parsed_debug(ORACLE, "Outrageous Robbery", &["Sorcery".to_string()], &[]);
-    assert!(
-        dbg.contains("Unimplemented") && dbg.contains("look at and play those cards"),
-        "the impulse-exile play clause must remain an honest Unimplemented defer; got:\n{dbg}"
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Outrageous Robbery",
+        &[],
+        &["Instant".to_string()],
+        &[],
     );
+    let dbg = format!("{parsed:#?}");
+    assert!(
+        !dbg.contains("Unimplemented"),
+        "Outrageous Robbery must have zero Unimplemented nodes, got:\n{dbg}"
+    );
+
+    let head = &parsed.abilities[0];
+    match &*head.effect {
+        Effect::ExileTop {
+            count, face_down, ..
+        } => {
+            assert!(
+                matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    } if name == "X"
+                ),
+                "exile count must be the cost's X, got {count:?}"
+            );
+            assert!(*face_down, "exiled cards must be face down (CR 406.3)");
+        }
+        other => panic!("expected ExileTop head, got {other:?}"),
+    }
+
+    let grant = head
+        .sub_ability
+        .as_ref()
+        .expect("ExileTop must chain the play grant");
+    match &*grant.effect {
+        Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    mana_spend_permission,
+                    ..
+                },
+            ..
+        } => assert_eq!(
+            *mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor),
+            "the 'spend mana as though any type' rider must fold onto the play grant"
+        ),
+        other => panic!("expected GrantCastingPermission sub-ability, got {other:?}"),
+    }
 }
 
 // §19 — Become Brutes. "For each of those creatures, create a Monster Role
@@ -392,28 +450,38 @@ fn become_brutes_for_each_target_role_is_honestly_deferred() {
     );
 }
 
-// §22 — Bre of Clan Stoutarm. The "Otherwise, put it into your hand" branch
-// depends on the antecedent gate "if the spell's mana value is less than or
-// equal to the amount of life you gained this turn" — a spell-MV-vs-dynamic-
-// life-gained QuantityCheck that is not modeled. Without the gate there is no
-// conditional for Otherwise to attach to, so it stays an honest fallback.
+// §22 — Bre of Clan Stoutarm (SHIPPED). The spell-MV-vs-dynamic-life-gained
+// gate "if the spell's mana value is less than or equal to the amount of life
+// you gained this turn" is now re-homed onto the cast clause as a
+// `QuantityCheck` condition (`ObjectManaValue { Target } <= LifeGainedThisTurn
+// { Controller }`), which in turn routes "Otherwise, put it into your hand" to
+// the cast's `else_ability` (`ChangeZone -> Hand`) instead of an Unimplemented
+// fallback. Runtime coverage: `bre_of_clan_stoutarm_endstep.rs`.
 #[test]
-fn bre_otherwise_mv_vs_life_gate_is_honestly_deferred() {
+fn bre_otherwise_mv_vs_life_gate_parses_to_conditional_cast() {
     const ORACLE: &str = "{1}{W}, {T}: Another target creature you control gains flying and lifelink until end of turn.\nAt the beginning of your end step, if you gained life this turn, exile cards from the top of your library until you exile a nonland card. You may cast that card without paying its mana cost if the spell's mana value is less than or equal to the amount of life you gained this turn. Otherwise, put it into your hand.";
     let dbg = parsed_debug(
         ORACLE,
         "Bre of Clan Stoutarm",
         &creature_types(),
-        &["Dwarf".to_string(), "Cleric".to_string()],
+        &["Dwarf".to_string(), "Warrior".to_string()],
+    );
+    // The gate is modeled, so the whole card is now free of Unimplemented nodes.
+    assert!(
+        !dbg.contains("Unimplemented"),
+        "Bre's gate is now modeled; expected zero Unimplemented nodes, got:\n{dbg}"
+    );
+    // The exile-until body, the gated free cast, and the else->hand branch.
+    assert!(
+        dbg.contains("ExileFromTopUntil") && dbg.contains("CastFromZone"),
+        "exile-until + cast must parse:\n{dbg}"
     );
     assert!(
-        dbg.contains("Unimplemented") && dbg.contains("otherwise"),
-        "Bre's Otherwise branch must remain an honest Unimplemented defer; got:\n{dbg}"
+        dbg.contains("ObjectManaValue") && dbg.contains("LifeGainedThisTurn"),
+        "cast clause must carry the MV<=life-gained gate:\n{dbg}"
     );
-    // The flying+lifelink activated ability and the end-step exile-until trigger
-    // must still parse around the deferred gate.
     assert!(
-        dbg.contains("ExileFromTopUntil"),
-        "exile-until must still parse"
+        dbg.contains("else_ability") && dbg.contains("ChangeZone"),
+        "Otherwise must route to else_ability ChangeZone->Hand:\n{dbg}"
     );
 }

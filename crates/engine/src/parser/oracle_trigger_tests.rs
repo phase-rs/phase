@@ -9148,6 +9148,96 @@ fn trigger_vengevine_intervening_if_maps_to_nth_creature_spell_constraint() {
     assert!(def.optional);
 }
 
+/// CR 601.2a + CR 603.4: Alania's disjunctive "first-of-type this turn"
+/// intervening-if lowers to `Or` of composed `And(TriggeringSpellMatchesFilter,
+/// SpellsCastThisTurn == n)` disjuncts — NOT a bundled ordinal variant — and the
+/// residual "you may have target opponent draw a card. If you do, copy that
+/// spell" parses for free (optional Draw + preserved gated CopySpell).
+///
+/// DISCRIMINATION: reverting the `parse_disjunctive_first_spell_intervening_if`
+/// wire-in restores `Effect::Unimplemented { name: "the", .. }` at the top of the
+/// chain and drops `def.condition` to `None`, flipping both the condition-equality
+/// assertion and the zero-Unimplemented reach-guard.
+#[test]
+fn trigger_alania_disjunctive_first_of_type_intervening_if() {
+    let def = parse_trigger_line(
+        "Whenever you cast a spell, if it's the first instant spell, the first sorcery spell, or the first Otter spell other than Alania you've cast this turn, you may have target opponent draw a card. If you do, copy that spell. You may choose new targets for the copy.",
+        "Alania, Divergent Storm",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    // Fires on ANY spell you cast; the disjunctive Or gates it — valid_card stays None.
+    assert_eq!(def.valid_card, None);
+
+    let instant = type_only_filter("instant").expect("instant type filter");
+    let sorcery = type_only_filter("sorcery").expect("sorcery type filter");
+    let otter = type_only_filter("otter").expect("otter subtype filter");
+    let otter_excl = TargetFilter::And {
+        filters: vec![
+            otter,
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Named {
+                    name: "Alania, Divergent Storm".to_string(),
+                }),
+            },
+        ],
+    };
+    let disjunct = |filter: TargetFilter| TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::TriggeringSpellMatchesFilter {
+                filter: filter.clone(),
+            },
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(filter),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            },
+        ],
+    };
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Or {
+            conditions: vec![disjunct(instant), disjunct(sorcery), disjunct(otter_excl)],
+        }),
+        "Alania condition must be Or-of-And(anchor, count); got {:?}",
+        def.condition
+    );
+
+    // Zero Unimplemented leakage (reach-guard for the reverted recognizer).
+    let execute = def.execute.as_ref().expect("Alania trigger execute");
+    fn has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| has_unimplemented(s))
+    }
+    assert!(
+        !has_unimplemented(execute),
+        "effect chain leaked Unimplemented: {execute:?}"
+    );
+
+    // The preserved CopySpell sub is still present and gated on the optional draw.
+    fn find_copyspell(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(*ability.effect, Effect::CopySpell { .. }) {
+            return Some(ability);
+        }
+        ability.sub_ability.as_deref().and_then(find_copyspell)
+    }
+    let copy = find_copyspell(execute).expect("CopySpell sub preserved");
+    assert_eq!(
+        copy.condition,
+        Some(AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+        }),
+        "CopySpell must stay gated on the optional draw (if you do)"
+    );
+}
+
 /// CR 109.4: "other than this card" in an exile target must add
 /// `FilterProp::Another` so the ability source (Ichorid) cannot be used
 /// to pay its own recursion cost.
@@ -17912,6 +18002,7 @@ fn cast_trigger_lowers_to_control_next_turn_effect() {
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after,
+            window: _,
         } => {
             assert!(*grant_extra_turn_after);
             assert_eq!(

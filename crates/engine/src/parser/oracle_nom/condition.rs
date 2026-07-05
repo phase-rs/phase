@@ -132,6 +132,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_triggering_player_has_unattacked_opponent,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
+        parse_offered_card_mana_value_comparison,
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
@@ -3871,6 +3872,62 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// still win for those patterns. A broader `parse_quantity` LHS would steal
 /// those phrases and rewrite their AST shape, breaking the derived-state
 /// dirty tracker (see `game/derived.rs:65`) that scans for `DevotionGE`.
+/// CR 202.3 + CR 608.2c + CR 115.1: Compare the mana value of a
+/// demonstratively-referenced card (the card just offered for casting) against
+/// a dynamic quantity — "[the spell's | that spell's | that card's | the
+/// card's] mana value is {less than | greater than}[ or equal to] <quantity>".
+///
+/// Covers the "impulse a nonland card off the top and cast it only if it is
+/// cheap enough" class (Bre of Clan Stoutarm: "You may cast that card without
+/// paying its mana cost if the spell's mana value is less than or equal to the
+/// amount of life you gained this turn. Otherwise, put it into your hand"). The
+/// referenced card is the first object target of the resolving cast sub-ability
+/// — the `ExileFromTopUntil` resolver injects the exiled hit as that target
+/// (CR 115.1) — so it lowers to `ObjectManaValue { scope: Target }`, read at
+/// resolution against the live life-gained tally. The comparator vocabulary is
+/// the shared `parse_life_total_comparator` (less/greater than [or equal to]);
+/// the RHS is any dynamic `parse_quantity`, so the same combinator serves every
+/// "cast if MV ≤ <dynamic amount>" card, not just the life-gained referent.
+///
+/// Otherwise-routing (auditor note): re-homing this gate onto the cast clause
+/// makes the downstream "Otherwise, put it into your hand" lower to the cast's
+/// `else_ability` — the PRE-EXISTING else_ability convention shared with Wick,
+/// the Whorled Mind / Chandra-class "may X, otherwise Y" cards. The runtime
+/// fires that branch on BOTH the condition-false outcome (mana value > life
+/// gained) and the optional-decline outcome, so a declined-but-eligible card
+/// also goes to hand. This is the deliberate current convention, NOT an
+/// accidental decline-branch shortcut. It is also not a confirmed-correct
+/// reading: the strict editorial parse of "Otherwise" (= condition-negation
+/// only, mana value > life) implies a declined-but-eligible card would STAY
+/// EXILED, and there is no published Bre ruling either way (as of 2026-07-02).
+/// Splitting condition-false vs optional-decline is class-wide engine debt (the
+/// routing lives in the runtime chain resolver, not here).
+fn parse_offered_card_mana_value_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        tag("the spell's"),
+        tag("that spell's"),
+        tag("that card's"),
+        tag("the card's"),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((tag(" mana value"), tag(" converted mana cost"))).parse(rest)?;
+    let (rest, _) = tag(" is ").parse(rest)?;
+    let (rest, comparator) = parse_life_total_comparator(rest)?;
+    let (rest, rhs) = nom_quantity::parse_quantity(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            },
+            comparator,
+            rhs,
+        },
+    ))
+}
+
 fn parse_quantity_quantity_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("x").parse(input)?;
     // Require word-boundary after 'x' so we don't consume the leading 'x' in

@@ -104,6 +104,14 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::MoveCounter { .. }));
+    // CR 107.1c + CR 608.2h: mirror of `pending_was_counter_move` for the
+    // "remove any number of counters" drain — captured before
+    // `continue_replacement` consumes the pending record so the Prevented arm
+    // can resume the remaining removals even when this one was fully prevented.
+    let pending_was_counter_removal = state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::RemoveCounter { .. }));
     // CR 701.24a: capture the parked library placement (W3) BEFORE
     // `continue_replacement` consumes (`.take()`s) the pending record, so the
     // ZoneChange resume arm below can thread it into the delivery `DeliveryCtx`
@@ -651,6 +659,20 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 107.1c + CR 608.2h: a "remove any number of counters" batch
+            // (Rhys, Tetravus) paused mid-removal because a per-removal
+            // replacement needed a choice. The chosen event was applied above;
+            // drain the parked tail (which re-parks if the next removal surfaces
+            // its own choice, setting state.waiting_for for us to propagate).
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_counter_removals.is_some()
+            {
+                effects::counters::drain_pending_counter_removals(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_counter_additions.is_some()
             {
@@ -851,6 +873,16 @@ pub(super) fn handle_replacement_choice(
                     player: state.active_player,
                 };
                 effects::counters::drain_pending_counter_moves(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
+            }
+            if pending_was_counter_removal {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::counters::drain_pending_counter_removals(state, events);
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     effects::drain_pending_continuation(state, events);
                 }

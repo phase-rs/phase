@@ -1064,6 +1064,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::OriginalController => "OriginalController",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
         TargetFilter::SelfRef => "SelfRef",
+        TargetFilter::GrantingObject => "GrantingObject",
         TargetFilter::SourceOrPaired => "SourceOrPaired",
         TargetFilter::Typed(_) => "Typed",
         TargetFilter::Not { .. } => "Not",

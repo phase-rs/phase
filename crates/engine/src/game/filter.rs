@@ -98,6 +98,9 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
+        // at grant-clone and never reaches this object predicate.
+        | TargetFilter::GrantingObject
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -305,6 +308,9 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
+        // at grant-clone and never reaches this object predicate.
+        | TargetFilter::GrantingObject
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -742,7 +748,8 @@ pub(crate) fn controller_ref_player(
         ControllerRef::ScopedPlayer => {
             scoped_player_or_controller(state, ability, source_controller, None)
         }
-        ControllerRef::TargetPlayer => ability.and_then(|a| {
+        // CR 109.4: TargetOpponent reads identically to TargetPlayer (first player target).
+        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => ability.and_then(|a| {
             a.targets.iter().find_map(|t| match t {
                 TargetRef::Player(pid) => Some(*pid),
                 TargetRef::Object(_) => None,
@@ -949,7 +956,7 @@ fn stack_entry_controller_matches(
             ctx.scoped_iteration_player,
         )
         .is_some_and(|pid| pid == entry_controller),
-        Some(ControllerRef::TargetPlayer) => ctx
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => ctx
             .ability
             .and_then(|ability| {
                 ability.targets.iter().find_map(|target| match target {
@@ -1566,8 +1573,9 @@ fn filter_inner_for_object(
                     // Read the first TargetRef::Player from ability.targets. Fail
                     // closed if no player target is present (the parser should
                     // surface a TargetFilter::Player slot via collect_target_slots
-                    // whenever this variant appears).
-                    ControllerRef::TargetPlayer => {
+                    // whenever this variant appears). CR 109.4: TargetOpponent reads
+                    // identically (the opponent constraint lives in the slot).
+                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
                         let target_player = ability
                             .and_then(|a| {
                                 a.targets.iter().find_map(|t| match t {
@@ -1924,7 +1932,8 @@ fn filter_inner_for_object(
         TargetFilter::Named { name } => obj.name == *name,
         // CR 400.3: Owner is a player-resolving filter (resolves to the owner of
         // source_id), meaningless as an object-matching predicate.
-        TargetFilter::Owner => false,
+        // CR 201.5a: GrantingObject appended append-only (concretized before runtime).
+        TargetFilter::Owner | TargetFilter::GrantingObject => false,
     }
 }
 
@@ -2018,7 +2027,8 @@ fn zone_change_filter_inner(
                     }
                     // CR 109.4 + CR 115.1: "target player controls" — match the
                     // record's controller against the chosen player target.
-                    ControllerRef::TargetPlayer => {
+                    // TargetOpponent reads identically (opponent constraint in slot).
+                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
                         let target_player = ability.and_then(|a| {
                             a.targets.iter().find_map(|t| match t {
                                 TargetRef::Player(pid) => Some(*pid),
@@ -2159,6 +2169,8 @@ fn zone_change_filter_inner(
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        // CR 201.5a: append-only (concretized before runtime).
+        | TargetFilter::GrantingObject
         | TargetFilter::Owner => false,
     }
 }
@@ -2377,7 +2389,7 @@ pub fn spell_record_matches_filter(
                     // a spell-history record (no ability context to resolve the
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
-                    ControllerRef::TargetPlayer => return false,
+                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
                     ControllerRef::ParentTargetOwner => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
@@ -2411,6 +2423,12 @@ pub fn spell_record_matches_filter(
         TargetFilter::Not { filter: inner } => {
             !spell_record_matches_filter(record, inner, controller, all_creature_types)
         }
+        // CR 201.2: name filter over spell history — the recorded card name (captured
+        // at cast time) must equal `name`. Mirrors the object matcher (`obj.name`) and
+        // the zone-change record matcher (`record.name`); without this, `Not(Named{X})`
+        // over a spell record was `!false = true` always, silently no-opping name
+        // self-exclusions like Alania's "first Otter spell other than ~".
+        TargetFilter::Named { name } => record.name == *name,
         // All remaining variants are inapplicable to spell snapshots.
         TargetFilter::None
         | TargetFilter::Player
@@ -2452,7 +2470,8 @@ pub fn spell_record_matches_filter(
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
-        | TargetFilter::Named { .. }
+        // CR 201.5a: append-only (concretized before runtime).
+        | TargetFilter::GrantingObject
         | TargetFilter::Owner => false,
     }
 }
@@ -2609,8 +2628,10 @@ fn spell_object_matches_filter_inner(
                     ControllerRef::Opponent if caster == source_controller => return false,
                     ControllerRef::ScopedPlayer => return false,
                     // CR 109.4: Target-player scope is undefined for spell-cast
-                    // history (no ability context). Fail closed.
-                    ControllerRef::TargetPlayer => return false,
+                    // history (no ability context). Fail closed. TargetOpponent must
+                    // be explicit here — the `_ => {}` wildcard below would otherwise
+                    // let it fall through and match with no controller restriction.
+                    ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     // CR 109.4: Chosen-player scope is undefined for spell-cast
@@ -2698,6 +2719,8 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
+        // CR 201.5a: append-only (concretized before runtime).
+        | TargetFilter::GrantingObject
         | TargetFilter::Owner => false,
     }
 }
@@ -3530,7 +3553,10 @@ fn matches_filter_prop(
                         source.controller.is_some() && Some(perm.controller) != source.controller
                     }
                     (Some(ControllerRef::ScopedPlayer), Some(pid)) => perm.controller == pid,
-                    (Some(ControllerRef::TargetPlayer), Some(pid)) => perm.controller == pid,
+                    (
+                        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent),
+                        Some(pid),
+                    ) => perm.controller == pid,
                     (Some(ControllerRef::ParentTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
@@ -3562,7 +3588,8 @@ fn matches_filter_prop(
             }
             // CR 109.5: Ownership relative to a chosen target player.
             // Resolves against the first TargetRef::Player in ability.targets.
-            ControllerRef::TargetPlayer => source
+            // TargetOpponent reads identically (opponent constraint lives in the slot).
+            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => source
                 .ability
                 .and_then(|a| {
                     a.targets.iter().find_map(|t| match t {
@@ -4233,7 +4260,8 @@ fn zone_change_record_matches_property(
                     .is_some_and(|pid| pid == record.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
-            ControllerRef::TargetPlayer => source
+            // TargetOpponent reads identically (opponent constraint lives in the slot).
+            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => source
                 .ability
                 .and_then(|a| {
                     a.targets.iter().find_map(|t| match t {
@@ -4510,7 +4538,7 @@ fn attachment_controller_matches(
             scoped_player_or_controller(state, source.ability, source.controller, None)
                 .is_some_and(|pid| pid == attachment_controller)
         }
-        Some(ControllerRef::TargetPlayer) => source
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => source
             .ability
             .and_then(|a| {
                 a.targets.iter().find_map(|t| match t {
@@ -5137,10 +5165,10 @@ fn player_matches_target_filter_with(
                 source_controller.is_some_and(|controller| is_opponent(controller, player_id))
             }
             Some(ControllerRef::ScopedPlayer) => false,
-            // CR 109.4: TargetPlayer has no meaning when matching a player against
-            // a filter without ability context. Fail closed (mirrors the pattern
-            // established at filter.rs:526–569 for spell-record filters).
-            Some(ControllerRef::TargetPlayer) => false,
+            // CR 109.4: TargetPlayer / TargetOpponent have no meaning when matching a
+            // player against a filter without ability context. Fail closed (mirrors the
+            // pattern established at filter.rs:526–569 for spell-record filters).
+            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,

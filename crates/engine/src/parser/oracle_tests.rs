@@ -4987,6 +4987,7 @@ fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
         &DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
         }
     );
 
@@ -6838,21 +6839,21 @@ fn creeping_peeper_full_mana_line_no_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 116.2b + CR 702.37e: Overgrown Zealot's second ability —
-/// "Add two mana of any one color. Spend this mana only to turn permanents
-/// face up" — names ONLY the turn-face-up special action, whose runtime gate
-/// (`OnlyForSpecialAction(TurnFaceUp)`) no production payment site can satisfy
-/// today. `ManaSpendRestriction::has_payable_branch` reports the standalone
-/// `TurnPermanentFaceUp` leaf as dead, so the seam leaves the restriction
-/// unabsorbed and the line lowers to `Effect::Unimplemented` — honest coverage
-/// red rather than false-green "supported".
+/// CR 106.6 + CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: Overgrown
+/// Zealot's second ability — "Add two mana of any one color. Spend this mana
+/// only to turn permanents face up" — names ONLY the turn-face-up special
+/// action, whose runtime gate (`OnlyForSpecialAction(TurnFaceUp)`) the paid
+/// `GameAction::TurnFaceUp` handler now satisfies.
+/// `ManaSpendRestriction::has_payable_branch` reports the standalone
+/// `TurnPermanentFaceUp` leaf live, so the seam absorbs the restriction into the
+/// `Effect::Mana` line — supported, no `Effect::Unimplemented`.
 ///
-/// Revert direction: if `has_payable_branch` returned `true` for
-/// `TurnPermanentFaceUp`, the seam would absorb the restriction and no
-/// `Effect::Unimplemented` would be produced — the assertion below flips and
-/// fails.
+/// Revert direction: if `has_payable_branch` returned `false` for
+/// `TurnPermanentFaceUp`, the seam would leave the restriction unabsorbed and the
+/// line would lower to `Effect::Unimplemented` — the `!parsed_has_unimplemented`
+/// assertion below flips and fails.
 #[test]
-fn overgrown_zealot_turn_face_up_only_is_unsupported_gap() {
+fn overgrown_zealot_turn_face_up_only_supported() {
     let r = parse(
         "{T}: Add two mana of any one color. Spend this mana only to turn permanents face up.",
         "Overgrown Zealot",
@@ -6860,33 +6861,55 @@ fn overgrown_zealot_turn_face_up_only_is_unsupported_gap() {
         &["Creature"],
         &["Elf", "Druid"],
     );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
-        parsed_has_unimplemented(&r),
-        "Overgrown Zealot's turn-face-up-only spend restriction has no payable \
-             branch, so the line must lower to Effect::Unimplemented (honest red): \
-             abilities={:?} triggers={:?}",
+        !parsed_has_unimplemented(&r),
+        "Overgrown Zealot's turn-face-up spend restriction is now payable, so the \
+             line must be supported (no Effect::Unimplemented): abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
     );
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert!(
+        matches!(produced, ManaProduction::AnyOneColor { .. }),
+        "expected two-mana-of-any-one-color, got {produced:?}"
+    );
+    assert_eq!(
+        restrictions,
+        &vec![ManaSpendRestriction::TurnPermanentFaceUp],
+        "the turn-face-up restriction must fold into the mana effect"
+    );
+    assert!(
+        crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+        "must stay a mana ability"
+    );
 }
 
-/// CR 106.6 + CR 708.4 + CR 116.2b: Tin Street Gossip's mana ability —
-/// "Add {R}{G}. Spend this mana only to cast face-down spells or to turn
-/// creatures face up" — is a disjunction of two dead branches: `FaceDownSpell`
-/// (gate `meta.is_face_down`, never true at a payment site, CR 708.4) and
-/// `TurnPermanentFaceUp` (`OnlyForSpecialAction(TurnFaceUp)`, never emitted,
-/// CR 116.2b). `has_payable_branch` of `Any([FaceDownSpell,
-/// TurnPermanentFaceUp])` is `false`, so the seam leaves it unabsorbed and the
-/// line lowers to `Effect::Unimplemented` — honest coverage red.
+/// CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e: Tin Street Gossip's mana
+/// ability — "Add {R}{G}. Spend this mana only to cast face-down spells or to
+/// turn creatures face up" — is a disjunction `Any([FaceDownSpell,
+/// TurnPermanentFaceUp])`. `FaceDownSpell` stays dead (gate `meta.is_face_down`,
+/// never true at a payment site, CR 708.4), but `TurnPermanentFaceUp`
+/// (`OnlyForSpecialAction(TurnFaceUp)`) is now live via the paid
+/// `GameAction::TurnFaceUp` handler. `has_payable_branch` of the `Any` is
+/// therefore `true` (any live branch suffices), so the seam absorbs it into the
+/// `Effect::Mana` line — supported, no `Effect::Unimplemented`. (The card is
+/// rules-honestly supported through its turn-up branch; the face-down-cast branch
+/// remains a genuine gap, correctly represented as a dead leaf inside the `Any`.)
 ///
-/// Revert direction: if either leaf were classified payable (or the `Any`
-/// short-circuit were broken to return `true` on an all-dead set), the seam
-/// would absorb the restriction and produce no `Effect::Unimplemented` — the
-/// assertion below flips and fails. This pins the all-dead `Any` arm in the
-/// false direction (the live mixed-`Any` cases are pinned by Creeping Peeper /
-/// Smoky Lounge / the unit test).
+/// Revert direction: if `has_payable_branch(TurnPermanentFaceUp)` returned
+/// `false` again, the `Any` would be all-dead, the seam would leave it unabsorbed
+/// and the line would lower to `Effect::Unimplemented` — the
+/// `!parsed_has_unimplemented` assertion below flips and fails.
 #[test]
-fn tin_street_gossip_face_down_or_turn_face_up_is_unsupported_gap() {
+fn tin_street_gossip_face_down_or_turn_face_up_supported() {
     let r = parse(
             "Vigilance\n{T}: Add {R}{G}. Spend this mana only to cast face-down spells or to turn creatures face up.",
             "Tin Street Gossip",
@@ -6894,13 +6917,37 @@ fn tin_street_gossip_face_down_or_turn_face_up_is_unsupported_gap() {
             &["Creature"],
             &["Goblin", "Artificer"],
         );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
-        parsed_has_unimplemented(&r),
-        "Tin Street Gossip's face-down/turn-face-up spend restriction has no \
-             payable branch, so the line must lower to Effect::Unimplemented \
-             (honest red): abilities={:?} triggers={:?}",
+        !parsed_has_unimplemented(&r),
+        "Tin Street Gossip's disjunction has a payable turn-face-up branch, so the \
+             line must be supported (no Effect::Unimplemented): abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
+    );
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert!(
+        matches!(produced, ManaProduction::Fixed { colors, .. } if colors == &[ManaColor::Red, ManaColor::Green]),
+        "expected fixed R+G, got {produced:?}"
+    );
+    assert_eq!(
+        restrictions,
+        &vec![ManaSpendRestriction::Any(vec![
+            ManaSpendRestriction::FaceDownSpell,
+            ManaSpendRestriction::TurnPermanentFaceUp,
+        ])],
+        "the face-down/turn-up disjunction must fold into the mana effect"
+    );
+    assert!(
+        crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+        "must stay a mana ability"
     );
 }
 

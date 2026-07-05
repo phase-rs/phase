@@ -95,7 +95,7 @@ use crate::types::ability::{
     AbilityCondition, ControllerRef, CountScope, Duration, EachDamageRecipient, Effect,
     ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
     QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition,
-    TargetChoiceTiming, TargetFilter, TriggerCondition,
+    TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 
@@ -534,10 +534,17 @@ fn scan_effect(x: &Effect) -> Axes {
             reveal: _,
             enter_tapped: _,
             source: _,
+            keep_count_expr,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(player));
             acc = acc.or(scan_quantity_expr(count));
+            // A dynamic keep-count is a projected-resource read (axis 3): "keep N
+            // cards" where N scales with game state feeds the growing-cascade
+            // detector exactly like `count`. Classify it identically, not `_`.
+            if let Some(kce) = keep_count_expr {
+                acc = acc.or(scan_quantity_expr(kce));
+            }
             acc = acc.or(scan_target_filter(filter));
             acc
         }
@@ -554,6 +561,7 @@ fn scan_effect(x: &Effect) -> Axes {
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after: _,
+            window: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));
@@ -623,6 +631,9 @@ fn scan_effect(x: &Effect) -> Axes {
         }
         Effect::Populate => Axes::NONE,
         Effect::Clash => Axes::NONE,
+        // CR 701.4a: behold projects no growing resource — it is a boolean
+        // reveal-or-choose keyword action.
+        Effect::Behold { .. } => Axes::NONE,
         Effect::EndTheTurn => Axes::NONE,
         Effect::EndCombatPhase => Axes::NONE,
         Effect::Vote { .. } => Axes::CONSERVATIVE,
@@ -709,6 +720,10 @@ fn scan_effect(x: &Effect) -> Axes {
         Effect::GainActivatedAbilitiesOfTarget {
             target,
             recipient,
+            // `scope` is a static compile-time selector of WHICH donor ability
+            // categories to snapshot (activated-only vs. all-other); it reads no
+            // game state, so it contributes no projected-resource/choice axis.
+            scope: _,
             duration,
         } => {
             let mut acc = Axes::NONE;
@@ -988,6 +1003,13 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_quantity_expr(count));
             acc
         }
+        // Continuous-modification carrier: the mods Vec is an UNDESCENDED subtree
+        // (no scan_continuous_modification walker exists), so classify
+        // CONSERVATIVE — the fail-closed default for undescended subtrees, exactly
+        // as every sibling continuous-modification effect (Animate:802,
+        // ReturnAsAura:803, GenericEffect:805). Over-read is inert — this effect
+        // never resolves standalone (lifted as CastFromZone permission metadata).
+        Effect::AddPendingEntersModifications { .. } => Axes::CONSERVATIVE,
         Effect::CreateEmblem { .. } => Axes::CONSERVATIVE,
         Effect::PayCost { .. } => Axes::CONSERVATIVE,
         Effect::CastFromZone { .. } => Axes::CONSERVATIVE,
@@ -1312,10 +1334,17 @@ fn scan_effect(x: &Effect) -> Axes {
             acc
         }
         Effect::ManifestDread => Axes::NONE,
-        Effect::Cloak { target, count } => {
+        Effect::Cloak {
+            target,
+            count,
+            object_source,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));
             acc = acc.or(scan_quantity_expr(count));
+            if let Some(f) = object_source {
+                acc = acc.or(scan_target_filter(f));
+            }
             acc
         }
         Effect::TurnFaceUp { target } => {
@@ -1743,7 +1772,18 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
         QuantityRef::TrackedSetAggregate {
             function: _,
             property: _,
-        } => Axes::NONE,
+            source,
+        } => match source {
+            // Chain-published set: reads no trigger/sibling context (unchanged).
+            TrackedAnaphorSource::ChainSet => Axes::NONE,
+            // Reads `state.current_trigger_events` (the triggering event) →
+            // event axis true, mirroring `QuantityRef::EventContextAmount` below.
+            TrackedAnaphorSource::TriggeringBatch => Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            },
+        },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
         QuantityRef::PreviousEffectAmount => Axes::NONE,
         QuantityRef::LifeLostThisTurn { player } => {
@@ -2294,6 +2334,9 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         TargetFilter::Player => Axes::NONE,
         TargetFilter::Controller => Axes::NONE,
         TargetFilter::SelfRef => Axes::NONE,
+        // CR 201.5a: a source-relative object ref (the granting object), like
+        // SelfRef — no event/sibling/projected resource axis.
+        TargetFilter::GrantingObject => Axes::NONE,
         TargetFilter::SourceOrPaired => Axes::NONE,
         TargetFilter::Typed(..) => Axes::CONSERVATIVE,
         TargetFilter::Not { filter } => {
@@ -2445,6 +2488,10 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         },
         ObjectScope::Anaphoric => Axes::NONE,
         ObjectScope::Demonstrative => Axes::NONE,
+        // CR 608.2c: per-resolution local (the other revealer's card), resolved
+        // by exclusion within this ability's own resolution — no event/sibling
+        // axis, like the demonstrative/anaphoric referents.
+        ObjectScope::OtherRevealedCard => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -2709,6 +2756,15 @@ fn scan_trigger_condition(x: &TriggerCondition) -> Axes {
         TriggerCondition::ExceptFirstDrawInDrawStep => Axes::NONE,
         TriggerCondition::PlacedByAbilitySource => Axes::NONE,
         TriggerCondition::TriggeringSpellTargetsFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(filter));
+            acc
+        }
+        TriggerCondition::TriggeringSpellMatchesFilter { filter } => {
             let mut acc = Axes {
                 event: true,
                 sibling: false,
@@ -3165,6 +3221,10 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         ControllerRef::Opponent => Axes::NONE,
         ControllerRef::ScopedPlayer => Axes::NONE,
         ControllerRef::TargetPlayer => Axes::NONE,
+        // CR 109.4: TargetOpponent is a target-player slot with opponent-only
+        // legality; it is runtime-read-identical to TargetPlayer (the scope
+        // restriction is enforced at target selection, not a walker axis).
+        ControllerRef::TargetOpponent => Axes::NONE,
         ControllerRef::ParentTargetController => Axes {
             event: true,
             sibling: false,
@@ -3381,6 +3441,9 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ProliferateTarget { .. }
         | Effect::Populate
         | Effect::Clash
+        // CR 701.4a + CR 608.2d: behold may prompt (`WaitingFor::BeholdChoice`
+        // when 2+ candidates) — fail-closed MayPrompt.
+        | Effect::Behold { .. }
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
@@ -3446,6 +3509,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
@@ -3941,6 +4005,9 @@ mod tests {
             Effect::Proliferate, // WaitingFor::ProliferateChoice — proliferate.rs:109
             Effect::Populate,    // WaitingFor::PopulateChoice — populate.rs:50
             Effect::Clash,       // WaitingFor::ClashChooseOpponent — clash.rs:47
+            Effect::Behold {
+                filter: TargetFilter::Any,
+            }, // WaitingFor::BeholdChoice — behold.rs (2+ candidates)
             Effect::Explore,     // WaitingFor::ExploreChoice — explore.rs:191
             Effect::Scry {
                 count: QuantityExpr::Fixed { value: 1 },

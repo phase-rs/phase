@@ -18,8 +18,8 @@ use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
     FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, RoundingMode, StaticCondition, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter, ZoneRef,
+    ResolvedAbility, RoundingMode, StaticCondition, TargetFilter, TargetRef, TrackedAnaphorSource,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -236,6 +236,9 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | ObjectScope::EventTarget
             | ObjectScope::CostPaidObject
             | ObjectScope::Anaphoric
+            // CR 608.2c: the other revealer's card is a per-resolution referent,
+            // resolved only at resolution time (never a static CDA read).
+            | ObjectScope::OtherRevealedCard
             | ObjectScope::Demonstrative => true,
         }
     }
@@ -2247,13 +2250,35 @@ fn resolve_ref(
         // place (mirrors the `Aggregate` extract: live object first, LKI cache
         // fallback). Drives "deals damage equal to the total mana value of those
         // exiled cards" (Ensnared by the Mara).
-        QuantityRef::TrackedSetAggregate { function, property } => {
-            let Some((_, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
-                return 0;
+        QuantityRef::TrackedSetAggregate {
+            function,
+            property,
+            source,
+        } => {
+            // The id-set to reduce depends on which anaphor the parser matched.
+            let ids: Vec<ObjectId> = match source {
+                // Chain-published tracked set ("those exiled cards"): the set the
+                // immediately-preceding chain effect published (highest id).
+                TrackedAnaphorSource::ChainSet => state
+                    .tracked_object_sets
+                    .iter()
+                    .max_by_key(|(id, _)| id.0)
+                    .map(|(_, ids)| ids.clone())
+                    .unwrap_or_default(),
+                // CR 603.2c + CR 603.10a: the current triggering event batch
+                // ("those creatures" on a batched dies trigger). The subjects are
+                // read from `state.current_trigger_events`; each died creature's
+                // power comes from its last-known info (LKI), i.e. death-time
+                // power, via `aggregate_property_over`'s live-then-LKI extract.
+                TrackedAnaphorSource::TriggeringBatch => state
+                    .current_trigger_events
+                    .iter()
+                    .filter_map(crate::game::targeting::extract_source_from_event)
+                    .collect(),
             };
             // Per-object aggregation delegated to the shared
             // `aggregate_property_over` summation authority (live-then-LKI).
-            aggregate_property_over(state, ids, *function, *property)
+            aggregate_property_over(state, &ids, *function, *property)
         }
         // CR 400.7 + CR 608.2c: Read the per-resolution counter populated by
         // ChangeZoneAll when it exiles cards from a hand. Used by "draws a card
@@ -2963,14 +2988,17 @@ fn resolve_ref(
                         Some(ControllerRef::ScopedPlayer) => {
                             snap.controller == scoped_player_or_controller(ability, controller)
                         }
-                        Some(ControllerRef::TargetPlayer) => ability
-                            .and_then(|a| {
-                                a.targets.iter().find_map(|t| match t {
-                                    crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-                                    crate::types::ability::TargetRef::Object(_) => None,
+                        // CR 109.4: TargetOpponent reads identically to TargetPlayer.
+                        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
+                            ability
+                                .and_then(|a| {
+                                    a.targets.iter().find_map(|t| match t {
+                                        crate::types::ability::TargetRef::Player(pid) => Some(*pid),
+                                        crate::types::ability::TargetRef::Object(_) => None,
+                                    })
                                 })
-                            })
-                            .is_some_and(|pid| pid == snap.controller),
+                                .is_some_and(|pid| pid == snap.controller)
+                        }
                         Some(ControllerRef::ParentTargetController) => ability
                             .and_then(|a| {
                                 crate::game::ability_utils::parent_target_controller(a, state)
@@ -3036,7 +3064,8 @@ fn damage_source_controller_matches(
         ControllerRef::You => actual == controller,
         ControllerRef::Opponent => actual != controller,
         ControllerRef::ScopedPlayer => actual == scoped_player_or_controller(ability, controller),
-        ControllerRef::TargetPlayer => ability
+        // CR 109.4: TargetOpponent reads identically to TargetPlayer.
+        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => ability
             .and_then(|ability| {
                 ability.targets.iter().find_map(|target| match target {
                     TargetRef::Player(player) => Some(*player),
@@ -3439,7 +3468,13 @@ fn object_for_scope<'a>(
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to a live `GameObject` here — both are snapshot
         // referents read through `ability` slots, not `state.objects`.
-        ObjectScope::CostPaidObject | ObjectScope::Anaphoric | ObjectScope::Demonstrative => None,
+        // `OtherRevealedCard` is likewise resolved specially in
+        // `resolve_object_mana_value` (by-exclusion over `last_revealed_ids`),
+        // not via this generic single-id path.
+        ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::Demonstrative => None,
     }
 }
 
@@ -3487,7 +3522,12 @@ fn object_id_for_scope(
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to an `ObjectId` here — both are snapshot
         // referents read through `ability` slots, not `state.objects`.
-        ObjectScope::CostPaidObject | ObjectScope::Anaphoric | ObjectScope::Demonstrative => None,
+        // `OtherRevealedCard` is resolved specially in `resolve_object_mana_value`
+        // (by-exclusion over `last_revealed_ids`), not via this generic path.
+        ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::Demonstrative => None,
     }
 }
 
@@ -3986,6 +4026,11 @@ where
                 })
             })
             .unwrap_or(0),
+        // CR 608.2c: MV-only class today ({Parker Luck, Keen Duelist} reference
+        // only the OTHER revealed card's mana value). No card reads its power or
+        // toughness, so this is a fail-closed placeholder. Extend by mirroring the
+        // `last_revealed_ids` by-exclusion read in `resolve_object_mana_value`.
+        ObjectScope::OtherRevealedCard => 0,
     }
 }
 
@@ -4156,6 +4201,31 @@ fn resolve_object_mana_value(
                     .map(|s| u32_to_i32_saturating(s.lki.mana_value))
             })
             .unwrap_or(0),
+        // CR 608.2c + CR 701.20b + CR 108.3 + CR 202.3: "the mana value of the
+        // card revealed by the OTHER player" in an exactly-two-target symmetric
+        // reveal. This fan-out iteration's OWN revealed card is bound as
+        // `effect_context_object` (owner-keyed, §2.4b of the plan). The other
+        // revealer's card is the single `last_revealed_ids` entry that is NOT the
+        // own card (by-exclusion). MV is printed/zone-independent (CR 202.3), so
+        // the read is stable whether or not the other card has already been put
+        // to hand. Fail-closed to 0 when no "other" entry exists — empty library
+        // or a target that became illegal on resolution (CR 608.2b).
+        ObjectScope::OtherRevealedCard => {
+            let own = ability
+                .and_then(|a| a.effect_context_object.as_ref())
+                .map(|s| s.object_id);
+            state
+                .last_revealed_ids
+                .iter()
+                .find(|id| Some(**id) != own)
+                .and_then(|id| state.objects.get(id))
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
+                .unwrap_or(0)
+        }
     }
 }
 

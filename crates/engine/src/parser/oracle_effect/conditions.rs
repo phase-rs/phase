@@ -20,7 +20,7 @@ use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_wo
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::{ContinuationAst, PutCount};
+use crate::parser::oracle_ir::ast::ContinuationAst;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
@@ -3661,12 +3661,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // CR 701.20e: Map the typed `PutCount` onto the Dig's keep_count/up_to.
     // `u32::MAX` is an unbounded parser sentinel; the Dig resolver clamps it
     // to the number of seen cards.
-    let (alt_keep_count, alt_up_to) = match alt_quantity {
-        PutCount::All => (Some(u32::MAX), false),
-        PutCount::AnyNumber => (Some(u32::MAX), true),
-        PutCount::Up(n) => (Some(n), true),
-        PutCount::Exactly(n) => (Some(n), false),
-    };
+    let (alt_keep_count, alt_keep_count_expr, alt_up_to) = alt_quantity.to_dig_keep();
 
     // CR 601.2f + CR 608.2c: a teamwork-gated "put ... from among them ...
     // instead" alternative reuses the preceding Dig's source; the base
@@ -3689,6 +3684,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         count: prev_count.clone(),
         destination: alt_destination,
         keep_count: alt_keep_count,
+        keep_count_expr: alt_keep_count_expr,
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),

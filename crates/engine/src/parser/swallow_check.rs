@@ -1101,6 +1101,23 @@ fn any_ability_has_instead_condition(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
+    // CR 609.4b + CR 608.2c: "if you cast a spell this way, you may spend mana as
+    // though it were mana of any type/color to cast it" folds onto the preceding
+    // `PlayFromExile` grant as `mana_spend_permission` (Outrageous Robbery,
+    // Brainstealer Dragon). The leading "if you cast a spell this way" is the
+    // back-reference scoping the concession to spells cast via that grant —
+    // represented by the field, not a swallowed condition.
+    if let Effect::GrantCastingPermission {
+        permission:
+            crate::types::ability::CastingPermission::PlayFromExile {
+                mana_spend_permission: Some(_),
+                ..
+            },
+        ..
+    } = &*def.effect
+    {
+        return true;
+    }
     if let Effect::Mana { grants, .. } = &*def.effect {
         if grants.iter().any(|grant| {
             matches!(

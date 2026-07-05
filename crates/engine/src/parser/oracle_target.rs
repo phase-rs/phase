@@ -657,6 +657,16 @@ pub fn parse_target_with_syntax<'a>(
         }
         let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
+            // CR 601.2c + CR 608.2c: when the chain declared multiple target
+            // slots and "that <type>" names exactly one of them (Stolen Uniform's
+            // "that Equipment"), bind the precise slot instead of the ambiguous
+            // whole-chain `ParentTarget`. Empty/ambiguous registry → falls through
+            // to the `ParentTarget` lift below, unchanged.
+            if let Some((slot_filter, slot_rest)) =
+                parse_definite_parent_reference(lower.as_str(), &ctx.declared_target_slots)
+            {
+                return (slot_filter, &text[lower.len() - slot_rest.len()..], syntax);
+            }
             return (TargetFilter::ParentTarget, rem, syntax);
         }
     }
@@ -918,7 +928,9 @@ pub fn parse_target_with_syntax<'a>(
             syntax,
         );
     }
-    if let Some((filter, rest)) = parse_definite_parent_reference(lower.as_str()) {
+    if let Some((filter, rest)) =
+        parse_definite_parent_reference(lower.as_str(), &ctx.declared_target_slots)
+    {
         return (filter, &text[lower.len() - rest.len()..], syntax);
     }
 
@@ -1533,36 +1545,96 @@ fn parse_selected_from_set_reference(input: &str) -> Option<&str> {
     Some(rest)
 }
 
-fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> {
-    let (rest, filter) = alt((
-        value(
-            TargetFilter::ParentTargetSlot { index: 1 },
-            tag::<_, _, OracleError<'_>>("the artifact card"),
-        ),
-        value(
-            TargetFilter::ParentTargetSlot { index: 0 },
-            tag::<_, _, OracleError<'_>>("the artifact"),
-        ),
+/// CR 601.2c + CR 608.2c: Resolve a definite anaphor ("the artifact", "the
+/// artifact card", "that Equipment", "the chosen creature") to the specific
+/// `ParentTargetSlot { index }` it names, by matching the anaphor's noun phrase
+/// (type/subtype token + optional "card" zone qualifier) against the chain's
+/// declared target slots (`ctx.declared_target_slots`).
+///
+/// Registry-driven: Goblin Welder's two-artifact disambiguation ("the artifact"
+/// = the battlefield slot, "the artifact card" = the graveyard slot) is
+/// reproduced from the slot filters' own zone properties, not a hardcoded
+/// artifact special case. Returns `None` — falling through to the broad
+/// `ParentTarget`/set-selection behavior — when the registry is empty
+/// (single-target spell) or the anaphor matches zero or ≥2 slots (ambiguous),
+/// so no anaphor is ever bound to a specific slot on a guess.
+///
+/// `input` is lowercase; the returned remainder is a slice of `input`.
+pub(super) fn parse_definite_parent_reference<'a>(
+    input: &'a str,
+    slots: &[TargetFilter],
+) -> Option<(TargetFilter, &'a str)> {
+    if slots.is_empty() {
+        return None;
+    }
+    // A definite determiner is REQUIRED — a bare type word ("creature") is a
+    // fresh target, not a back-reference. Longest-match-first: "the chosen "
+    // before "the ".
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the chosen "),
+        tag("the "),
+        tag("that "),
     ))
     .parse(input)
     .ok()?;
-    if rest.is_empty()
-        || peek(alt((
-            tag::<_, _, OracleError<'_>>(","),
-            tag::<_, _, OracleError<'_>>("."),
-            tag::<_, _, OracleError<'_>>(";"),
-            tag::<_, _, OracleError<'_>>(" and "),
-            tag::<_, _, OracleError<'_>>(" to "),
-            tag::<_, _, OracleError<'_>>(" into "),
-            tag::<_, _, OracleError<'_>>(" onto "),
-        )))
-        .parse(rest)
-        .is_ok()
-    {
-        Some((filter, rest))
-    } else {
-        None
+    let (after_type_word, anaphor_type) = nom_target::parse_type_filter_word(rest).ok()?;
+    // Optional trailing "card"/"cards" zone qualifier (Goblin Welder's "the
+    // artifact card"). When present, the anaphor names a non-battlefield
+    // (card-zone) slot.
+    let (rest, is_card) = match parse_card_or_cards_word(after_type_word.trim_start()) {
+        Ok((r, _)) => (r, true),
+        Err(_) => (after_type_word, false),
+    };
+    // A possessive continuation ("the creature's controller") is a distinct
+    // anaphor class (controller/owner of the slot), not a bare slot reference —
+    // refuse it so the possessive arms downstream keep their bindings.
+    if tag::<_, _, OracleError<'_>>("'").parse(rest).is_ok() {
+        return None;
     }
+    // Guard against consuming the head of a COMPOUND type phrase ("the artifact
+    // creature") as an anaphor: if the remainder begins with another type word,
+    // this is a fresh typed filter, not a slot back-reference.
+    let tail = rest.trim_start();
+    if !tail.is_empty() && nom_target::parse_type_filter_word(tail).is_ok() {
+        return None;
+    }
+    // CR 601.2c: each anaphor names exactly one earlier slot — bind only a
+    // UNIQUE match; zero or ≥2 matches fall through as `None`.
+    let mut matched: Option<usize> = None;
+    for (index, slot) in slots.iter().enumerate() {
+        if slot_matches_anaphor(&anaphor_type, is_card, slot) {
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some(index);
+        }
+    }
+    matched.map(|index| (TargetFilter::ParentTargetSlot { index }, rest))
+}
+
+/// CR 205.3 + CR 400.1: Whether a declared target slot filter matches a definite
+/// anaphor's parsed `(type token, is-card)`. Type match is by core-type
+/// membership or subtype equality; the card qualifier requires the slot to be
+/// (`is_card`) or not be (`!is_card`) in a non-battlefield card zone.
+fn slot_matches_anaphor(anaphor_type: &TypeFilter, is_card: bool, slot: &TargetFilter) -> bool {
+    let TargetFilter::Typed(tf) = slot else {
+        return false;
+    };
+    let type_ok = match anaphor_type {
+        TypeFilter::Subtype(sub) => tf
+            .get_subtype()
+            .is_some_and(|slot_sub| slot_sub.eq_ignore_ascii_case(sub)),
+        other => tf.type_filters.iter().any(|t| t == other),
+    };
+    if !type_ok {
+        return false;
+    }
+    // A "card" lives in a non-battlefield zone (Goblin Welder's graveyard slot);
+    // a battlefield permanent carries no such zone property.
+    let slot_is_card = slot
+        .extract_in_zone()
+        .is_some_and(|zone| zone != Zone::Battlefield);
+    slot_is_card == is_card
 }
 
 /// CR 201.2: Match a clause boundary that ends a card name in a board-filter
@@ -5106,6 +5178,21 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
     // keyword class regardless of cost, so map it to the discriminant-level `Kind`.
     if let Ok((rest, kind)) =
         value(KeywordKind::Mutate, tag::<_, _, OracleError<'_>>("mutate")).parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
+    // CR 702.168: Disguise is a parameterized keyword (`Disguise(ManaCost)`), so
+    // the `Keyword::from_str` fallback would yield a concrete `Keyword::Disguise(cost)`
+    // and force an exact-cost match. "creatures you control with disguise" names
+    // the keyword class regardless of cost, so map it to the discriminant `Kind`.
+    if let Ok((rest, kind)) = value(
+        KeywordKind::Disguise,
+        tag::<_, _, OracleError<'_>>("disguise"),
+    )
+    .parse(text)
     {
         if rest.is_empty() {
             return Some(KeywordMatch::Kind(kind));
@@ -9237,25 +9324,137 @@ mod tests {
         ));
     }
 
+    /// Goblin Welder's two artifact slots: `[artifact on battlefield, artifact
+    /// card in graveyard]` — the registry the "Choose target artifact a player
+    /// controls and target artifact card in that player's graveyard" head
+    /// declares. The generalized resolver reproduces the old hardcoded artifact
+    /// disambiguation purely from these slots' zone properties.
+    fn goblin_welder_slots() -> Vec<TargetFilter> {
+        vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: None,
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: None,
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            }),
+        ]
+    }
+
+    fn parse_target_with_slots(text: &str, slots: Vec<TargetFilter>) -> (TargetFilter, &str) {
+        let mut ctx = ParseContext {
+            declared_target_slots: slots,
+            ..ParseContext::default()
+        };
+        let (filter, rest, _) = parse_target_with_syntax(text, &mut ctx);
+        (filter, rest)
+    }
+
     #[test]
     fn definite_artifact_reference_binds_first_parent_target_slot() {
-        let (filter, rest) = parse_target("the artifact and returns it");
+        // Threads the two-artifact registry so the general resolver reproduces
+        // the deleted hardcoded "the artifact" → slot 0 arm.
+        let (filter, rest) =
+            parse_target_with_slots("the artifact and returns it", goblin_welder_slots());
         assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 0 });
         assert_eq!(rest, " and returns it");
     }
 
     #[test]
     fn definite_artifact_card_reference_binds_second_parent_target_slot() {
-        let (filter, rest) = parse_target("the artifact card to the battlefield");
+        let (filter, rest) = parse_target_with_slots(
+            "the artifact card to the battlefield",
+            goblin_welder_slots(),
+        );
         assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 1 });
         assert_eq!(rest, " to the battlefield");
     }
 
     #[test]
     fn definite_artifact_reference_does_not_steal_type_phrase() {
-        let (filter, rest) = parse_target("the artifact creature");
+        // "the artifact creature" is a fresh compound type phrase, never an
+        // anaphor — even with the registry populated.
+        let (filter, rest) =
+            parse_target_with_slots("the artifact creature", goblin_welder_slots());
         assert_ne!(filter, TargetFilter::ParentTargetSlot { index: 0 });
         assert_ne!(rest, " creature");
+    }
+
+    #[test]
+    fn definite_reference_empty_registry_is_none() {
+        // Claim 4/7: with no declared slots the resolver never guesses a slot —
+        // it returns None so the broad `ParentTarget`/set-selection arms win.
+        assert_eq!(
+            parse_definite_parent_reference("the artifact and returns it", &[]),
+            None
+        );
+        assert_eq!(
+            parse_definite_parent_reference("the chosen creature", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn definite_reference_ambiguous_registry_is_none() {
+        // Two same-type battlefield slots + a bare "the creature" anaphor: two
+        // slots tie, so the resolver returns None (no silent slot-0 guess)
+        // rather than binding a specific slot.
+        let two_creatures = vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }),
+        ];
+        assert_eq!(
+            parse_definite_parent_reference("the creature and it fights", &two_creatures),
+            None
+        );
+    }
+
+    #[test]
+    fn set_selection_arm_unshadowed_by_empty_registry() {
+        // Claim 7: a "the chosen creature" set-selection card with NO dual-target
+        // declaration (empty registry) must still parse to `ParentTarget` via the
+        // `SELECTED_FROM_SET_PHRASES` arm — the generalized resolver returns None
+        // and does not shadow it with a `ParentTargetSlot`.
+        let (filter, _rest) = parse_target_with_slots("the chosen creature", vec![]);
+        assert_eq!(filter, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn stolen_uniform_anaphors_bind_precise_slots() {
+        // Claim 4 (parser shape): with the Stolen Uniform registry
+        // `[creature you control, Equipment]`, "that Equipment" → slot 1 and
+        // "the chosen creature" → slot 0, disambiguated purely by type.
+        let slots = vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Equipment".to_string())],
+                controller: None,
+                properties: vec![],
+            }),
+        ];
+        let (equip, rest) =
+            parse_target_with_slots("that Equipment until end of turn", slots.clone());
+        assert_eq!(equip, TargetFilter::ParentTargetSlot { index: 1 });
+        assert_eq!(rest, " until end of turn");
+        let (creature, _) = parse_target_with_slots("the chosen creature.", slots);
+        assert_eq!(creature, TargetFilter::ParentTargetSlot { index: 0 });
     }
 
     #[test]

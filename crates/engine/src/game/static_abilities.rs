@@ -1731,7 +1731,9 @@ pub(crate) fn static_filter_matches(
                         // in which to resolve a target player. Fail closed — the
                         // parser never emits this variant for static filters.
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
-                        crate::types::ability::ControllerRef::TargetPlayer => false,
+                        // CR 109.4: TargetOpponent fails closed identically here.
+                        crate::types::ability::ControllerRef::TargetPlayer
+                        | crate::types::ability::ControllerRef::TargetOpponent => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::ParentTargetOwner => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,

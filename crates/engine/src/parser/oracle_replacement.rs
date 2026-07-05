@@ -2179,6 +2179,131 @@ fn subject_lower_has_face_up(after_subject: &str) -> bool {
         .is_ok()
 }
 
+/// A dual-condition "As [this permanent] enters [or is turned face up], put …
+/// counters on it" ability. The engine has no single enters-or-turned-face-up
+/// event, so this recognizer emits ONE replacement per event
+/// (`Moved`/Battlefield and `TurnFaceUp`), both carrying the same `execute`,
+/// mirroring the multi-emit shape of `lower_as_enters_becomes_choice_modal`.
+/// Because `parse_replacement_line` returns a single `Option`, the two
+/// definitions are pushed directly into `result`.
+///
+/// Handles the counter class:
+///   "As ~ enters[ the battlefield][ or is turned face up], put X +1/+1 counters
+///    on it, where X is the number of other creatures you control."
+/// (Crowd-Control Warden — dual arm) and the single-condition template family
+/// (any counter type, fixed or dynamic count). The effect is parsed through the
+/// shared `parse_effect_chain` stack, so the where-X quantity + ObjectCount /
+/// `FilterProp::Another` lowering are all reused.
+///
+/// A tight self-`PutCounter` guard (`normalize_self_put_counter_chain`) keeps
+/// this from claiming sibling "As ~ enters, choose…/becomes…" lines: those lower
+/// to `Effect::Choose` (not `PutCounter`) and fall through here.
+///
+/// CR 614.1c: "As [this permanent] enters …" is a replacement effect (the ETB arm).
+/// CR 708.11: an "As … is turned face up" ability applies while the permanent is
+/// being turned face up (the face-up arm).
+/// CR 122.1a: the placed +1/+1 counters add to the creature's power and toughness.
+pub(crate) fn lower_as_enters_or_face_up_counters(
+    text: &str,
+    result: &mut super::oracle::ParsedAbilities,
+) -> bool {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    // nom-frame: "as ~ enters[ the battlefield][ or is turned face up], ".
+    let Ok((rest, _)) = tag::<_, _, VE>("as ~ enters").parse(lower.as_str()) else {
+        return false;
+    };
+    let (rest, _the_battlefield) = opt(tag::<_, _, VE>(" the battlefield"))
+        .parse(rest)
+        .unwrap_or((rest, None));
+    let (rest, face_up) = opt(tag::<_, _, VE>(" or is turned face up"))
+        .parse(rest)
+        .unwrap_or((rest, None));
+    let has_face_up = face_up.is_some();
+    let Ok((tail_lower, _)) = tag::<_, _, VE>(", ").parse(rest) else {
+        return false;
+    };
+
+    // Recover the ORIGINAL-case effect slice via byte offset (mirrors
+    // `split_once_on_lower`) so `parse_effect_chain` sees the printed casing.
+    let Some(effect_start) = text.len().checked_sub(tail_lower.len()) else {
+        return false;
+    };
+    let effect_text = text[effect_start..].trim().trim_end_matches('.').trim();
+    if effect_text.is_empty() {
+        return false;
+    }
+
+    // Reuse the counter + quantity effect stack (where-X → ObjectCount / Another).
+    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+
+    // Scoping guard + self-anaphor normalization: every effect in the chain must
+    // place counters on the entering/turned-up permanent itself (none may be
+    // Unimplemented or externally targeted). Rewrites the "it" placeholder to
+    // `SelfRef` so the runtime event-modifier fold recognizes it.
+    if !normalize_self_put_counter_chain(&mut execute) {
+        return false;
+    }
+
+    // CR 614.1c: ETB arm — a battlefield-entry-scoped `Moved` replacement whose
+    // `PutCounter { SelfRef }` execute is folded into the entering object's
+    // enter-with-counters by the runtime event-modifier path.
+    result.replacements.push(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(execute.clone())
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description(text.to_string()),
+    );
+
+    // CR 708.11: face-up arm — the same effect applies as the permanent is turned
+    // face up (Disguise/megamorph turn-up), bound to that permanent via SelfRef.
+    if has_face_up {
+        result.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(execute)
+                .description(text.to_string()),
+        );
+    }
+
+    true
+}
+
+/// Validate + normalize the execute chain of an as-enters / turned-face-up
+/// counter replacement. Requires every effect reachable through the
+/// `sub_ability` chain to place counters on the permanent itself, rejecting
+/// `Effect::Unimplemented` and any externally-targeted effect — this scopes
+/// `lower_as_enters_or_face_up_counters` to the CR 614.1c / CR 708.11
+/// event-modifier class (do NOT reuse the looser
+/// `turn_face_up_effect_is_self_resolving`, which also passes `Effect::Choose`).
+///
+/// `parse_effect_chain` represents "put … counters on it" as `SelfRef` for a
+/// fixed count but as `ParentTarget` for the dynamic "…, where X is …" form (the
+/// "it" anaphor has no parent target to bind, so `parse_target` leaves the
+/// `ParentTarget` placeholder). In an as-enters / turned-face-up replacement "it"
+/// is definitionally the entering/turned-up permanent, so this rewrites
+/// `ParentTarget` → `SelfRef` in place. The rewrite is required for correctness:
+/// the runtime folds an ETB counter modifier only when the `PutCounter` target
+/// is `SelfRef` (`EventModifiers::is_event_modifier_effect`), and the
+/// turned-face-up applier binds `SelfRef` to the permanent.
+fn normalize_self_put_counter_chain(ability: &mut AbilityDefinition) -> bool {
+    let mut current = Some(ability);
+    while let Some(def) = current {
+        match def.effect.as_mut() {
+            Effect::PutCounter { target, .. }
+                if matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget) =>
+            {
+                *target = TargetFilter::SelfRef;
+            }
+            _ => return false,
+        }
+        current = def.sub_ability.as_deref_mut();
+    }
+    true
+}
+
 /// CR 110.2a + CR 614.1d: "`<this permanent>` enters under the control of an
 /// opponent of your choice." — a self-ETB controller-override replacement.
 ///
@@ -16092,6 +16217,164 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s.condition, Some(StaticCondition::ChosenLabelIs { .. }))),
             "no gated statics when the modal aborts"
+        );
+    }
+
+    // --- lower_as_enters_or_face_up_counters (Crowd-Control Warden) ---
+
+    /// Assert a replacement's execute is exactly
+    /// `PutCounter { Plus1Plus1, Ref{ObjectCount{Creature, You, ⊇[Another]}}, SelfRef }`.
+    fn assert_self_other_creatures_counter(rep: &ReplacementDefinition) {
+        let execute = rep.execute.as_deref().expect("replacement has execute");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = execute.effect.as_ref()
+        else {
+            panic!("execute must be PutCounter, got {:?}", execute.effect);
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert_eq!(
+            *target,
+            TargetFilter::SelfRef,
+            "counters land on the permanent itself"
+        );
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("count must be a dynamic ObjectCount ref, got {count:?}");
+        };
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) = filter
+        else {
+            panic!("ObjectCount filter must be Typed, got {filter:?}");
+        };
+        assert!(
+            type_filters.contains(&TypeFilter::Creature),
+            "counts creatures"
+        );
+        assert_eq!(*controller, Some(ControllerRef::You), "you control");
+        assert!(
+            properties.contains(&FilterProp::Another),
+            "'other creatures' must carry FilterProp::Another so the source excludes itself, got {properties:?}"
+        );
+    }
+
+    /// P1: the full dual-condition line lowers to exactly TWO replacements — a
+    /// `Moved`/Battlefield ETB arm and a `TurnFaceUp` arm — both carrying the same
+    /// dynamic `PutCounter { SelfRef }`. Zero `Unimplemented`. Reverting the
+    /// recognizer regresses the line to `Unimplemented("replacement_structure")`.
+    #[test]
+    fn crowd_control_warden_lowers_to_dual_counter_replacements() {
+        let parsed = parse_oracle_text(
+            "As this creature enters or is turned face up, put X +1/+1 counters on it, \
+             where X is the number of other creatures you control.\nDisguise {3}{G/W}{G/W}",
+            "Crowd-Control Warden",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+
+        assert_eq!(
+            parsed.replacements.len(),
+            2,
+            "dual line emits one Moved + one TurnFaceUp replacement, got {}",
+            parsed.replacements.len()
+        );
+
+        let moved = parsed
+            .replacements
+            .iter()
+            .find(|r| r.event == ReplacementEvent::Moved)
+            .expect("ETB Moved arm present");
+        assert_eq!(moved.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(moved.valid_card, Some(TargetFilter::SelfRef));
+        assert_self_other_creatures_counter(moved);
+
+        let face_up = parsed
+            .replacements
+            .iter()
+            .find(|r| r.event == ReplacementEvent::TurnFaceUp)
+            .expect("TurnFaceUp arm present");
+        assert_eq!(face_up.valid_card, Some(TargetFilter::SelfRef));
+        assert_self_other_creatures_counter(face_up);
+
+        // No honest gap anywhere (the whole replacement line is supported; the
+        // Disguise line is an extracted keyword, not an Unimplemented ability).
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| a.effect.unimplemented_description().is_some()),
+            "no Unimplemented ability — the replacement_structure gap is closed"
+        );
+    }
+
+    /// P1 revert tripwire: WITHOUT the recognizer the line falls through to the
+    /// Priority-14a fallback and stamps `Unimplemented("replacement_structure")`.
+    /// This asserts the exact pre-fix behaviour by parsing the line through the
+    /// non-multi-emit path (`parse_replacement_line`, which cannot handle the dual
+    /// condition), proving the recognizer is what closes the gap.
+    #[test]
+    fn crowd_control_warden_dual_line_unhandled_by_single_option_path() {
+        // The single-`Option` replacement path (used before the multi-emit
+        // recognizer) returns None for the dual condition — this is the gap the
+        // recognizer fills. If a future single-Option parser learns this line,
+        // this test flips and the recognizer wiring should be reconsidered.
+        let single = parse_replacement_line(
+            "As ~ enters or is turned face up, put X +1/+1 counters on it, \
+             where X is the number of other creatures you control.",
+            "Crowd-Control Warden",
+        );
+        assert!(
+            single.is_none(),
+            "the dual line is not parseable as a single replacement definition — \
+             it requires the multi-emit recognizer"
+        );
+    }
+
+    /// P2 (guard reach-guard): "As ~ enters, choose a basic land type." must NOT be
+    /// claimed by the counter recognizer (its execute is `Effect::Choose`, not
+    /// `PutCounter`), so it falls through to `parse_as_enters_choose`. Non-vacuous:
+    /// the line still produces a Choose replacement through the full pipeline, and
+    /// NO counter replacement is emitted. Removing the PutCounter-SelfRef guard
+    /// would let the recognizer stamp a bare `Moved`/Choose replacement first,
+    /// pre-empting `parse_as_enters_choose`'s land-type wiring.
+    #[test]
+    fn as_enters_choose_line_not_stolen_by_counter_recognizer() {
+        let parsed = parse_oracle_text(
+            "As ~ enters, choose a basic land type.",
+            "~",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "exactly one replacement (the choose), got {}",
+            parsed.replacements.len()
+        );
+        let rep = &parsed.replacements[0];
+        assert!(
+            rep.execute
+                .as_deref()
+                .is_some_and(|e| matches!(e.effect.as_ref(), Effect::Choose { .. })),
+            "as-enters-choose line must still lower to a Choose replacement, not a PutCounter"
+        );
+        // Reach-guard positive: the recognizer would have emitted PutCounter — prove
+        // it did not steal the line.
+        assert!(
+            !parsed.replacements.iter().any(|r| r
+                .execute
+                .as_deref()
+                .is_some_and(|e| matches!(e.effect.as_ref(), Effect::PutCounter { .. }))),
+            "the counter recognizer must not claim a choose line"
         );
     }
 

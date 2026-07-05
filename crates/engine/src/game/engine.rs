@@ -4193,6 +4193,29 @@ fn apply_action(
                 return Err(EngineError::NotYourPriority);
             }
             let p = *player;
+            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
+            // a face-down permanent face up is a special action whose morph/disguise/
+            // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
+            // validates the action and derives that cost; payment routes through
+            // `PaymentContext::SpecialAction(TurnFaceUp)` so spend-restricted mana
+            // ("only to turn permanents face up", Overgrown Zealot / Tin Street
+            // Gossip) is eligible here while other-context mana is rejected. Mirrors
+            // the `UnlockDoor` special-action handler.
+            let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
+            let cost = casting::apply_special_action_cost_reduction(
+                state,
+                p,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost,
+            );
+            casting::pay_special_action_mana_cost(
+                state,
+                p,
+                Some(object_id),
+                &cost,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                &mut events,
+            )?;
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
@@ -4813,6 +4836,37 @@ fn apply_action(
             }
             state.waiting_for.clone()
         }
+        // CR 107.1c + CR 608.2d: Submit the "remove any number of counters"
+        // resolution-time selection (Rhys, the Evermore; Tetravus). ORDERING
+        // INVARIANT: apply removals (stamping `last_effect_count`) BEFORE draining
+        // the continuation, so a chained "create that many" rider reads the count.
+        (
+            WaitingFor::RemoveCountersChoice {
+                player,
+                source_id,
+                available,
+                pending_effect,
+                ..
+            },
+            GameAction::ChooseCountersToRemove { selections },
+        ) => {
+            let p = *player;
+            effects::counters::validate_and_queue_counter_removal(
+                state,
+                &selections,
+                *source_id,
+                available,
+                pending_effect,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            effects::counters::drain_pending_counter_removals(state, &mut events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                effects::drain_pending_continuation(state, &mut events);
+            }
+            state.waiting_for.clone()
+        }
         // CR 115.7: Retarget a spell or ability on the stack via the dialog
         // path — the multi-target (`All`-scope) UI submits every new target at
         // once.
@@ -5351,6 +5405,18 @@ fn handle_play_land(
         return Err(EngineError::ActionNotAllowed(
             "Player is under a CantPlayLand static (CR 305.2)".to_string(),
         ));
+    }
+    // CR 116.2a + CR 305.1: A `ProhibitPlayFromZone` deny covers the play-land
+    // half of "play" (a land play is a special action, not a cast), so this gate
+    // is the land-side counterpart to the cast-gate check in
+    // `casting::prepare_spell_cast` (Memory Vessel: "can't play cards from their
+    // hand"). The card's current zone is the discriminator.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
+            ));
+        }
     }
     let additional = super::static_abilities::additional_land_drops(state, player);
     let effective_limit = state.max_lands_per_turn.saturating_add(additional);

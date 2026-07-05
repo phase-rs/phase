@@ -207,6 +207,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::Adapt { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -221,6 +222,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeUnprepared { .. }
+        | Effect::Behold { .. }
         | Effect::BlightEffect { .. }
         | Effect::Bolster { .. }
         | Effect::Cascade

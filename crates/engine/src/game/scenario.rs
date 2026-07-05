@@ -1504,6 +1504,7 @@ impl GameRunner {
             WaitingFor::SearchPartitionChoice { .. } => "SearchPartitionChoice",
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -1629,6 +1630,7 @@ impl GameRunner {
             WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
             WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
+            WaitingFor::RemoveCountersChoice { .. } => "RemoveCountersChoice",
             WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
@@ -2589,7 +2591,7 @@ impl<'a> AbilityActivation<'a> {
             x,
             target_players,
             target_objects,
-            pay_with: _pay_with,
+            pay_with,
             search_pick,
             optional,
         } = self;
@@ -2686,6 +2688,24 @@ impl<'a> AbilityActivation<'a> {
                 WaitingFor::ManaPayment { .. } => {
                     act_collect(runner, GameAction::PassPriority, &mut events)
                         .expect("finalizing the ability's mana payment must be accepted");
+                }
+                // CR 602.2b + CR 601.2h: pay a non-mana cost (e.g. sacrificing or
+                // exiling a specific permanent named by the cost). Activating an
+                // ability follows the 601.2 process (602.2b); 601.2h is the
+                // object-moving cost-payment step. Submit the pre-declared
+                // `.pay_with(..)` object(s).
+                WaitingFor::PayCost { .. } => {
+                    if pay_with.is_empty() {
+                        panic!(
+                            "AbilityActivation reached WaitingFor::PayCost but no .pay_with(..) \
+                             objects were declared — declare the object(s) that pay this cost"
+                        );
+                    }
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: pay_with.clone(),
+                        })
+                        .expect("SelectCards (cost payment) must be accepted");
                 }
                 other => panic!(
                     "AbilityActivation driver does not handle WaitingFor::{} yet — extend the \

@@ -484,6 +484,8 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
+        // CR 201.5a: a granted body's by-name reference to its granting object.
+        TargetFilter::GrantingObject => "granting object".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
         TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
         TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
@@ -786,6 +788,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::Opponent => "opponent's",
                     ControllerRef::ScopedPlayer => "that player's",
                     ControllerRef::TargetPlayer => "target player's",
+                    ControllerRef::TargetOpponent => "target opponent's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
                     ControllerRef::DefendingPlayer => "defending player's",
@@ -932,6 +935,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::Opponent => "opponent",
                 ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
+                ControllerRef::TargetOpponent => "target opponent",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::ParentTargetOwner => "parent target's owner",
                 ControllerRef::DefendingPlayer => "defending player",
@@ -1004,6 +1008,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::Opponent => "opponent controls",
         ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
+        ControllerRef::TargetOpponent => "target opponent controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::ParentTargetOwner => "parent target's owner controls",
         ControllerRef::DefendingPlayer => "defending player controls",
@@ -1217,6 +1222,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventSource => "event source",
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
+                ObjectScope::OtherRevealedCard => "other revealed card",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1241,6 +1247,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's power".into(),
             ObjectScope::EventTarget => "event target's power".into(),
             ObjectScope::CostPaidObject => "referenced object's power".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1251,6 +1258,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's toughness".into(),
             ObjectScope::EventTarget => "event target's toughness".into(),
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1261,6 +1269,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's mana value".into(),
             ObjectScope::EventTarget => "event target's mana value".into(),
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1272,6 +1281,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "event source's colors".into(),
             ObjectScope::EventTarget => "event target's colors".into(),
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
+            ObjectScope::OtherRevealedCard => "other revealed card's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1282,6 +1292,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "typeline components on event source".into(),
             ObjectScope::EventTarget => "typeline components on event target".into(),
             ObjectScope::CostPaidObject => "typeline components on cost-paid object".into(),
+            ObjectScope::OtherRevealedCard => "typeline components on other revealed card".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1292,6 +1303,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventSource => "words in event source's name".into(),
             ObjectScope::EventTarget => "words in event target's name".into(),
             ObjectScope::CostPaidObject => "words in cost-paid object's name".into(),
+            ObjectScope::OtherRevealedCard => "words in other revealed card's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1301,6 +1313,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventSource => "event source",
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
+                ObjectScope::OtherRevealedCard => "other revealed card",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -1408,7 +1421,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
         }
-        QuantityRef::TrackedSetAggregate { function, property } => {
+        QuantityRef::TrackedSetAggregate {
+            function,
+            property,
+            source: _,
+        } => {
             let func = match function {
                 AggregateFunction::Max => "max",
                 AggregateFunction::Min => "min",
@@ -3049,10 +3066,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after,
+            window,
         } => {
             d.push(("player".into(), fmt_target(target)));
             if *grant_extra_turn_after {
                 d.push(("extra turn after".into(), "yes".into()));
+            }
+            if matches!(
+                window,
+                crate::types::ability::ControlWindow::NextCombatPhase
+            ) {
+                d.push(("window".into(), "next combat phase".into()));
             }
         }
         Effect::AdditionalPhase {
@@ -3147,6 +3171,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExploreAll { filter } => {
             d.push(("filter".into(), fmt_target(filter)));
         }
+        // CR 701.4a: behold's only parameter is the beheld quality (subtype filter).
+        Effect::Behold { filter } => {
+            d.push(("filter".into(), fmt_target(filter)));
+        }
         Effect::GiftDelivery { kind } => {
             d.push(("gift".into(), format!("{kind:?}")));
         }
@@ -3219,6 +3247,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ApplySticker { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseOneOf { .. }
         | Effect::ReturnAsAura { .. }
@@ -3575,6 +3604,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         TC::PlacedByAbilitySource => "placed by this ability".into(),
         TC::TriggeringSpellTargetsFilter { filter } => {
             format!("triggering spell targets {}", fmt_target(filter))
+        }
+        TC::TriggeringSpellMatchesFilter { filter } => {
+            format!("triggering spell is {}", fmt_target(filter))
         }
         TC::And { conditions } => {
             let parts: Vec<String> = conditions.iter().map(fmt_trigger_condition).collect();
@@ -6521,6 +6553,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourcePower", Handled),
             ObjectScope::EventTarget => ("EventTargetPower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6531,6 +6564,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceToughness", Handled),
             ObjectScope::EventTarget => ("EventTargetToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6541,6 +6575,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceManaValue", Handled),
             ObjectScope::EventTarget => ("EventTargetManaValue", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -6552,6 +6587,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
             ObjectScope::EventTarget => ("EventTargetObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6562,6 +6598,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceObjectNameWordCount", Handled),
             ObjectScope::EventTarget => ("EventTargetObjectNameWordCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6572,6 +6609,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceObjectTypelineComponentCount", Handled),
             ObjectScope::EventTarget => ("EventTargetObjectTypelineComponentCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectTypelineComponentCount", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardTypelineComponentCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6582,6 +6620,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventSource => ("EventSourceManaSymbolsInManaCost", Handled),
             ObjectScope::EventTarget => ("EventTargetManaSymbolsInManaCost", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaSymbolsInManaCost", Handled),
+            ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),

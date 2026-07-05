@@ -5243,13 +5243,13 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
     let mut to_fire: Vec<(DelayedTrigger, Option<GameEvent>)> = Vec::new();
     let mut to_remove: Vec<(usize, GameEvent)> = Vec::new();
 
-    // CR 603.12: A reflexive coin-flip trigger ("when you win/lose the flip") is
-    // checked immediately after creation and triggers based on whether the flip
-    // occurred during the creating resolution. If the flip happened but its
-    // result did not match the trigger's filter (the "win" reflexive on a lost
-    // flip, or vice versa), the reflexive simply does not trigger — and, being
-    // tied to that one flip, must be discarded rather than left to fire on a
-    // later coin flip this turn (which a bare CR 603.7 `WhenNextEvent` would do).
+    // CR 603.12: A reflexive delayed trigger ("when you [do X] this way, …",
+    // including "when you win/lose the flip") is checked immediately after
+    // creation and triggers only on the event(s) that occurred earlier during the
+    // creating resolution. It gets exactly one shot on that creation batch: if it
+    // did not match on this — its first — `check_delayed_triggers` pass, it must
+    // be discarded rather than left to fire on a later same-turn matching event
+    // (which a bare CR 603.7b `WhenNextEvent` would do).
     let mut to_discard: Vec<usize> = Vec::new();
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
@@ -5265,14 +5265,10 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             } else {
                 to_fire.push((delayed.clone(), Some(trigger_event)));
             }
-        } else if reflexive_coin_flip_resolved_without_match(
-            &delayed.condition,
-            events,
-            state,
-            delayed.source_id,
-        ) {
-            // CR 603.12: the creating flip occurred but the result was opposite —
-            // discard this reflexive trigger; it never gets a "next" flip.
+        } else if is_reflexive_lifetime(&delayed.condition) {
+            // CR 603.12: an unmatched reflexive trigger, checked on its creation
+            // batch, never gets a "next" event — discard it rather than let it
+            // linger to a later same-turn event.
             to_discard.push(idx);
         }
     }
@@ -5657,6 +5653,26 @@ fn reflexive_coin_flip_resolved_without_match(
     })
 }
 
+/// CR 603.12: True when `condition` is a reflexive delayed trigger — a
+/// `WhenNextEvent` carrying the `Reflexive` lifetime ("when you [do X] this
+/// way, …", including the coin-flip "when you win/lose the flip"). A reflexive
+/// is checked on its creation resolution's event batch and gets exactly one
+/// shot: this predicate is consulted only in the unmatched branch of
+/// `check_delayed_triggers`, so a `true` return means "unmatched on the creation
+/// batch — discard". Plain `ThisTurn` / `Persistent` `WhenNextEvent` triggers
+/// keep their CR 603.7b "next time the event occurs" semantics and return
+/// `false`.
+fn is_reflexive_lifetime(condition: &crate::types::ability::DelayedTriggerCondition) -> bool {
+    use crate::types::ability::{DelayedTriggerCondition, DelayedTriggerLifetime};
+    matches!(
+        condition,
+        DelayedTriggerCondition::WhenNextEvent {
+            lifetime: DelayedTriggerLifetime::Reflexive,
+            ..
+        }
+    )
+}
+
 fn delayed_trigger_event_with_index(
     condition: &crate::types::ability::DelayedTriggerCondition,
     events: &[GameEvent],
@@ -5675,9 +5691,34 @@ fn delayed_trigger_event_with_index(
             .enumerate()
             .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
             .map(|(idx, event)| (idx, event.clone())),
-        DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player } => {
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            player,
+            gate,
+        } => {
             if state.active_player != *player {
                 return None;
+            }
+            // CR 513.2: honor the "on your next turn" turn-floor. The parser's
+            // symbolic `AfterCreationTurn` is always rewritten to `After(turn)`
+            // at creation (effects::delayed_trigger::resolve, single-path).
+            use crate::types::ability::TurnGate;
+            match gate {
+                TurnGate::None => {}
+                // Skip every matching phase up to and including the floor turn;
+                // fire on the first strictly-later turn (the controller's next
+                // turn per the active_player guard above, incl. extra turns —
+                // CR 500.7).
+                TurnGate::After(floor) => {
+                    if state.turn_number <= *floor {
+                        return None;
+                    }
+                }
+                TurnGate::AfterCreationTurn => {
+                    debug_assert!(false, "unstamped AfterCreationTurn reached the matcher");
+                    // Fall through to fire THIS turn — the LOUD wrong-timing
+                    // signal (caught by the paired test), never silent-never-fire.
+                }
             }
             events
                 .iter()
@@ -6846,6 +6887,23 @@ pub(crate) fn check_trigger_condition(
                     context_source_id,
                 )
             }),
+        // CR 601.2a + CR 603.4: spell-cast intervening-if on the triggering spell's
+        // own characteristics — true when the spell object named by the SpellCast
+        // event matches `filter`. Anchors to the event's `object_id` (not the live
+        // stack top) so the CR 603.4 resolution re-check evaluates the correct spell.
+        TriggerCondition::TriggeringSpellMatchesFilter { filter } => trigger_event
+            .and_then(|event| match event {
+                GameEvent::SpellCast { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .is_some_and(|spell_id| {
+                crate::game::trigger_matchers::target_filter_matches_object(
+                    state,
+                    spell_id,
+                    filter,
+                    source_id.unwrap_or(spell_id),
+                )
+            }),
     }
 }
 
@@ -7452,6 +7510,18 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // cause collect_target_slots to create target selection slots, routing
     // resolution through the targeted path which lacks controller scoping.
     if matches!(effect, Effect::Sacrifice { .. }) {
+        return None;
+    }
+    // CR 701.3d + CR 115.1: `UnattachAll` is a non-targeted mass effect. Its
+    // `target` is a resolution-time host-scope filter that `resolve_unattach_all`
+    // mass-scans (never a chosen target), and its `attachment` is a context-ref
+    // anaphor ("unattach it") resolved from the snapshot. Surfacing the host
+    // filter here would create a spurious required target slot (Stolen Uniform's
+    // "unattach it" would demand the controller pick among the creatures they
+    // control), stalling the delayed trigger unresolved. Mirrors the Sacrifice
+    // carve-out above; matches the `None` its mass siblings (DestroyAll/BounceAll)
+    // return from `Effect::target_filter`.
+    if matches!(effect, Effect::UnattachAll { .. }) {
         return None;
     }
     // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
@@ -16288,6 +16358,23 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
             "Sacrifice should not extract a target filter (resolution-time selection)"
+        );
+    }
+
+    /// CR 701.3d + CR 115.1: `UnattachAll` is a non-targeted mass effect — its
+    /// host `target` is mass-scanned at resolution time and its `attachment` is a
+    /// context-ref anaphor ("unattach it"), so it must not extract a target filter.
+    /// Surfacing one creates a spurious required slot that stalls the Stolen Uniform
+    /// lose-control delayed trigger unresolved. Reverting the carve-out flips this.
+    #[test]
+    fn extract_target_skips_unattach_all() {
+        let effect = Effect::UnattachAll {
+            attachment: TargetFilter::ParentTargetSlot { index: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "UnattachAll must not extract a target filter (mass resolution-time scan)"
         );
     }
 

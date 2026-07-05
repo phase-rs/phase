@@ -43,7 +43,8 @@ fn resolve_sacrifice_scope(
             .map(|p| p.id)
             .filter(|&id| id != ability.controller)
             .collect(),
-        Some(ControllerRef::TargetPlayer) => ability
+        // CR 109.4: TargetOpponent reads identically to TargetPlayer.
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => ability
             .targets
             .iter()
             .find_map(|t| match t {
