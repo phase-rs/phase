@@ -563,10 +563,13 @@ pub(crate) fn try_parse_self_is_also_subtypes(
 /// artifact with "..." and loses ...") is the subtype-bearing sibling.
 ///
 /// Emits, in written order: `SetCardTypes` (replace all card types with
-/// <core type>, CR 205.1a), `SetColor([])` (become colorless, CR 105.2), one
-/// `AddSubtype` per parsed subtype (CR 205.1a, Layer 4 — e.g. Sugar Coat's
-/// Food), `RemoveAllAbilities` (the permanent loses its own abilities, Layer 6
-/// CR 613.1f), then the `GrantAbility` produced by the shared
+/// <core type>, CR 205.1a), `SetColor([])` (become colorless, CR 105.2), then —
+/// when a subtype is present — `RemoveAllSubtypes` for the core type's subtype
+/// set followed by one `AddSubtype` per parsed subtype (CR 205.1a set
+/// replacement, Layer 4 — e.g. Sugar Coat's Food, wiping any pre-existing
+/// artifact subtype so a Clue host becomes "Food artifact", not "Clue Food
+/// artifact"), `RemoveAllAbilities` (the permanent loses its own abilities,
+/// Layer 6 CR 613.1f), then the `GrantAbility` produced by the shared
 /// `parse_quoted_ability_modifications` authority. `RemoveAllAbilities` is
 /// emitted BEFORE the grant so the granted ability SURVIVES the wipe (CR 613.6 —
 /// the removal and the grant are parts of one continuous effect applied
@@ -651,6 +654,17 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
     ];
     // CR 205.1a (Layer 4): grant each parsed subtype (Sugar Coat → Food). Placed
     // with the other type-identity modifications, before the Layer-6 ability wipe.
+    // Setting a subtype REPLACES the object's existing subtypes from the same
+    // set (CR 205.1a), so wipe the core type's subtype set first — otherwise an
+    // already-subtyped host keeps its old subtype (e.g. a Clue enchanted by Sugar
+    // Coat would become "Clue Food artifact" instead of "Food artifact"). The
+    // grammar guarantees each parsed subtype belongs to the core type's set, so a
+    // single `RemoveAllSubtypes { set-of-core-type }` covers them all.
+    if !subtypes.is_empty() {
+        if let Some(set) = core_type_subtype_set(core_type) {
+            modifications.push(ContinuousModification::RemoveAllSubtypes { set });
+        }
+    }
     for subtype in subtypes {
         modifications.push(ContinuousModification::AddSubtype { subtype });
     }
@@ -666,6 +680,24 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
             .modifications(modifications)
             .description(description.to_string()),
     )
+}
+
+/// CR 205.3: the subtype set correlated with a core card type. Used to wipe an
+/// object's existing subtypes of that set before a set-replacement `AddSubtype`
+/// (CR 205.1a). Returns `None` for core types that have no subtype set of
+/// interest here.
+fn core_type_subtype_set(
+    core_type: crate::types::card_type::CoreType,
+) -> Option<crate::types::card_type::SubtypeSet> {
+    use crate::types::card_type::{CoreType, SubtypeSet};
+    match core_type {
+        CoreType::Creature => Some(SubtypeSet::Creature),
+        CoreType::Artifact => Some(SubtypeSet::Artifact),
+        CoreType::Enchantment => Some(SubtypeSet::Enchantment),
+        CoreType::Land => Some(SubtypeSet::Land),
+        CoreType::Planeswalker => Some(SubtypeSet::Planeswalker),
+        _ => None,
+    }
 }
 
 pub(crate) fn parse_enchanted_is_type(
