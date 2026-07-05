@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::extract::{Request, State, WebSocketUpgrade};
+use axum::middleware::{from_fn, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
@@ -1137,35 +1138,44 @@ async fn main() {
         info!(public_url = %url, "advertising public URL for join-code sharing");
     }
 
-    let app = Router::new()
+    // Public, client-facing HTTP surface. `/p2p-draft-backup*` is part of the
+    // normal P2P draft flow; only the administrative `/admin/*` routes are gated.
+    let mut app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
-        .route("/admin/drafts", get(admin::admin_list_drafts))
-        .route(
-            "/admin/drafts/{code}",
-            get(admin::admin_get_draft).delete(admin::admin_delete_draft),
-        )
         .route("/p2p-draft-backup", post(admin::p2p_backup_store))
         .route(
             "/p2p-draft-backup/{code}",
             get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
-        )
-        .layer(cors)
-        .with_state(AppState {
-            sessions: state,
-            draft_sessions,
-            draft_pools,
-            connections,
-            db,
-            lobby,
-            lobby_subscribers,
-            player_count,
-            game_db,
-            draft_spectators,
-            game_spectators,
-            mode,
-            public_url: advertised_public_url,
-        });
+        );
+
+    // Administrative endpoints are destructive and information-disclosing, and
+    // reachable through the same reverse proxy as `/ws` (see deploy nginx).
+    // Mount them only when PHASE_ADMIN_TOKEN is set; otherwise absent (404).
+    let admin_token = admin_token_from_env();
+    match admin_token.as_deref() {
+        Some(_) => info!("admin HTTP endpoints enabled (bearer-token authenticated)"),
+        None => info!("admin HTTP endpoints disabled (set PHASE_ADMIN_TOKEN to enable)"),
+    }
+    if let Some(token) = admin_token.as_deref().filter(|t| !t.is_empty()) {
+        app = mount_admin_routes(app, token);
+    }
+
+    let app = app.layer(cors).with_state(AppState {
+        sessions: state,
+        draft_sessions,
+        draft_pools,
+        connections,
+        db,
+        lobby,
+        lobby_subscribers,
+        player_count,
+        game_db,
+        draft_spectators,
+        game_spectators,
+        mode,
+        public_url: advertised_public_url,
+    });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
         .await
@@ -1247,6 +1257,80 @@ async fn shutdown_signal() {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Constant-time byte comparison so admin-token validation does not leak the
+/// expected token through response timing.
+fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
+    if presented.len() != expected.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in presented.iter().zip(expected.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// Load the admin bearer token from the environment. Intentionally not a CLI
+/// flag — command-line secrets leak via process listings and shell history.
+fn admin_token_from_env() -> Option<String> {
+    std::env::var("PHASE_ADMIN_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// Mount bearer-guarded `/admin/*` routes on a router that will receive `AppState`.
+fn mount_admin_routes(app: Router<AppState>, admin_token: &str) -> Router<AppState> {
+    let auth_layer = |expected: Arc<str>| {
+        from_fn(move |request: Request, next: Next| {
+            let expected = expected.clone();
+            async move { require_admin_auth(expected, request, next).await }
+        })
+    };
+    let list_auth = auth_layer(Arc::from(admin_token));
+    let detail_auth = auth_layer(Arc::from(admin_token));
+    app.route(
+        "/admin/drafts",
+        get(admin::admin_list_drafts).route_layer(list_auth),
+    )
+    .route(
+        "/admin/drafts/{code}",
+        get(admin::admin_get_draft)
+            .delete(admin::admin_delete_draft)
+            .route_layer(detail_auth),
+    )
+}
+
+/// Decide whether an `Authorization` header value authorizes an admin request.
+/// Scheme must be `Bearer` (case-insensitive per RFC 9110); credential must
+/// match `expected` in constant time.
+fn admin_request_authorized(auth_header: Option<&str>, expected: &str) -> bool {
+    let Some(value) = auth_header.map(str::trim) else {
+        return false;
+    };
+    let Some((scheme, credentials)) = value.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return false;
+    }
+    tokens_match(credentials.trim().as_bytes(), expected.as_bytes())
+}
+
+/// Auth guard for the administrative `/admin/*` routes.
+async fn require_admin_auth(expected: Arc<str>, request: Request, next: Next) -> Response {
+    let auth_header = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    if admin_request_authorized(auth_header, &expected) {
+        next.run(request).await
+    } else {
+        (http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    }
 }
 
 /// Validate an operator-supplied public URL at the system boundary. It must
@@ -7041,5 +7125,170 @@ mod issue_4548_deadlock_tests {
         .expect(
             "create_and_connect_multiplayer_session must release state+connections before returning",
         );
+    }
+}
+
+#[cfg(test)]
+mod admin_auth_tests {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::Router;
+    use lobby_broker::Broker;
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::session::SessionManager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+    use url::Url;
+
+    use super::{
+        admin_request_authorized, draft_pools, mount_admin_routes, persistence, tokens_match,
+        AppState, ServerMode,
+    };
+
+    const TOKEN: &str = "s3cr3t-admin-token";
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db_path = temp_dir.path().join("games.db");
+        let game_db = Arc::new(persistence::GameDb::open(&game_db_path).expect("game db"));
+        AppState {
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            db: Arc::new(engine::database::CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            mode: ServerMode::Full,
+            public_url: None,
+        }
+    }
+
+    async fn spawn_admin_http_test(
+        admin_token: Option<&str>,
+    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        // Mirror production: establish Router<AppState> before mounting admin routes.
+        let mut app = Router::new().route("/ws", get(super::ws_handler));
+        if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
+            app = mount_admin_routes(app, token);
+        }
+        let app = app.with_state(app_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        (format!("http://{addr}"), handle, temp_dir)
+    }
+
+    async fn get_admin_drafts(base_url: &str, auth: Option<&str>) -> StatusCode {
+        let url = Url::parse(&format!("{base_url}/admin/drafts")).expect("url");
+        let host = url.host_str().expect("host");
+        let port = url.port().expect("port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect");
+        let mut request = String::from("GET /admin/drafts HTTP/1.1\r\n");
+        request.push_str(&format!("Host: {host}\r\n"));
+        if let Some(value) = auth {
+            request.push_str(&format!("Authorization: {value}\r\n"));
+        }
+        request.push_str("Connection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await.expect("read");
+        let response = std::str::from_utf8(&buf[..n]).expect("utf8");
+        let status_code = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .expect("status line");
+        StatusCode::from_u16(status_code).expect("status code")
+    }
+
+    #[test]
+    fn tokens_match_is_exact() {
+        assert!(tokens_match(b"abc", b"abc"));
+        assert!(!tokens_match(b"abc", b"abd"));
+        assert!(!tokens_match(b"abc", b"ab"));
+        assert!(!tokens_match(b"", b"x"));
+        assert!(tokens_match(b"", b""));
+    }
+
+    #[test]
+    fn authorized_only_with_matching_bearer_token() {
+        let ok = format!("Bearer {TOKEN}");
+        assert!(admin_request_authorized(Some(&ok), TOKEN));
+        let padded = format!("Bearer   {TOKEN}  ");
+        assert!(admin_request_authorized(Some(&padded), TOKEN));
+        assert!(admin_request_authorized(
+            Some(&format!("bearer {TOKEN}")),
+            TOKEN
+        ));
+        assert!(admin_request_authorized(
+            Some(&format!("BEARER {TOKEN}")),
+            TOKEN
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_wrong_or_malformed_header() {
+        assert!(!admin_request_authorized(None, TOKEN));
+        assert!(!admin_request_authorized(Some(""), TOKEN));
+        assert!(!admin_request_authorized(Some("Bearer wrong-token"), TOKEN));
+        let basic = format!("Basic {TOKEN}");
+        assert!(!admin_request_authorized(Some(&basic), TOKEN));
+        assert!(!admin_request_authorized(Some(TOKEN), TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_routes_absent_without_token() {
+        let (base_url, server, _temp) = spawn_admin_http_test(None).await;
+        assert_eq!(
+            get_admin_drafts(&base_url, None).await,
+            StatusCode::NOT_FOUND
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn admin_routes_reject_missing_bearer() {
+        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
+        assert_eq!(
+            get_admin_drafts(&base_url, None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn admin_routes_reject_wrong_bearer() {
+        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
+        assert_eq!(
+            get_admin_drafts(&base_url, Some("Bearer wrong-token")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn admin_routes_accept_valid_bearer() {
+        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
+        assert_eq!(
+            get_admin_drafts(&base_url, Some(&format!("Bearer {TOKEN}"))).await,
+            StatusCode::OK
+        );
+        server.abort();
     }
 }

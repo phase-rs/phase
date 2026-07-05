@@ -147,6 +147,49 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     )
 }
 
+/// CR 305.6 + CR 607.2d + CR 613.1d (Layer 4): "Lands you control are the chosen
+/// [land] type in addition to their other types" — the basic-land-type axis
+/// sibling of [`parse_arcane_adaptation_chosen_type_static`] (which parameterizes
+/// the CR 205.3g creature-subtype axis). Realmwright ("As ~ enters, choose a
+/// basic land type. Lands you control are the chosen type in addition to their
+/// other types.") is the type specimen. Additive only (CR 205.1b): the chosen
+/// basic land type is added while each affected land RETAINS its existing
+/// subtypes. Reuses the existing `AddChosenSubtype { kind: BasicLandType }`
+/// runtime (game/layers.rs), the land-axis counterpart of the creature path's
+/// `kind: CreatureType` — no new variant, no new runtime.
+pub(crate) fn parse_chosen_land_type_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_chosen_land_type_static_sentence,
+    )?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::BasicLandType,
+            }])
+            .description(description.to_string()),
+    )
+}
+
+/// nom body for [`parse_chosen_land_type_static`]: "lands you control are the
+/// chosen [land ]type in addition to their other types[.]", consumed to `eof`
+/// so a partial prefix can never mis-claim a longer line.
+fn parse_chosen_land_type_static_sentence(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("lands you control are the chosen ").parse(input)?;
+    let (input, _) = opt(tag("land ")).parse(input)?;
+    let (input, _) = tag("type in addition to their other types").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, ()))
+}
+
 fn parse_chosen_creature_type_static_sentence_with_scope(
     input: &str,
 ) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, ChosenCreatureTypeApplication)> {
