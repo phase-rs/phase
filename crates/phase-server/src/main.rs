@@ -7172,7 +7172,12 @@ mod admin_auth_tests {
 
     async fn spawn_admin_http_test(
         admin_token: Option<&str>,
-    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        AppState,
+    ) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app_state = test_app_state(&temp_dir);
         // Mirror production: establish Router<AppState> before mounting admin routes.
@@ -7180,7 +7185,7 @@ mod admin_auth_tests {
         if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
             app = mount_admin_routes(app, token);
         }
-        let app = app.with_state(app_state);
+        let app = app.with_state(app_state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -7188,33 +7193,48 @@ mod admin_auth_tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("test server");
         });
-        (format!("http://{addr}"), handle, temp_dir)
+        (format!("http://{addr}"), handle, temp_dir, app_state)
     }
 
-    async fn get_admin_drafts(base_url: &str, auth: Option<&str>) -> StatusCode {
-        let url = Url::parse(&format!("{base_url}/admin/drafts")).expect("url");
+    async fn get_admin_path(
+        base_url: &str,
+        path: &str,
+        auth: Option<&str>,
+    ) -> (StatusCode, String) {
+        let url = Url::parse(&format!("{base_url}{path}")).expect("url");
         let host = url.host_str().expect("host");
         let port = url.port().expect("port");
         let mut stream = tokio::net::TcpStream::connect((host, port))
             .await
             .expect("connect");
-        let mut request = String::from("GET /admin/drafts HTTP/1.1\r\n");
+        let mut request = format!("GET {path} HTTP/1.1\r\n");
         request.push_str(&format!("Host: {host}\r\n"));
         if let Some(value) = auth {
             request.push_str(&format!("Authorization: {value}\r\n"));
         }
         request.push_str("Connection: close\r\n\r\n");
         stream.write_all(request.as_bytes()).await.expect("write");
-        let mut buf = [0u8; 1024];
-        let n = stream.read(&mut buf).await.expect("read");
-        let response = std::str::from_utf8(&buf[..n]).expect("utf8");
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.expect("read");
+        let response = std::str::from_utf8(&bytes).expect("utf8");
         let status_code = response
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .and_then(|s| s.parse::<u16>().ok())
             .expect("status line");
-        StatusCode::from_u16(status_code).expect("status code")
+        let body = response
+            .split_once("\r\n\r\n")
+            .map_or("", |(_, body)| body)
+            .to_string();
+        (
+            StatusCode::from_u16(status_code).expect("status code"),
+            body,
+        )
+    }
+
+    async fn get_admin_drafts(base_url: &str, auth: Option<&str>) -> StatusCode {
+        get_admin_path(base_url, "/admin/drafts", auth).await.0
     }
 
     #[test]
@@ -7254,7 +7274,7 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_absent_without_token() {
-        let (base_url, server, _temp) = spawn_admin_http_test(None).await;
+        let (base_url, server, _temp, _state) = spawn_admin_http_test(None).await;
         assert_eq!(
             get_admin_drafts(&base_url, None).await,
             StatusCode::NOT_FOUND
@@ -7264,7 +7284,7 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_reject_missing_bearer() {
-        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
+        let (base_url, server, _temp, _state) = spawn_admin_http_test(Some(TOKEN)).await;
         assert_eq!(
             get_admin_drafts(&base_url, None).await,
             StatusCode::UNAUTHORIZED
@@ -7274,7 +7294,7 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_reject_wrong_bearer() {
-        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
+        let (base_url, server, _temp, _state) = spawn_admin_http_test(Some(TOKEN)).await;
         assert_eq!(
             get_admin_drafts(&base_url, Some("Bearer wrong-token")).await,
             StatusCode::UNAUTHORIZED
@@ -7284,11 +7304,64 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_accept_valid_bearer() {
-        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
+        let (base_url, server, _temp, _state) = spawn_admin_http_test(Some(TOKEN)).await;
         assert_eq!(
             get_admin_drafts(&base_url, Some(&format!("Bearer {TOKEN}"))).await,
             StatusCode::OK
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn admin_draft_detail_redacts_seat_credentials() {
+        let (base_url, server, _temp, app_state) = spawn_admin_http_test(Some(TOKEN)).await;
+        let code = {
+            let mut drafts = app_state.draft_sessions.lock().await;
+            let (code, _host_token, _) = drafts.create_draft(
+                draft_core::types::DraftConfig {
+                    set_code: "TST".to_string(),
+                    pod_size: 4,
+                    bot_count: 0,
+                    pack_count: 3,
+                    cards_per_pack: 14,
+                    kind: draft_core::types::DraftKind::Pack,
+                    packs: Vec::new(),
+                    rng_seed: 0xdead_beef_cafe_babe,
+                },
+                "Alice".to_string(),
+            );
+            drafts
+                .join_draft(&code, "Bob".to_string(), None)
+                .expect("join draft");
+            let session = drafts.sessions.get_mut(&code).expect("draft session");
+            session.lobby_meta = Some(server_core::PersistedLobbyMeta {
+                host_name: "Alice".to_string(),
+                public: false,
+                password: Some("secret-pod".to_string()),
+                timer_seconds: None,
+                start_when_full: true,
+                ranked: false,
+            });
+            code
+        };
+
+        let (status, body) = get_admin_path(
+            &base_url,
+            &format!("/admin/drafts/{code}"),
+            Some(&format!("Bearer {TOKEN}")),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("json body");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["player_tokens"].as_array().unwrap().len(), 4);
+        assert!(json["player_tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v.as_str() == Some("")));
+        assert_eq!(json["lobby_meta"]["password"], serde_json::Value::Null);
+        assert_eq!(json["config"]["rng_seed"], 0);
         server.abort();
     }
 }
