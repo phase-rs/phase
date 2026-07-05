@@ -2129,6 +2129,15 @@ export interface GameState {
   max_lands_per_turn: number;
   priority_pass_count: number;
   /**
+   * Mirrors `engine::types::game_state::GameState::unimplemented_oracle_ids`.
+   * Oracle ids (fallback: object names) of cards whose abilities hit an
+   * unimplemented effect at resolution this game. Diagnostics only — forwarded
+   * verbatim to the `game_end` telemetry event. Distinct from the per-object
+   * `unimplemented_mechanics` static parse-coverage projection. Absent when the
+   * set is empty (serde `skip_serializing_if`).
+   */
+  unimplemented_oracle_ids?: string[];
+  /**
    * Engine-authored derived projections, attached by adapters from the
    * wire-format `ClientGameState.derived` sibling field. Optional because
    * some wire paths (legacy cached state, older server builds) may not

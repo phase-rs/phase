@@ -131,6 +131,8 @@ DEFECT_SIGNAL_WEIGHTS = {
     "no-repro": 6,
     "value-bar": 6,
     "careful-watch": 4,
+    "ai-template-gap": 4,
+    "unchecked-engine-implementer": 4,
 }
 # Praise signals add to the contributor score (credit, capped below). They never
 # affect recurrence, scrutiny, or the derived-trusted gate — praise softens the
@@ -1604,10 +1606,14 @@ def proof_profile(
     scrutiny = (contributor or {}).get("scrutiny")
 
     risk_flags = []
+    tracking_signals = []
     if missing_template_sections:
         risk_flags.append("missing-ai-contributor-template")
+        tracking_signals.append("ai-template-gap")
     if unchecked_items:
         risk_flags.append("unchecked-verification-items")
+        if any("engine-implementer" in item for item in unchecked_items):
+            tracking_signals.append("unchecked-engine-implementer")
     if skipped_phrases:
         risk_flags.append("verification-skipped-or-delegated")
     if agent_coauthored:
@@ -1617,10 +1623,10 @@ def proof_profile(
     if (gittensor or {}).get("risk_flag"):
         risk_flags.append(str((gittensor or {})["risk_flag"]))
 
-    proof_required = any(
-        flag in PROOF_REQUIRED_RISK_FLAGS or flag.startswith("contributor-scrutiny-")
-        for flag in risk_flags
-    )
+    # Template/checklist hygiene and prior scrutiny are tracking context for the
+    # reviewer. They should not by themselves block an otherwise passing review;
+    # only hard proof risks require concrete verification before queue handoff.
+    proof_required = any(flag in PROOF_REQUIRED_RISK_FLAGS for flag in risk_flags)
     template_verification_complete = bool(body.strip()) and not (
         missing_template_sections or skipped_phrases
     )
@@ -1635,7 +1641,13 @@ def proof_profile(
         "checked_test_evidence": checked_evidence[:5],
         "skipped_phrases": skipped_phrases,
         "agent_coauthored_all_commits": agent_coauthored,
+        "tracking_signals": tracking_signals,
     }
+
+
+def proof_tracking_signals(packet: dict[str, Any]) -> list[str]:
+    proof = packet.get("proof") or {}
+    return list(proof.get("tracking_signals") or [])
 
 
 def fetch_gittensor_records(api_url: str | None) -> tuple[list[dict[str, Any]], str | None]:
@@ -1745,6 +1757,10 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         and timestamp_after(comment.get("createdAt"), local_event_timestamp)
         for comment in pr.get("comments", [])
     )
+    parse_diff = packet.get("parse_diff") or {}
+    parse_diff_after_local_event = timestamp_after(
+        parse_diff.get("updated_at"), local_event_timestamp
+    )
     author_policy = packet.get("author_policy", {})
     local_block_event = local_outcome != "ci_failed" and local_event_type in {
         "review_blocked",
@@ -1794,6 +1810,9 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_block and author_followup_after_local_event:
         action = "review"
         reason = "author_followup_after_local_block"
+    elif local_block and parse_diff_after_local_event:
+        action = "review"
+        reason = "parse_diff_after_local_block"
     elif local_block:
         action = "blocked"
         reason = "local_block_current_head"
@@ -1838,7 +1857,6 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     # a stale merge-base whose R2 baseline aged out shows "Baseline pending" forever, so
     # flag engine-surface review candidates to consider update-branch first. The
     # files_truncated safety reason from make_packet is preserved — it must not be masked.
-    parse_diff = packet.get("parse_diff") or {}
     if (
         action == "review"
         and reason != "files_truncated_needs_manual_classification"
@@ -2421,6 +2439,9 @@ def command_inspect(args: argparse.Namespace) -> int:
     packet = packet_for_pr(context, pr, args.mode)
     if args.emit_event:
         packet["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
+        signals = proof_tracking_signals(packet)
+        if signals:
+            packet["event_skeleton"]["signals"] = signals
     print(json_dumps(packet))
     return 0
 
@@ -2443,6 +2464,9 @@ def command_recommend(args: argparse.Namespace) -> int:
     if args.emit_event:
         recommendation = dict(recommendation)
         recommendation["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
+        signals = proof_tracking_signals(packet)
+        if signals:
+            recommendation["event_skeleton"]["signals"] = signals
     print(json_dumps(recommendation))
     return 0
 

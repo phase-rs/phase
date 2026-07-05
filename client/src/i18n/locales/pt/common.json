@@ -40,6 +40,10 @@
     "sandboxToolsTitle": "Ferramentas de Sandbox — configure qualquer estado de tabuleiro (`)",
     "resume": "Continuar",
     "settings": "Configurações",
+    "boardLayoutSplit": "Dividido",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Alternar para visualização de mesa dividida",
+    "switchToLegacyView": "Alternar para visualização legacy focada",
     "helpShortcuts": "Ajuda e Atalhos",
     "showAiHand": "Mostrar Mão da IA",
     "hideAiHand": "Ocultar Mão da IA",
@@ -228,5 +232,10 @@
     "settings": "Configurações",
     "languageSettings": "Idioma ({{lang}}) — abrir configurações",
     "languageTitle": "Idioma: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Algo deu errado",
+    "body": "O aplicativo encontrou um erro inesperado e não pode continuar nesta tela. Recarregar geralmente resolve.",
+    "reload": "Recarregar"
   }
 }

@@ -98,6 +98,10 @@ function dataFileDefines(mode: string): Record<string, string> {
     // keeps self-hosted builds working with no Supabase account.
     __SUPABASE_URL__: JSON.stringify(envVar("SUPABASE_URL")),
     __SUPABASE_ANON_KEY__: JSON.stringify(envVar("SUPABASE_ANON_KEY")),
+    // First-party telemetry ingest endpoint (lobby-worker `POST /telemetry`).
+    // Empty when unset (local dev, self-hosted builds) → the telemetry module
+    // compiles to a permanent no-op and nothing is ever sent anywhere.
+    __TELEMETRY_URL__: JSON.stringify(process.env.TELEMETRY_URL || ""),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded

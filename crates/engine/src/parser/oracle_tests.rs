@@ -127,6 +127,67 @@ fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
     );
 }
 
+#[test]
+fn legacy_play_this_ability_as_sorcery_records_activation_restriction() {
+    let r = parse(
+        "When Shichifukujin Dragon comes into play, put seven +1/+1 counters on it.\n\
+         {R}{R}{R}, Sacrifice two +1/+1 counters: Put three +1/+1 counters on \
+         Shichifukujin Dragon at end of turn. Play this ability as a sorcery.",
+        "Shichifukujin Dragon",
+        &[],
+        &["Creature"],
+        &["Dragon"],
+    );
+
+    let activation = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Play this ability"))
+        })
+        .expect("expected legacy activated ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "expected legacy play-this-ability wording to map to AsSorcery, got {:?}",
+        activation.activation_restrictions
+    );
+}
+
+#[test]
+fn parenthetical_activate_only_as_instant_records_activation_restriction() {
+    let r = parse(
+        "Swampwalk (This creature can't be blocked as long as defending player controls a Swamp.)\n\
+         {T}: Add {B}{B}{B}{B}. Target opponent gains control of Witch Engine. \
+         (Activate only as an instant.)",
+        "Witch Engine",
+        &[Keyword::Landwalk("Swamp".to_string())],
+        &["Creature"],
+        &["Horror"],
+    );
+
+    let activation =
+        r.abilities
+            .iter()
+            .find(|ability| {
+                ability.description.as_deref().is_some_and(|description| {
+                    description.contains("Target opponent gains control")
+                })
+            })
+            .expect("expected parenthetical activation-timing ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsInstant),
+        "expected parenthetical activation timing to map to AsInstant, got {:?}",
+        activation.activation_restrictions
+    );
+}
+
 /// The static half of M.O.D.O.K. ("Designed Only for Killing — Creatures your
 /// opponents control get -1/-1") already parses on its own ability-word label;
 /// this guards that the activated-ability fix above doesn't regress it.
@@ -17135,11 +17196,10 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
         .expect("begin-combat trigger must have an execute body");
 
     // CR 707.9b + CR 205.4: top-level effect is `CopyTokenOf` with the
-    // `RemoveSupertype { Legendary }` modification baked in. The token
-    // copies "equipped creature" — the target filter is internal detail
-    // tested elsewhere; this regression test pins ONLY the
-    // additional_modifications, which is the load-bearing field for the
-    // non-legendary semantic.
+    // `RemoveSupertype { Legendary }` modification baked in. The follow-up
+    // "That token gains haste" is a separate continuous effect bound to
+    // `LastCreated`, not to the equipped creature source copied by the
+    // parent effect.
     match &*exec.effect {
         Effect::CopyTokenOf {
             additional_modifications,
@@ -17154,6 +17214,44 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
             );
         }
         other => panic!("expected CopyTokenOf at trigger.execute.effect, got {other:?}"),
+    }
+
+    let haste = exec
+        .sub_ability
+        .as_deref()
+        .expect("Helm trigger must include the haste followup");
+    match &*haste.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } => {
+            assert_eq!(
+                *target,
+                Some(TargetFilter::LastCreated),
+                "Helm haste rider must target the created token, not the equipped creature"
+            );
+            assert_eq!(
+                *duration,
+                Some(Duration::Permanent),
+                "Helm's Oracle text states no duration for the haste grant"
+            );
+            assert!(
+                static_abilities.iter().any(|static_def| {
+                    static_def.affected == Some(TargetFilter::LastCreated)
+                        && static_def.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::Haste,
+                                }
+                            )
+                        })
+                }),
+                "Helm haste rider must affect LastCreated with AddKeyword(Haste): {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect haste followup, got {other:?}"),
     }
 }
 

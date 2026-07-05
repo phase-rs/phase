@@ -1588,6 +1588,19 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
 /// (issue #2016, Bonder's Ornament). They are kept as a single composable
 /// `alt()` over the predicate lead so the boundary covers the class, not one
 /// card.
+fn parse_named_filter_origin_zone_terminator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    tag::<_, _, OracleError<'_>>(" from ").parse(input)?;
+    let Some((_, _, consumed)) = parse_zone_suffix(input) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((&input[consumed..], ()))
+}
+
 fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     alt((
         // Controller-scope suffixes (CR 109.4). Longest-match-first.
@@ -1600,6 +1613,10 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" that ")),
         value((), tag(" with ")),
         value((), tag(" without ")),
+        // CR 201.2 + CR 400.1: origin-zone suffixes are outside the literal
+        // card name ("card named X from your graveyard"). Require a real zone
+        // suffix after "from" so names like "Extract from Darkness" stay whole.
+        parse_named_filter_origin_zone_terminator,
         // Copular / state predicates opening a relative clause.
         value((), tag(" is ")),
         value((), tag(" are ")),
@@ -6748,6 +6765,16 @@ mod tests {
         // Relative pronoun terminates the name.
         let (name, _) = named_of("a creature named Storm Crow that has flying");
         assert_eq!(name, "Storm Crow");
+
+        // Origin-zone suffix terminates the name (Deathpact Angel class).
+        let (name, rest) = named_of("a card named Deathpact Angel from your graveyard");
+        assert_eq!(name, "Deathpact Angel");
+        assert_eq!(rest, " from your graveyard");
+
+        // "from" inside a card name is preserved when it is not an origin-zone
+        // suffix.
+        let (name, _) = named_of("a card named Extract from Darkness");
+        assert_eq!(name, "Extract from Darkness");
 
         // A comma-bearing legendary name is preserved (no split on internal
         // punctuation) when no clause boundary follows.

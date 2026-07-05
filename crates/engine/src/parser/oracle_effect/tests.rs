@@ -20544,6 +20544,93 @@ fn strip_optional_target_prefix_up_to_x_target() {
 }
 
 #[test]
+fn detain_up_to_two_target_creatures_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Detain up to two target creatures your opponents control.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+    );
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+}
+
+#[test]
+fn detain_up_to_two_target_nonland_permanents_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Detain up to two target nonland permanents your opponents control.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+    );
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Permanent));
+    assert!(filter
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+}
+
+#[test]
+fn detain_single_target_permanent_remains_mandatory() {
+    let def = parse_effect_chain("Detain target permanent.", AbilityKind::Spell);
+
+    assert_eq!(def.multi_target, None);
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Permanent));
+}
+
+#[test]
+fn chained_return_up_to_one_target_creature_card_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Each opponent sacrifices a creature of their choice and you return up to one target creature card from your graveyard to your hand.",
+        AbilityKind::Spell,
+    );
+
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("expected return sub-ability");
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+    );
+    let Effect::Bounce { target, .. } = sub.effect.as_ref() else {
+        panic!("expected Bounce sub-effect, got {:?}", sub.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed return target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: Zone::Graveyard
+    }));
+}
+
+#[test]
 fn cast_variant_paid_instead_sneak() {
     let (cond, text) = strip_additional_cost_conditional(
         "if her sneak cost was paid this turn, instead return that card to the battlefield",
@@ -29767,6 +29854,32 @@ fn perpetual_parser_maps_modify_pt() {
             ..
         }
     ));
+
+    let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: -1,
+                toughness_delta: -2,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::Opponent)
+    ));
+
+    let e = parse_effect("target creature you control perpetually gets +1/+0.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: 1,
+                toughness_delta: 0,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::You)
+    ));
 }
 
 #[test]
@@ -33213,16 +33326,16 @@ fn choose_one_of_rejects_when_second_half_unparseable() {
     );
 }
 
-/// CR 608.2k: After a token-creating effect, a plain "the token <verb>"
+/// CR 608.2c + CR 611.2a: After a token-creating effect, a plain "the token <verb>"
 /// anaphor (without the "created this way" populate qualifier) must
-/// rewrite to a `GenericEffect` targeting `LastCreated`. Pietra,
-/// Crafter of Clowns is the canonical case: "Create a 1/1 white Clown
-/// Robot artifact creature token. … the token gains haste until end of
-/// turn."
+/// preserve its printed duration when it rewrites to a `GenericEffect`
+/// targeting `LastCreated`. Pietra, Crafter of Clowns is the canonical case:
+/// "Create a 1/1 white Clown Robot artifact creature token. … the token
+/// gains haste until end of turn."
 #[test]
-fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
+fn the_token_plain_anaphor_after_token_creator_preserves_duration() {
     let ability = parse_effect_chain(
-        "create a 1/1 white Clown Robot artifact creature token. the token gains haste",
+        "create a 1/1 white Clown Robot artifact creature token. the token gains haste until end of turn",
         AbilityKind::Spell,
     );
     // Outer effect is the Token creation.
@@ -33265,6 +33378,75 @@ fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
     }
 }
 
+/// CR 608.2c + CR 707.2 + CR 611.2c: After a copy-token effect,
+/// "that token" names the newly created copy token, not the copied source
+/// carried in the parent `CopyTokenOf` target slot. The lowering pass must
+/// therefore rewrite both the GenericEffect target and its affected filter
+/// to `LastCreated`.
+#[test]
+fn copy_token_that_token_anaphor_rewrites_generic_effect_to_last_created() {
+    let ability = parse_effect_chain(
+        "create a token that's a copy of target creature. that token gains haste",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*ability.effect, Effect::CopyTokenOf { .. }),
+        "expected Effect::CopyTokenOf, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("that-token haste sub-ability missing");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } => {
+            assert_eq!(*target, Some(TargetFilter::LastCreated));
+            assert_eq!(*duration, Some(Duration::Permanent));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::LastCreated)
+            );
+            assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }
+            )));
+        }
+        other => panic!("expected GenericEffect anaphor rewrite, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 611.2a: Explicitly stated token-anaphor durations are
+/// preserved, while unstated durations last until the end of the game.
+#[test]
+fn token_anaphor_preserves_explicit_until_end_of_turn_duration() {
+    let ability = parse_effect_chain(
+        "create a 1/1 white Clown Robot artifact creature token. the token gains haste until end of turn",
+        AbilityKind::Spell,
+    );
+    let sub = ability.sub_ability.as_deref().expect("haste sub-ability");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            duration,
+            target,
+            static_abilities,
+        } => {
+            assert_eq!(*target, Some(TargetFilter::LastCreated));
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::LastCreated)
+            );
+        }
+        other => panic!("expected GenericEffect, got {other:?}"),
+    }
+}
+
 /// CR 608.2k: Recognizer-level coverage for the "this token "
 /// anaphor — exercised directly via `Unimplemented` description so
 /// the test pins the recognizer's behavior independent of upstream
@@ -33288,7 +33470,7 @@ fn rewrite_recognizer_accepts_this_token_prefix() {
             target,
         } => {
             assert_eq!(target, Some(TargetFilter::LastCreated));
-            assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(duration, Some(Duration::Permanent));
             assert!(static_abilities[0].modifications.iter().any(|m| matches!(
                 m,
                 ContinuousModification::AddKeyword {
@@ -33435,6 +33617,36 @@ fn plain_anaphor_without_token_creator_is_not_rewritten() {
         !contains_last_created_rewrite(&ability),
         "no token creator preceded — must not produce LastCreated rewrite"
     );
+}
+
+/// CR 608.2c: Non-token antecedents must keep their normal `ParentTarget`
+/// binding; the LastCreated rewrite is gated on a prior token creator.
+#[test]
+fn non_token_parent_target_generic_effect_stays_parent_target() {
+    let ability = parse_effect_chain(
+        "gain control of target permanent until end of turn. it gains haste until end of turn",
+        AbilityKind::Spell,
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("expected haste followup");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => {
+            assert_ne!(*target, Some(TargetFilter::LastCreated));
+            assert!(
+                static_abilities
+                    .iter()
+                    .all(|s| s.affected != Some(TargetFilter::LastCreated)),
+                "non-token anaphor must not rewrite to LastCreated: {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect followup, got {other:?}"),
+    }
 }
 
 /// CR 608.2k + CR 603.7c: Inalla-style "Exile it at the beginning of

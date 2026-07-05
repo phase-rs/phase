@@ -905,13 +905,20 @@ async fn main() {
         match game_db.load_all_drafts() {
             Ok(persisted_drafts) => {
                 let mut dsm = draft_sessions.lock().await;
+                let mut lob_guard = lobby.lock().await;
+                let lob = lob_guard.lobby_mut();
                 let mut restored_drafts = 0u32;
                 for (draft_code, json) in &persisted_drafts {
                     match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
                     {
                         Ok(ps) => {
+                            let register_req =
+                                server_core::persist::restored_draft_lobby_register_request(&ps);
                             let timer_ms = ps.timer_remaining_ms;
                             dsm.restore_session(ps);
+                            if let Some(req) = register_req {
+                                lob.register_game(draft_code, req, &SysEnv);
+                            }
                             if let Some(ms) = timer_ms {
                                 info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
                             }
@@ -5325,7 +5332,19 @@ async fn handle_client_message(
 
             let (draft_code, player_token, seat_index) = {
                 let mut mgr = draft_state.lock().await;
-                mgr.create_draft(config, display_name.clone())
+                let (draft_code, player_token, seat_index) =
+                    mgr.create_draft(config, display_name.clone());
+                if let Some(session) = mgr.sessions.get_mut(&draft_code) {
+                    session.lobby_meta = Some(server_core::PersistedLobbyMeta {
+                        host_name: display_name.clone(),
+                        public,
+                        password: password.clone(),
+                        timer_seconds,
+                        start_when_full: true,
+                        ranked: false,
+                    });
+                }
+                (draft_code, player_token, seat_index)
             };
 
             identity.draft_code = Some(draft_code.clone());
@@ -5471,6 +5490,15 @@ async fn handle_client_message(
                     }
                 }
                 Err(reason) => {
+                    if reason == "password_required" {
+                        let msg = ServerMessage::PasswordRequired {
+                            game_code: draft_code.clone(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
                     let msg = ServerMessage::DraftActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -5536,6 +5564,18 @@ async fn handle_client_message(
                 None
             };
 
+            let public_before = if is_start {
+                draft_state
+                    .lock()
+                    .await
+                    .sessions
+                    .get(&draft_code)
+                    .and_then(|s| s.lobby_meta.as_ref())
+                    .is_some_and(|m| m.public)
+            } else {
+                false
+            };
+
             let result = {
                 let mut mgr = draft_state.lock().await;
                 let before_window = mgr.sessions.get(&draft_code).map(|s| {
@@ -5567,6 +5607,25 @@ async fn handle_client_message(
 
             match result {
                 Ok((views, should_rearm_timer)) => {
+                    if is_start {
+                        let removed = {
+                            let mut lob_guard = lobby.lock().await;
+                            let lob = lob_guard.lobby_mut();
+                            let existed = lob.has_game(&draft_code);
+                            lob.unregister_game(&draft_code);
+                            existed
+                        };
+                        if removed && public_before {
+                            broadcast_to_lobby_subscribers(
+                                lobby_subscribers,
+                                ServerMessage::LobbyGameRemoved {
+                                    game_code: draft_code.clone(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
                     // Broadcast DraftStateUpdate to all connected sockets in the pod
                     broadcast_draft_views(&draft_code, &views, connections, draft_state).await;
 

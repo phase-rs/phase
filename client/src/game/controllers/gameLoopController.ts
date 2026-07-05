@@ -30,6 +30,20 @@ export interface GameLoopController {
 }
 
 export function createGameLoopController(config: GameLoopConfig): GameLoopController {
+  // Publish the AI seat bindings to the store so telemetry `game_end` can
+  // classify `winner_kind`. Only local "ai" mode starts client-side AI
+  // controllers (`start()` gates on `mode === "ai"`) with bindings this client
+  // owns. "local" is human hotseat (GameProvider passes fabricated `aiSeats`
+  // for BOTH "ai" and "local", so we gate on the mode, not on the presence of
+  // `config.aiSeats`, or hotseat would be mislabeled vs-AI). Online games CAN
+  // have AI seats, but those are server-hosted (`CreateGameWithSettings::ai_seats`)
+  // and not identifiable from client-owned config — a guest cannot know them —
+  // so we publish none and telemetry treats an online winner as unknown.
+  // Cleared with the rest of game state on `reset`.
+  const aiSeatIds =
+    config.mode === "ai" ? (config.aiSeats?.map((seat) => seat.playerId) ?? []) : [];
+  useGameStore.setState({ aiSeatIds });
+
   let active = false;
   let opponentController: OpponentController | null = null;
   let unsubscribe: (() => void) | null = null;

@@ -21,9 +21,10 @@ pub(crate) use lower::{
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
     apply_where_x_to_filter, extract_bounded_target_multi_target,
-    extract_exact_target_multi_target, parse_dynamic_counter_suffix_body,
-    parse_multi_target_count_expr, parse_where_x_quantity_expression, strip_exact_target_prefix,
-    strip_optional_target_prefix, try_parse_pump,
+    extract_exact_target_multi_target, extract_optional_target_multi_target,
+    parse_dynamic_counter_suffix_body, parse_multi_target_count_expr,
+    parse_where_x_quantity_expression, strip_exact_target_prefix, strip_optional_target_prefix,
+    try_parse_pump,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
@@ -7084,6 +7085,37 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
 
     let lower = tp.lower;
 
+    // Explicit target form: "Target creature perpetually gets -2/-0."
+    // `parse_target` owns the target/filter grammar; this arm only recognizes the
+    // perpetual P/T tail and rejects compound grants so mixed forms stay honest.
+    if peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(lower)
+        .is_ok()
+    {
+        let (target, after_target) = parse_target(lower);
+        if !matches!(target, TargetFilter::Any) {
+            let (rest, _) = space1::<_, OracleError<'_>>(after_target).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+                .parse(rest)
+                .ok()?;
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            ))
+            .parse(rest)
+            .ok()?;
+            let (rest, (power_delta, toughness_delta)) =
+                nom_primitives::parse_pt_modifier(rest).ok()?;
+            return tail_done(rest).then_some(Effect::ApplyPerpetual {
+                target,
+                modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            });
+        }
+    }
+
     // Anaphoric back-reference: "that Vehicle perpetually gets +1/+0".
     if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
         let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
@@ -11700,7 +11732,8 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         && triggers::extract_target_filter_from_effect(&clause.effect).is_some()
     {
         clause.multi_target = extract_exact_target_multi_target(text)
-            .or_else(|| extract_bounded_target_multi_target(text));
+            .or_else(|| extract_bounded_target_multi_target(text))
+            .or_else(|| extract_optional_target_multi_target(text));
     }
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_deal_damage_multi_target(text);
