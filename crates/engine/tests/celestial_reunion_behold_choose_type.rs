@@ -467,7 +467,8 @@ fn cancel_after_type_choice_rewinds_and_recast_reprompts() {
 fn resolve_then_flashback_recast_reprompts_creature_type() {
     let mut s = setup();
     let card_id = s.runner.state().objects[&s.spell].card_id;
-    drive(&mut s, true, "Elf", Some(s.lib_elf));
+    let lib_elf = s.lib_elf;
+    drive(&mut s, true, "Elf", Some(lib_elf));
 
     assert_eq!(
         zone_of(&s, s.spell),
