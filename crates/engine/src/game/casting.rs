@@ -9588,6 +9588,11 @@ fn announce_spell_on_stack(
     prepared: &PreparedSpellCast,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 400.7: A new cast announcement is a new casting event — discard any
+    // stale behold creature-type choice left on the spell object from a prior
+    // resolution (#5051; cancel rewind uses the same clear in handle_cancel_cast).
+    clear_cast_scoped_creature_type_choice(state, prepared.object_id);
+
     stack::push_to_stack(
         state,
         StackEntry {
@@ -14285,6 +14290,17 @@ pub fn handle_activate_ability(
 /// reversion is needed — the object is already in its origin zone.
 /// Activated-ability casts never placed an object on the stack during target
 /// selection, so no stack rollback is needed for them.
+/// CR 400.7 + CR 601.2: Cast-scoped behold creature-type choices must not
+/// survive across casting events. A resolved spell that later re-enters the
+/// cast pipeline (flashback, retrace, hand re-cast, etc.) is a new object for
+/// game purposes and must re-prompt (#5051).
+fn clear_cast_scoped_creature_type_choice(state: &mut GameState, object_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.chosen_attributes
+            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
+    }
+}
+
 pub fn handle_cancel_cast(
     state: &mut GameState,
     pending: &PendingCast,
@@ -14301,10 +14317,7 @@ pub fn handle_cancel_cast(
     // (`casting_costs::pay_additional_cost_with_source`) would skip the type
     // prompt on the next cast attempt and silently reuse the stale type — so
     // remove it here and let a re-cast re-prompt from a clean slate.
-    if let Some(obj) = state.objects.get_mut(&pending.object_id) {
-        obj.chosen_attributes
-            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
-    }
+    clear_cast_scoped_creature_type_choice(state, pending.object_id);
 
     let convoked_creatures = if pending.convoked_creatures.is_empty() {
         state
