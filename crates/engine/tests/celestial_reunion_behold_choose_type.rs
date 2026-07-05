@@ -23,9 +23,9 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::keywords::{FlashbackCost, Keyword};
 use engine::types::game_state::{CastingVariant, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::{FlashbackCost, Keyword};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -491,7 +491,9 @@ fn resolve_then_flashback_recast_reprompts_creature_type() {
         .get_mut(&s.spell)
         .unwrap()
         .keywords
-        .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::generic(2))));
+        .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::generic(
+            2,
+        ))));
 
     add_mana(&mut s.runner, 4);
     s.runner
