@@ -713,6 +713,16 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
             rest.original,
         ));
     }
+    // An Equipment that can attach to a non-creature permanent (e.g. Luxior,
+    // Giada's Gift equips a planeswalker) addresses the "equipped permanent" —
+    // the widest attached-Equipment subject. Mirrors the "enchanted permanent"
+    // arm above with `EquippedBy`.
+    if let Some(rest) = nom_tag_tp(tp, "equipped permanent ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EquippedBy])),
+            rest.original,
+        ));
+    }
     None
 }
 

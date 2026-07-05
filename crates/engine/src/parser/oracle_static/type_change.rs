@@ -906,15 +906,15 @@ pub(crate) fn parse_enchanted_is_type(
 /// Both reuse the existing `RemoveType` / `AddType` runtime (`game/layers.rs`)
 /// applied at Layer 4 — no new engine variant, no new runtime. The subject is
 /// the shared `attached_subject_filter` building block (Enchanted/Equipped
-/// creature/permanent/land), extended here to accept the "equipped permanent"
-/// prefix that Equipment reconfigured onto a non-creature permanent needs. The
-/// body is consumed to `eof`, so a partial prefix can never mis-claim a longer
-/// or differently-shaped line.
+/// creature/permanent/land), which owns every attached-subject prefix including
+/// the "equipped permanent" case a Luxior-style Equipment attached to a
+/// non-creature permanent uses. The body is consumed to `eof`, so a partial
+/// prefix can never mis-claim a longer or differently-shaped line.
 pub(crate) fn parse_attached_isnt_and_is_type(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let (affected, predicate) = parse_attached_type_change_subject(tp)?;
+    let (affected, predicate) = attached_subject_filter(tp)?;
     let predicate_lower = predicate.trim().to_lowercase();
     let (_, modifications) = parse_isnt_and_is_additive_type_body(&predicate_lower).ok()?;
     Some(
@@ -923,23 +923,6 @@ pub(crate) fn parse_attached_isnt_and_is_type(
             .modifications(modifications)
             .description(description.to_string()),
     )
-}
-
-/// Resolve the attached subject of [`parse_attached_isnt_and_is_type`] into its
-/// `EnchantedBy` / `EquippedBy` `TargetFilter`, returning the original-cased
-/// predicate remainder. Delegates the Aura/Equipment subjects the shared
-/// `attached_subject_filter` already recognizes (enchanted creature/permanent/
-/// land, equipped creature) and adds the "equipped permanent" prefix that a
-/// reconfigured Equipment attached to a non-creature permanent uses (Luxior).
-fn parse_attached_type_change_subject<'a>(tp: &TextPair<'a>) -> Option<(TargetFilter, &'a str)> {
-    if let Some(result) = attached_subject_filter(tp) {
-        return Some(result);
-    }
-    let rest = nom_tag_tp(tp, "equipped permanent ")?;
-    Some((
-        TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EquippedBy])),
-        rest.original,
-    ))
 }
 
 /// nom body for [`parse_attached_isnt_and_is_type`]: "isn't a[n] <core type> and
