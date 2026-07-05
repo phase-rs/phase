@@ -95,8 +95,6 @@
       "Exile": "Exil",
       "Command": "Kommandozone"
     },
-    "ownTag": "Du",
-    "opponentTag": "Gegner",
     "emblemTag": "Emblem"
   },
   "board": {
@@ -946,7 +944,8 @@
       "title": "Aktivierungskosten wählen"
     },
     "debug": {
-      "modeBanner": "DEBUG-MODUS - Klicke eine beliebige Karte"
+      "modeBanner": "DEBUG-MODUS - Klicke eine beliebige Karte",
+      "modeButtonOff": "KLICKMODUS AUS"
     }
   },
   "gameProvider": {

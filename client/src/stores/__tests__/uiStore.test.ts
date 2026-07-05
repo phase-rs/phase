@@ -96,4 +96,12 @@ describe("uiStore", () => {
     act(() => useUiStore.getState().toggleAutoPass());
     expect(useUiStore.getState().autoPass).toBe(true);
   });
+
+  it("toggleDebugClickModeButtonVisible flips the pinned click-mode control", () => {
+    expect(useUiStore.getState().debugClickModeButtonVisible).toBe(false);
+    act(() => useUiStore.getState().toggleDebugClickModeButtonVisible());
+    expect(useUiStore.getState().debugClickModeButtonVisible).toBe(true);
+    act(() => useUiStore.getState().toggleDebugClickModeButtonVisible());
+    expect(useUiStore.getState().debugClickModeButtonVisible).toBe(false);
+  });
 });

@@ -30,6 +30,9 @@ interface GameMenuProps {
    *  multiplayer sandbox). */
   showSandboxTools?: boolean;
   onSandboxToolsClick?: () => void;
+  debugInteractionMode?: boolean;
+  debugClickModeButtonVisible?: boolean;
+  onToggleDebugClickModeButtonVisible?: () => void;
   /** Show the always-visible "Report a card problem" flag button. Gated by the
    *  caller to live, participating (non-spectate) games. */
   showReportCard?: boolean;
@@ -50,6 +53,9 @@ export function GameMenu({
   onRequestTakeback,
   showSandboxTools,
   onSandboxToolsClick,
+  debugInteractionMode = false,
+  debugClickModeButtonVisible = false,
+  onToggleDebugClickModeButtonVisible,
   showReportCard,
   onReportCardClick,
 }: GameMenuProps) {
@@ -57,6 +63,7 @@ export function GameMenu({
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [open, setOpen] = useState(false);
+  const [sandboxOpen, setSandboxOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const cardDataMeta = useCardDataMeta();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
@@ -77,15 +84,16 @@ export function GameMenu({
   });
 
   useEffect(() => {
-    if (!open) return;
+    if (!open && !sandboxOpen) return;
     function handleClick(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setOpen(false);
+        setSandboxOpen(false);
       }
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
-  }, [open]);
+  }, [open, sandboxOpen]);
 
   return (
     <div
@@ -98,10 +106,15 @@ export function GameMenu({
     >
       <div className="flex h-7 items-center gap-1 rounded-sm border border-white/8 bg-slate-950/64 px-0.5 shadow-[0_8px_18px_rgba(0,0,0,0.24)] backdrop-blur-md">
         <button
-          onClick={() => setOpen(!open)}
+          onClick={() => {
+            setOpen(!open);
+            setSandboxOpen(false);
+          }}
           className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-gray-400 transition-colors hover:bg-white/10 hover:text-gray-200"
           aria-label={t("gameMenu.menu")}
           title={t("gameMenu.menu")}
+          aria-haspopup="menu"
+          aria-expanded={open}
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -120,10 +133,19 @@ export function GameMenu({
         <FullscreenButton variant="game" />
         {showSandboxTools && onSandboxToolsClick && (
           <button
-            onClick={onSandboxToolsClick}
-            className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-amber-300/90 transition-colors hover:bg-white/10 hover:text-amber-200"
+            onClick={() => {
+              setSandboxOpen(!sandboxOpen);
+              setOpen(false);
+            }}
+            className={`flex h-7 w-9 items-center justify-center gap-0.5 rounded-md transition-colors ${
+              debugInteractionMode
+                ? "bg-amber-400/20 text-amber-200 ring-1 ring-amber-300/40 hover:bg-amber-400/25"
+                : "bg-white/6 text-amber-300/90 hover:bg-white/10 hover:text-amber-200"
+            }`}
             aria-label={t("gameMenu.sandboxTools")}
             title={t("gameMenu.sandboxToolsTitle")}
+            aria-haspopup="menu"
+            aria-expanded={sandboxOpen}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -138,6 +160,14 @@ export function GameMenu({
               <path d="M8 2.5v4.2L4 14.2a1.6 1.6 0 0 0 1.45 2.3h9.1A1.6 1.6 0 0 0 16 14.2L12 6.7V2.5" />
               <path d="M7 2.5h6" />
               <path d="M6.3 11.5h7.4" />
+            </svg>
+            <svg
+              viewBox="0 0 12 12"
+              fill="currentColor"
+              className={`h-2.5 w-2.5 transition-transform ${sandboxOpen ? "rotate-180" : ""}`}
+              aria-hidden
+            >
+              <path d="M3 4.5h6L6 8z" />
             </svg>
           </button>
         )}
@@ -181,8 +211,38 @@ export function GameMenu({
           <span>{boardLayoutToggleLabel}</span>
         </button>
       )}
+      {sandboxOpen && showSandboxTools && onSandboxToolsClick && (
+        <div
+          role="menu"
+          className="absolute left-0 top-full mt-1 w-60 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
+        >
+          <MenuButton
+            label={t("gameMenu.openSandboxTools")}
+            onClick={() => {
+              onSandboxToolsClick();
+              setSandboxOpen(false);
+            }}
+          />
+          {onToggleDebugClickModeButtonVisible && (
+            <MenuButton
+              label={t("gameMenu.clickModeButton")}
+              checked={debugClickModeButtonVisible}
+              status={
+                debugClickModeButtonVisible ? t("gameMenu.shown") : t("gameMenu.hidden")
+              }
+              onClick={() => {
+                onToggleDebugClickModeButtonVisible();
+                setSandboxOpen(false);
+              }}
+            />
+          )}
+        </div>
+      )}
       {open && (
-        <div className="absolute left-0 top-full mt-1 w-52 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm">
+        <div
+          role="menu"
+          className="absolute left-0 top-full mt-1 w-52 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
+        >
           <MenuButton label={t("gameMenu.resume")} onClick={() => setOpen(false)} />
           <MenuButton
             label={t("gameMenu.settings")}
@@ -305,14 +365,20 @@ function MenuButton({
   onClick,
   variant,
   shortcut,
+  checked,
+  status,
 }: {
   label: string;
   onClick: () => void;
   variant?: "danger";
   shortcut?: string;
+  checked?: boolean;
+  status?: string;
 }) {
   return (
     <button
+      role={checked == null ? "menuitem" : "menuitemcheckbox"}
+      aria-checked={checked}
       onClick={onClick}
       className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors ${
         variant === "danger"
@@ -320,8 +386,18 @@ function MenuButton({
           : "text-gray-300 hover:bg-gray-800 hover:text-white"
       }`}
     >
-      <span>{label}</span>
-      {shortcut && <span className="font-mono text-xs text-gray-500">{shortcut}</span>}
+      <span className="flex min-w-0 items-center gap-2">
+        {checked != null && (
+          <span
+            aria-hidden
+            className={`h-2 w-2 rounded-full ${checked ? "bg-amber-300" : "bg-gray-700"}`}
+          />
+        )}
+        <span className="truncate">{label}</span>
+      </span>
+      {(status || shortcut) && (
+        <span className="shrink-0 font-mono text-xs text-gray-500">{status ?? shortcut}</span>
+      )}
     </button>
   );
 }

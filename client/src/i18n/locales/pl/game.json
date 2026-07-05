@@ -95,8 +95,6 @@
       "Exile": "Wygnanie",
       "Command": "Strefa dowodzenia"
     },
-    "ownTag": "Ty",
-    "opponentTag": "Przeciwnik",
     "emblemTag": "Emblemat"
   },
   "board": {
@@ -946,7 +944,8 @@
       "title": "Wybierz koszt aktywacji"
     },
     "debug": {
-      "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę"
+      "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę",
+      "modeButtonOff": "TRYB KLIKNIĘCIA WYŁĄCZONY"
     }
   },
   "gameProvider": {

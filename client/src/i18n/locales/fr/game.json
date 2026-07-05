@@ -95,8 +95,6 @@
       "Exile": "Exil",
       "Command": "Zone de commandement"
     },
-    "ownTag": "Vous",
-    "opponentTag": "Adversaire",
     "emblemTag": "Emblème"
   },
   "board": {
@@ -946,7 +944,8 @@
       "title": "Choisir le coût d'activation"
     },
     "debug": {
-      "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte"
+      "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte",
+      "modeButtonOff": "MODE CLIC DÉSACTIVÉ"
     }
   },
   "gameProvider": {

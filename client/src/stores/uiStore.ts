@@ -163,6 +163,10 @@ interface UiStoreState {
    *  panel straight to "actions" instead of the default "console" log view. */
   debugPanelTab: "console" | "actions";
   debugInteractionMode: boolean;
+  /** Whether the quick floating Click Mode control is pinned on-screen. The
+   *  mode itself stays in `debugInteractionMode`; this only controls access to
+   *  the fast toggle for repeated sandbox edits. */
+  debugClickModeButtonVisible: boolean;
   debugContextMenu: { objectId: ObjectId; x: number; y: number } | null;
   /** Debug-only library browser: when set, a modal lists the player's full
    *  library (in a stable randomized order) so individual cards can be moved to
@@ -242,6 +246,7 @@ interface UiStoreActions {
   /** Open the debug panel directly to the Actions ("Sandbox Tools") tab. */
   openSandboxTools: () => void;
   toggleDebugInteractionMode: () => void;
+  toggleDebugClickModeButtonVisible: () => void;
   openDebugContextMenu: (menu: { objectId: ObjectId; x: number; y: number }) => void;
   closeDebugContextMenu: () => void;
   openDebugLibraryViewer: (playerId: number) => void;
@@ -295,6 +300,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   debugPanelOpen: false,
   debugPanelTab: "console",
   debugInteractionMode: false,
+  debugClickModeButtonVisible: false,
   debugContextMenu: null,
   debugLibraryViewer: null,
   helpSheetOpen: false,
@@ -550,6 +556,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     debugInteractionMode: !state.debugInteractionMode,
     debugContextMenu: null,
   })),
+  toggleDebugClickModeButtonVisible: () =>
+    set((state) => ({ debugClickModeButtonVisible: !state.debugClickModeButtonVisible })),
   openDebugContextMenu: (menu) => set({ debugContextMenu: menu, selectedObjectId: menu.objectId }),
   closeDebugContextMenu: () => set({ debugContextMenu: null }),
   openDebugLibraryViewer: (playerId) => set({ debugLibraryViewer: { playerId } }),

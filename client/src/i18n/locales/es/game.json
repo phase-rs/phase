@@ -95,8 +95,6 @@
       "Exile": "Exilio",
       "Command": "Zona de mando"
     },
-    "ownTag": "Tú",
-    "opponentTag": "Oponente",
     "emblemTag": "Emblema"
   },
   "board": {
@@ -946,7 +944,8 @@
       "title": "Elegir coste de activación"
     },
     "debug": {
-      "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta"
+      "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta",
+      "modeButtonOff": "MODO CLIC DESACTIVADO"
     }
   },
   "gameProvider": {

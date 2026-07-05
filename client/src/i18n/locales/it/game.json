@@ -95,8 +95,6 @@
       "Exile": "Esilio",
       "Command": "Zona di comando"
     },
-    "ownTag": "Tu",
-    "opponentTag": "Avversario",
     "emblemTag": "Emblema"
   },
   "board": {
@@ -946,7 +944,8 @@
       "title": "Scegli il costo di attivazione"
     },
     "debug": {
-      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta"
+      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta",
+      "modeButtonOff": "MODALITÀ CLIC DISATTIVATA"
     }
   },
   "gameProvider": {

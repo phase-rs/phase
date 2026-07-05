@@ -95,8 +95,6 @@
       "Exile": "Exile",
       "Command": "Command"
     },
-    "ownTag": "You",
-    "opponentTag": "Opponent",
     "emblemTag": "Emblem"
   },
   "board": {
@@ -978,7 +976,8 @@
       "title": "Choose Activation Cost"
     },
     "debug": {
-      "modeBanner": "DEBUG MODE - Click any card"
+      "modeBanner": "DEBUG MODE - Click any card",
+      "modeButtonOff": "CLICK MODE OFF"
     }
   },
   "spectator": {

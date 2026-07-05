@@ -844,6 +844,11 @@ function GamePageContent({
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
+  const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
+  const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const toggleDebugClickModeButtonVisible = useUiStore(
+    (s) => s.toggleDebugClickModeButtonVisible,
+  );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
@@ -1425,6 +1430,9 @@ function GamePageContent({
         onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
+        debugInteractionMode={debugInteractionMode}
+        debugClickModeButtonVisible={debugClickModeButtonVisible}
+        onToggleDebugClickModeButtonVisible={toggleDebugClickModeButtonVisible}
         showReportCard={canReportCard}
         onReportCardClick={() => useUiStore.getState().openCardReportDialog()}
       />
@@ -3192,17 +3200,23 @@ function ActivationCostOneOfChoiceModal() {
 function DebugModeBanner() {
   const { t } = useTranslation("game");
   const active = useUiStore((s) => s.debugInteractionMode);
+  const visible = useUiStore((s) => s.debugClickModeButtonVisible);
   const toggle = useUiStore((s) => s.toggleDebugInteractionMode);
 
-  if (!active) return null;
+  if (!active && !visible) return null;
 
   return (
     <div className="fixed left-1/2 top-2 z-50 -translate-x-1/2">
       <button
         onClick={toggle}
-        className="rounded-full border border-amber-500/40 bg-amber-950/80 px-4 py-1.5 font-mono text-xs font-semibold text-amber-300 shadow-lg backdrop-blur-sm transition-colors hover:bg-amber-900/80"
+        className={
+          "rounded-full border px-4 py-1.5 font-mono text-xs font-semibold shadow-lg backdrop-blur-sm transition-colors " +
+          (active
+            ? "border-amber-500/40 bg-amber-950/80 text-amber-300 hover:bg-amber-900/80"
+            : "border-gray-600/50 bg-gray-950/75 text-gray-400 hover:border-amber-600/50 hover:text-amber-300")
+        }
       >
-        {t("gamePage.debug.modeBanner")}
+        {active ? t("gamePage.debug.modeBanner") : t("gamePage.debug.modeButtonOff")}
       </button>
     </div>
   );
