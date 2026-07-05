@@ -226,25 +226,25 @@ pub(crate) fn handle_select_modes(
 fn maybe_pause_for_cast_distribution(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
-    ability: ResolvedAbility,
+    pending: &PendingCast,
+    ability: &ResolvedAbility,
 ) -> Result<Option<WaitingFor>, EngineError> {
-    let Some(unit) = pending.distribute.clone() else {
+    let Some(unit) = &pending.distribute else {
         return Ok(None);
     };
-    let Some(total) = extract_distribution_total(state, &ability, &ability.effect) else {
+    let Some(total) = extract_distribution_total(state, ability, &ability.effect) else {
         // X-spell: distribution deferred to after mana payment.
         return Ok(None);
     };
-    let assigned_targets = distribution_targets(&ability);
-    let mut pending_dist = pending;
-    pending_dist.ability = ability;
+    let assigned_targets = distribution_targets(ability);
+    let mut pending_dist = pending.clone();
+    pending_dist.ability = ability.clone();
     state.pending_cast = Some(Box::new(pending_dist));
     Ok(Some(WaitingFor::DistributeAmong {
         player,
         total,
         targets: assigned_targets,
-        unit,
+        unit: unit.clone(),
     }))
 }
 
@@ -282,7 +282,7 @@ pub(crate) fn handle_select_targets(
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
     if let Some(waiting_for) =
-        maybe_pause_for_cast_distribution(state, player, pending.clone(), ability.clone())?
+        maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
     {
         return Ok(waiting_for);
     }
@@ -402,7 +402,7 @@ pub(crate) fn handle_choose_target(
             assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
             if let Some(waiting_for) =
-                maybe_pause_for_cast_distribution(state, player, pending.clone(), ability.clone())?
+                maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
             {
                 return Ok(waiting_for);
             }
