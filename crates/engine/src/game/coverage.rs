@@ -10528,6 +10528,7 @@ mod tests {
                     characteristic_defining: false,
                     description: None,
                     attack_defended: None,
+                    source_controller: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -10572,6 +10573,7 @@ mod tests {
                     characteristic_defining: false,
                     description: None,
                     attack_defended: None,
+                    source_controller: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -11557,6 +11559,7 @@ mod tests {
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -11588,6 +11591,7 @@ mod tests {
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -11617,6 +11621,7 @@ mod tests {
             characteristic_defining: false,
             description: None,
             attack_defended: None,
+            source_controller: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -11764,6 +11769,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("Skip your draw step.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(
@@ -11793,6 +11799,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("Players skip their upkeep steps.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(
@@ -11832,6 +11839,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("Players can't draw cards.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11862,6 +11870,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("You can't draw cards.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11894,6 +11903,7 @@ mod tests {
             characteristic_defining: false,
             description: Some(oracle.to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11932,6 +11942,7 @@ mod tests {
                 characteristic_defining: false,
                 description: Some(description.to_string()),
                 attack_defended: None,
+                source_controller: None,
             });
         }
 
@@ -12072,6 +12083,7 @@ mod tests {
             characteristic_defining: false,
             description: Some(oracle.to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(

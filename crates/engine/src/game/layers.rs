@@ -4140,6 +4140,45 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
     }
 }
 
+/// CR 611.2c + CR 109.5: True when a granted `MustBeBlockedByAll` /
+/// `MustBeBlocked` static carries a controller-relative blocker filter
+/// (`ControllerRef::You`/`Opponent`/… — "your opponents", "you control").
+/// When such a static is grafted onto a TARGET permanent by a one-shot effect
+/// (You Look Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter
+/// relative to the target's controller. This gate is the condition under which
+/// the installing player must be snapshotted as the anchor (mirrors
+/// `static_mode_uses_chosen_color`).
+fn static_mode_uses_controller_relative_blocker_filter(
+    mode: &crate::types::statics::StaticMode,
+) -> bool {
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::MustBeBlockedByAll {
+            blockers: Some(filter),
+        }
+        | StaticMode::MustBeBlocked { by: Some(filter) } => {
+            target_filter_controller_is_relative(filter)
+        }
+        _ => false,
+    }
+}
+
+/// CR 109.5: True when a `TargetFilter` constrains the controller of matched
+/// objects via a `ControllerRef` slot (any variant qualifies — none is a
+/// concrete-player anchor). Recurses through `And`/`Or`/`Not`, modeled on
+/// `ability_utils::filter_references_target_player`.
+fn target_filter_controller_is_relative(filter: &TargetFilter) -> bool {
+    use crate::types::ability::TypedFilter;
+    match filter {
+        TargetFilter::Typed(TypedFilter { controller, .. }) => controller.is_some(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_controller_is_relative)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_is_relative(filter),
+        _ => false,
+    }
+}
+
 /// CR 509.1b + CR 105.4 (issue #327): Walk a `TargetFilter` looking for
 /// `FilterProp::IsChosenColor`. Mirrors the chosen-ref detection pattern in
 /// `effects::prevent_damage::resolve_source_filter`.
@@ -5029,8 +5068,19 @@ fn apply_continuous_effect_filtered(
                 // chosen-color attribute of its own; resolving at apply time
                 // bakes the granting source's choice into the live filter.
                 let resolved_mode = resolve_static_mode_chosen_color(mode, chosen_color);
-                let def =
+                let mut def =
                     StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
+                // CR 611.2c + CR 109.5: A controller-relative blocker filter
+                // ("your opponents") grafted onto a TARGET permanent would
+                // otherwise resolve "you" as the target's controller. Snapshot
+                // the installing player (`effect.controller`, the single
+                // authority) so combat re-derives the filter context from the
+                // spell controller — the continuous effect's anchor is locked at
+                // materialization. `None` anchor (permanent-static lures) still
+                // resolves from the carrier.
+                if static_mode_uses_controller_relative_blocker_filter(&resolved_mode) {
+                    def = def.source_controller(effect.controller);
+                }
                 if !obj
                     .static_definitions
                     .iter_all()

@@ -993,10 +993,13 @@ fn must_be_blocked_requirements_for_attacker<'a>(
     state: &'a GameState,
     attacker_id: ObjectId,
     precomputed: &'a [(ObjectId, StaticDefinition)],
-) -> impl Iterator<Item = (Option<&'a TargetFilter>, ObjectId)> + 'a {
+) -> impl Iterator<Item = (Option<&'a TargetFilter>, ObjectId, Option<PlayerId>)> + 'a {
+    // CR 611.2c + CR 109.5: the third element is the installing-player anchor
+    // snapshotted at graft time (`StaticDefinition::source_controller`). `None`
+    // = resolve the controller from the carrier (permanent-static lures).
     must_be_blocked_statics_for_attacker_from_precomputed(state, attacker_id, precomputed)
         .filter_map(|(def, src_id)| match &def.mode {
-            StaticMode::MustBeBlocked { by } => Some((by.as_ref(), src_id)),
+            StaticMode::MustBeBlocked { by } => Some((by.as_ref(), src_id, def.source_controller)),
             _ => None, // MustBeBlockedByAll handled by its own loop
         })
 }
@@ -1012,12 +1015,35 @@ fn must_be_blocked_by_all_requirements_for_attacker<'a>(
     state: &'a GameState,
     attacker_id: ObjectId,
     precomputed: &'a [(ObjectId, StaticDefinition)],
-) -> impl Iterator<Item = (Option<&'a TargetFilter>, ObjectId)> + 'a {
+) -> impl Iterator<Item = (Option<&'a TargetFilter>, ObjectId, Option<PlayerId>)> + 'a {
+    // CR 611.2c + CR 109.5: the third element is the installing-player anchor
+    // snapshotted at graft time (`StaticDefinition::source_controller`). `None`
+    // = resolve the controller from the carrier (permanent-static lures).
     must_be_blocked_statics_for_attacker_from_precomputed(state, attacker_id, precomputed)
         .filter_map(|(def, src_id)| match &def.mode {
-            StaticMode::MustBeBlockedByAll { blockers } => Some((blockers.as_ref(), src_id)),
+            StaticMode::MustBeBlockedByAll { blockers } => {
+                Some((blockers.as_ref(), src_id, def.source_controller))
+            }
             _ => None, // MustBeBlocked handled by its own loop
         })
+}
+
+/// CR 509.1c + CR 109.5: Build the `FilterContext` used to evaluate a granted
+/// blocker filter. When the requirement carries an installing-player `anchor`
+/// (a controller-relative filter grafted onto a target by a one-shot effect,
+/// e.g. You Look Upon the Tarrasque — CR 611.2c locks the anchor at
+/// materialization), evaluate "your opponents" relative to the SPELL
+/// controller. Otherwise (`None` anchor — permanent-static lures) resolve the
+/// controller from the carrier object, unchanged.
+fn blocker_filter_context(
+    state: &GameState,
+    src_id: ObjectId,
+    anchor: Option<PlayerId>,
+) -> FilterContext<'_> {
+    anchor.map_or_else(
+        || FilterContext::from_source(state, src_id),
+        |controller| FilterContext::from_source_with_controller(src_id, controller),
+    )
 }
 
 /// CR 509.1b + CR 609.4 + CR 702.28b: A creature without shadow normally can't
@@ -1485,11 +1511,11 @@ pub fn validate_blockers_for_player(
             }
             let attacker_id = attacker_info.object_id;
 
-            let requirements: Vec<(Option<&TargetFilter>, ObjectId)> =
+            let requirements: Vec<(Option<&TargetFilter>, ObjectId, Option<PlayerId>)> =
                 must_be_blocked_requirements_for_attacker(state, attacker_id, &must_be_blocked)
                     .collect();
 
-            for (by, src_id) in requirements {
+            for (by, src_id, anchor) in requirements {
                 // CR 509.1c: the requirement is obeyed if a qualifying blocker is
                 // already assigned to this attacker — `None` ⇒ any assigned
                 // blocker; `Some(filter)` ⇒ an assigned blocker matching `filter`.
@@ -1502,7 +1528,7 @@ pub fn validate_blockers_for_player(
                                 state,
                                 *blocker_id,
                                 filter,
-                                &FilterContext::from_source(state, src_id),
+                                &blocker_filter_context(state, src_id, anchor),
                             ),
                         })
                     });
@@ -1561,7 +1587,7 @@ pub fn validate_blockers_for_player(
                             state,
                             *id,
                             filter,
-                            &FilterContext::from_source(state, src_id),
+                            &blocker_filter_context(state, src_id, anchor),
                         ),
                     }
                 });
@@ -1595,7 +1621,7 @@ pub fn validate_blockers_for_player(
             // Collect the requirements before the inner `state.battlefield` iter
             // to drop the precomputed borrow (mirrors the sibling collect at
             // ~1479-1481 for the MustBeBlocked loop).
-            let requirements: Vec<(Option<&TargetFilter>, ObjectId)> =
+            let requirements: Vec<(Option<&TargetFilter>, ObjectId, Option<PlayerId>)> =
                 must_be_blocked_by_all_requirements_for_attacker(
                     state,
                     attacker_id,
@@ -1603,7 +1629,7 @@ pub fn validate_blockers_for_player(
                 )
                 .collect();
 
-            for (blockers, src_id) in requirements {
+            for (blockers, src_id, anchor) in requirements {
                 // Any untapped defender with spare block capacity that could
                 // legally block the lured attacker should have been declared as
                 // its blocker. `blockers == None` ⇒ every idle able creature is
@@ -1644,7 +1670,7 @@ pub fn validate_blockers_for_player(
                                 state,
                                 *id,
                                 f,
-                                &FilterContext::from_source(state, src_id),
+                                &blocker_filter_context(state, src_id, anchor),
                             )
                         })
                 });
@@ -8350,6 +8376,126 @@ mod tests {
         assert!(
             validate_blockers(&state, &[(flier, attacker)]).is_ok(),
             "the non-flier is not compelled, so blocking with only the flier is legal"
+        );
+    }
+
+    /// CR 509.1c + CR 611.2c + CR 109.5 (PR #5131 [MED] follow-up): the ONE-SHOT
+    /// filtered lure — You Look Upon the Tarrasque, "All creatures your opponents
+    /// control able to block that creature this turn do so" — must evaluate its
+    /// controller-relative "your opponents" filter relative to the SPELL
+    /// controller (the caster), NOT the target creature's controller. The
+    /// one-shot grafts a `MustBeBlockedByAll { blockers: Some(Opponent) }` static
+    /// onto the TARGET permanent via `AddStaticMode`. Without the
+    /// `source_controller` anchor snapshotted at graft time, combat re-derives
+    /// the filter context from the target's controller, so casting the spell on
+    /// an opponent's creature compels the CASTER's own creatures (wrong).
+    ///
+    /// Revert-discrimination: `caster_creature` is P0's own creature. Buggy
+    /// anchor (`from_source(target)` → source_controller = P1) makes P0 an
+    /// "opponent" of P1, wrongly compelling `caster_creature`, so
+    /// `validate_blockers(&state, &[]).is_err()`. Fixed anchor (P0) means P0 is
+    /// not its own opponent, `caster_creature` is not compelled, and the empty
+    /// declaration is legal. The `is_ok()` arm flips to `is_err()` on revert.
+    #[test]
+    fn parsed_tarrasque_one_shot_lure_evaluates_opponents_from_caster_seat() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetRef};
+
+        // 3-player state: P0 caster, P1 target-controller, P2 other opponent.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1); // P1 is the attacking player
+
+        // The target of the spell: a creature P1 controls.
+        let target = create_creature(&mut state, PlayerId(1), "Lured Attacker", 3, 3);
+        // P0's own creature — must NOT be compelled (P0 is the caster, not its
+        // own opponent).
+        let caster_creature = create_creature(&mut state, PlayerId(0), "Caster's Bear", 2, 2);
+        // P2's creature — a genuine opponent-of-P0, used as the multiplayer
+        // reach-guard (must match the "your opponents" filter from P0's seat).
+        let p2_creature = create_creature(&mut state, PlayerId(2), "Rival's Bear", 2, 2);
+
+        // Production parse of the real Oracle text (verbatim; matches
+        // oracle_effect/tests.rs `mass_forced_block_filtered_opponents_control`).
+        let mut effect = crate::parser::oracle_effect::parse_effect(
+            "All creatures your opponents control able to block that creature this turn do so",
+        );
+        // Pin the grafted static to the specific target creature (the subject
+        // "that creature" resolves to the declared target); the inner
+        // AddStaticMode blockers:Some(Typed{Opponent}) is left intact.
+        match &mut effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                for sd in static_abilities.iter_mut() {
+                    sd.affected = Some(TargetFilter::SpecificObject { id: target });
+                }
+            }
+            other => panic!("expected GenericEffect from parser, got {other:?}"),
+        }
+
+        // Resolve as a spell cast by P0 targeting P1's creature, then materialize
+        // the transient continuous effect onto the target's static_definitions.
+        let ability =
+            ResolvedAbility::new(effect, vec![TargetRef::Object(target)], target, PlayerId(0))
+                .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        // Anchor reach-guard: the grafted static on the target carries the
+        // installing player (P0) as its source_controller.
+        let installed = state
+            .objects
+            .get(&target)
+            .unwrap()
+            .static_definitions
+            .iter_all()
+            .find(|sd| matches!(sd.mode, StaticMode::MustBeBlockedByAll { .. }))
+            .expect("grafted MustBeBlockedByAll must be installed on the target");
+        assert_eq!(
+            installed.source_controller,
+            Some(PlayerId(0)),
+            "grafted one-shot lure must snapshot the spell controller (P0) as anchor"
+        );
+        let StaticMode::MustBeBlockedByAll { blockers: Some(f) } = &installed.mode else {
+            panic!("expected Some(filter), got {:?}", installed.mode);
+        };
+        let f = f.clone();
+
+        // Context divergence reach-guard: the fixed context (anchored to P0)
+        // compels P2's creature (a real opponent of P0) but NOT P0's own; the
+        // buggy context (anchored to the target's controller P1) instead compels
+        // P0's creature. This isolates the fix to exactly the anchor.
+        let ctx_fixed = FilterContext::from_source_with_controller(target, PlayerId(0));
+        assert!(
+            matches_target_filter(&state, p2_creature, &f, &ctx_fixed),
+            "from P0's seat, P2's creature is an opponent's creature"
+        );
+        assert!(
+            !matches_target_filter(&state, caster_creature, &f, &ctx_fixed),
+            "from P0's seat, P0's own creature is NOT an opponent's creature"
+        );
+        let ctx_buggy = FilterContext::from_source(&state, target);
+        assert!(
+            matches_target_filter(&state, caster_creature, &f, &ctx_buggy),
+            "the buggy target-anchored context wrongly counts P0 as an opponent-of-P1"
+        );
+
+        // Geometry: P1's creature attacks P0, so P0 is the defending player and
+        // P0's own `caster_creature` is the candidate blocker under scrutiny.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(target, PlayerId(0))],
+            ..Default::default()
+        });
+
+        // Revert-failing assertion: with the correct anchor (P0), P0's own
+        // creature is NOT compelled, so declaring no blockers is legal. On revert
+        // the buggy anchor (P1) would compel `caster_creature` and this flips to
+        // Err.
+        assert!(
+            validate_blockers(&state, &[]).is_ok(),
+            "the caster's own creature must not be compelled by 'your opponents' evaluated from the caster's seat"
         );
     }
 
