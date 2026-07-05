@@ -61,6 +61,26 @@ describe("PhaseStopBar", () => {
     expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("No stop set: click to pause auto-pass here."));
   });
 
+  it("cycles a stop in place, preserving array order", () => {
+    // Order matters: `usePhaseStopsSync` dedupes by positional comparison, so
+    // cycling must not move the touched stop to the end of the array. Seed two
+    // stops and cycle the first — it must stay at index 0.
+    usePreferencesStore.setState({
+      phaseStops: [
+        { phase: "Upkeep", scope: "AllTurns" },
+        { phase: "PreCombatMain", scope: "AllTurns" },
+      ],
+    });
+    render(<PhaseIndicatorLeft />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Phase stop: Upkeep step\./ }));
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "Upkeep", scope: "OwnTurn" },
+      { phase: "PreCombatMain", scope: "AllTurns" },
+    ]);
+  });
+
   it("describes combat phase group stops", () => {
     render(<CombatPhaseIndicator />);
 

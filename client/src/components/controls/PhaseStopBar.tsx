@@ -151,17 +151,25 @@ function PhaseDot({ phase }: { phase: Phase }) {
   const tooltip = getPhaseTooltip(t, phase, stop?.scope, isActive);
 
   // Cycle the stop for this phase: off → AllTurns → OwnTurn → OpponentsTurns → off.
+  // Update in place so array order is preserved — `usePhaseStopsSync` dedupes by
+  // positional comparison, so appending would reorder and force a redundant
+  // engine dispatch even when the set of stops is unchanged.
   const cyclePhase = () => {
-    const others = phaseStops.filter((s) => s.phase !== phase);
+    if (stop === undefined) {
+      setPhaseStops([...phaseStops, { phase, scope: "AllTurns" }]);
+      return;
+    }
     const next: PhaseStopScope | null =
-      stop === undefined
-        ? "AllTurns"
-        : stop.scope === "AllTurns"
-          ? "OwnTurn"
-          : stop.scope === "OwnTurn"
-            ? "OpponentsTurns"
-            : null; // OpponentsTurns → off
-    setPhaseStops(next === null ? others : [...others, { phase, scope: next }]);
+      stop.scope === "AllTurns"
+        ? "OwnTurn"
+        : stop.scope === "OwnTurn"
+          ? "OpponentsTurns"
+          : null; // OpponentsTurns → off
+    setPhaseStops(
+      next === null
+        ? phaseStops.filter((s) => s.phase !== phase)
+        : phaseStops.map((s) => (s.phase === phase ? { phase, scope: next } : s)),
+    );
   };
 
   return (

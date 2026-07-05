@@ -964,6 +964,15 @@ export interface ResolvedAbility {
   sub_ability?: ResolvedAbility;
   else_ability?: ResolvedAbility;
   description?: string;
+  /**
+   * CR 400.7 identity latch + CR 704.5d token cessation: the source's card
+   * identity snapshotted at trigger push, so an `AllCopies` priority yield can
+   * be matched by card identity after the source object has ceased to exist (a
+   * token that left the battlefield is removed from `objects` before priority is
+   * next offered). Set only for triggered abilities; absent otherwise (serde
+   * `skip_serializing_if`).
+   */
+  source_card_id?: CardId;
 }
 
 // ── Stack ────────────────────────────────────────────────────────────────
