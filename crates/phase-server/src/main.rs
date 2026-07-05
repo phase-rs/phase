@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Request, State, WebSocketUpgrade};
-use axum::middleware::{from_fn_with_state, Next};
+use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -1289,7 +1289,13 @@ fn merge_admin_routes<S>(mut app: Router<S>, admin_token: Option<&str>) -> Route
                 "/admin/drafts/{code}",
                 get(admin::admin_get_draft).delete(admin::admin_delete_draft),
             )
-            .layer(from_fn_with_state(expected, require_admin_auth));
+            .route_layer(from_fn({
+                let expected = expected.clone();
+                move |request: Request, next: Next| {
+                    let expected = expected.clone();
+                    async move { require_admin_auth(expected, request, next).await }
+                }
+            }));
         app = app.merge(admin_routes);
     }
     app
@@ -1312,11 +1318,7 @@ fn admin_request_authorized(auth_header: Option<&str>, expected: &str) -> bool {
 }
 
 /// Auth guard for the administrative `/admin/*` routes.
-async fn require_admin_auth(
-    State(expected): State<Arc<str>>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn require_admin_auth(expected: Arc<str>, request: Request, next: Next) -> Response {
     let auth_header = request
         .headers()
         .get(http::header::AUTHORIZATION)
@@ -7138,7 +7140,10 @@ mod admin_auth_tests {
     use tokio::sync::Mutex;
     use tower::ServiceExt;
 
-    use super::{admin_request_authorized, merge_admin_routes, tokens_match, AppState, ServerMode};
+    use super::{
+        admin_request_authorized, draft_pools, merge_admin_routes, persistence, tokens_match,
+        AppState, ServerMode,
+    };
 
     const TOKEN: &str = "s3cr3t-admin-token";
 
