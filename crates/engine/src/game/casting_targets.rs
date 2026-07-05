@@ -281,9 +281,12 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
-    if let Some(waiting_for) =
-        maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
-    {
+    if let Some(waiting_for) = maybe_pause_for_cast_distribution(
+        state,
+        player,
+        &pending,
+        &ability,
+    )? {
         return Ok(waiting_for);
     }
 
@@ -401,9 +404,12 @@ pub(crate) fn handle_choose_target(
             let mut ability = pending.ability.clone();
             assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
-            if let Some(waiting_for) =
-                maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
-            {
+            if let Some(waiting_for) = maybe_pause_for_cast_distribution(
+                state,
+                player,
+                &pending,
+                &ability,
+            )? {
                 return Ok(waiting_for);
             }
 
