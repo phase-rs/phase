@@ -6362,6 +6362,28 @@ pub(crate) fn check_trigger_condition(
                 _ => None,
             })
             .is_some(),
+        // CR 603.4 + CR 701.9a: Intervening-if on the triggering event's object
+        // (e.g. the discarded card). The object may already have left the hand,
+        // so fall back to LKI when the live object no longer matches.
+        TriggerCondition::EventObjectMatchesFilter { filter } => trigger_event
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .is_some_and(|object_id| {
+                let ctx = FilterContext::from_source_with_controller(
+                    source_id.unwrap_or(ObjectId(0)),
+                    controller,
+                );
+                if super::filter::matches_target_filter(state, object_id, filter, &ctx) {
+                    return true;
+                }
+                state
+                    .lki_cache
+                    .get(&object_id)
+                    .is_some_and(|lki| {
+                        super::filter::matches_target_filter_on_lki_snapshot(
+                            state, object_id, lki, filter, &ctx,
+                        )
+                    })
+            }),
         // CR 120.1 + CR 108.3: "deals combat damage to its owner" — the damaged
         // player must be the owner of the object that dealt the damage (CR 120.1:
         // the object that deals damage is the source of that damage). Two event
@@ -7718,6 +7740,64 @@ pub mod tests {
         assert!(
             !check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &no_cause),
             "a discard with no recorded cause must NOT satisfy the constraint"
+        );
+    }
+
+    /// Issue #5143 — Anje Falkenrath: intervening-if "if it has madness" must
+    /// read the discarded card, not fire for every discard.
+    #[test]
+    fn event_object_madness_intervening_if_gates_discard_trigger() {
+        use crate::types::ability::{FilterProp, TriggerCondition};
+        use crate::types::keywords::{Keyword, KeywordKind};
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup();
+        let anje = make_creature(&mut state, PlayerId(0), "Anje Falkenrath", 1, 3);
+        let madness_card = make_creature(&mut state, PlayerId(0), "Basking Rootwalla", 1, 1);
+        let normal_card = make_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2);
+
+        if let Some(obj) = state.objects.get_mut(&madness_card) {
+            obj.keywords.push(Keyword::Madness(ManaCost::default()));
+        }
+
+        let condition = TriggerCondition::EventObjectMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Madness,
+                },
+            ])),
+        };
+
+        let madness_discard = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: madness_card,
+            source_id: None,
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(anje),
+                Some(&madness_discard),
+            ),
+            "madness discard must satisfy the intervening-if"
+        );
+
+        let normal_discard = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: normal_card,
+            source_id: None,
+        };
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(anje),
+                Some(&normal_discard),
+            ),
+            "non-madness discard must NOT satisfy the intervening-if"
         );
     }
 

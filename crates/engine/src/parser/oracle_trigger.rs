@@ -46,7 +46,7 @@ use crate::types::ability::{
     TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
     TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
-use crate::types::card_type::{is_land_subtype, CoreType};
+use crate::types::keywords::KeywordKind;
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::mana::{ManaColor, ManaType};
@@ -3887,6 +3887,23 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     controller: None,
                     owner: None,
                 }),
+            }),
+        );
+    }
+
+    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has madness" — intervening-if on
+    // discard triggers whose subject is the discarded card (Anje Falkenrath).
+    // MUST precede the zone-change-object "if it " arms below, which would
+    // otherwise mis-route this predicate.
+    if let Some(pos) = tp.find("if it has madness") {
+        return (
+            strip_condition_clause(text, pos, "if it has madness".len()),
+            Some(TriggerCondition::EventObjectMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::HasKeywordKind {
+                        value: KeywordKind::Madness,
+                    },
+                ])),
             }),
         );
     }

@@ -16217,6 +16217,14 @@ pub enum TriggerCondition {
     /// Checked at both fire-time and resolution-time per CR 603.4.
     EventDamageSourceMatchesFilter { filter: TargetFilter },
 
+    /// CR 603.4 + CR 701.9a: Intervening-if whose subject is the object named
+    /// by the triggering event (e.g. the discarded card on `GameEvent::Discarded`),
+    /// not the permanent that owns the ability. Distinct from
+    /// `ZoneChangeObjectMatchesFilter` (zone-change subjects) and
+    /// `SourceMatchesFilter` (the ability's own permanent). Used by discard
+    /// riders such as "if it has madness" (Anje Falkenrath).
+    EventObjectMatchesFilter { filter: TargetFilter },
+
     /// CR 120.1 + CR 108.3 + CR 603.4: Intervening-if predicate that holds when
     /// the player dealt the triggering damage is the OWNER of the object that
     /// dealt it ("deals combat damage to its owner"). Reads the triggering
