@@ -7418,12 +7418,9 @@ mod spectate_draft_password_tests {
     {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         while tokio::time::Instant::now() < deadline {
-            match recv_server_message(socket).await {
-                ServerMessage::Error { message } => {
-                    assert_eq!(message, expected);
-                    return;
-                }
-                _ => {}
+            if let ServerMessage::Error { message } = recv_server_message(socket).await {
+                assert_eq!(message, expected);
+                return;
             }
         }
         panic!("timed out waiting for Error: {expected}");
@@ -7454,9 +7451,10 @@ mod spectate_draft_password_tests {
             .expect("send create");
 
             let draft_code = loop {
-                match recv_server_message(&mut host).await {
-                    ServerMessage::DraftCreated { draft_code, .. } => break draft_code,
-                    _ => {}
+                if let ServerMessage::DraftCreated { draft_code, .. } =
+                    recv_server_message(&mut host).await
+                {
+                    break draft_code;
                 }
             };
 
