@@ -82,7 +82,25 @@
     "autoPassing": "Pasando automáticamente al paso final...",
     "resolvingStack": "Resolviendo la pila..."
   },
+  "cardReport": {
+    "title": "Informar de un problema con una carta",
+    "subtitle": "Elige la carta que no funciona correctamente.",
+    "search": "Buscar cartas…",
+    "empty": "No hay cartas para informar a la vista.",
+    "zone": {
+      "Stack": "Pila",
+      "Battlefield": "Campo de batalla",
+      "Hand": "Mano",
+      "Graveyard": "Cementerio",
+      "Exile": "Exilio",
+      "Command": "Zona de mando"
+    },
+    "ownTag": "Tú",
+    "opponentTag": "Oponente",
+    "emblemTag": "Emblema"
+  },
   "board": {
+    "reportCard": "Informar de un problema con una carta",
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
     "changeBackground": "Cambiar fondo…",
     "customizeLayout": "Personalizar diseño…",

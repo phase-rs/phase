@@ -37,6 +37,7 @@ import { BlockRequirementBadges } from "../components/combat/BlockRequirementBad
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
+import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
@@ -833,6 +834,8 @@ function GamePageContent({
   const playerId = usePlayerId();
   const perspectivePlayerId = usePerspectivePlayerId();
   const isSpectatorMode = useSpectatorMode();
+  // Card-report picker is valid in a live, participating game (never spectate).
+  const canReportCard = gameState != null && !isSpectatorMode;
   const canActForWaitingState = useCanActForWaitingState();
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
@@ -1422,8 +1425,11 @@ function GamePageContent({
         onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
+        showReportCard={canReportCard}
+        onReportCardClick={() => useUiStore.getState().openCardReportDialog()}
       />
       <HelpSheet />
+      <CardReportDialog />
 
       {/* Connection failure toast */}
       {isOnlineMode && (
@@ -1571,6 +1577,9 @@ function GamePageContent({
           onCustomizeLayout={() => useUiStore.getState().setFlexEditMode(true)}
           onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
           onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
+          onReportCard={
+            canReportCard ? () => useUiStore.getState().openCardReportDialog() : undefined
+          }
         />
       )}
 

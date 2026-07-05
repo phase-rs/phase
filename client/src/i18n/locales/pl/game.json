@@ -82,7 +82,25 @@
     "autoPassing": "Automatyczne przekazywanie do kroku końcowego...",
     "resolvingStack": "Rozpatrywanie stosu..."
   },
+  "cardReport": {
+    "title": "Zgłoś problem z kartą",
+    "subtitle": "Wybierz kartę, która nie działa poprawnie.",
+    "search": "Szukaj kart…",
+    "empty": "Brak widocznych kart do zgłoszenia.",
+    "zone": {
+      "Stack": "Stos",
+      "Battlefield": "Pole bitwy",
+      "Hand": "Ręka",
+      "Graveyard": "Cmentarz",
+      "Exile": "Wygnanie",
+      "Command": "Strefa dowodzenia"
+    },
+    "ownTag": "Ty",
+    "opponentTag": "Przeciwnik",
+    "emblemTag": "Emblemat"
+  },
   "board": {
+    "reportCard": "Zgłoś problem z kartą",
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
     "changeBackground": "Zmień tło…",
     "customizeLayout": "Dostosuj układ…",

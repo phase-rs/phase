@@ -82,7 +82,25 @@
     "autoPassing": "Auto-Passing to End Step...",
     "resolvingStack": "Resolving Stack..."
   },
+  "cardReport": {
+    "title": "Report a card problem",
+    "subtitle": "Pick the card that isn't working correctly.",
+    "search": "Search cards…",
+    "empty": "No reportable cards in view.",
+    "zone": {
+      "Stack": "Stack",
+      "Battlefield": "Battlefield",
+      "Hand": "Hand",
+      "Graveyard": "Graveyard",
+      "Exile": "Exile",
+      "Command": "Command"
+    },
+    "ownTag": "You",
+    "opponentTag": "Opponent",
+    "emblemTag": "Emblem"
+  },
   "board": {
+    "reportCard": "Report a card problem",
     "regroupCreatures": "Regroup duplicate creature groups",
     "changeBackground": "Change background…",
     "customizeLayout": "Customize layout…",

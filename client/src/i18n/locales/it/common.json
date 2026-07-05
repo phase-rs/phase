@@ -35,6 +35,7 @@
     "off": "Disattivato"
   },
   "gameMenu": {
+    "reportCard": "Segnala una carta",
     "menu": "Menu di gioco",
     "sandboxTools": "Strumenti Sandbox",
     "sandboxToolsTitle": "Strumenti Sandbox — imposta qualsiasi stato del campo (`)",

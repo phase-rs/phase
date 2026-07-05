@@ -35,6 +35,7 @@
     "off": "Wył."
   },
   "gameMenu": {
+    "reportCard": "Zgłoś kartę",
     "menu": "Menu gry",
     "sandboxTools": "Narzędzia piaskownicy",
     "sandboxToolsTitle": "Narzędzia piaskownicy — skonfiguruj dowolny stan pola bitwy (`)",

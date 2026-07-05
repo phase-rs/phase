@@ -82,7 +82,25 @@
     "autoPassing": "Passage automatique jusqu'à l'étape de fin...",
     "resolvingStack": "Résolution de la pile..."
   },
+  "cardReport": {
+    "title": "Signaler un problème de carte",
+    "subtitle": "Choisissez la carte qui ne fonctionne pas correctement.",
+    "search": "Rechercher des cartes…",
+    "empty": "Aucune carte à signaler visible.",
+    "zone": {
+      "Stack": "Pile",
+      "Battlefield": "Champ de bataille",
+      "Hand": "Main",
+      "Graveyard": "Cimetière",
+      "Exile": "Exil",
+      "Command": "Zone de commandement"
+    },
+    "ownTag": "Vous",
+    "opponentTag": "Adversaire",
+    "emblemTag": "Emblème"
+  },
   "board": {
+    "reportCard": "Signaler un problème de carte",
     "regroupCreatures": "Regrouper les groupes de créatures en double",
     "changeBackground": "Changer l'arrière-plan…",
     "customizeLayout": "Personnaliser la disposition…",

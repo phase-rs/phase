@@ -35,6 +35,7 @@
     "off": "Désactivé"
   },
   "gameMenu": {
+    "reportCard": "Signaler une carte",
     "menu": "Menu de la partie",
     "sandboxTools": "Outils bac à sable",
     "sandboxToolsTitle": "Outils bac à sable — configurez n'importe quel état du plateau (`)",

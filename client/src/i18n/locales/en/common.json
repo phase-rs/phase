@@ -35,6 +35,7 @@
     "off": "Off"
   },
   "gameMenu": {
+    "reportCard": "Report a card",
     "menu": "Game menu",
     "sandboxTools": "Sandbox Tools",
     "sandboxToolsTitle": "Sandbox Tools — set up any board state (`)",

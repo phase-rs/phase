@@ -35,6 +35,7 @@
     "off": "Aus"
   },
   "gameMenu": {
+    "reportCard": "Karte melden",
     "menu": "Spielmenü",
     "sandboxTools": "Sandbox-Werkzeuge",
     "sandboxToolsTitle": "Sandbox-Werkzeuge — beliebigen Spielzustand einrichten (`)",

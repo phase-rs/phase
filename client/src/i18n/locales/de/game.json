@@ -82,7 +82,25 @@
     "autoPassing": "Automatisch bis zum Endschritt abgeben...",
     "resolvingStack": "Stapel wird aufgelöst..."
   },
+  "cardReport": {
+    "title": "Kartenproblem melden",
+    "subtitle": "Wähle die Karte, die nicht richtig funktioniert.",
+    "search": "Karten suchen…",
+    "empty": "Keine meldbaren Karten sichtbar.",
+    "zone": {
+      "Stack": "Stapel",
+      "Battlefield": "Schlachtfeld",
+      "Hand": "Hand",
+      "Graveyard": "Friedhof",
+      "Exile": "Exil",
+      "Command": "Kommandozone"
+    },
+    "ownTag": "Du",
+    "opponentTag": "Gegner",
+    "emblemTag": "Emblem"
+  },
   "board": {
+    "reportCard": "Kartenproblem melden",
     "regroupCreatures": "Doppelte Kreaturengruppen neu gruppieren",
     "changeBackground": "Hintergrund ändern…",
     "customizeLayout": "Layout anpassen…",

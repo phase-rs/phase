@@ -35,6 +35,7 @@
     "off": "Desligado"
   },
   "gameMenu": {
+    "reportCard": "Relatar uma carta",
     "menu": "Menu do jogo",
     "sandboxTools": "Ferramentas de Sandbox",
     "sandboxToolsTitle": "Ferramentas de Sandbox — configure qualquer estado de tabuleiro (`)",

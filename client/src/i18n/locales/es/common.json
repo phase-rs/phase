@@ -35,6 +35,7 @@
     "off": "Desactivado"
   },
   "gameMenu": {
+    "reportCard": "Informar de una carta",
     "menu": "Menú de la partida",
     "sandboxTools": "Herramientas de sandbox",
     "sandboxToolsTitle": "Herramientas de sandbox — configura cualquier estado del tablero (`)",

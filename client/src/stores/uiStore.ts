@@ -169,6 +169,9 @@ interface UiStoreState {
    *  any zone via the standard debug context menu. `null` when closed. */
   debugLibraryViewer: { playerId: number } | null;
   helpSheetOpen: boolean;
+  /** Whether the "Report a card problem" picker dialog is open. A plain boolean
+   *  open-flag, mirroring the sandbox-tools / help-sheet open patterns. */
+  cardReportDialogOpen: boolean;
   /** Object currently being "previewed" by a debug-panel control (e.g. an
    *  ObjectSelect dropdown option under the cursor). Drives a distinct,
    *  always-obvious highlight on the board permanent / player avatar that is
@@ -245,6 +248,8 @@ interface UiStoreActions {
   closeDebugLibraryViewer: () => void;
   setHelpSheetOpen: (open: boolean) => void;
   toggleHelpSheet: () => void;
+  openCardReportDialog: () => void;
+  closeCardReportDialog: () => void;
   /** Set or clear the debug-panel preview highlight for an object. */
   setDebugHighlightedObjectId: (id: ObjectId | null) => void;
   /** Set or clear the debug-panel preview highlight for a player. */
@@ -293,6 +298,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   debugContextMenu: null,
   debugLibraryViewer: null,
   helpSheetOpen: false,
+  cardReportDialogOpen: false,
   debugHighlightedObjectId: null,
   debugHighlightedPlayerId: null,
   logPanelOpen: false,
@@ -550,6 +556,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   closeDebugLibraryViewer: () => set({ debugLibraryViewer: null }),
   setHelpSheetOpen: (open) => set({ helpSheetOpen: open }),
   toggleHelpSheet: () => set((state) => ({ helpSheetOpen: !state.helpSheetOpen })),
+  openCardReportDialog: () => set({ cardReportDialogOpen: true }),
+  closeCardReportDialog: () => set({ cardReportDialogOpen: false }),
   setLogPanelOpen: (open) => set({ logPanelOpen: open }),
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
   setFlexEditMode: (active) => set({ flexEditMode: active }),

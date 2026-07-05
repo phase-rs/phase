@@ -30,6 +30,10 @@ interface GameMenuProps {
    *  multiplayer sandbox). */
   showSandboxTools?: boolean;
   onSandboxToolsClick?: () => void;
+  /** Show the always-visible "Report a card problem" flag button. Gated by the
+   *  caller to live, participating (non-spectate) games. */
+  showReportCard?: boolean;
+  onReportCardClick?: () => void;
 }
 
 export function GameMenu({
@@ -46,6 +50,8 @@ export function GameMenu({
   onRequestTakeback,
   showSandboxTools,
   onSandboxToolsClick,
+  showReportCard,
+  onReportCardClick,
 }: GameMenuProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -132,6 +138,28 @@ export function GameMenu({
               <path d="M8 2.5v4.2L4 14.2a1.6 1.6 0 0 0 1.45 2.3h9.1A1.6 1.6 0 0 0 16 14.2L12 6.7V2.5" />
               <path d="M7 2.5h6" />
               <path d="M6.3 11.5h7.4" />
+            </svg>
+          </button>
+        )}
+        {showReportCard && onReportCardClick && (
+          <button
+            onClick={onReportCardClick}
+            className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-gray-400 transition-colors hover:bg-white/10 hover:text-gray-200"
+            aria-label={t("gameMenu.reportCard")}
+            title={t("gameMenu.reportCard")}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-4 w-4"
+            >
+              <path d="M4 2.5v15" />
+              <path d="M4 3.5h9.5l-1.6 3 1.6 3H4" />
             </svg>
           </button>
         )}
