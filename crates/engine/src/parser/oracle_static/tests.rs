@@ -3162,16 +3162,20 @@ fn static_bare_compound_tribal_subject_verdeloth() {
         .contains(&ContinuousModification::AddToughness { value: 1 }));
 }
 
-// #5147 regression: the bare tribal compound helper must NOT claim a compound
-// whose branches lack an explicit "creature" head noun. Life and Limb's subject
-// "All Forests and all Saprolings" has "Forests" as a LAND subtype; without the
-// creature-term gate the helper reinterpreted it as `creature Forest or creature
-// Saproling`, silently adding wrong out-of-scope support. The helper must decline
-// so Forest stays a land subject (handled by the type-change seam, not here).
+// #5147 regression on Life and Limb's ACTUAL static text. Its subject "All
+// Forests and all Saprolings" has "Forests" as a LAND subtype; the ungated bare
+// tribal-compound helper reinterpreted it as `Or{creature Forest, creature
+// Saproling}`, silently adding wrong out-of-scope support. With the
+// creature-term gate the helper declines this non-creature subject, so the
+// unsupported compound type-change strict-fails (no static) — the same shape as
+// baseline main — rather than over-claiming. Assert BOTH: Forest is never
+// reinterpreted as a creature-anthem branch, AND the line strict-fails.
 #[test]
-fn static_bare_compound_declines_non_creature_subtype_branches() {
-    let def = parse_static_line("Forests and Saprolings get +1/+1.");
-    if let Some(def) = def {
+fn life_and_limb_real_text_not_over_claimed_as_creature_forest() {
+    let line = "All Forests and all Saprolings are 1/1 green Saproling creatures \
+                and Forest lands in addition to their other types.";
+    // No produced static may treat the land subtype Forest as a creature subject.
+    for def in parse_static_line_multi(line) {
         if let Some(TargetFilter::Or { ref filters }) = def.affected {
             assert!(
                 !filters.iter().any(|f| matches!(
@@ -3181,10 +3185,20 @@ fn static_bare_compound_declines_non_creature_subtype_branches() {
                             t, TypeFilter::Subtype(s) if s == "Forest"
                         ))
                 )),
-                "land subtype Forest must not be reinterpreted as a creature-anthem branch: {def:?}"
+                "Life and Limb must not reinterpret land subtype Forest as a \
+                 creature-anthem branch: {def:?}"
             );
         }
     }
+    // The bare-compound creature helper must decline this non-creature subject,
+    // so the unsupported compound type-change produces no bogus static (strict
+    // failure) — matching baseline main. This is the discriminating check: the
+    // ungated helper produced a spurious `creature Forest` static here.
+    assert!(
+        parse_static_line_multi(line).is_empty(),
+        "unsupported compound type-change must strict-fail, not over-claim: {:?}",
+        parse_static_line_multi(line)
+    );
 }
 
 #[test]
