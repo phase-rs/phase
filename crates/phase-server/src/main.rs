@@ -1160,20 +1160,20 @@ async fn main() {
     app = merge_admin_routes(app, admin_token.as_deref());
 
     let app = app.layer(cors).with_state(AppState {
-            sessions: state,
-            draft_sessions,
-            draft_pools,
-            connections,
-            db,
-            lobby,
-            lobby_subscribers,
-            player_count,
-            game_db,
-            draft_spectators,
-            game_spectators,
-            mode,
-            public_url: advertised_public_url,
-        });
+        sessions: state,
+        draft_sessions,
+        draft_pools,
+        connections,
+        db,
+        lobby,
+        lobby_subscribers,
+        player_count,
+        game_db,
+        draft_spectators,
+        game_spectators,
+        mode,
+        public_url: advertised_public_url,
+    });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
         .await
@@ -7138,16 +7138,13 @@ mod admin_auth_tests {
     use tokio::sync::Mutex;
     use tower::ServiceExt;
 
-    use super::{
-        admin_request_authorized, merge_admin_routes, tokens_match, AppState, ServerMode,
-    };
+    use super::{admin_request_authorized, merge_admin_routes, tokens_match, AppState, ServerMode};
 
     const TOKEN: &str = "s3cr3t-admin-token";
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
-        let game_db = Arc::new(
-            persistence::GameDb::open(temp_dir.path().join("games.db")).expect("game db"),
-        );
+        let game_db =
+            Arc::new(persistence::GameDb::open(temp_dir.path().join("games.db")).expect("game db"));
         AppState {
             sessions: Arc::new(Mutex::new(SessionManager::new())),
             draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
@@ -7199,8 +7196,14 @@ mod admin_auth_tests {
         assert!(admin_request_authorized(Some(&ok), TOKEN));
         let padded = format!("Bearer   {TOKEN}  ");
         assert!(admin_request_authorized(Some(&padded), TOKEN));
-        assert!(admin_request_authorized(Some(&format!("bearer {TOKEN}")), TOKEN));
-        assert!(admin_request_authorized(Some(&format!("BEARER {TOKEN}")), TOKEN));
+        assert!(admin_request_authorized(
+            Some(&format!("bearer {TOKEN}")),
+            TOKEN
+        ));
+        assert!(admin_request_authorized(
+            Some(&format!("BEARER {TOKEN}")),
+            TOKEN
+        ));
     }
 
     #[test]
@@ -7216,13 +7219,19 @@ mod admin_auth_tests {
     #[tokio::test]
     async fn admin_routes_absent_without_token() {
         let (mut app, _temp) = test_admin_app(None);
-        assert_eq!(get_admin_drafts(&mut app, None).await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            get_admin_drafts(&mut app, None).await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
     async fn admin_routes_reject_missing_bearer() {
         let (mut app, _temp) = test_admin_app(Some(TOKEN));
-        assert_eq!(get_admin_drafts(&mut app, None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            get_admin_drafts(&mut app, None).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
