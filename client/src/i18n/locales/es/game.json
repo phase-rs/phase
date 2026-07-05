@@ -16,6 +16,8 @@
     "holdCtrlFront": "Mantén Ctrl para la cara frontal",
     "holdCtrlFlip": "Mantén Ctrl para girar",
     "flip": "Girar",
+    "report": "Informar de un problema",
+    "reported": "Informado ✓",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",

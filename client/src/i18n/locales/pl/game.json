@@ -16,6 +16,8 @@
     "holdCtrlFront": "Przytrzymaj Ctrl, aby zobaczyć przednią stronę",
     "holdCtrlFlip": "Przytrzymaj Ctrl, aby odwrócić",
     "flip": "Odwróć",
+    "report": "Zgłoś problem",
+    "reported": "Zgłoszono ✓",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",

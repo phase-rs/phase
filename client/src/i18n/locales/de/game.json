@@ -16,6 +16,8 @@
     "holdCtrlFront": "Strg halten für Vorderseite",
     "holdCtrlFlip": "Strg halten zum Umdrehen",
     "flip": "Umdrehen",
+    "report": "Problem melden",
+    "reported": "Gemeldet ✓",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",

@@ -16,10 +16,15 @@ import { useGameStore } from "../stores/gameStore";
 import { flushNow, installTelemetryLifecycle, trackEvent } from "./telemetry";
 
 /** Coarse route: the first path segment, so we bucket by area (deck / game /
- *  draft / menu) without capturing ids or query strings. */
-function coarseRoute(): string {
-  if (typeof window === "undefined") return "";
-  const segment = window.location.pathname.split("/").filter(Boolean)[0];
+ *  draft / menu) without capturing ids or query strings. The single route
+ *  vocabulary shared by `js_error.route`, `session_start`, and `route_view` —
+ *  every route-keyed dashboard query joins on this format. Defaults to the
+ *  current location; callers with a specific pathname (e.g. the route-change
+ *  component) pass it explicitly. */
+export function coarseRoute(pathname?: string): string {
+  if (pathname === undefined && typeof window === "undefined") return "";
+  const path = pathname ?? window.location.pathname;
+  const segment = path.split("/").filter(Boolean)[0];
   return segment ? `/${segment}` : "/";
 }
 
@@ -140,10 +145,54 @@ function installGameEndTracking(): void {
   );
 }
 
-/** Install all Tier 1 telemetry hooks. Idempotent-safe to call once at boot. */
+/**
+ * Emit `game_start` once per game when a new non-null `gameId` first has a
+ * non-null `gameState`. Mirrors `game_end`'s edge-trigger machinery
+ * (closure-scoped last-emitted gameId, spectate skip): counts are per-client
+ * sessions, not per game.
+ *
+ * Resume semantics: a mid-game reload re-emits `game_start` in the new session
+ * (the closure state resets on page load). This matches `game_end`'s existing
+ * per-client-session semantics — a resumed-and-finished game stays balanced
+ * because `game_end` re-emits in the same session too; only a reload-then-
+ * abandon skews starts-vs-ends, which is itself signal.
+ */
+function installGameStartTracking(): void {
+  let lastEmittedGameId: string | null = null;
+
+  useGameStore.subscribe(
+    (s) => s.gameState,
+    (gameState) => {
+      if (!gameState) return;
+      const { gameId, gameMode, aiSeatIds } = useGameStore.getState();
+      if (gameMode === "spectate") return;
+      if (gameId === null || gameId === lastEmittedGameId) return;
+      lastEmittedGameId = gameId;
+
+      trackEvent("game_start", {
+        game_mode: gameMode,
+        player_count: gameState.players.length,
+        ai_count: aiSeatIds.length,
+      });
+    },
+  );
+}
+
+/** Guards `session_start` to exactly one emit per page load, even if
+ *  `installTelemetry` is ever called twice (hot reload). */
+let sessionStarted = false;
+
+/** Install all telemetry hooks. Idempotent-safe to call once at boot. */
 export function installTelemetry(): void {
   installTelemetryLifecycle();
   installErrorListeners();
   installStuckDecisionTracking();
   installGameEndTracking();
+  installGameStartTracking();
+  // Once per page load: the session's opening route. Version/platform/build
+  // ride the batch envelope, so `route` is the only field.
+  if (!sessionStarted) {
+    sessionStarted = true;
+    trackEvent("session_start", { route: coarseRoute() });
+  }
 }
