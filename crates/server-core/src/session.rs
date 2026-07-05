@@ -1072,25 +1072,50 @@ impl SessionManager {
             ));
         }
 
-        // SetPhaseStops: preference propagation keyed to the authenticated player,
-        // not whoever currently holds priority. Mirrors CancelAutoPass — the engine's
-        // own handler would key by `authorized_submitter`, which is the priority
-        // holder in multiplayer, so we must intercept here to write to the correct
-        // player's entry.
-        if let GameAction::SetPhaseStops { stops } = &action {
-            if stops.is_empty() {
-                session.state.phase_stops.remove(&player);
-            } else {
-                session.state.phase_stops.insert(player, stops.clone());
-            }
+        // SetPhaseStops: per-player preference keyed to the authenticated player,
+        // not the priority holder. Bypasses the turn/legal-action prechecks (any
+        // player may adjust their own stops at any time) and delegates the
+        // mutation to the engine (single authority — the write handler keys by
+        // `actor`, i.e. the authenticated player). Not an undo point → no
+        // takeback snapshot. CR 102.1 (scope resolves against the active player).
+        if matches!(action, GameAction::SetPhaseStops { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
             let (new_legal_actions, spell_costs, by_object) =
                 engine_legal_actions_full(&session.state);
             let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
             return Ok((
                 session.state.clone(),
-                vec![],
+                result.events,
                 new_legal_actions,
-                vec![],
+                result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ));
+        }
+
+        // SetPriorityYield: per-player standing priority-yield preference keyed
+        // to the authenticated player, not the priority holder. Bypasses the
+        // turn/legal-action prechecks (any player may adjust their own yields at
+        // any time) and delegates the mutation to the engine (single authority).
+        // A preference toggle is not an undo point, so — unlike ReorderHand — it
+        // takes NO takeback snapshot. CR 117.3d.
+        if matches!(action, GameAction::SetPriorityYield { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
+            let (new_legal_actions, spell_costs, by_object) =
+                engine_legal_actions_full(&session.state);
+            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
+            return Ok((
+                session.state.clone(),
+                result.events,
+                new_legal_actions,
+                result.log_entries,
                 auto_pass,
                 spell_costs,
                 by_object,
@@ -1384,6 +1409,7 @@ mod tests {
     use engine::types::card_type::CardType;
     use engine::types::game_state::WaitingFor;
     use engine::types::mana::ManaCost;
+    use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use seat_reducer::types::SeatMutation;
 
     fn make_deck() -> PlayerDeckPayload {
@@ -1784,6 +1810,54 @@ mod tests {
             }
         }
         (mgr, code, token0, token1)
+    }
+
+    /// `SetPhaseStops` is keyed to the authenticated player and delegated to the
+    /// engine write-handler (keyed by `actor`), so a non-priority player's stops
+    /// land on their OWN entry — not the priority holder's. Mirrors the
+    /// `SetPriorityYield` delegate precedent.
+    #[test]
+    fn set_phase_stops_lands_on_authenticated_players_entry() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        // Dispatch from the player who does NOT hold priority.
+        let (non_priority_player, non_priority_token) = if priority_player == PlayerId(0) {
+            (PlayerId(1), token1)
+        } else {
+            (PlayerId(0), token0)
+        };
+
+        let stops = vec![PhaseStop {
+            phase: Phase::DeclareBlockers,
+            scope: PhaseStopScope::OpponentsTurns,
+        }];
+        let result = mgr.handle_action(
+            &code,
+            &non_priority_token,
+            GameAction::SetPhaseStops {
+                stops: stops.clone(),
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "SetPhaseStops from a non-priority player should succeed: {:?}",
+            result.err()
+        );
+
+        let state = &mgr.sessions.get(&code).unwrap().state;
+        assert_eq!(
+            state.phase_stops.get(&non_priority_player),
+            Some(&stops),
+            "the write must land on the authenticated (non-priority) player's entry"
+        );
+        assert!(
+            !state.phase_stops.contains_key(&priority_player),
+            "the priority holder's entry must remain untouched"
+        );
     }
 
     /// `ReorderHand` succeeds even when the sender is not the priority holder.

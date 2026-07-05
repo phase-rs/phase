@@ -1,6 +1,7 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::types::ability::{CountScope, DoorLockOp};
+use crate::types::counter::{CounterMatch, CounterType};
 
 #[test]
 fn escape_keyword_extracted_on_instants_and_sorceries() {
@@ -93,6 +94,97 @@ fn ability_word_labeled_activated_ability_parses_cost_effect_restriction() {
             .contains(&ActivationRestriction::DuringYourTurn),
         "'Activate only during your turn' must yield DuringYourTurn, got {:?}",
         def.activation_restrictions
+    );
+}
+
+fn has_not_your_turn_activation_restriction(restrictions: &[ActivationRestriction]) -> bool {
+    restrictions.iter().any(|restriction| {
+        matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not { condition })
+            } if matches!(condition.as_ref(), ParsedCondition::IsYourTurn)
+        )
+    })
+}
+
+#[test]
+fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
+    let r = parse(
+        "{T}: Add {C}{C}. Activate only during an opponent's turn.",
+        "Lavinia, Foil to Conspiracy",
+        &[],
+        &["Creature"],
+        &["Human", "Detective"],
+    );
+
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        has_not_your_turn_activation_restriction(restrictions),
+        "expected Not(IsYourTurn) activation restriction, got {:?}",
+        restrictions
+    );
+}
+
+#[test]
+fn legacy_play_this_ability_as_sorcery_records_activation_restriction() {
+    let r = parse(
+        "When Shichifukujin Dragon comes into play, put seven +1/+1 counters on it.\n\
+         {R}{R}{R}, Sacrifice two +1/+1 counters: Put three +1/+1 counters on \
+         Shichifukujin Dragon at end of turn. Play this ability as a sorcery.",
+        "Shichifukujin Dragon",
+        &[],
+        &["Creature"],
+        &["Dragon"],
+    );
+
+    let activation = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Play this ability"))
+        })
+        .expect("expected legacy activated ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "expected legacy play-this-ability wording to map to AsSorcery, got {:?}",
+        activation.activation_restrictions
+    );
+}
+
+#[test]
+fn parenthetical_activate_only_as_instant_records_activation_restriction() {
+    let r = parse(
+        "Swampwalk (This creature can't be blocked as long as defending player controls a Swamp.)\n\
+         {T}: Add {B}{B}{B}{B}. Target opponent gains control of Witch Engine. \
+         (Activate only as an instant.)",
+        "Witch Engine",
+        &[Keyword::Landwalk("Swamp".to_string())],
+        &["Creature"],
+        &["Horror"],
+    );
+
+    let activation =
+        r.abilities
+            .iter()
+            .find(|ability| {
+                ability.description.as_deref().is_some_and(|description| {
+                    description.contains("Target opponent gains control")
+                })
+            })
+            .expect("expected parenthetical activation-timing ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsInstant),
+        "expected parenthetical activation timing to map to AsInstant, got {:?}",
+        activation.activation_restrictions
     );
 }
 
@@ -439,6 +531,98 @@ fn parsed_has_unimplemented(r: &ParsedAbilities) -> bool {
             .iter()
             .filter_map(|t| t.execute.as_deref())
             .any(def_chain_has_unimplemented)
+}
+
+#[test]
+fn altair_ibn_la_ahad_for_each_exile_memory_counter_copy_parses() {
+    let parsed = parse(
+        "First strike\nWhenever Altaïr attacks, exile up to one target Assassin creature card from your graveyard with a memory counter on it. Then for each creature card you own in exile with a memory counter on it, create a tapped and attacking token that's a copy of it. Exile those tokens at end of combat.",
+        "Altaïr Ibn-La'Ahad",
+        &[Keyword::FirstStrike],
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Altaïr must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.execute.is_some())
+        .expect("Altaïr attack trigger");
+    let execute = trigger.execute.as_deref().expect("trigger execute");
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!(
+            "expected Graveyard->Exile head effect, got {:?}",
+            execute.effect
+        );
+    };
+    let copy = execute
+        .sub_ability
+        .as_deref()
+        .expect("CopyTokenOf sub-ability after exile");
+    let Effect::CopyTokenOf {
+        source_filter: Some(TargetFilter::Typed(source_filter)),
+        tapped,
+        enters_attacking,
+        ..
+    } = copy.effect.as_ref()
+    else {
+        panic!(
+            "expected source-filtered CopyTokenOf after exile, got {:?}",
+            copy.effect
+        );
+    };
+    assert!(*tapped);
+    assert!(*enters_attacking);
+    assert!(source_filter.type_filters.contains(&TypeFilter::Creature));
+    assert!(source_filter.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        )
+    }));
+    assert!(source_filter
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })));
+    assert!(source_filter.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Generic(name)),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        } if name == "memory"
+    )));
+
+    let delayed = copy
+        .sub_ability
+        .as_deref()
+        .expect("delayed end-of-combat cleanup");
+    let Effect::CreateDelayedTrigger { effect, .. } = delayed.effect.as_ref() else {
+        panic!("expected delayed cleanup trigger, got {:?}", delayed.effect);
+    };
+    let Effect::ChangeZone {
+        target,
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Exile,
+        ..
+    } = effect.effect.as_ref()
+    else {
+        panic!(
+            "expected LastCreated Battlefield->Exile cleanup, got {:?}",
+            effect.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::LastCreated);
 }
 
 /// CR 702.34a / CR 702.128a / CR 702.180a: the three self-cost graveyard
@@ -6761,7 +6945,7 @@ fn parses_return_forest_cost_untap_activated_ability() {
 /// restriction, instead of dropping the whole sentence to Unimplemented.
 #[test]
 fn any_player_may_activate_but_only_records_timing_restriction() {
-    let activation_restrictions_for = |text: &str, name: &str| {
+    let activation_for = |text: &str, name: &str| {
         let parsed = parse(text, name, &[], &["Artifact"], &[]);
         assert!(
             parsed
@@ -6776,14 +6960,15 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
             .into_iter()
             .find(|ability| !ability.activation_restrictions.is_empty())
             .expect("expected an activated ability with restrictions")
-            .activation_restrictions
     };
 
     // "as a sorcery" form (Endbringer's Revel / Scandalmonger / Task Mage Assembly).
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only as a sorcery.",
         "Test Any-Player Sorcery",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::AsSorcery),
         "expected AsSorcery, got {:?}",
@@ -6791,10 +6976,12 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     );
 
     // "during their turn" form (Volrath's Dungeon) → the activator's turn.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only during their turn.",
         "Test Any-Player Turn",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::DuringYourTurn),
         "expected DuringYourTurn, got {:?}",
@@ -6802,21 +6989,37 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     );
 
     // "during their upkeep" form maps to the activator's upkeep restriction.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only during their upkeep.",
         "Test Any-Player Upkeep",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::DuringYourUpkeep),
         "expected DuringYourUpkeep, got {:?}",
         restrictions
     );
 
+    let activation = activation_for(
+        "{T}: Draw a card. Any player may activate this ability but only during an opponent's turn.",
+        "Test Any-Player Opponent Turn",
+    );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
+    assert!(
+        has_not_your_turn_activation_restriction(restrictions),
+        "expected Not(IsYourTurn), got {:?}",
+        restrictions
+    );
+
     // "if <condition>" form (Lightning Storm) keeps the parsed condition gate.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only if ~ is on the stack.",
         "Test Any-Player Condition",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.iter().any(|restriction| matches!(
             restriction,
@@ -6835,6 +7038,14 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
 fn opponents_may_activate_but_only_records_timing_restriction() {
     let activation_for = |text: &str, name: &str| {
         let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "expected no unimplemented fallback, got {:?}",
+            parsed.abilities
+        );
         parsed
             .abilities
             .into_iter()
@@ -6866,6 +7077,45 @@ fn opponents_may_activate_but_only_records_timing_restriction() {
             .contains(&ActivationRestriction::DuringYourTurn),
         "expected DuringYourTurn, got {:?}",
         during_turn.activation_restrictions
+    );
+
+    let opponent_turn = activation_for(
+        "{1}: Draw a card. Only your opponents may activate this ability and only during an opponent's turn.",
+        "Test Opponent Opponent Turn",
+    );
+    assert_eq!(opponent_turn.activator_filter, Some(PlayerFilter::Opponent));
+    assert!(
+        has_not_your_turn_activation_restriction(&opponent_turn.activation_restrictions),
+        "expected Not(IsYourTurn), got {:?}",
+        opponent_turn.activation_restrictions
+    );
+}
+
+#[test]
+fn quoted_sentence_before_activate_only_keeps_timing_restriction() {
+    let r = parse(
+        "{T}: Add {W}.\n{1}{W}, {T}, Sacrifice ~: Create a 1/1 colorless Pilot creature token with \"~ saddles Mounts and crews Vehicles as though its power were 2 greater.\" Activate only as a sorcery.",
+        "Country Roads",
+        &[],
+        &["Land"],
+        &[],
+    );
+    let activation = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Create a 1/1 colorless Pilot"))
+        })
+        .expect("expected token-making activated ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "expected quoted-text suffix to preserve AsSorcery, got {:?}",
+        activation.activation_restrictions
     );
 }
 
@@ -11679,6 +11929,126 @@ fn strip_counter_conditional_no_ice_counters() {
     );
 }
 
+/// SHAPE C1 — the indefinite-article arm: "a +1/+1 counter on it" means
+/// one or more (CR 122.1 + CR 122.1a). The "it" subject keeps the source scope.
+#[test]
+fn strip_counter_conditional_article_it_source() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, Comparator, Effect, QuantityExpr, QuantityRef,
+    };
+
+    let def = parse_effect_chain(
+        "draw a card if it has a +1/+1 counter on it",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) if *counter_type == crate::types::counter::CounterType::Plus1Plus1
+        ),
+        "Expected QuantityCheck(P1P1 >= 1, Source), got {:?}",
+        def.condition,
+    );
+    // Reach-guard (CR: the effect must actually be the draw, never Unimplemented).
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "Expected Draw effect, got {:?}",
+        def.effect,
+    );
+    assert!(
+        !matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "Draw clause must not be Unimplemented, got {:?}",
+        def.effect,
+    );
+}
+
+/// SHAPE C2 — the demonstrative arm in NON-trigger context: "that creature" is
+/// the spell's target (CR 115.1), so the scope is `Target`, not `Source`. This is
+/// Oblivion's Hunger clause 2. `parse_effect_chain` parses in spell (non-trigger)
+/// context, so the demonstrative is recognized.
+#[test]
+fn strip_counter_conditional_demonstrative_target_non_trigger() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, Comparator, Effect, QuantityExpr, QuantityRef,
+    };
+
+    let def = parse_effect_chain(
+        "draw a card if that creature has a +1/+1 counter on it",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(counter_type) } },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) if *counter_type == crate::types::counter::CounterType::Plus1Plus1
+        ),
+        "Expected QuantityCheck(P1P1 >= 1, Target), got {:?}",
+        def.condition,
+    );
+    // Reach-guard: draw effect reached, zero Unimplemented.
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "Expected Draw effect, got {:?}",
+        def.effect,
+    );
+    assert!(
+        !matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "Draw clause must not be Unimplemented, got {:?}",
+        def.effect,
+    );
+}
+
+/// SHAPE C3 — GUARD: a LEADING demonstrative "if that creature has … counter …,
+/// [source] deals N … instead" (Bring Low's verbatim clause 2) must NOT be
+/// captured by the counter-conditional as an additive `QuantityCheck`-gated
+/// `DealDamage`. The leading demonstrative is deliberately withheld from
+/// `strip_counter_conditional` (offered only in the trailing form), so
+/// `strip_counter_conditional` returns no condition here and this
+/// replacement-class clause stays on the same inert deferral path as upstream
+/// `main` (CR 608.2e). Discriminating: under the pre-fix over-acceptance the
+/// leading demonstrative matched and the condition became
+/// `QuantityCheck(Target, GE 1)`, with the "instead" replacement wrongly lowered
+/// as an additive 5-damage sibling (target with a counter → 3+5=8 instead of the
+/// correct 5). This test fails under that regression (condition would be
+/// `Some(QuantityCheck)`) and passes only on the deferred path (condition `None`,
+/// exactly as upstream produces for this isolated clause).
+#[test]
+fn strip_counter_conditional_leading_demonstrative_instead_deferred() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityCondition, AbilityKind};
+
+    let def = parse_effect_chain(
+        "If that creature has a +1/+1 counter on it, Bring Low deals 5 damage to it instead.",
+        AbilityKind::Spell,
+    );
+    // Must NOT be captured as a counter-gated additive QuantityCheck (the
+    // pre-fix false-green). This is the discriminating assertion.
+    assert!(
+        !matches!(&def.condition, Some(AbilityCondition::QuantityCheck { .. })),
+        "Leading 'if that creature has a +1/+1 counter … instead' must NOT parse to a \
+         QuantityCheck-gated additive DealDamage; got {:?}",
+        def.condition,
+    );
+    // Upstream parity: the counter-conditional does not recognize this leading
+    // demonstrative at all, so no counter condition is attached — the clause is
+    // left as an honest deferred gap, identical to upstream `main`.
+    assert!(
+        def.condition.is_none(),
+        "Leading demonstrative 'instead' clause must stay a deferred gap (no counter \
+         condition), matching upstream main; got {:?}",
+        def.condition,
+    );
+}
+
 #[test]
 fn earthbender_ascension_landfall_chain() {
     use crate::parser::oracle_effect::parse_effect_chain;
@@ -13727,6 +14097,38 @@ fn spell_cost_reduction_for_creatures_that_attacked_stays_static() {
     );
 }
 
+#[test]
+fn vivid_spell_cost_reduction_uses_distinct_colors_quantity() {
+    let r = parse(
+        "Vivid — This spell costs {1} less to cast for each color among permanents you control.\nDraw a card.",
+        "Rime Chill",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Rime Chill-style cost reducer must not leave Unimplemented: {r:#?}"
+    );
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 1, .. },
+        dynamic_count:
+            Some(QuantityRef::DistinctColorsAmongPermanents {
+                filter: TargetFilter::Typed(tf),
+            }),
+        ..
+    } = &r.statics[0].mode
+    else {
+        panic!(
+            "expected self-spell ReduceCost over distinct permanent colors, got {:?}",
+            r.statics
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+}
+
 /// CR 701.26b + CR 614.6: Blossombind — the compound "Enchanted creature
 /// can't become untapped and can't have counters put on it." is two
 /// replacement effects: an unconditional `Untap` prevention (CR 701.26b — the
@@ -15629,6 +16031,16 @@ fn leading_conditional_instead_composes_self_replacement() {
         ),
         "expected AttackedThisTurn >= 1 inside ConditionInstead, got: {inner:?}"
     );
+    assert!(
+        !matches!(
+            sub.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::EventTarget,
+                ..
+            }
+        ),
+        "self-replacement damage must not bind trigger EventTarget"
+    );
 }
 
 #[test]
@@ -15673,6 +16085,16 @@ fn leading_conditional_instead_threshold_graveyard_count() {
             }
         ),
         "expected GraveyardSize >= 7 inside ConditionInstead, got: {inner:?}"
+    );
+    assert!(
+        !matches!(
+            sub.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::EventTarget,
+                ..
+            }
+        ),
+        "self-replacement damage must not bind trigger EventTarget"
     );
 }
 
@@ -16468,6 +16890,85 @@ fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
 }
 
 #[test]
+fn activated_draw_for_each_color_among_permanents_uses_distinct_colors_quantity() {
+    let parsed = parse(
+        "{5}, {T}: Draw a card for each color among permanents you control.",
+        "Chromatic Orrery",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Chromatic Orrery draw ability must not leave Unimplemented: {parsed:#?}"
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("expected parsed draw ability");
+    let Effect::Draw {
+        count:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::DistinctColorsAmongPermanents {
+                        filter: TargetFilter::Typed(tf),
+                    },
+            },
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected Draw count over distinct permanent colors, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+}
+
+#[test]
+fn mana_for_each_color_among_monocolored_permanents_stays_mana_path() {
+    let parsed = parse(
+        "{1}, {T}: For each color among monocolored permanents you control, add one mana of that color.",
+        "Tarnation Vista",
+        &[],
+        &["Land"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Tarnation Vista mana ability must not leave Unimplemented: {parsed:#?}"
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("expected parsed mana ability");
+    let Effect::Mana {
+        produced:
+            crate::types::ability::ManaProduction::DistinctColorsAmongPermanents {
+                filter: TargetFilter::Typed(tf),
+            },
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected mana production over distinct monocolored permanent colors, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::ColorCount { count: 1, .. })));
+    assert!(
+        ability.repeat_for.is_none(),
+        "mana path must not be split into repeat_for + generic mana"
+    );
+}
+
+#[test]
 fn source_filtered_copy_token_does_not_emit_dynamic_qty_warning() {
     let parsed = parse(
             "As this enchantment enters, choose a creature type.\nCreatures you control of the chosen type get +1/+0.\nAt the beginning of your end step, for each token you control of the chosen type that entered this turn, create a token that's a copy of it.",
@@ -16926,11 +17427,10 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
         .expect("begin-combat trigger must have an execute body");
 
     // CR 707.9b + CR 205.4: top-level effect is `CopyTokenOf` with the
-    // `RemoveSupertype { Legendary }` modification baked in. The token
-    // copies "equipped creature" — the target filter is internal detail
-    // tested elsewhere; this regression test pins ONLY the
-    // additional_modifications, which is the load-bearing field for the
-    // non-legendary semantic.
+    // `RemoveSupertype { Legendary }` modification baked in. The follow-up
+    // "That token gains haste" is a separate continuous effect bound to
+    // `LastCreated`, not to the equipped creature source copied by the
+    // parent effect.
     match &*exec.effect {
         Effect::CopyTokenOf {
             additional_modifications,
@@ -16945,6 +17445,44 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
             );
         }
         other => panic!("expected CopyTokenOf at trigger.execute.effect, got {other:?}"),
+    }
+
+    let haste = exec
+        .sub_ability
+        .as_deref()
+        .expect("Helm trigger must include the haste followup");
+    match &*haste.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } => {
+            assert_eq!(
+                *target,
+                Some(TargetFilter::LastCreated),
+                "Helm haste rider must target the created token, not the equipped creature"
+            );
+            assert_eq!(
+                *duration,
+                Some(Duration::Permanent),
+                "Helm's Oracle text states no duration for the haste grant"
+            );
+            assert!(
+                static_abilities.iter().any(|static_def| {
+                    static_def.affected == Some(TargetFilter::LastCreated)
+                        && static_def.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::Haste,
+                                }
+                            )
+                        })
+                }),
+                "Helm haste rider must affect LastCreated with AddKeyword(Haste): {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect haste followup, got {other:?}"),
     }
 }
 
@@ -17971,5 +18509,117 @@ fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
     assert!(
         has_unimplemented(execute),
         "nested unbindable difference anaphor must become a loud Unimplemented residual: {execute:#?}"
+    );
+}
+
+/// CR 508.6 + CR 608.2c: The Commander 2017 "whenever enchanted player is
+/// attacked" curse cycle carries the rider "Each opponent attacking that player
+/// does the same." — a player-scoped replication of the antecedent effect.
+/// Before the fix the rider was an `Effect::unimplemented("attacking", …)`
+/// residual; it must now lower to a `SequentialSibling` sub_ability that CLONES
+/// the antecedent effect and iterates it over `player_scope: Opponent` (the same
+/// AST the explicit-verb riders of the cycle already produce). Fail-on-revert:
+/// walks the parsed trigger and asserts the cloned effect + scope, and that the
+/// rider residual is gone.
+fn parse_curse(name: &str, oracle: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(
+        oracle,
+        name,
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string(), "Curse".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .unwrap_or_else(|| panic!("{name}: expected an 'is attacked' trigger: {parsed:#?}"));
+    *trigger
+        .execute
+        .clone()
+        .unwrap_or_else(|| panic!("{name}: trigger must carry an execute body"))
+}
+
+#[test]
+fn curse_of_opulence_rider_clones_token_across_attacking_opponents() {
+    let execute = parse_curse(
+        "Curse of Opulence",
+        "Enchant player\n\
+         Whenever enchanted player is attacked, create a Gold token. Each opponent \
+         attacking that player does the same. (A Gold token is an artifact with \
+         \"Sacrifice this token: Add one mana of any color.\")",
+    );
+
+    // Base effect: the curse controller creates a Gold token.
+    assert!(
+        matches!(&*execute.effect, Effect::Token { name, .. } if name == "Gold"),
+        "base effect must create a Gold token, got {:#?}",
+        execute.effect
+    );
+
+    // Rider: cloned into a per-opponent SequentialSibling — NOT an Unimplemented.
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("does-the-same rider must lower to a sub_ability");
+    assert_eq!(
+        rider.player_scope,
+        Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+        "the 'attacking that player' qualifier must scope the rider to opponents \
+         attacking the enchanted player (CR 508.6), not all opponents"
+    );
+    assert_eq!(
+        rider.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert!(
+        matches!(&*rider.effect, Effect::Token { name, .. } if name == "Gold"),
+        "rider must CLONE the antecedent Gold-token effect, got {:#?}",
+        rider.effect
+    );
+
+    // Fail-on-revert: no surviving "attacking … does the same" residual.
+    assert!(
+        !has_unimplemented(&execute),
+        "no Unimplemented residual may survive: {execute:#?}"
+    );
+}
+
+#[test]
+fn curse_of_vitality_rider_clones_gain_life_across_attacking_opponents() {
+    let execute = parse_curse(
+        "Curse of Vitality",
+        "Enchant player\n\
+         Whenever enchanted player is attacked, you gain 2 life. Each opponent \
+         attacking that player does the same.",
+    );
+
+    assert!(
+        matches!(&*execute.effect, Effect::GainLife { amount, .. } if *amount == QuantityExpr::Fixed { value: 2 }),
+        "base effect must gain 2 life, got {:#?}",
+        execute.effect
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("does-the-same rider must lower to a sub_ability");
+    assert_eq!(
+        rider.player_scope,
+        Some(PlayerFilter::OpponentAttackingEnchantedPlayer)
+    );
+    assert_eq!(
+        rider.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert!(
+        matches!(&*rider.effect, Effect::GainLife { amount, .. } if *amount == QuantityExpr::Fixed { value: 2 }),
+        "rider must CLONE the antecedent gain-2-life effect, got {:#?}",
+        rider.effect
+    );
+
+    assert!(
+        !has_unimplemented(&execute),
+        "no Unimplemented residual may survive: {execute:#?}"
     );
 }

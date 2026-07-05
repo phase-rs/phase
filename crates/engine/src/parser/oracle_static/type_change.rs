@@ -147,6 +147,49 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     )
 }
 
+/// CR 305.6 + CR 607.2d + CR 613.1d (Layer 4): "Lands you control are the chosen
+/// [land] type in addition to their other types" — the basic-land-type axis
+/// sibling of [`parse_arcane_adaptation_chosen_type_static`] (which parameterizes
+/// the CR 205.3g creature-subtype axis). Realmwright ("As ~ enters, choose a
+/// basic land type. Lands you control are the chosen type in addition to their
+/// other types.") is the type specimen. Additive only (CR 205.1b): the chosen
+/// basic land type is added while each affected land RETAINS its existing
+/// subtypes. Reuses the existing `AddChosenSubtype { kind: BasicLandType }`
+/// runtime (game/layers.rs), the land-axis counterpart of the creature path's
+/// `kind: CreatureType` — no new variant, no new runtime.
+pub(crate) fn parse_chosen_land_type_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_chosen_land_type_static_sentence,
+    )?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::BasicLandType,
+            }])
+            .description(description.to_string()),
+    )
+}
+
+/// nom body for [`parse_chosen_land_type_static`]: "lands you control are the
+/// chosen [land ]type in addition to their other types[.]", consumed to `eof`
+/// so a partial prefix can never mis-claim a longer line.
+fn parse_chosen_land_type_static_sentence(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("lands you control are the chosen ").parse(input)?;
+    let (input, _) = opt(tag("land ")).parse(input)?;
+    let (input, _) = tag("type in addition to their other types").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, ()))
+}
+
 fn parse_chosen_creature_type_static_sentence_with_scope(
     input: &str,
 ) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, ChosenCreatureTypeApplication)> {
@@ -842,6 +885,81 @@ pub(crate) fn parse_enchanted_is_type(
     }
 
     None
+}
+
+/// CR 613.1d (Layer 4) + CR 205.1b + CR 205.2: Parse an attached-permanent
+/// type-SWAP static of the form
+/// "[Enchanted|Equipped] <subject> isn't a[n] <core type> and is a[n] <core
+/// type> in addition to its other types."
+///
+/// Luxior, Giada's Gift and Luxior and Shadowspear are the type specimens
+/// ("Equipped permanent isn't a planeswalker and is a creature in addition to
+/// its other types."): the Equipment removes the equipped permanent's
+/// Planeswalker card type while adding the Creature card type, turning an
+/// equipped planeswalker into a creature. The two clauses decompose into two
+/// independent Layer-4 modifications. The "isn't a[n] <T>" clause becomes
+/// `RemoveType { core_type: <T> }` (CR 613.1d type removal — the permanent loses
+/// the named card type). The "is a[n] <T> in addition to its other types" clause
+/// becomes `AddType { core_type: <T> }` (CR 205.1b / CR 205.2 additive grant —
+/// the permanent keeps its other card types and gains <T>).
+///
+/// Both reuse the existing `RemoveType` / `AddType` runtime (`game/layers.rs`)
+/// applied at Layer 4 — no new engine variant, no new runtime. The subject is
+/// the shared `attached_subject_filter` building block (Enchanted/Equipped
+/// creature/permanent/land), which owns every attached-subject prefix including
+/// the "equipped permanent" case a Luxior-style Equipment attached to a
+/// non-creature permanent uses. The body is consumed to `eof`, so a partial
+/// prefix can never mis-claim a longer or differently-shaped line.
+pub(crate) fn parse_attached_isnt_and_is_type(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (affected, predicate) = attached_subject_filter(tp)?;
+    let predicate_lower = predicate.trim().to_lowercase();
+    let (_, modifications) = parse_isnt_and_is_additive_type_body(&predicate_lower).ok()?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
+/// nom body for [`parse_attached_isnt_and_is_type`]: "isn't a[n] <core type> and
+/// is a[n] <core type> in addition to its other types[.]", consumed to `eof`.
+/// CR 613.1d: the leading clause removes a card type; CR 205.1b / CR 205.2: the
+/// trailing "in addition to its other types" clause adds a card type additively.
+fn parse_isnt_and_is_additive_type_body(
+    input: &str,
+) -> OracleResult<'_, Vec<ContinuousModification>> {
+    let (input, _) = alt((tag("isn't an "), tag("isn't a "))).parse(input)?;
+    let (input, removed) = parse_core_type_word(input)?;
+    let (input, _) = alt((tag(" and is an "), tag(" and is a "))).parse(input)?;
+    let (input, added) = parse_core_type_word(input)?;
+    let (input, _) = tag(" in addition to its other types").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof.parse(input)?;
+    Ok((
+        input,
+        vec![
+            ContinuousModification::RemoveType { core_type: removed },
+            ContinuousModification::AddType { core_type: added },
+        ],
+    ))
+}
+
+/// CR 205.2: Map a singular core-type word to its [`CoreType`]. Longest tokens
+/// have no shared prefixes here, so left-to-right `alt` ordering is unambiguous.
+fn parse_core_type_word(input: &str) -> OracleResult<'_, CoreType> {
+    alt((
+        value(CoreType::Artifact, tag("artifact")),
+        value(CoreType::Battle, tag("battle")),
+        value(CoreType::Creature, tag("creature")),
+        value(CoreType::Enchantment, tag("enchantment")),
+        value(CoreType::Planeswalker, tag("planeswalker")),
+        value(CoreType::Land, tag("land")),
+    ))
+    .parse(input)
 }
 
 /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: Scan text for a "becomes a

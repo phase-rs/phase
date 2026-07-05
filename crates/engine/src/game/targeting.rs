@@ -1144,6 +1144,11 @@ fn blocked_attacker_from_event(
     event: &crate::types::events::GameEvent,
     source_id: ObjectId,
 ) -> Option<ObjectId> {
+    // CR 509.3c: an effect-driven "becomes blocked" carries only the attacker
+    // (the blocked creature); "that creature" resolves to that attacker.
+    if let crate::types::events::GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
+        return Some(*attacker);
+    }
     let crate::types::events::GameEvent::BlockersDeclared { assignments } = event else {
         return None;
     };
@@ -1310,6 +1315,9 @@ pub(crate) fn extract_source_from_event(
             let first = blockers.next()?;
             blockers.all(|blocker| blocker == first).then_some(first)
         }
+        // CR 509.3c: an effect-driven "becomes blocked" trigger's source is the
+        // attacker that became blocked.
+        GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(*attacker),
         _ => None,
     }
 }

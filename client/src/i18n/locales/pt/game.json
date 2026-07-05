@@ -16,6 +16,8 @@
     "holdCtrlFront": "Segure Ctrl para a face dianteira",
     "holdCtrlFlip": "Segure Ctrl para virar",
     "flip": "Virar",
+    "report": "Relatar um problema",
+    "reported": "Relatado ✓",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -287,6 +289,9 @@
     "cleanupDescription": "O dano se dissipa e o tamanho máximo da mão é verificado.",
     "tooltipStopSet": "Parada definida: clique para remover esta parada de passe automático.",
     "tooltipNoStop": "Nenhuma parada definida: clique para pausar o passe automático aqui.",
+    "scopeAllTurns": "Para em todos os turnos.",
+    "scopeOwnTurn": "Para apenas nos seus turnos.",
+    "scopeOpponentsTurns": "Para apenas nos turnos dos oponentes.",
     "tooltipCurrentPhase": "Fase atual.",
     "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -562,6 +567,14 @@
     "paidKickedTimes": "kicker ×{{count}}",
     "paidAdditionalCost": "custo extra",
     "paidConvoked": "convocadas ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Cessões de prioridade",
+    "yieldThis": "Ceder este",
+    "yieldAllCopies": "Ceder todas as cópias",
+    "revoke": "Revogar",
+    "clearAll": "Limpar tudo",
+    "allCopiesHint": "Recomendado para gatilhos de fichas"
   },
   "targeting": {
     "choosePermanentToCopy": "Escolha um permanente para copiar",
@@ -1586,6 +1599,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantFreerunning": "Conjurar com Freerunning",
     "variantFuse": "Conjurar com Fusão",
     "variantFallback": "Conjurar com {{type}}"
   },
@@ -1958,6 +1972,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

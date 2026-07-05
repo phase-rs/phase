@@ -429,6 +429,25 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
     true
 }
 
+/// CR 509.1h: mark a current attacker as blocked purely by effect, without
+/// assigning any blocking creature. The attacker becomes (and remains) blocked
+/// even though `blocker_assignments` / `blocker_to_attacker` stay empty; per
+/// CR 510.1c a blocked creature with no creatures blocking it assigns no combat
+/// damage. Emits no event (the caller decides whether the CR 509.3c precondition
+/// is met). Returns `false` if `oid` is not a current attacker.
+pub fn mark_attacker_blocked(state: &mut GameState, oid: ObjectId) -> bool {
+    let Some(combat) = state.combat.as_mut() else {
+        return false;
+    };
+    let Some(info) = combat.attackers.iter_mut().find(|a| a.object_id == oid) else {
+        return false;
+    };
+    info.blocked = true;
+    // CR 613.1f: `FilterProp::Blocked` grants may now apply; re-evaluate layers.
+    state.layers_dirty.mark_full();
+    true
+}
+
 /// Validate attacker declarations per CR 508.1.
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;

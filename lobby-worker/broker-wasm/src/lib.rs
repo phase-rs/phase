@@ -169,6 +169,13 @@ impl WasmBroker {
         self.inner.lobby().is_empty()
     }
 
+    /// Number of currently registered lobby entries (games waiting for players).
+    /// Read-only, so the shell need not re-snapshot after calling — this is the
+    /// live "active games" gauge surfaced by the `/stats` endpoint.
+    pub fn active_games(&self) -> usize {
+        self.inner.lobby().len()
+    }
+
     /// Handle one raw client frame (the exact JSON the client sent over the
     /// WebSocket). Parsing + dispatch happen in Rust; the shell never inspects
     /// the protocol. `conn_json` is the per-socket [`ConnState`] from the WS

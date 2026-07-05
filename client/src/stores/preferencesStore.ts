@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { GameFormat, MatchType, Phase } from "../adapter/types";
+import type { GameFormat, MatchType, PhaseStop } from "../adapter/types";
 import type { CommanderBracket } from "../types/bracket";
 import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
@@ -309,6 +309,7 @@ function buildDefaultPreferences(): PreferencesState {
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
     flexLayout: defaultFlexLayout(),
+    telemetryEnabled: true,
   };
 }
 
@@ -332,7 +333,7 @@ interface PreferencesState {
    *  for the full list. Each event's category is resolved via `eventCategory()`
    *  and the matching multiplier scales its base duration. */
   pacingMultipliers: Record<PacingCategory, number>;
-  phaseStops: Phase[];
+  phaseStops: PhaseStop[];
   masterVolume: number;
   sfxVolume: number;
   musicVolume: number;
@@ -400,6 +401,11 @@ interface PreferencesState {
   /** Persisted board layout (grid bands + per-widget offsets + active preset).
    *  See {@link FlexLayoutConfig}. Edited only in Flex Layout mode. */
   flexLayout: FlexLayoutConfig;
+  /** Whether anonymous, identity-free crash & usage telemetry may be sent.
+   *  Default on. Gates every send at enqueue time so a mid-session toggle takes
+   *  effect immediately. Builds without a `__TELEMETRY_URL__` define never send
+   *  regardless. See `services/telemetry.ts`. */
+  telemetryEnabled: boolean;
 }
 
 interface PreferencesActions {
@@ -422,7 +428,7 @@ interface PreferencesActions {
    *  audio levels, board background — everything except persisted multiplayer
    *  reconnect state, which is owned by `multiplayerStore`. */
   resetAllPreferences: () => void;
-  setPhaseStops: (stops: Phase[]) => void;
+  setPhaseStops: (stops: PhaseStop[]) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
   setMusicVolume: (vol: number) => void;
@@ -495,6 +501,8 @@ interface PreferencesActions {
   applyFlexPreset: (config: FlexLayoutConfig) => void;
   /** Reset the layout to the default preset (clears all offsets). */
   resetFlexLayout: () => void;
+  /** Toggle anonymous crash & usage telemetry. */
+  setTelemetryEnabled: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -748,10 +756,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         })),
       applyFlexPreset: (config) => set({ flexLayout: cloneFlexLayout(config) }),
       resetFlexLayout: () => set({ flexLayout: defaultFlexLayout() }),
+      setTelemetryEnabled: (enabled) => set({ telemetryEnabled: enabled }),
     }),
     {
       name: "phase-preferences",
-      version: 21,
+      version: 23,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -793,6 +802,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          merge, so existing users see no behavior change.
       // v20 → v21: Add multiplayerBoardLayout; legacy stores default to
       //          "focused", preserving the current focused-opponent layout.
+      // v21 → v22: Add telemetryEnabled; legacy stores default to `true` (opt-out,
+      //          identity-free crash & usage telemetry) via the shallow merge —
+      //          no explicit migration block needed (see flexLayout precedent).
+      // v22 → v23: phaseStops gained a turn-direction scope; each legacy bare
+      //          Phase string maps to a scoped stop defaulting to "AllTurns"
+      //          (fire on every turn = the old behavior).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -931,6 +946,19 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
 
         if (version < 21) {
           migrated = { ...migrated, multiplayerBoardLayout: "focused" };
+        }
+
+        // v22 → v23: phase stops gained a turn-direction scope. Map each legacy
+        // bare Phase string to a scoped stop defaulting to "AllTurns" (fire on
+        // every turn = the old behavior). Non-array values reset to [].
+        if (version < 23) {
+          const legacy = (migrated as { phaseStops?: unknown }).phaseStops;
+          migrated = {
+            ...migrated,
+            phaseStops: Array.isArray(legacy)
+              ? legacy.map((p) => (typeof p === "string" ? { phase: p, scope: "AllTurns" } : p))
+              : [],
+          };
         }
 
         return migrated;

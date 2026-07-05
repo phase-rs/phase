@@ -71,6 +71,25 @@
 //! verdict is a SOUNDNESS claim ("resolving can never enter a non-priority
 //! `WaitingFor`, for ANY state") and requires a resolver trace cited in the arm
 //! plus a `..`-free destructure so a future field forces re-audit.
+//!
+//! # Consumers of the read-axis classifiers after PR-6.75
+//!
+//! CR 603.3b: the legacy UNGATED trigger-ordering paths (same firing event, and
+//! the explicitly-simultaneous ZoneChanged departure batch) no longer consume the
+//! event-context / sibling-mutable read classifiers of this scanner. They consume
+//! the richer kind/scope read/write conflict profile in the sibling module
+//! `ability_rw.rs` (`ability_rw_profile` / `trigger_condition_rw_profile` /
+//! `profiles_conflict`), which answers "which kinds of state does the ability READ
+//! and WRITE, at what scope" — the precise read/write predicate those paths require
+//! (PR-6.25 §3 C0(ii)). The event-context and sibling-mutable read classifiers here
+//! are now consumed ONLY by the C2 distinct-event term (`group_is_order_independent`
+//! / `trigger_events_match_for_ordering`), ungated from loop detection (adopted from
+//! #5084) and conjoined with `!batch_conflict` — so a coarse C2-clean verdict may
+//! auto-order a distinct-event group only when the precise `ability_rw` profiler also
+//! agrees it is conflict-clean; a conservative verdict here means a prompt (safe
+//! over-reject). The projected-resource classifier (question 3) and the
+//! resolution-time choice classifier (question 4) are unchanged. See `ability_rw.rs`
+//! for the conflict model and its CR 603.3b commutation argument.
 
 use crate::types::ability::{
     AbilityCondition, ControllerRef, CountScope, Duration, EachDamageRecipient, Effect,
@@ -153,6 +172,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         targets: _,               // concrete announced target refs (already resolved)
         source_id: _,             // object id
         source_incarnation: _,    // epoch guard token
+        source_card_id: _,        // latched card identity token (AllCopies yield), no read
         controller: _,            // player id
         original_controller: _,   // player id
         scoped_player: _,         // player id (iteration binding)
@@ -175,6 +195,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         may_trigger_origin: _,    // provenance tag
         target_selection_mode: _, // Chosen/Random tag
         chosen_players: _,        // concrete chosen player ids
+        replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
     } = a;
@@ -294,6 +315,7 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint) -> Axes {
     match c {
         TargetSelectionConstraint::DifferentTargetPlayers => Axes::NONE,
         TargetSelectionConstraint::DifferentObjectControllers => Axes::NONE,
+        TargetSelectionConstraint::SameZoneOwner { zone: _ } => Axes::NONE,
         TargetSelectionConstraint::TotalManaValue {
             value,
             comparator: _,
@@ -923,6 +945,11 @@ fn scan_effect(x: &Effect) -> Axes {
             acc
         }
         Effect::BecomeSaddled { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target));
+            acc
+        }
+        Effect::BecomeBlocked { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));
             acc
@@ -2903,6 +2930,11 @@ fn scan_player_filter(x: &PlayerFilter) -> Axes {
             subject: _,
             scope: _,
         } => Axes::NONE,
+        // CR 508.6: inverse combat relation of `OpponentAttacked` — reads the
+        // per-combat attack-declaration ledger and the source's (static)
+        // AttachedTo host. Neither is an event-context or projected-growth
+        // resource, matching the `OpponentAttacked` / `DefendingPlayer` arms.
+        PlayerFilter::OpponentAttackingEnchantedPlayer => Axes::NONE,
         PlayerFilter::All => Axes::NONE,
         PlayerFilter::AllExcept { exclude } => {
             let mut acc = Axes::NONE;
@@ -3397,6 +3429,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::AddTargetReplacement { .. }
@@ -3540,6 +3573,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
         source_incarnation: _, // epoch guard token
+        source_card_id: _, // latched card identity token (AllCopies yield), no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
@@ -3557,6 +3591,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         may_trigger_origin: _, // provenance tag
         target_selection_mode: _, // Chosen/Random tag (announce-time)
         chosen_players: _, // concrete chosen player ids (already selected)
+        replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
     } = a;

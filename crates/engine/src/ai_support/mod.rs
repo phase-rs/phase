@@ -810,20 +810,65 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         _ => return false,
     };
 
-    // CR 117.1d (issue #4388): On an opponent's turn the priority player may
-    // activate their own mana abilities (Gaea's Cradle, Itlimoc, basic lands).
-    // Those actions live only in `legal_actions_by_object`, not the flat list
-    // consumed here — without this guard auto-pass fires through the window
-    // before the frontend can offer a tap.
-    if state.active_player != player && !activatable_object_mana_actions(state).is_empty() {
+    // A phase stop on the current phase (empty stack = initial priority window)
+    // means the player asked to pause here — never recommend auto-pass. Moved
+    // from the frontend so the engine is the single authority. Disjoint from the
+    // CR 117.3d yield short-circuit below, which requires a NON-empty stack
+    // (`stack.back()` is `Some`); this branch requires an EMPTY stack.
+    //
+    // Seat note: this gate keys on the `WaitingFor::Priority` player bound
+    // above; the frontend gate it replaced keyed on `state.priority_player`.
+    // CR 723.5: while controlling another player, one player makes all of that
+    // player's choices — so the priority holder and `priority_player` can be
+    // different seats. With an empty stack those two seats diverge only in that
+    // turn-control case, and this divergence is accepted (the checked seat is
+    // the one actually being asked to act).
+    if state.stack.is_empty() && state.phase_stop_hit(player) {
         return false;
     }
 
+    // CR 117.3d: A standing priority yield for the top-of-stack trigger is an
+    // explicit pre-commitment to pass. It deliberately overrides the castability
+    // and meaningful-action holds below (including the issue #4388 opponent-turn
+    // mana window) — the player has already decided not to interact with this
+    // trigger class, so recommend auto-pass regardless of what they could cast.
+    if state
+        .stack
+        .back()
+        .is_some_and(|top| state.is_priority_yielded(player, top))
+    {
+        return true;
+    }
+
+    // CR 117.1d (issue #4388): On an opponent's turn the priority player may
+    // hold to cast an instant/flash spell paid for with their own mana
+    // abilities (Gaea's Cradle, Itlimoc, basic lands). Hold ONLY when they
+    // actually have a feasibly castable spell to spend that mana on — a bare
+    // mana source with nothing castable is not a meaningful priority window, so
+    // let auto-pass fire. `has_feasibly_castable_spell` covers the full
+    // activatable-capacity space (auto-tap AND manual-float payment,
+    // game/casting.rs:11375-11461), so it subsumes the old
+    // `activatable_object_mana_actions` proxy while dropping the false HOLD.
+    // Meaningful non-mana activated abilities and issue #544 sac-for-mana on an
+    // opponent's turn are still held below by `has_meaningful_priority_action`;
+    // a dedicated `has_feasibly_activatable_ability` opponent-turn seam
+    // (the ability analogue of this predicate) is deferred as future work.
+    if state.active_player != player && has_feasibly_castable_spell(state, player) {
+        return false;
+    }
+
+    // Own-turn upkeep/draw fast path. This MUST stay above the own-turn
+    // castability rung so a routine own upkeep/draw window short-circuits here
+    // BEFORE any hand sweep (perf; preserves today's behavior). The rung above
+    // is gated on `active_player != player` and the rung below on
+    // `active_player == player`, so the two are mutually exclusive:
+    // `has_feasibly_castable_spell` runs at most once per call, and zero times
+    // on your own upkeep/draw.
     if auto_passes_initial_priority_by_default(state) {
         return true;
     }
 
-    if has_feasibly_castable_spell(state, player) {
+    if state.active_player == player && has_feasibly_castable_spell(state, player) {
         return false;
     }
 
@@ -1268,6 +1313,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+    use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2543,18 +2589,101 @@ mod tests {
         );
     }
 
-    /// Issue #4388: Gaea's Cradle / Itlimoc / basic-land mana on an opponent's
-    /// turn must not be skipped by auto-pass (CR 117.1d).
+    /// Issue #4388 (narrowed): a lone mana source (Gaea's Cradle / Itlimoc /
+    /// basic land) with nothing castable to spend the mana on is NOT a
+    /// meaningful priority window — auto-pass fires even on an opponent's turn
+    /// (CR 117.1d covers *permission* to activate, not an obligation to stop).
     #[test]
-    fn auto_pass_holds_priority_for_grouped_mana_on_opponents_turn() {
+    fn auto_pass_releases_priority_for_lone_mana_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let state = runner.state();
+
+        // Reach-guard FIRST: prove the Forest's mana ability is genuinely
+        // activatable on the opponent's turn, so this test exercises the
+        // lone-mana branch rather than passing vacuously.
+        assert!(
+            !super::activatable_object_mana_actions(state).is_empty(),
+            "precondition: Forest mana is activatable"
+        );
+        assert!(
+            super::auto_pass_recommended(state, &super::flat_priority_actions(state)),
+            "lone mana source with empty hand on opponent's turn → auto-pass"
+        );
+    }
+
+    /// Issue #4388: on an opponent's turn, a feasibly castable instant paired
+    /// with the mana to cast it is a meaningful priority window — hold (CR
+    /// 117.1d + CR 601.2g: mana abilities feed the pending mana payment).
+    #[test]
+    fn auto_pass_holds_priority_for_castable_spell_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Bolt", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        // Positive reach-guard: prove the {G} instant is feasibly castable so
+        // the HOLD assertion below cannot pass vacuously.
+        assert!(
+            super::has_feasibly_castable_spell(runner.state(), P0),
+            "precondition: the {{G}} instant is feasibly castable"
+        );
+        assert!(
+            !super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "castable instant + mana on opponent's turn → hold"
+        );
+
+        // Own-turn control arm: HOLD via the own-turn castability rung (the
+        // rung below the upkeep/draw fast path), proving the two castability
+        // rungs are gated symmetrically on `active_player` (in)equality.
+        runner.state_mut().active_player = P0;
+        assert!(
+            !super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "castable instant on your own turn → hold via own-turn castability rung"
+        );
+    }
+
+    /// Issue #4388 (ladder preservation): a meaningful sac-for-mana ability
+    /// (Krark-Clan Ironworks, issue #544) still holds priority on an opponent's
+    /// turn even with an empty hand — the narrowed mana rung must not swallow
+    /// the `has_meaningful_priority_action` rung below it (CR 605.3a + 603.6).
+    #[test]
+    fn auto_pass_holds_priority_for_meaningful_ability_on_opponents_turn() {
         use crate::game::zones::create_object;
-        use crate::types::ability::{
-            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction,
-        };
-        use crate::types::card_type::CoreType;
-        use crate::types::identifiers::CardId;
-        use crate::types::mana::ManaColor;
-        use crate::types::zones::Zone;
+        use crate::types::ability::TypeFilter;
 
         let mut state = GameState::new_two_player(42);
         state.phase = crate::types::phase::Phase::PreCombatMain;
@@ -2564,22 +2693,25 @@ mod tests {
             player: PlayerId(0),
         };
 
-        let land = create_object(
+        let kci = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
-            "Forest".to_string(),
+            "Krark-Clan Ironworks".to_string(),
             Zone::Battlefield,
         );
         {
-            let obj = state.objects.get_mut(&land).unwrap();
-            obj.card_types.core_types.push(CoreType::Land);
+            let obj = state.objects.get_mut(&kci).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            // Same BARE Sacrifice + Typed(Artifact) cost as the #544 test —
+            // drives the real meaningful-priority classifier.
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
-                        produced: ManaProduction::Fixed {
-                            colors: vec![ManaColor::Green],
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![ManaColor::Red],
                             contribution: ManaContribution::Base,
                         },
                         restrictions: vec![],
@@ -2588,25 +2720,49 @@ mod tests {
                         target: None,
                     },
                 )
-                .cost(AbilityCost::Tap),
+                .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    1,
+                ))),
             );
         }
 
-        let flat = super::flat_priority_actions(&state);
+        // Production path: the flat `legal_actions` list omits sac-for-mana
+        // abilities (they live in `legal_actions_by_object` only, #544), so both
+        // the meaningful-priority classifier and the auto-pass gate must reach
+        // the KCI activation through the internal `activatable_object_mana_actions`
+        // scan — not through a caller-injected activation in the passed vec.
+        let (flat, _, grouped) = legal_actions_full(&state);
+        assert!(
+            !flat.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, .. } if *source_id == kci
+            )),
+            "precondition: KCI activation is grouped-only during priority, so the \
+             hold must flow through the internal sac-for-mana scan"
+        );
+        assert!(
+            bucket_has(
+                &grouped,
+                kci,
+                &GameAction::ActivateAbility {
+                    source_id: kci,
+                    ability_index: 0,
+                },
+            ),
+            "KCI activation must appear in legal_actions_by_object"
+        );
+        // Reach-guard: even with the sac-for-mana omitted from the flat list, the
+        // classifier still returns true via its internal-scan branch, so this test
+        // truly reaches the `has_meaningful_priority_action` rung (CR 605.3a + 603.6).
+        assert!(
+            super::has_meaningful_priority_action(&state, &flat),
+            "precondition: sac-for-mana is a meaningful priority decision reached via the internal scan"
+        );
         assert!(
             !super::auto_pass_recommended(&state, &flat),
-            "auto-pass must hold priority on opponent's turn when grouped mana is available"
-        );
-
-        // Control: on the active player's own turn, standalone mana still auto-passes.
-        state.active_player = PlayerId(0);
-        state.priority_player = PlayerId(0);
-        state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        assert!(
-            super::auto_pass_recommended(&state, &flat),
-            "auto-pass should still fire on your turn when only mana is available"
+            "meaningful sac-for-mana ability on opponent's turn → hold via the internal scan; \
+             empty hand must not auto-pass (#4388 ladder preservation)"
         );
     }
 
@@ -3368,6 +3524,164 @@ mod tests {
         assert!(
             clones < 5,
             "delve validation should not clone state per graveyard card (got {clones} clones)"
+        );
+    }
+
+    /// CR 117.3d: a matching priority yield for the top-of-stack trigger makes
+    /// `auto_pass_recommended` return `true`, overriding the meaningful-action
+    /// hold that would otherwise keep the window open. Reverting the yield short-
+    /// circuit flips this back to `false`.
+    #[test]
+    fn auto_pass_recommended_true_for_yielded_top() {
+        let mut state = setup_priority();
+        // Opponent-controlled token trigger on top of the stack.
+        let source = ObjectId(500);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(1),
+        );
+        ability.source_incarnation = Some(2);
+        ability.source_card_id = Some(CardId(77));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: source,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Token".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        // A meaningful action keeps auto-pass OFF absent a yield (reach-guard:
+        // proves the yield is what flips the result).
+        let actions = vec![GameAction::PlayLand {
+            object_id: ObjectId(700),
+            card_id: CardId(1),
+        }];
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "without a yield, a meaningful action must keep the window open"
+        );
+
+        state.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(77),
+            },
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "CR 117.3d: a matching yield overrides the meaningful-action hold"
+        );
+    }
+
+    /// State-shape tests for the engine-owned phase-stop gate migrated out of the
+    /// frontend (Step 5). `auto_passes_initial_priority_by_default` returns true on
+    /// an own-turn Upkeep with an empty stack, which is the downstream `true` these
+    /// tests reach absent the phase-stop gate — so the gate's `false` is never
+    /// vacuous.
+    #[test]
+    fn auto_pass_recommended_false_on_empty_stack_phase_stop() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        let actions = vec![GameAction::PassPriority];
+
+        // Reach-guard: without any stop, the own-turn upkeep window auto-passes.
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "reach-guard: empty-stack own-turn upkeep recommends auto-pass absent a stop"
+        );
+
+        // With an AllTurns stop on the current phase, the new gate refuses.
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::Upkeep,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "empty stack + phase stop on the current phase must never auto-pass"
+        );
+    }
+
+    #[test]
+    fn auto_pass_recommended_true_when_phase_not_stopped() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        // Stop configured on a DIFFERENT phase → this branch does not gate.
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::End,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "a stop on an unrelated phase must not gate the current phase"
+        );
+    }
+
+    #[test]
+    fn auto_pass_recommended_true_when_stack_nonempty_despite_stop() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        // A phase stop on the current phase, but the stack is NON-empty: the new
+        // gate is empty-stack-only (disjoint from the CR 117.3d yield short-circuit
+        // below), so it must not fire here. Reverting the `is_empty()` guard flips
+        // this to `false`.
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: ObjectId(600),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::Upkeep,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "the empty-stack-only phase-stop gate must not fire while the stack is non-empty"
+        );
+    }
+
+    #[test]
+    fn auto_pass_recommended_phase_stop_per_player_isolation() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        // Stop belongs to player 1; the priority seat is player 0 → the gate must
+        // not fire for player 0.
+        state.phase_stops.insert(
+            PlayerId(1),
+            vec![PhaseStop {
+                phase: Phase::Upkeep,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "player 1's phase stop must not gate player 0's auto-pass"
         );
     }
 }

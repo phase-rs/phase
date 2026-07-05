@@ -329,6 +329,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RegisterBending { .. }
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::Renown { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Reveal { .. }

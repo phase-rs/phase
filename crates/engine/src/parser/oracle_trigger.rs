@@ -48,7 +48,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::PlayerActionKind;
+use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
@@ -1091,6 +1091,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
+        in_trigger: true,
         ..Default::default()
     };
 
@@ -7574,6 +7575,21 @@ fn parse_damage_to_its_owner(after_verb: &str) -> OracleResult<'_, ()> {
     Ok((rest, ()))
 }
 
+/// CR 115.10a + CR 120.1 + CR 120.3: Recognize a mixed non-target damage
+/// recipient ("to a permanent or player") without lowering it to a
+/// `valid_target` filter. The exact recipient is carried by the `DamageDealt`
+/// event and later used by DealDamage-local `EventTarget` resolution.
+fn parse_damage_to_permanent_or_player(after_verb: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        preceded(
+            tag::<_, _, OracleError<'_>>("to "),
+            alt((tag("a permanent or player"), tag("a permanent or a player"))),
+        ),
+    ))
+    .parse(after_verb.trim_start())
+}
+
 /// CR 603.6a + CR 110.5b: After consuming the `"enter"` prefix in a ChangesZone
 /// trigger clause, recognize an optional tapped-state rider — `"enters tapped"`
 /// or `"enters untapped"` — and produce the corresponding intervening-if
@@ -8209,6 +8225,11 @@ fn try_parse_event(
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Ref { qty: recipient_pt },
                 });
+            } else if parse_damage_to_permanent_or_player(after_damage).is_ok() {
+                // CR 115.10a + CR 120.1 + CR 120.3: mixed object/player
+                // recipient ("to a permanent or player") is not a target
+                // filter. The concrete recipient is the DamageDealt event
+                // target.
             } else if let Ok((_, filter)) = parse_object_recipient_filter(after_damage) {
                 // CR 120.3: bare object recipient ("to a creature") — gate the
                 // matcher's recipient check on the damaged object's type (Strax +
@@ -9572,6 +9593,14 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
         def.damage_amount = threshold;
         return Some((TriggerMode::DamageDone, def));
     }
+    // CR 115.10a + CR 120.1 + CR 120.3: "to a permanent or player" scopes the
+    // trigger to damage events with any permanent/player recipient, but does not
+    // create a static `valid_target` filter. The event carries the exact
+    // recipient for the resolving effect.
+    if parse_damage_to_permanent_or_player(after_damage).is_ok() {
+        def.damage_amount = threshold;
+        return Some((TriggerMode::DamageDone, def));
+    }
     // CR 120.3: bare object recipient ("to a creature") — scope valid_target. The
     // terminator guard inside `parse_object_recipient_filter` declines "creature
     // or player"/"creature or opponent", which then reach the player-axis
@@ -9609,20 +9638,25 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 ///   * head noun       — "source" | supported object type head nouns
 ///   * controller      — optional " you control" → `ControllerRef::You`
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
-    // CR 109.4: leading article is mandatory in printed damage-source phrases
-    // ("a source", "an opponent's source" — the latter not in any printed card
-    // today, deferred). Word boundary on the trailing space.
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("a "),
-        tag::<_, _, OracleError<'_>>("an "),
+    // CR 109.4: printed damage-source phrases either use an article
+    // ("a source") or the article-less determiner "another source" (Ghyrson).
+    // Parse "another" on the same axis as the article so it can feed the
+    // existing `FilterProp::Another` runtime evaluator.
+    let (rest, another) = alt((
+        value(
+            Some(FilterProp::Another),
+            tag::<_, _, OracleError<'_>>("another "),
+        ),
+        value(None, tag::<_, _, OracleError<'_>>("a ")),
+        value(None, tag::<_, _, OracleError<'_>>("an ")),
     ))
     .parse(input)?;
 
-    // Optional "another " → FilterProp::Another. CR 109.4 governs object
+    // Optional post-article "another " → FilterProp::Another. CR 109.4 governs object
     // identity in references; "another" reads "an object distinct from the
     // ability source" and is enforced by `FilterProp::Another` at the
     // `game/filter.rs` runtime evaluator.
-    let (rest, another) = opt(value(
+    let (rest, post_article_another) = opt(value(
         FilterProp::Another,
         tag::<_, _, OracleError<'_>>("another "),
     ))
@@ -9716,7 +9750,7 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
         typed = typed.controller(c);
     }
     let mut props = Vec::new();
-    if let Some(p) = another {
+    if let Some(p) = another.or(post_article_another) {
         props.push(p);
     }
     if let Some(p) = renowned {
@@ -12353,17 +12387,46 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 701.30b-c: "whenever you clash" fires when the controller of the
     // trigger source is either player participating in a clash.
     // Cards: Entangling Trap, Rebellion of the Flamekin.
-    if all_consuming(preceded(
+    //
+    // CR 701.30d + CR 603.4: an optional "...and win" tail (Sylvan Echoes)
+    // narrows the trigger so it fires ONLY when the controller won the clash.
+    // The win requirement rides on `clash_result` into trigger MATCHING (checked
+    // when the clash event occurs), so a lost or tied clash never creates a
+    // pending trigger — rather than gating the effect at resolution.
+    if let Ok((tail, ())) = preceded(
         alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
         value((), (tag("you"), space1, tag("clash"))),
-    ))
+    )
     .parse(lower)
-    .is_ok()
     {
-        let mut def = make_base();
-        def.mode = TriggerMode::Clashed;
-        def.valid_target = Some(TargetFilter::Controller);
-        return Some((TriggerMode::Clashed, def));
+        // Empty residual = plain "you clash" (any outcome). A " and win" residual
+        // = the win-required shape (Sylvan Echoes). Any other residual is a
+        // different clause we decline so a later dispatcher can try it.
+        let clash_result = if tail.is_empty() {
+            Some(None)
+        } else if all_consuming(value(
+            (),
+            (
+                space1,
+                tag::<_, _, OracleError<'_>>("and"),
+                space1,
+                tag("win"),
+            ),
+        ))
+        .parse(tail)
+        .is_ok()
+        {
+            Some(Some(ClashResult::Won))
+        } else {
+            None
+        };
+        if let Some(clash_result) = clash_result {
+            let mut def = make_base();
+            def.mode = TriggerMode::Clashed;
+            def.valid_target = Some(TargetFilter::Controller);
+            def.clash_result = clash_result;
+            return Some((TriggerMode::Clashed, def));
+        }
     }
 
     // CR 701.30: "whenever a player clashes" — fires for any clashing player.

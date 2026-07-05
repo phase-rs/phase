@@ -15,14 +15,16 @@ use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
-use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
+use crate::parser::oracle_quantity::{
+    parse_cda_quantity, parse_for_each_object_filter_clause, parse_quantity_ref,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, LibraryPosition,
-    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    MultiTargetSpec, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1186,6 +1188,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 111.1 + CR 707.2: "for each <object>, create a token that's a copy
+    // of it" is one copy-token instruction. The comma separates the object-set
+    // head from the token body, not two independent clauses.
+    if is_for_each_copy_token_continuation(&current_lower, trimmed, &trimmed_lower) {
+        return None;
+    }
+
     if tag::<_, _, OracleError<'_>>("then ")
         .parse(trimmed_lower.as_str())
         .is_ok()
@@ -1295,6 +1304,42 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     }
 
     None
+}
+
+fn is_for_each_copy_token_continuation(
+    current_lower: &str,
+    next_text: &str,
+    next_lower: &str,
+) -> bool {
+    let current = strip_sequence_connector_lower(current_lower);
+    let Ok((object_clause, _)) = tag::<_, _, OracleError<'_>>("for each ").parse(current) else {
+        return false;
+    };
+    if parse_for_each_object_filter_clause(object_clause.trim()).is_none() {
+        return false;
+    }
+
+    let mut ctx = ParseContext::default();
+    matches!(
+        super::token::try_parse_token(next_lower, next_text, &mut ctx),
+        Some(Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget
+                | TargetFilter::SelfRef
+                | TargetFilter::TriggeringSource,
+            ..
+        })
+    )
+}
+
+fn strip_sequence_connector_lower(input: &str) -> &str {
+    let trimmed = input.trim();
+    alt((
+        tag::<_, _, OracleError<'_>>("then, "),
+        tag::<_, _, OracleError<'_>>("then "),
+    ))
+    .parse(trimmed)
+    .map(|(rest, _)| rest.trim_start())
+    .unwrap_or(trimmed)
 }
 
 /// CR 120.2b: True when the closing chunk text contains a `damage to `
@@ -5032,6 +5077,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::AddTargetReplacement { .. }
@@ -6571,6 +6617,75 @@ pub(super) fn does_the_same_unimplemented_name(subject: DoesTheSameSubject) -> S
     }
 }
 
+/// CR 508.6 + CR 608.2c: Recognize a player-SCOPED "does the same / does so"
+/// replication rider — "each opponent[ attacking that player] does the same"
+/// (the Commander 2017 curse cycle: Curse of Opulence / Vitality / Verbosity /
+/// Disturbance). Returns the affected `PlayerFilter` scope on a match.
+///
+/// Unlike the single targeted-opponent form (`try_parse_does_the_same_clause`,
+/// which is deferred because the opponent acts on their OWN objects via a
+/// mid-chain target slot), the scoped fan-out maps cleanly onto EXISTING engine
+/// machinery: the caller clones the immediately-preceding sibling clause's
+/// effect and stamps the returned scope as its `player_scope`. The runtime
+/// `player_scope` driver rebinds the acting controller to each iterated player
+/// (CR 608.2c: the antecedent action is replicated verbatim per player), so an
+/// antecedent whose recipient is the controller (create a token, gain life,
+/// draw a card) is performed by each such player for themselves — no new engine
+/// variant, resolver, or scope is required.
+///
+/// CR 508.6 defines a player as "attacking [a player]" iff it controls a
+/// creature attacking that player. When the rider carries the "attacking that
+/// player" combat qualifier, the affected set is therefore NARROWER than plain
+/// `Opponent` (all opponents): it is only those opponents who control a creature
+/// attacking the enchanted/defending player this combat (CR 102.2 + CR 508.1b).
+/// The qualifier is folded into a dedicated `OpponentAttackingEnchantedPlayer`
+/// scope so a non-attacking opponent — and, crucially, the enchanted defending
+/// player in a two-player game — never receives the copied effect. A plain
+/// "each opponent does the same" (no qualifier) keeps the raw `Opponent` scope.
+/// Combinators only; the clause must be fully consumed (modulo a trailing
+/// period) or the rider stays an honest `Unimplemented` residual.
+pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter> {
+    // Single-authority scope recognition: reuse the canonical "each <scope>"
+    // subject stripper. It returns the residual predicate with only its leading
+    // verb deconjugated ("attacking" is unaffected), so the combat qualifier and
+    // replication verb below parse against the untouched tail.
+    let (scope, rest) = super::lower::strip_each_player_subject(text);
+    let scope = scope?;
+    let rest_lower = rest.to_lowercase();
+    let (has_attacking_qualifier, remainder) = nom_on_lower(&rest, &rest_lower, |i| {
+        // CR 508.6: optional combat-relation qualifier "attacking that
+        // player / that opponent / you". Its PRESENCE narrows the scope below.
+        let (i, qualifier) = opt((
+            tag("attacking "),
+            alt((tag("that player"), tag("that opponent"), tag("you"))),
+            multispace1,
+        ))
+        .parse(i)?;
+        // Prefix nesting (sum, not product): "do" + optional "es" +
+        // (" the same" | " so") covers does/do × the-same/so.
+        let (i, _) = tag("do").parse(i)?;
+        let (i, _) = opt(tag("es")).parse(i)?;
+        let (i, _) = alt((tag(" the same"), tag(" so"))).parse(i)?;
+        Ok((i, qualifier.is_some()))
+    })?;
+    if !remainder.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    if has_attacking_qualifier {
+        // CR 508.6 + CR 102.2 + CR 508.1b: "each opponent attacking that player"
+        // = opponents of the controller who declared a creature attacking the
+        // enchanted player. Only composes with the opponent subject; any other
+        // subject + combat qualifier stays an honest residual (no matching CR
+        // scope, and no card exercises it).
+        match scope {
+            PlayerFilter::Opponent => Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+            _ => None,
+        }
+    } else {
+        Some(scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6591,6 +6706,57 @@ mod tests {
                 try_parse_does_the_same_clause(phrasing),
                 Some(DoesTheSameSubject::TargetOpponent),
                 "should recognize {phrasing:?}"
+            );
+        }
+    }
+
+    // CR 508.6 + CR 102.2 + CR 608.2c: the player-scoped "does the same"
+    // recognizer maps the Commander 2017 curse-cycle rider to its affected
+    // `PlayerFilter`. The "attacking that player" combat qualifier NARROWS the
+    // opponent fan-out to only opponents attacking the enchanted player (so the
+    // non-attacking defender is excluded — CR 508.6); a plain "each opponent
+    // does the same" without the qualifier keeps the raw `Opponent` scope.
+    #[test]
+    fn scoped_does_the_same_recognizes_curse_cycle_riders() {
+        for phrasing in [
+            "Each opponent attacking that player does the same.",
+            "each opponent attacking that player does the same",
+            "Each opponent attacking that player does so.",
+        ] {
+            assert_eq!(
+                try_parse_scoped_does_the_same(phrasing),
+                Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+                "the 'attacking that player' qualifier must narrow the scope to \
+                 attackers of the enchanted player for {phrasing:?}"
+            );
+        }
+        assert_eq!(
+            try_parse_scoped_does_the_same("each opponent does the same"),
+            Some(PlayerFilter::Opponent),
+            "unqualified 'each opponent does the same' keeps the plain opponent scope"
+        );
+        assert_eq!(
+            try_parse_scoped_does_the_same("each player does the same"),
+            Some(PlayerFilter::All),
+            "'each player' fans out over all players"
+        );
+    }
+
+    // Guard: the scoped recognizer must NOT fire without a real "each <scope>"
+    // subject, and must not swallow a trailing tail — those stay honest
+    // residuals rather than a silent over-broad fan-out.
+    #[test]
+    fn scoped_does_the_same_rejects_non_scoped_or_trailing() {
+        for phrasing in [
+            "does the same.",
+            "target opponent does the same",
+            "each opponent attacking that player does the same for enchantment cards",
+            "each opponent draws a card",
+        ] {
+            assert_eq!(
+                try_parse_scoped_does_the_same(phrasing),
+                None,
+                "should reject {phrasing:?}"
             );
         }
     }

@@ -4,7 +4,7 @@ use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
-    CounterMoveChoice, ShardChoice,
+    CounterMoveChoice, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -602,11 +602,19 @@ pub enum GameAction {
     /// Cancel any active auto-pass for the acting player.
     CancelAutoPass,
     /// Replace the acting player's phase-stop preference list. Phase stops
-    /// interrupt an `UntilEndOfTurn` auto-pass session and prevent the engine
+    /// interrupt an `UntilTurnBoundary` auto-pass session and prevent the engine
     /// from auto-submitting empty blocker declarations during the named phases.
     /// Legal in any WaitingFor state — pure preference propagation.
     SetPhaseStops {
-        stops: Vec<super::phase::Phase>,
+        stops: Vec<super::phase::PhaseStop>,
+    },
+    /// CR 117.3d: Update the acting player's standing priority-yield preferences —
+    /// a pre-committed decision to pass priority while a class of triggered
+    /// ability is on the stack. Legal in any WaitingFor state and routed to the
+    /// acting player (not necessarily the priority-holder), mirroring
+    /// `SetPhaseStops`. Pure preference propagation.
+    SetPriorityYield {
+        op: PriorityYieldOp,
     },
     /// CR 510.1c/d: Assign damage from an attacker to its blockers (and optionally
     /// the defending player/PW with trample, plus PW controller with trample-over-PW).
@@ -754,6 +762,25 @@ pub enum GameAction {
     Concede {
         player_id: PlayerId,
     },
+}
+
+/// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
+/// acting player's standing priority-yield preferences. `Add` names a stack
+/// source and scope; the engine resolves it into a concrete `YieldTarget` by
+/// reading the identity latched on that source's trigger (CR 400.7), so the
+/// frontend never constructs an incarnation or card id. `Remove` echoes a
+/// stored `YieldTarget` verbatim; `ClearAll` drops every yield for the actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PriorityYieldOp {
+    Add {
+        source_id: ObjectId,
+        scope: YieldScope,
+    },
+    Remove {
+        target: YieldTarget,
+    },
+    ClearAll,
 }
 
 /// CR 701.48a: Learn choice — rummage a specific card, or skip entirely.
@@ -1362,6 +1389,7 @@ impl GameAction {
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityYield { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }

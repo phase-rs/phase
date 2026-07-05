@@ -1002,6 +1002,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }

@@ -241,6 +241,153 @@ fn the_kingpin_of_crime_full_card_has_no_unimplemented() {
     }
 }
 
+/// Recursively walk an ability chain (root effect + `sub_ability` + `else_ability`)
+/// for any `Effect::Unimplemented` node — the coverage-gap sentinel the one-shot
+/// effect pipeline emits when a clause matches no combinator.
+fn ability_chain_has_unimplemented(ability: &AbilityDefinition) -> bool {
+    matches!(*ability.effect, Effect::Unimplemented { .. })
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_chain_has_unimplemented)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_chain_has_unimplemented)
+}
+
+/// CR 510.1a + CR 613.11: Plagon, Lord of the Beach — the singular one-shot
+/// EFFECT form "Target creature you control assigns combat damage equal to its
+/// toughness rather than its power this turn". The effect pipeline deconjugates
+/// "assigns" → "assign" (`normalize_verb_token`) before the shared
+/// damage-by-toughness predicate runs, so the deconjugated-singular surface
+/// ("assign … its … its") must lower with NO residual `Effect::Unimplemented`.
+#[test]
+fn plagon_full_card_has_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "When Plagon enters, draw a card for each creature you control with toughness greater than its power.\n\
+         {W/U}: Target creature you control assigns combat damage equal to its toughness rather than its power this turn.",
+        "Plagon, Lord of the Beach",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Crab".to_string()],
+    );
+
+    // Reach-guard (non-vacuous): the parse actually produced structure, so the
+    // no-Unimplemented assertion below can't pass on an empty parse.
+    assert!(
+        !parsed.triggers.is_empty(),
+        "Plagon's ETB must parse to a trigger"
+    );
+    assert!(
+        !parsed.abilities.is_empty(),
+        "Plagon's {{W/U}} ability must parse to an activated ability"
+    );
+
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            assert!(
+                !ability_chain_has_unimplemented(execute),
+                "Plagon trigger lowered to Unimplemented: {execute:#?}"
+            );
+        }
+    }
+    for ability in &parsed.abilities {
+        assert!(
+            !ability_chain_has_unimplemented(ability),
+            "Plagon ability lowered to Unimplemented: {ability:#?}"
+        );
+    }
+}
+
+/// CR 510.1a + CR 613.11: Bill the Pony — the leading-duration one-shot EFFECT
+/// form "Until end of turn, target creature you control assigns combat damage
+/// equal to its toughness rather than its power". Same deconjugated-singular
+/// predicate as Plagon, riding a `Sacrifice a Food` activated ability; must
+/// lower with NO residual `Effect::Unimplemented`.
+#[test]
+fn bill_the_pony_full_card_has_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "When Bill the Pony enters, create two Food tokens. (They're artifacts with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")\n\
+         Sacrifice a Food: Until end of turn, target creature you control assigns combat damage equal to its toughness rather than its power.",
+        "Bill the Pony",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Horse".to_string()],
+    );
+
+    assert!(
+        !parsed.triggers.is_empty(),
+        "Bill's ETB must parse to a trigger"
+    );
+    assert!(
+        !parsed.abilities.is_empty(),
+        "Bill's Sacrifice-a-Food ability must parse to an activated ability"
+    );
+
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            assert!(
+                !ability_chain_has_unimplemented(execute),
+                "Bill trigger lowered to Unimplemented: {execute:#?}"
+            );
+        }
+    }
+    for ability in &parsed.abilities {
+        assert!(
+            !ability_chain_has_unimplemented(ability),
+            "Bill ability lowered to Unimplemented: {ability:#?}"
+        );
+    }
+}
+
+/// SHAPE — CR 613.11 + CR 510.1c: Bill the Pony's `Sacrifice a Food` ability
+/// lowers to a duration-bound `Effect::GenericEffect`. The leading "Until end
+/// of turn," is peeled onto the effect's `duration` (proves the peel), and the
+/// deconjugated-singular predicate contributes the
+/// `AssignDamageFromToughness` continuous modification (proves the predicate
+/// fired, so the duration assertion isn't vacuous).
+#[test]
+fn bill_the_pony_sacrifice_ability_is_until_end_of_turn_shape() {
+    use crate::types::ability::{ContinuousModification, Duration};
+
+    let parsed = parse_oracle_text(
+        "When Bill the Pony enters, create two Food tokens. (They're artifacts with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")\n\
+         Sacrifice a Food: Until end of turn, target creature you control assigns combat damage equal to its toughness rather than its power.",
+        "Bill the Pony",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Horse".to_string()],
+    );
+
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "exactly one activated ability (the Sacrifice-a-Food line)"
+    );
+    match &*parsed.abilities[0].effect {
+        Effect::GenericEffect {
+            duration,
+            static_abilities,
+            ..
+        } => {
+            assert_eq!(
+                *duration,
+                Some(Duration::UntilEndOfTurn),
+                "the leading \"Until end of turn,\" must peel onto the GenericEffect duration"
+            );
+            assert!(
+                static_abilities.iter().any(|s| s
+                    .modifications
+                    .contains(&ContinuousModification::AssignDamageFromToughness)),
+                "the damage-by-toughness predicate must contribute AssignDamageFromToughness, \
+                 got {static_abilities:#?}"
+            );
+        }
+        other => panic!("expected a duration-bound GenericEffect, got {other:#?}"),
+    }
+}
+
 /// CR 601.2c + CR 115.1: HONEST DEFERRAL — Graceful Takedown's heterogeneous
 /// compound source set ("any number of target enchanted creatures you control
 /// AND up to one other target creature you control each deal damage equal to
@@ -3006,6 +3153,75 @@ fn effect_lightning_bolt() {
             ..
         }
     ));
+}
+
+#[test]
+fn non_trigger_damage_to_that_permanent_or_player_does_not_use_event_target() {
+    let e = parse_effect("Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player");
+    if let Effect::DealDamage { target, .. } = &e {
+        assert_ne!(
+            *target,
+            TargetFilter::EventTarget,
+            "generic parse_effect must not bind trigger event targets"
+        );
+    }
+    assert!(
+        e.target_filter()
+            .filter(|filter| **filter == TargetFilter::EventTarget)
+            .is_none(),
+        "generic parse_effect must not expose EventTarget"
+    );
+}
+
+#[test]
+fn trigger_context_damage_to_that_permanent_or_player_uses_event_target_without_slot() {
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        ..Default::default()
+    };
+    let def = parse_effect_chain_with_context(
+        "Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    match def.effect.as_ref() {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target,
+            damage_source: None,
+            ..
+        } => {
+            assert_eq!(*target, TargetFilter::EventTarget);
+            assert!(
+                target.is_context_ref(),
+                "EventTarget must be suppressed as a target slot"
+            );
+            assert!(
+                def.effect
+                    .target_filter()
+                    .filter(|filter| !filter.is_context_ref())
+                    .is_none(),
+                "EventTarget must not produce a chosen target slot"
+            );
+        }
+        other => panic!("expected DealDamage to EventTarget, got {other:?}"),
+    }
+}
+
+#[test]
+fn each_target_damage_does_not_accept_permanent_or_player_event_target() {
+    let def = parse_effect_chain(
+        "They each deal damage equal to their power to that permanent or player.",
+        AbilityKind::Spell,
+    );
+    if let Effect::DealDamage {
+        damage_source: Some(DamageSource::EachTarget),
+        target,
+        ..
+    } = def.effect.as_ref()
+    {
+        assert_ne!(*target, TargetFilter::EventTarget);
+    }
 }
 
 #[test]
@@ -6181,6 +6397,35 @@ fn molten_influence_unless_have_deal_damage() {
 }
 
 #[test]
+fn skullscorch_unless_that_player_have_deal_damage() {
+    let def = parse_effect_chain(
+        "Target player discards two cards at random unless that player has Skullscorch deal 4 damage to them.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Discard { .. }),
+        "primary should discard, got {:?}",
+        def.effect
+    );
+    let unless_pay = def
+        .unless_pay
+        .as_ref()
+        .expect("Skullscorch must attach unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+    match &unless_pay.cost {
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Player,
+                ..
+            } => {}
+            other => panic!("expected DealDamage 4 to payer, got {other:?}"),
+        },
+        other => panic!("expected EffectCost, got {other:?}"),
+    }
+}
+
+#[test]
 fn effect_chain_rhystic_lightning_unless_dual_payer_is_parent_target_controller() {
     use crate::types::mana::ManaCost;
 
@@ -8216,6 +8461,134 @@ fn effect_for_each_chosen_type_copy_token_uses_source_filter() {
                 .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
         }
         other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn effect_for_each_graveyard_countered_card_copy_token_uses_source_filter() {
+    let def = parse_effect_chain(
+        "For each creature card in your graveyard with a quest counter on it, create a token that's a copy of it.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        def.repeat_for.is_none(),
+        "copy-source set should not be lowered to repeat_for"
+    );
+    let Effect::CopyTokenOf {
+        target,
+        source_filter: Some(TargetFilter::Typed(tf)),
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected CopyTokenOf with typed source_filter, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(tf.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::InZone {
+            zone: Zone::Graveyard
+        }
+    )));
+    assert!(tf.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::Counters {
+            counters: crate::types::counter::CounterMatch::OfType(CounterType::Generic(name)),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        } if name == "quest"
+    )));
+}
+
+#[test]
+fn effect_for_each_controlled_creature_copy_token_preserves_except_clause() {
+    let def = parse_effect_chain(
+        "For each creature you control, create a token that's a copy of it, except it isn't legendary.",
+        AbilityKind::Spell,
+    );
+    let Effect::CopyTokenOf {
+        target,
+        source_filter: Some(TargetFilter::Typed(tf)),
+        additional_modifications,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected CopyTokenOf with source_filter and exception, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(additional_modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::RemoveSupertype {
+            supertype: Supertype::Legendary
+        }
+    )));
+}
+
+#[test]
+fn effect_for_each_copy_token_preserves_contextual_this_ability_except_clause() {
+    let mut ctx = ParseContext {
+        current_trigger_index: Some(2),
+        ..Default::default()
+    };
+    let clause = parse_effect_clause(
+        "For each creature you control, create a token that's a copy of it, except it has this ability.",
+        &mut ctx,
+    );
+    let Effect::CopyTokenOf {
+        additional_modifications,
+        ..
+    } = clause.effect
+    else {
+        panic!("expected CopyTokenOf, got {:?}", clause.effect);
+    };
+    assert!(additional_modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::RetainPrintedTriggerFromSource {
+            source_trigger_index: 2
+        }
+    )));
+}
+
+#[test]
+fn effect_for_each_comma_or_filter_copy_token_uses_later_structural_comma() {
+    let def = parse_effect_chain(
+        "For each artifact, creature, or enchantment you control, create a token that's a copy of it.",
+        AbilityKind::Spell,
+    );
+    assert!(def.repeat_for.is_none());
+    let Effect::CopyTokenOf {
+        target,
+        source_filter: Some(TargetFilter::Or { filters }),
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected CopyTokenOf with Or source_filter, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert_eq!(filters.len(), 3);
+    for filter in filters {
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed Or branch, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.iter().any(|type_filter| matches!(
+                type_filter,
+                TypeFilter::Artifact | TypeFilter::Creature | TypeFilter::Enchantment
+            )),
+            "branch should be artifact, creature, or enchantment: {tf:?}"
+        );
     }
 }
 
@@ -20171,6 +20544,93 @@ fn strip_optional_target_prefix_up_to_x_target() {
 }
 
 #[test]
+fn detain_up_to_two_target_creatures_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Detain up to two target creatures your opponents control.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+    );
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+}
+
+#[test]
+fn detain_up_to_two_target_nonland_permanents_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Detain up to two target nonland permanents your opponents control.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+    );
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Permanent));
+    assert!(filter
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+}
+
+#[test]
+fn detain_single_target_permanent_remains_mandatory() {
+    let def = parse_effect_chain("Detain target permanent.", AbilityKind::Spell);
+
+    assert_eq!(def.multi_target, None);
+    let Effect::Detain { target } = def.effect.as_ref() else {
+        panic!("expected Detain effect, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed detain target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Permanent));
+}
+
+#[test]
+fn chained_return_up_to_one_target_creature_card_preserves_multi_target() {
+    let def = parse_effect_chain(
+        "Each opponent sacrifices a creature of their choice and you return up to one target creature card from your graveyard to your hand.",
+        AbilityKind::Spell,
+    );
+
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("expected return sub-ability");
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+    );
+    let Effect::Bounce { target, .. } = sub.effect.as_ref() else {
+        panic!("expected Bounce sub-effect, got {:?}", sub.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed return target, got {target:?}");
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert!(filter.properties.contains(&FilterProp::InZone {
+        zone: Zone::Graveyard
+    }));
+}
+
+#[test]
 fn cast_variant_paid_instead_sneak() {
     let (cond, text) = strip_additional_cost_conditional(
         "if her sneak cost was paid this turn, instead return that card to the battlefield",
@@ -26961,6 +27421,68 @@ fn choose_two_target_creatures_controlled_by_different_players_sets_target_const
 }
 
 #[test]
+fn target_cards_from_single_graveyard_sets_same_zone_owner_constraint() {
+    let def = parse_effect_chain(
+        "Exile up to three target cards from a single graveyard.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }))
+    );
+    assert_eq!(
+        def.target_constraints,
+        vec![TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard
+        }]
+    );
+    match &*def.effect {
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert_eq!(*origin, Some(Zone::Graveyard));
+            assert_eq!(*destination, Zone::Exile);
+            assert!(tf.type_filters.contains(&TypeFilter::Card));
+            assert!(tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }));
+        }
+        other => panic!("expected graveyard-card exile ChangeZone, got {other:?}"),
+    }
+}
+
+#[test]
+fn modal_single_graveyard_target_constraint_survives_mode_parsing() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Choose one —\n• Target opponent loses 1 life and you gain 1 life.\n• Exile up to three target cards from a single graveyard.\n• Target creature gains fear until end of turn.",
+        "Ebony Charm",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+
+    let exile_mode = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::ChangeZone { .. }))
+        .expect("modal graveyard exile ability must parse");
+    assert_eq!(
+        exile_mode.target_constraints,
+        vec![TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard
+        }]
+    );
+    assert_eq!(
+        exile_mode.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }))
+    );
+}
+
+#[test]
 fn effect_for_each_opponent_up_to_one_gain_control_has_optional_fanout_slots() {
     let def = parse_effect_chain(
         "For each opponent, gain control of up to one target creature that player controls.",
@@ -29321,8 +29843,7 @@ fn perpetual_parser_maps_self_base_pt() {
         }
     ));
 
-    // "become(s)" verb variant. (Uses an unambiguous self-subject; the
-    // anaphoric "it" form is intentionally not accepted.)
+    // "become(s)" verb variant with an unambiguous self-subject.
     let e = parse_effect("This creature perpetually becomes base power and toughness 2/2.");
     assert!(matches!(
         e,
@@ -29365,6 +29886,19 @@ fn perpetual_parser_maps_referenced_base_pt() {
             ..
         }
     ));
+
+    let e = parse_effect("It perpetually has base power and toughness 3/3.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::SetBasePowerToughness {
+                power: 3,
+                toughness: 3,
+            },
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -29394,6 +29928,45 @@ fn perpetual_parser_maps_modify_pt() {
             ..
         }
     ));
+
+    let e = parse_effect("it perpetually gets +3/+0.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: 3,
+                toughness_delta: 0,
+            },
+            ..
+        }
+    ));
+
+    let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: -1,
+                toughness_delta: -2,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::Opponent)
+    ));
+
+    let e = parse_effect("target creature you control perpetually gets +1/+0.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(ref filter),
+            modification: PerpetualModification::ModifyPowerToughness {
+                power_delta: 1,
+                toughness_delta: 0,
+            },
+        } if filter.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+            && filter.controller == Some(crate::types::ability::ControllerRef::You)
+    ));
 }
 
 #[test]
@@ -29419,6 +29992,16 @@ fn perpetual_parser_maps_grant_keywords() {
             modification: PerpetualModification::GrantKeywords { keywords },
             ..
         } if keywords == vec![Keyword::Flying]
+    ));
+
+    let e = parse_effect("it perpetually gains haste.");
+    assert!(matches!(
+        e,
+        Effect::ApplyPerpetual {
+            target: TargetFilter::ParentTarget,
+            modification: PerpetualModification::GrantKeywords { keywords },
+            ..
+        } if keywords == vec![Keyword::Haste]
     ));
 }
 
@@ -29602,6 +30185,112 @@ fn perpetual_modify_cost_anaphor_that_card() {
         ),
         "'that card' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
     );
+
+    let e = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
+    assert!(
+        matches!(
+            &e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(1)
+        ),
+        "'it' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
+    );
+
+    let e = parse_effect("It perpetually gains \"This spell costs {2} more to cast.\"");
+    assert!(
+        matches!(
+            &e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Raise,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(2)
+        ),
+        "'it' anaphor must map to ParentTarget Raise generic(2), got {e:?}"
+    );
+}
+
+#[test]
+fn perpetual_anaphor_after_chosen_card_targets_parent_target() {
+    use crate::types::ability::PerpetualModification;
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
+
+    let def = parse_effect_chain(
+        "Choose a nonland card in your hand. It perpetually gains \"This spell costs {1} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("chosen card must feed perpetual sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(1)
+        ),
+        "chosen-card 'it' must map to ParentTarget ApplyPerpetual, got {:?}",
+        sub.effect
+    );
+
+    let def = parse_effect_chain(
+        "Choose a nonland card in your hand. It perpetually gains \"This spell costs {2} more to cast.\"",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("chosen card must feed perpetual cost-increase sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyCost {
+                    mode: CostModifyMode::Raise,
+                    amount,
+                },
+            } if *amount == ManaCost::generic(2)
+        ),
+        "chosen-card 'it' must map to ParentTarget Raise generic(2), got {:?}",
+        sub.effect
+    );
+
+    let def = parse_effect_chain(
+        "Choose a creature card in your hand. It perpetually gets +3/+0.",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("chosen card must feed perpetual P/T sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 3,
+                    toughness_delta: 0,
+                },
+            }
+        ),
+        "chosen-card P/T 'it' must map to ParentTarget ApplyPerpetual, got {:?}",
+        sub.effect
+    );
 }
 
 /// Mass-hand arm: the EXACT real Oracle clauses (verified against
@@ -29721,8 +30410,7 @@ fn perpetual_mass_hand_cost_arm_parses_typed_hand_filter() {
 /// model and fall through (NOT ApplyPerpetual::ModifyCost):
 /// - Absorb Energy's "that share a card type with that spell" rider;
 /// - an `{X}` body the cost-body parser cannot interpret;
-/// - a trailing rider "…and draws a card";
-/// - the "It perpetually gains …" form (subject not in the mass-arm list).
+/// - a trailing rider "…and draws a card".
 #[test]
 fn perpetual_mass_hand_cost_arm_honest_red() {
     use crate::types::ability::PerpetualModification;
@@ -29760,13 +30448,6 @@ fn perpetual_mass_hand_cost_arm_honest_red() {
     assert!(
         !is_modify_cost(&e),
         "trailing rider must not parse as ModifyCost, got {e:?}"
-    );
-
-    // "It perpetually gains …" — the subject is not in the mass-arm class.
-    let e = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
-    assert!(
-        !is_modify_cost(&e),
-        "'It perpetually gains' is not a mass-hand subject, got {e:?}"
     );
 }
 
@@ -32840,16 +33521,16 @@ fn choose_one_of_rejects_when_second_half_unparseable() {
     );
 }
 
-/// CR 608.2k: After a token-creating effect, a plain "the token <verb>"
+/// CR 608.2c + CR 611.2a: After a token-creating effect, a plain "the token <verb>"
 /// anaphor (without the "created this way" populate qualifier) must
-/// rewrite to a `GenericEffect` targeting `LastCreated`. Pietra,
-/// Crafter of Clowns is the canonical case: "Create a 1/1 white Clown
-/// Robot artifact creature token. … the token gains haste until end of
-/// turn."
+/// preserve its printed duration when it rewrites to a `GenericEffect`
+/// targeting `LastCreated`. Pietra, Crafter of Clowns is the canonical case:
+/// "Create a 1/1 white Clown Robot artifact creature token. … the token
+/// gains haste until end of turn."
 #[test]
-fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
+fn the_token_plain_anaphor_after_token_creator_preserves_duration() {
     let ability = parse_effect_chain(
-        "create a 1/1 white Clown Robot artifact creature token. the token gains haste",
+        "create a 1/1 white Clown Robot artifact creature token. the token gains haste until end of turn",
         AbilityKind::Spell,
     );
     // Outer effect is the Token creation.
@@ -32892,6 +33573,75 @@ fn the_token_plain_anaphor_after_token_creator_rewrites_to_last_created() {
     }
 }
 
+/// CR 608.2c + CR 707.2 + CR 611.2c: After a copy-token effect,
+/// "that token" names the newly created copy token, not the copied source
+/// carried in the parent `CopyTokenOf` target slot. The lowering pass must
+/// therefore rewrite both the GenericEffect target and its affected filter
+/// to `LastCreated`.
+#[test]
+fn copy_token_that_token_anaphor_rewrites_generic_effect_to_last_created() {
+    let ability = parse_effect_chain(
+        "create a token that's a copy of target creature. that token gains haste",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*ability.effect, Effect::CopyTokenOf { .. }),
+        "expected Effect::CopyTokenOf, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("that-token haste sub-ability missing");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } => {
+            assert_eq!(*target, Some(TargetFilter::LastCreated));
+            assert_eq!(*duration, Some(Duration::Permanent));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::LastCreated)
+            );
+            assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }
+            )));
+        }
+        other => panic!("expected GenericEffect anaphor rewrite, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 611.2a: Explicitly stated token-anaphor durations are
+/// preserved, while unstated durations last until the end of the game.
+#[test]
+fn token_anaphor_preserves_explicit_until_end_of_turn_duration() {
+    let ability = parse_effect_chain(
+        "create a 1/1 white Clown Robot artifact creature token. the token gains haste until end of turn",
+        AbilityKind::Spell,
+    );
+    let sub = ability.sub_ability.as_deref().expect("haste sub-ability");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            duration,
+            target,
+            static_abilities,
+        } => {
+            assert_eq!(*target, Some(TargetFilter::LastCreated));
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::LastCreated)
+            );
+        }
+        other => panic!("expected GenericEffect, got {other:?}"),
+    }
+}
+
 /// CR 608.2k: Recognizer-level coverage for the "this token "
 /// anaphor — exercised directly via `Unimplemented` description so
 /// the test pins the recognizer's behavior independent of upstream
@@ -32915,7 +33665,7 @@ fn rewrite_recognizer_accepts_this_token_prefix() {
             target,
         } => {
             assert_eq!(target, Some(TargetFilter::LastCreated));
-            assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(duration, Some(Duration::Permanent));
             assert!(static_abilities[0].modifications.iter().any(|m| matches!(
                 m,
                 ContinuousModification::AddKeyword {
@@ -33062,6 +33812,36 @@ fn plain_anaphor_without_token_creator_is_not_rewritten() {
         !contains_last_created_rewrite(&ability),
         "no token creator preceded — must not produce LastCreated rewrite"
     );
+}
+
+/// CR 608.2c: Non-token antecedents must keep their normal `ParentTarget`
+/// binding; the LastCreated rewrite is gated on a prior token creator.
+#[test]
+fn non_token_parent_target_generic_effect_stays_parent_target() {
+    let ability = parse_effect_chain(
+        "gain control of target permanent until end of turn. it gains haste until end of turn",
+        AbilityKind::Spell,
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("expected haste followup");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => {
+            assert_ne!(*target, Some(TargetFilter::LastCreated));
+            assert!(
+                static_abilities
+                    .iter()
+                    .all(|s| s.affected != Some(TargetFilter::LastCreated)),
+                "non-token anaphor must not rewrite to LastCreated: {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect followup, got {other:?}"),
+    }
 }
 
 /// CR 608.2k + CR 603.7c: Inalla-style "Exile it at the beginning of

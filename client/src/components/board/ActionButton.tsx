@@ -15,6 +15,7 @@ import { useBlockRequirements } from "../combat/useBlockRequirements.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
+import { PriorityYieldList } from "./PriorityYieldList.tsx";
 
 type ActionButtonMode =
   | "combat-attackers"
@@ -250,10 +251,10 @@ export function ActionButton() {
 
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
-  const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
+  const isEndingTurn = autoPass?.type === "UntilTurnBoundary";
   // Armed Arena-style "Resolve All" session (multiplayer): the engine is
   // auto-passing this seat's priority windows until the stack empties or
-  // grows. Surfaced with the same pulsing cancel affordance as UntilEndOfTurn
+  // grows. Surfaced with the same pulsing cancel affordance as UntilTurnBoundary
   // so the player can revoke it between opponents' windows.
   const isResolvingStack = autoPass?.type === "UntilStackEmpty";
   const canActDuringAutoPass = mode === "combat-blockers";
@@ -449,7 +450,12 @@ export function ActionButton() {
             )}
             <button
               disabled={blocked}
-              onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } })}
+              onClick={() =>
+                dispatchAction({
+                  type: "SetAutoPass",
+                  data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+                })
+              }
               aria-describedby={passToEndTooltipId}
               className={`group relative ${gameButtonClass({ tone: "slate", size: "md", disabled: blocked, className: secondaryButtonClass })}`}
             >
@@ -481,6 +487,9 @@ export function ActionButton() {
           </button>
         )}
       </div>
+
+      {/* CR 117.3d: the viewer's standing priority yields, with revoke controls. */}
+      <PriorityYieldList />
 
       {showTargetPicker && (
         <AttackTargetPicker

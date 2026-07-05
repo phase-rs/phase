@@ -94,13 +94,6 @@ jobs:
               body = body.slice(0, LIMIT) + '\n\n_…truncated — see the `parse-diff.json` run artifact for the full diff._\n';
             }
 
-            // Classify: a "real changes" body carries the "signature(s)" headline;
-            // the no-change and baseline-pending bodies do not. Anti-thrash rule:
-            // only REAL changes may CREATE a comment. No-change / pending may only
-            // UPDATE an existing sticky (so a resolved diff collapses to "✓"),
-            // never spawn a fresh notification.
-            const isReal = body.includes('signature(s)');
-
             const { owner, repo } = context.repo;
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: prNumber, per_page: 100,
@@ -114,11 +107,12 @@ jobs:
                 owner, repo, comment_id: existing.id, body,
               });
               core.info(`Updated sticky comment ${existing.id} on PR #${prNumber}.`);
-            } else if (isReal) {
+            } else {
+              // A no-change parse diff is still required review evidence for
+              // parser PRs. If we suppress the first sticky, local review tools
+              // can only report "absent" even though the CI artifact exists.
               await github.rest.issues.createComment({
                 owner, repo, issue_number: prNumber, body,
               });
               core.info(`Created sticky comment on PR #${prNumber}.`);
-            } else {
-              core.info('No existing sticky and nothing substantive to report; not creating one.');
             }

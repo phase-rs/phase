@@ -40,6 +40,10 @@
     "sandboxToolsTitle": "Narzędzia piaskownicy — skonfiguruj dowolny stan pola bitwy (`)",
     "resume": "Wznów",
     "settings": "Ustawienia",
+    "boardLayoutSplit": "Podzielony",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Przełącz na widok podzielonego stołu",
+    "switchToLegacyView": "Przełącz na skupiony widok legacy",
     "helpShortcuts": "Pomoc i skróty",
     "showAiHand": "Pokaż rękę AI",
     "hideAiHand": "Ukryj rękę AI",
@@ -228,5 +232,10 @@
     "settings": "Ustawienia",
     "languageSettings": "Język ({{lang}}) — otwórz ustawienia",
     "languageTitle": "Język: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Coś poszło nie tak",
+    "body": "Aplikacja napotkała nieoczekiwany błąd i nie może kontynuować na tym ekranie. Ponowne załadowanie zwykle to naprawia.",
+    "reload": "Załaduj ponownie"
   }
 }

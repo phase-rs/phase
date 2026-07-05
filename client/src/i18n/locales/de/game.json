@@ -16,6 +16,8 @@
     "holdCtrlFront": "Strg halten für Vorderseite",
     "holdCtrlFlip": "Strg halten zum Umdrehen",
     "flip": "Umdrehen",
+    "report": "Problem melden",
+    "reported": "Gemeldet ✓",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -287,6 +289,9 @@
     "cleanupDescription": "Schaden verschwindet und die maximale Handgröße wird geprüft.",
     "tooltipStopSet": "Stopp gesetzt: klicken, um diesen Auto-Abgabe-Stopp zu entfernen.",
     "tooltipNoStop": "Kein Stopp gesetzt: klicken, um das automatische Abgeben hier zu pausieren.",
+    "scopeAllTurns": "Stoppt in jedem Zug.",
+    "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
+    "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
     "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -562,6 +567,14 @@
     "paidKickedTimes": "verstärkt ×{{count}}",
     "paidAdditionalCost": "Zusatzkosten",
     "paidConvoked": "beschworen ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Prioritätsverzichte",
+    "yieldThis": "Diesen überspringen",
+    "yieldAllCopies": "Alle Kopien überspringen",
+    "revoke": "Widerrufen",
+    "clearAll": "Alle löschen",
+    "allCopiesHint": "Empfohlen für Spielstein-Auslöser"
   },
   "targeting": {
     "choosePermanentToCopy": "Wähle eine bleibende Karte zum Kopieren",
@@ -1586,6 +1599,7 @@
     "variantForetell": "Aus Vorhersagen wirken",
     "variantOverload": "Mit Überladen wirken",
     "variantBestow": "Mit Verleihen wirken",
+    "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
@@ -1958,6 +1972,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

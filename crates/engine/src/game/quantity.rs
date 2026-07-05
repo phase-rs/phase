@@ -4611,6 +4611,15 @@ pub(crate) fn resolve_player_count(
                                     *subject, *scope, controller, source_id, p.id,
                                 )
                         }
+                        // CR 508.6 + CR 102.2: opponent of the controller
+                        // attacking the enchanted/defending player this combat.
+                        // Delegates to the single-authority predicate in
+                        // `matches_player_scope` (the two copies must stay in sync).
+                        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+                            crate::game::effects::matches_player_scope(
+                                state, p.id, filter, controller, source_id,
+                            )
+                        }
                         PlayerFilter::All => true,
                         // CR 608.2c + CR 109.4: all players except the anchor's
                         // set (count context). Uses the generic predicate

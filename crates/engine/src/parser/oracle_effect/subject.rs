@@ -3425,6 +3425,22 @@ fn build_become_clause(
         return Some(super::parsed_clause(Effect::BecomeSaddled { target }));
     }
 
+    // CR 509.1h: "becomes blocked" makes the target attacking creature a blocked
+    // creature with no blockers assigned (Dazzling Beauty: "Target unblocked
+    // attacking creature becomes blocked."). Mirrors the saddled idiom: a real
+    // "Target ... creature" subject carries its `Typed` filter as the target slot;
+    // an anaphoric subject falls back to `affected`.
+    if all_consuming(tag::<_, _, OracleError<'_>>("blocked"))
+        .parse(become_lower.as_str())
+        .is_ok()
+    {
+        let target = application
+            .target
+            .clone()
+            .unwrap_or_else(|| application.affected.clone());
+        return Some(super::parsed_clause(Effect::BecomeBlocked { target }));
+    }
+
     // CR 707.2 / CR 613.1a: "become a copy of [target]" — copy copiable characteristics.
     // Must intercept before parse_animation_spec which rejects "copy of" patterns.
     //
@@ -7950,5 +7966,53 @@ mod tests {
         // remainder is not discarded.
         let mut ctx = ParseContext::default();
         assert!(try_parse_copula_goaded_clause("it's goaded and draws a card", &mut ctx).is_none());
+    }
+
+    // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
+    // `Effect::BecomeBlocked` whose target is a Typed(creature) filter carrying
+    // both FilterProp::Unblocked and FilterProp::Attacking. SHAPE test — runtime
+    // semantics are covered by the cast-pipeline tests in
+    // tests/dazzling_beauty_become_blocked.rs.
+    #[test]
+    fn become_blocked_parses_with_unblocked_attacking_target() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+
+        let effect =
+            super::super::parse_effect("Target unblocked attacking creature becomes blocked.");
+        let Effect::BecomeBlocked { target } = &effect else {
+            panic!("expected Effect::BecomeBlocked, got {effect:?}");
+        };
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = target
+        else {
+            panic!("expected a Typed creature target, got {target:?}");
+        };
+        assert!(
+            type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "target must be a creature filter, got {type_filters:?}"
+        );
+        assert!(
+            properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Unblocked)),
+            "target must carry FilterProp::Unblocked (CR 509.1h), got {properties:?}"
+        );
+        assert!(
+            properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Attacking { .. })),
+            "target must carry FilterProp::Attacking, got {properties:?}"
+        );
+        // Reach-guard against a vacuous parse: the effect is the concrete
+        // BecomeBlocked variant, not Unimplemented.
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "must not fall through to Unimplemented"
+        );
     }
 }

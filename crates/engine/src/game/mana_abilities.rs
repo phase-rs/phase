@@ -528,6 +528,7 @@ pub fn activate_mana_ability(
             player,
             source_id,
             ability_index,
+            ability_snapshot: Some(ability_def.clone()),
             color_override,
             resume,
             chosen_tappers: Vec::new(),
@@ -788,6 +789,7 @@ pub fn handle_choose_mana_color(
         .get(&pending.source_id)
         .and_then(|obj| obj.abilities.get(pending.ability_index))
         .cloned()
+        .or_else(|| pending.ability_snapshot.clone())
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
 
     produce_mana_from_ability(
@@ -4970,6 +4972,60 @@ mod tests {
         id
     }
 
+    #[test]
+    fn token_treasure_choose_color_uses_activation_snapshot_after_self_sacrifice() {
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9000, PlayerId(0), ManaColor::ALL.to_vec());
+        {
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.is_token = true;
+            let ability = Arc::make_mut(&mut obj.abilities).get_mut(0).unwrap();
+            let Effect::Mana {
+                produced: ManaProduction::AnyOneColor { count, .. },
+                ..
+            } = ability.effect.as_mut()
+            else {
+                panic!("test treasure must have AnyOneColor mana production");
+            };
+            *count = QuantityExpr::Fixed { value: 2 };
+        }
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: treasure,
+                ability_index: 0,
+            },
+        )
+        .expect("token Treasure should activate into a color prompt");
+        assert!(
+            matches!(result.waiting_for, WaitingFor::ChooseManaColor { .. }),
+            "Goldspan-style Treasure should wait for a color choice"
+        );
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+        assert!(
+            !state.objects.contains_key(&treasure),
+            "a sacrificed token Treasure has ceased to exist before the color choice"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            },
+        )
+        .expect("color choice must resolve from the activation-time ability snapshot");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            2,
+            "Goldspan-style Treasure adds two mana of the chosen color"
+        );
+    }
+
     /// CR 605.3a: One color choice with `count = N` activates the tapped source
     /// plus `N - 1` identical, choice-free twins — `N` mana of the chosen color,
     /// `N` sources sacrificed, and a per-source tap each twin (the events a
@@ -6632,6 +6688,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -6696,6 +6753,7 @@ mod tests {
                 player: PlayerId(0),
                 source_id: source,
                 ability_index: 0,
+                ability_snapshot: None,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 chosen_tappers: Vec::new(),
@@ -6926,6 +6984,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -7029,6 +7088,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -7930,6 +7990,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -8299,6 +8360,7 @@ mod tests {
             player: PlayerId(1),
             source_id: brushland,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -8861,6 +8923,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -8931,6 +8994,7 @@ mod tests {
             player: PlayerId(0),
             source_id: altar,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -9056,6 +9120,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -9119,6 +9184,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -9273,6 +9339,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),

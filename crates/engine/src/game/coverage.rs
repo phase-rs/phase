@@ -1638,6 +1638,9 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
                 "each opponent this source attacked this combat"
             }
         },
+        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+            "each opponent attacking the enchanted player"
+        }
         PlayerFilter::All => "each player",
         PlayerFilter::AllExcept { .. } => "each player other than the excluded player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
@@ -3149,6 +3152,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::BecomePrepared { target }
         | Effect::BecomeUnprepared { target }
         | Effect::BecomeSaddled { target }
+        | Effect::BecomeBlocked { target }
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
@@ -6655,6 +6659,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::HasLostTheGame => ("HasLostTheGame", Handled),
         PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
         PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
+        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+            ("OpponentAttackingEnchantedPlayer", Handled)
+        }
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),

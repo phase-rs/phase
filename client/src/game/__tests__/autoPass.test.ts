@@ -6,7 +6,6 @@ import {
   buildGameState,
   buildPlayers,
   buildPriorityWaitingFor,
-  buildStackEntry,
 } from "../../test/factories/gameStateFactory";
 import { shouldAutoPass } from "../autoPass";
 
@@ -20,7 +19,6 @@ function createState(overrides: {
   stack?: GameState["stack"];
   objects?: GameState["objects"];
   players?: GameState["players"];
-  phase_stops?: Record<number, Phase[]>;
 } = {}): GameState {
   return buildGameState({
     phase: overrides.phase ?? "PreCombatMain",
@@ -28,7 +26,6 @@ function createState(overrides: {
     objects: overrides.objects ?? buildObjectMap(buildGameObject({ id: 1 })),
     players: overrides.players ?? buildPlayers([0, 1]),
     priority_player: overrides.priority_player ?? 0,
-    phase_stops: overrides.phase_stops,
   });
 }
 
@@ -76,41 +73,6 @@ describe("shouldAutoPass", () => {
     expect(shouldAutoPass(createState({ priority_player: 1 }), priority(0), false, true)).toBe(
       false,
     );
-  });
-
-  // Phase stops — only apply to initial priority (empty stack)
-  it("does not auto-pass during a stopped phase with empty stack", () => {
-    const state = createState({
-      phase: "PreCombatMain",
-      phase_stops: { 0: ["PreCombatMain"] },
-    });
-    expect(shouldAutoPass(state, priority(0), false, true)).toBe(false);
-  });
-
-  it("auto-passes in phase without a stop even if other phases have stops", () => {
-    const state = createState({
-      phase: "PreCombatMain",
-      phase_stops: { 0: ["BeginCombat"] },
-    });
-    expect(shouldAutoPass(state, priority(0), false, true)).toBe(true);
-  });
-
-  it("ignores phase stops when stack is non-empty (responding to spell)", () => {
-    const stateWithStack = createState({
-      phase: "PreCombatMain",
-      stack: [buildStackEntry({ id: 1, controller: 0 })],
-      phase_stops: { 0: ["PreCombatMain"] },
-    });
-    expect(shouldAutoPass(stateWithStack, priority(0), false, true)).toBe(true);
-  });
-
-  it("treats another player's phase stops as irrelevant to local auto-pass", () => {
-    // Phase stops are per-player; player 1's stops must not gate player 0.
-    const state = createState({
-      phase: "PreCombatMain",
-      phase_stops: { 1: ["PreCombatMain"] },
-    });
-    expect(shouldAutoPass(state, priority(0), false, true)).toBe(true);
   });
 
   it("does not auto-pass with no objects in game state (invalid state)", () => {

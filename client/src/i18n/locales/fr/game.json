@@ -16,6 +16,8 @@
     "holdCtrlFront": "Maintenez Ctrl pour la face avant",
     "holdCtrlFlip": "Maintenez Ctrl pour pivoter",
     "flip": "Pivoter",
+    "report": "Signaler un problème",
+    "reported": "Signalé ✓",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -287,6 +289,9 @@
     "cleanupDescription": "Les blessures s'estompent et la taille maximale de main est vérifiée.",
     "tooltipStopSet": "Arrêt défini : cliquez pour retirer cet arrêt de passage automatique.",
     "tooltipNoStop": "Aucun arrêt défini : cliquez pour mettre en pause le passage automatique ici.",
+    "scopeAllTurns": "S'arrête à chaque tour.",
+    "scopeOwnTurn": "S'arrête uniquement lors de vos tours.",
+    "scopeOpponentsTurns": "S'arrête uniquement lors des tours des adversaires.",
     "tooltipCurrentPhase": "Phase actuelle.",
     "tooltip": "Arrêt de phase : {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -562,6 +567,14 @@
     "paidKickedTimes": "kické ×{{count}}",
     "paidAdditionalCost": "coût supplémentaire",
     "paidConvoked": "convoqué ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Renoncements de priorité",
+    "yieldThis": "Passer celui-ci",
+    "yieldAllCopies": "Passer toutes les copies",
+    "revoke": "Révoquer",
+    "clearAll": "Tout effacer",
+    "allCopiesHint": "Recommandé pour les capacités de jetons"
   },
   "targeting": {
     "choosePermanentToCopy": "Choisissez un permanent à copier",
@@ -1586,6 +1599,7 @@
     "variantForetell": "Lancer depuis la Prédiction",
     "variantOverload": "Lancer avec Surcharge",
     "variantBestow": "Lancer avec Don",
+    "variantFreerunning": "Lancer avec Freerunning",
     "variantFuse": "Lancer avec Fusion",
     "variantFallback": "Lancer avec {{type}}"
   },
@@ -1958,6 +1972,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

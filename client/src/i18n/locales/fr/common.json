@@ -40,6 +40,10 @@
     "sandboxToolsTitle": "Outils bac à sable — configurez n'importe quel état du plateau (`)",
     "resume": "Reprendre",
     "settings": "Paramètres",
+    "boardLayoutSplit": "Divisé",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Passer à la vue table divisée",
+    "switchToLegacyView": "Passer à la vue legacy focalisée",
     "helpShortcuts": "Aide et raccourcis",
     "showAiHand": "Afficher la main de l'IA",
     "hideAiHand": "Masquer la main de l'IA",
@@ -228,5 +232,10 @@
     "settings": "Paramètres",
     "languageSettings": "Langue ({{lang}}) — ouvrir les paramètres",
     "languageTitle": "Langue : {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Une erreur est survenue",
+    "body": "L'application a rencontré une erreur inattendue et ne peut pas continuer sur cet écran. Recharger règle généralement le problème.",
+    "reload": "Recharger"
   }
 }

@@ -1110,6 +1110,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }

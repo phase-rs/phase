@@ -4525,6 +4525,54 @@ fn static_creature_spells_cost_less() {
     }
 }
 
+// CR 105.1 + CR 601.2f: Prophecy Familiar cycle (Nightscape / Stormscape /
+// Sunscape / Thornscape / Thunderscape Familiar) — "<color> spells and <color>
+// spells you cast cost {1} less to cast." A two-BARE-color compound subject must
+// narrow the reduction to an `Or` of `HasColor` filters, NOT silently drop the
+// color restriction (which would cheapen every spell).
+#[test]
+fn static_compound_bare_color_spells_cost_less_narrows_to_or_of_colors() {
+    let def =
+        parse_static_line("Blue spells and red spells you cast cost {1} less to cast.").unwrap();
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost { generic: 1, .. },
+            ..
+        }
+    ));
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
+    } = def.mode
+    {
+        let filter = spell_filter
+            .as_ref()
+            .expect("compound color must set a spell_filter");
+        match filter {
+            TargetFilter::Or { filters } => {
+                let colors: Vec<_> = filters
+                    .iter()
+                    .filter_map(|f| match f {
+                        TargetFilter::Typed(tf) => tf.properties.iter().find_map(|p| match p {
+                            FilterProp::HasColor { color } => Some(*color),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    colors.contains(&ManaColor::Blue) && colors.contains(&ManaColor::Red),
+                    "must narrow to Blue OR Red HasColor filters: {filters:?}"
+                );
+            }
+            other => panic!("expected Or of HasColor filters, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn static_spells_of_chosen_type_cost_less_carries_chosen_card_type() {
     // Issue #930 — Cloud Key / Umori / Stenn:
@@ -5627,6 +5675,41 @@ fn static_type_removal_with_nondevotion_condition() {
         }]
     );
     assert!(def.condition.is_some(), "condition must be extracted");
+}
+
+// CR 613.1d (Layer 4) + CR 205.1b/205.2: Luxior — attached-permanent type SWAP.
+// "Equipped permanent isn't a planeswalker and is a creature in addition to its
+// other types" (Luxior, Giada's Gift; Luxior and Shadowspear) removes the
+// Planeswalker card type (RemoveType) and additively grants Creature (AddType),
+// scoped to the equipped permanent — turning an equipped planeswalker into a
+// creature while it keeps its other types.
+#[test]
+fn parse_luxior_equipped_permanent_type_swap() {
+    let def = parse_static_line(
+        "Equipped permanent isn't a planeswalker and is a creature in addition to its other types.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::RemoveType {
+                core_type: CoreType::Planeswalker,
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ],
+        "must remove Planeswalker then additively add Creature: {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::EquippedBy),
+            "affected must be the equipped permanent: {tf:?}"
+        ),
+        other => panic!("expected Typed EquippedBy filter, got {other:?}"),
+    }
 }
 
 #[test]
@@ -11659,20 +11742,35 @@ fn static_self_gets_dynamic_pt_for_each_unspent_green_mana() {
 }
 
 #[test]
-fn for_each_clause_unspent_mana() {
-    // Building-block: the for-each quantity parser maps "unspent <color> mana
-    // you have" to UnspentMana{color}, and the colorless "unspent mana you have"
-    // to UnspentMana{None} (all colors).
-    use crate::types::ability::QuantityRef;
-    assert_eq!(
-        crate::parser::oracle_quantity::parse_for_each_clause("unspent green mana you have"),
-        Some(QuantityRef::UnspentMana {
-            color: Some(ManaColor::Green),
-        }),
+fn equipped_creature_gets_dynamic_pt_for_each_color_among_permanents() {
+    let def = parse_static_line(
+        "Equipped creature gets +1/+1 for each color among permanents you control.",
+    )
+    .expect("Conqueror's Flail dynamic P/T static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctColorsAmongPermanents {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
+                controller: Some(ControllerRef::You),
+                properties: Vec::new(),
+            }),
+        },
+    };
+    assert!(
+        def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicPower { value } if value == &expected)
+        ),
+        "expected AddDynamicPower over distinct colors, got {:?}",
+        def.modifications
     );
-    assert_eq!(
-        crate::parser::oracle_quantity::parse_for_each_clause("unspent mana you have"),
-        Some(QuantityRef::UnspentMana { color: None }),
+    assert!(
+        def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicToughness { value } if value == &expected)
+        ),
+        "expected AddDynamicToughness over distinct colors, got {:?}",
+        def.modifications
     );
 }
 
@@ -16711,6 +16809,55 @@ fn parse_arcane_adaptation_adds_chosen_creature_type() {
             kind: ChosenSubtypeKind::CreatureType,
         }],
         "additive form must be a single AddChosenSubtype: {mods:?}"
+    );
+}
+
+// CR 305.6 + CR 205.1b: land-axis counterpart of Arcane Adaptation. Realmwright's
+// "Lands you control are the chosen type in addition to their other types" adds the
+// chosen BASIC LAND TYPE additively (single AddChosenSubtype{BasicLandType}, no
+// wipe) to lands the source's controller controls — mirroring the creature path's
+// AddChosenSubtype{CreatureType}.
+#[test]
+fn parse_chosen_land_type_adds_chosen_basic_land_type() {
+    let def = parse_static_line(
+        "Lands you control are the chosen type in addition to their other types.",
+    )
+    .unwrap();
+    assert_eq!(
+        &def.modifications,
+        &vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::BasicLandType,
+        }],
+        "additive land form must be a single AddChosenSubtype{{BasicLandType}}: {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "affected must be you-control: {tf:?}"
+            );
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Land)),
+                "affected must be lands (not creatures): {tf:?}"
+            );
+        }
+        other => panic!("expected Typed land filter, got {other:?}"),
+    }
+    // The bare-creature form must NOT be claimed by the land handler.
+    assert!(
+        parse_static_line(
+            "Creatures you control are the chosen type in addition to their other types."
+        )
+        .unwrap()
+        .modifications
+        .contains(&ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }),
+        "creature form must still route to the creature-type handler"
     );
 }
 
@@ -23912,42 +24059,7 @@ fn enchanted_permanent_is_ongoing_grants_supertype() {
     );
 }
 
-/// CR 604.1 + CR 611.3a + CR 613.4c + CR 109.4: Skycat Sovereign — "~ gets
-/// +1/+1 for each other creature you control with flying." The controller
-/// scope ("you control") and the keyword qualifier ("with flying") both trail
-/// the type word — the controller-scoped counterpart of Radiant, Archangel's
-/// battlefield-wide pump. The "for each" grammar had a combinator for the
-/// any-controller "on the battlefield with <keyword>" form but none for the
-/// "you control with <keyword>" form, so this dynamic pump previously failed to
-/// parse and the whole modification was dropped.
-#[test]
-fn static_self_dynamic_pump_for_each_other_creature_you_control_with_keyword() {
-    let def = parse_static_line("~ gets +1/+1 for each other creature you control with flying.")
-        .expect("Skycat Sovereign's dynamic pump must parse");
-    assert_eq!(def.mode, StaticMode::Continuous);
-    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 
-    let expected = QuantityExpr::Ref {
-        qty: QuantityRef::ObjectCount {
-            filter: TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::Creature],
-                controller: Some(ControllerRef::You),
-                properties: vec![
-                    FilterProp::Another,
-                    FilterProp::WithKeyword {
-                        value: Keyword::Flying,
-                    },
-                ],
-            }),
-        },
-    };
-
-    assert!(def.modifications.iter().any(
-        |m| matches!(m, ContinuousModification::AddDynamicPower { value } if value == &expected)
-    ));
-    assert!(def.modifications.iter().any(
-        |m| matches!(m, ContinuousModification::AddDynamicToughness { value } if value == &expected)
-    ));
     assert!(
         !def.modifications.iter().any(|m| matches!(
             m,

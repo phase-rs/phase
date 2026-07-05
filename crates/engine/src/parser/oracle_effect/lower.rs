@@ -72,6 +72,30 @@ fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style "that permanent or player"
+/// is a non-target damage recipient bound to the raw `DamageDealt.target`.
+/// Keep this local to single-source DealDamage lowering so generic event-context
+/// refs and EachTarget/EachSource damage stay object-only.
+fn parse_damage_event_target_recipient<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    if !ctx.in_trigger {
+        return None;
+    }
+    let lower = input.to_lowercase();
+    nom_on_lower(input, &lower, |i| {
+        value(
+            TargetFilter::EventTarget,
+            alt((
+                tag::<_, _, OracleError<'_>>("that permanent or player"),
+                tag("that permanent or a player"),
+            )),
+        )
+        .parse(i)
+    })
+}
+
 /// CR 608.2c: True when an ability's primary effect acts on the ability's own
 /// source permanent (`TargetFilter::SelfRef`). Self-targeting "If <self status>,
 /// A on it. Otherwise, B it." abilities (Repeat Offender) lower the "if" body's
@@ -1793,6 +1817,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         if parse_controlled_by_different_players_target_constraint(&clause_ir.source_text) {
             def = def.target_constraint(TargetSelectionConstraint::DifferentObjectControllers);
         }
+        if let Some(constraint) = parse_same_zone_owner_target_constraint(&clause_ir.source_text) {
+            def = def.target_constraint(constraint);
+        }
         if let Some(constraint) = parse_total_mana_value_target_constraint(&clause_ir.source_text) {
             def = def.target_constraint(constraint);
         }
@@ -2800,7 +2827,7 @@ fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
     parse_event_context_quantity(expr).or_else(|| parse_cda_quantity(expr))
 }
 
-/// CR 611.2c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
+/// CR 611.2a/c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
 /// anaphors following a token-creating effect.
 ///
 /// Two rewrites, both scoped to defs whose chain contains a prior token
@@ -2808,8 +2835,9 @@ fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
 ///
 /// 1. `Effect::Unimplemented { description: "<anaphor> <mod>" }`
 ///    → `GenericEffect { target: Some(LastCreated), static_abilities: [...],
-///    duration: Some(UntilEndOfTurn) }` where the modifications are parsed
-///    from the verb phrase ("gains haste" / "gets +1/+1" / …).
+///    duration: Some(Permanent) }` where the modifications are parsed from the
+///    verb phrase ("gains haste" / "gets +1/+1" / …). Explicit printed
+///    durations are preserved.
 ///    Recognized anaphor prefixes (longest-first to disambiguate):
 ///    "the token created this way " / "the tokens created this way "
 ///    (populate-specific qualifier) and the plain forms "this token " /
@@ -2849,6 +2877,7 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
     let Effect::GenericEffect {
         static_abilities,
         target,
+        duration,
         ..
     } = effect
     else {
@@ -2863,6 +2892,9 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
     }
     if rebound && matches!(target, None | Some(TargetFilter::SelfRef)) {
         *target = Some(TargetFilter::LastCreated);
+    }
+    if rebound && duration.is_none() {
+        *duration = Some(Duration::Permanent);
     }
 }
 
@@ -3139,9 +3171,7 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
         .description(text.to_string());
     Some(Effect::GenericEffect {
         static_abilities: vec![static_def],
-        duration: duration
-            .or(clause_duration)
-            .or(Some(Duration::UntilEndOfTurn)),
+        duration: duration.or(clause_duration).or(Some(Duration::Permanent)),
         target: Some(TargetFilter::LastCreated),
     })
 }
@@ -3263,6 +3293,51 @@ fn thread_chosen_damage_source_into_oneshot_effects(defs: &mut [AbilityDefinitio
 
 pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
     match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            duration,
+            ..
+        } => {
+            // CR 608.2c + CR 611.2c: In token-creator followups ("that token
+            // gains haste"), the GenericEffect's application authority is the
+            // just-created token set, not the parent copied/source object.
+            // Rewrite both possible application slots because the runtime
+            // intentionally prefers a StaticDefinition's inherited `affected`
+            // reference over the outer GenericEffect target.
+            let mut rebound = false;
+            for static_def in static_abilities {
+                if matches!(
+                    static_def.affected,
+                    Some(
+                        TargetFilter::ParentTarget
+                            | TargetFilter::SelfRef
+                            | TargetFilter::TriggeringSource
+                            | TargetFilter::LastCreated
+                    )
+                ) {
+                    static_def.affected = Some(TargetFilter::LastCreated);
+                    rebound = true;
+                }
+            }
+            if matches!(
+                target,
+                Some(
+                    TargetFilter::ParentTarget
+                        | TargetFilter::SelfRef
+                        | TargetFilter::TriggeringSource
+                        | TargetFilter::LastCreated
+                )
+            ) {
+                *target = Some(TargetFilter::LastCreated);
+                rebound = true;
+            } else if rebound && target.is_none() {
+                *target = Some(TargetFilter::LastCreated);
+            }
+            if rebound && duration.is_none() {
+                *duration = Some(Duration::Permanent);
+            }
+        }
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
@@ -3274,7 +3349,6 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         }
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
-        | Effect::ChangeZone { target, .. }
         // CR 603.7c + CR 608.2c (issue #4601 review): a delayed cleanup that
         // puts the temporary token on top/bottom of a library ("… put it on the
         // bottom of its owner's library at the beginning of the next end step")
@@ -3298,6 +3372,19 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ) {
                 *target = TargetFilter::LastCreated;
             }
+        }
+        Effect::ChangeZone { target, origin, .. }
+            if matches!(
+                target,
+                TargetFilter::ParentTarget
+                    | TargetFilter::TriggeringSource
+                    | TargetFilter::TrackedSet { .. }
+            ) =>
+        {
+            // CR 603.7c: In the gated post-token scope, both singular
+            // anaphors and plural "those tokens" refer to the token(s) just
+            // created and must still be in the battlefield zone at cleanup.
+            rewrite_change_zone_cleanup_to_last_created(target, origin);
         }
         _ => {}
     }
@@ -3323,7 +3410,6 @@ fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::ChangeZone { target, .. }
         // CR 603.7c (issue #4601 review): a delayed cleanup that puts the
         // temporary token on top/bottom of a library ("… put it on the bottom
         // of its owner's library at the beginning of the next end step") has the
@@ -3333,8 +3419,22 @@ fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
         {
             *target = TargetFilter::LastCreated;
         }
+        Effect::ChangeZone { target, origin, .. } if matches!(target, TargetFilter::SelfRef) => {
+            rewrite_change_zone_cleanup_to_last_created(target, origin);
+        }
         _ => {}
     }
+}
+
+fn rewrite_change_zone_cleanup_to_last_created(
+    target: &mut TargetFilter,
+    origin: &mut Option<Zone>,
+) {
+    *target = TargetFilter::LastCreated;
+    // CR 603.7c: A delayed triggered ability affects a referenced object only
+    // if that object remains in the zone it is expected to be in when the
+    // delayed trigger resolves.
+    origin.get_or_insert(Zone::Battlefield);
 }
 
 /// CR 603.7c: Sentence splitting can leave a WheneverEvent delayed trigger's
@@ -3583,7 +3683,8 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
                 {
                     return (None, text.to_string());
                 }
-                if parse_for_each_object_copy_parts(text, &lower).is_some() {
+                let mut copy_ctx = ParseContext::default();
+                if parse_for_each_object_copy_parts(text, &lower, &mut copy_ctx).is_some() {
                     return (None, text.to_string());
                 }
                 // CR 606.3: The Chain Veil's "For each planeswalker you control,
@@ -5108,6 +5209,23 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
     parser.parse(lower.as_str()).is_ok()
 }
 
+/// CR 115.1 + CR 601.2c + CR 400.1: Detect target-set constraints that require
+/// all chosen objects to come from one player's zone pile, currently the printed
+/// "from a single graveyard" class.
+fn parse_same_zone_owner_target_constraint(text: &str) -> Option<TargetSelectionConstraint> {
+    let lower = text.to_lowercase();
+    let mut parser = preceded(
+        take_until::<_, _, OracleError<'_>>("from a single graveyard"),
+        tag("from a single graveyard"),
+    );
+    parser
+        .parse(lower.as_str())
+        .ok()
+        .map(|_| TargetSelectionConstraint::SameZoneOwner {
+            zone: Zone::Graveyard,
+        })
+}
+
 /// CR 202.3 + CR 115.1: Detect a "with total mana value <N|X> or less" target-set
 /// constraint anywhere in the clause and build the typed
 /// `TargetSelectionConstraint::TotalManaValue`. Literal numbers stay fixed;
@@ -5262,7 +5380,7 @@ fn parse_each_of_up_to_damage_target<'a>(
 /// `MultiTargetSpec`. Routing it through this list would strip the quantifier
 /// and collapse the count to a fixed 1 (issue #458).
 const MULTI_TARGET_VERBS: &[&str] = &[
-    "exile", "tap", "untap", "goad", "return", "destroy", "choose",
+    "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
 
 pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
@@ -6542,6 +6660,18 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                         "",
                     ));
                 } else if let Some((target, ecr_rem)) =
+                    parse_damage_event_target_recipient(target_phrase, ctx)
+                {
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target,
+                            damage_source: None,
+                            excess: None,
+                        },
+                        ecr_rem,
+                    ));
+                } else if let Some((target, ecr_rem)) =
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
                 {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
@@ -6781,6 +6911,22 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 excess: None,
             },
             "",
+        ));
+    }
+
+    // CR 115.10a + CR 120.1 + CR 120.3: Check Ghyrson-style mixed event
+    // recipients before generic event-context references. This is DealDamage
+    // local because `EventTarget` may be a player only for the raw damage
+    // recipient carried by DamageDealt.
+    if let Some((target, ecr_rem)) = parse_damage_event_target_recipient(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount: amount.clone(),
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            ecr_rem,
         ));
     }
 
@@ -9916,6 +10062,51 @@ mod where_x_tests {
             gain.contains(&demonstrative_mv),
             "you-gain GainLife.amount must bind Demonstrative mana value, got {gain:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod token_anaphor_rewrite_tests {
+    use super::*;
+
+    /// CR 608.2c + CR 611.2c: Token-anaphor lowering must rebind the outer
+    /// `GenericEffect.target` even when the granted static's own `affected`
+    /// filter intentionally names a different object set. This is the
+    /// quoted-static shape: the token receives the static ability, and that
+    /// static ability affects another class of objects.
+    #[test]
+    fn generic_effect_rewrites_outer_target_without_inner_affected_rewrite() {
+        let mut effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(
+                        StaticDefinition::continuous()
+                            .affected(TargetFilter::Typed(TypedFilter::creature()))
+                            .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                    ),
+                }])],
+            duration: None,
+            target: Some(TargetFilter::ParentTarget),
+        };
+
+        rewrite_parent_target_to_last_created(&mut effect);
+
+        match effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(target, Some(TargetFilter::LastCreated));
+                assert_eq!(duration, Some(Duration::Permanent));
+                assert!(
+                    matches!(static_abilities[0].affected, Some(TargetFilter::Typed(_))),
+                    "inner affected filter must stay on the granted static's object set"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
     }
 }
 
