@@ -27,8 +27,8 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
-    ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
-    ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
+    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+    TargetFilter, ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -1062,6 +1062,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
         parse_player_counter_ref_tail,
+        parse_lost_game_player_count,
         // CR 122.1: "[kind] counters on [object]" — counter count on an object.
         // Must precede generic type-filter arm. Used for patterns like
         // "equal to the number of charge counters on it".
@@ -1754,7 +1755,22 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((
         rest,
         QuantityRef::PlayerCount {
-            filter: crate::types::ability::PlayerFilter::Opponent,
+            filter: PlayerFilter::Opponent,
+        },
+    ))
+}
+
+/// CR 104.3 + CR 104.5: A player who has lost the game is counted after leaving
+/// the game for effects that refer to players who have lost.
+fn parse_lost_game_player_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("players "), tag("player "))).parse(input)?;
+    let (rest, _) = alt((tag("who "), tag("that "))).parse(rest)?;
+    let (rest, _) = alt((tag("has "), tag("have "))).parse(rest)?;
+    let (rest, _) = tag("lost the game").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::PlayerCount {
+            filter: PlayerFilter::HasLostTheGame,
         },
     ))
 }
@@ -1766,7 +1782,6 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
 /// "of your "/"of " is optional. Each qualifier is one `alt()` arm — no
 /// permutation enumeration.
 fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, QuantityRef> {
-    use crate::types::ability::PlayerFilter;
     let (rest, _) = opt(alt((tag("of your "), tag("of ")))).parse(input)?;
     // Singular "opponent who lost life this turn" (Gev, Scaled Scorch's per-each
     // counter scaling) and plural "opponents who …" (Belbe, Corrupted Observer)
@@ -2960,7 +2975,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_card_drawn_this_way,
         alt((
             parse_for_each_one_life_changed,
-            parse_for_each_opponents_life_change,
+            alt((
+                parse_for_each_opponents_life_change,
+                parse_lost_game_player_count,
+            )),
             parse_counter_added_this_turn_for_each,
             parse_color_of_object_for_each,
             parse_object_colors_for_each,
@@ -4328,6 +4346,64 @@ mod tests {
         let (rest, q) = parse_quantity("3 damage").unwrap();
         assert_eq!(q, QuantityExpr::Fixed { value: 3 });
         assert_eq!(rest, " damage");
+    }
+
+    fn assert_lost_game_player_count(qty: QuantityRef) {
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_for_each_clause_ref_handles_lost_game_player_count_surfaces() {
+        for phrase in [
+            "player who has lost the game",
+            "players who have lost the game",
+            "player that has lost the game",
+            "players that have lost the game",
+            "player who have lost the game",
+            "players who has lost the game",
+            "player that have lost the game",
+            "players that has lost the game",
+        ] {
+            let (rest, qty) = parse_for_each_clause_ref(phrase)
+                .unwrap_or_else(|_| panic!("lost-game for-each phrase should parse: {phrase}"));
+            assert_eq!(rest, "", "lost-game for-each phrase should fully consume");
+            assert_lost_game_player_count(qty);
+        }
+    }
+
+    #[test]
+    fn parse_quantity_ref_handles_lost_game_player_count_number_surfaces() {
+        for phrase in [
+            "the number of player who has lost the game",
+            "the number of players who have lost the game",
+            "the number of player that has lost the game",
+            "the number of players that have lost the game",
+            "the number of player who have lost the game",
+            "the number of players who has lost the game",
+            "the number of player that have lost the game",
+            "the number of players that has lost the game",
+        ] {
+            let (rest, qty) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|_| panic!("lost-game number phrase should parse: {phrase}"));
+            assert_eq!(rest, "", "lost-game number phrase should fully consume");
+            assert_lost_game_player_count(qty);
+        }
+    }
+
+    #[test]
+    fn parse_lost_game_player_count_rejects_lost_match_phrases() {
+        let (rest, qty) = parse_for_each_clause_ref("player who has lost the game")
+            .expect("positive lost-game phrase should reach parser");
+        assert_eq!(rest, "");
+        assert_lost_game_player_count(qty);
+
+        assert!(parse_for_each_clause_ref("player who has lost the match").is_err());
+        assert!(parse_for_each_clause_ref("players who have lost the match").is_err());
     }
 
     #[test]

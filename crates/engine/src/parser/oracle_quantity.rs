@@ -424,25 +424,6 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
-        // CR 104.3: "players who have lost the game" (Rampant Frogantua quantity form).
-        if let Ok((remainder, ())) = value(
-            (),
-            (
-                alt((
-                    tag::<_, _, OracleError<'_>>("players who have "),
-                    tag("player who has "),
-                )),
-                tag("lost the game"),
-            ),
-        )
-        .parse(rest)
-        {
-            if remainder.trim().is_empty() {
-                return Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::HasLostTheGame,
-                });
-            }
-        }
         // CR 120.1 + CR 510.1: "opponents that were dealt combat damage
         // [this turn]". The trailing " this turn" suffix is optional because
         // upstream callers may strip durations before this parser sees the
@@ -2815,26 +2796,6 @@ fn parse_for_each_clause_with_they_controller(
         return Some(QuantityRef::PlayerCount {
             filter: PlayerFilter::OpponentGainedLife,
         });
-    }
-
-    // CR 104.3: "player(s) who have/has lost the game" (Rampant Frogantua).
-    if let Some(((), rest)) = nom_on_lower(clause, clause, |i| {
-        value(
-            (),
-            (
-                alt((tag("player "), tag("players "))),
-                alt((tag("who "), tag("that "))),
-                alt((tag("has "), tag("have "))),
-                tag("lost the game"),
-            ),
-        )
-        .parse(i)
-    }) {
-        if rest.is_empty() {
-            return Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            });
-        }
     }
 
     // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
@@ -6355,27 +6316,6 @@ mod tests {
             gained,
             QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentGainedLife,
-            }
-        );
-    }
-
-    /// CR 104.3: "for each player who has lost the game" (Rampant Frogantua).
-    #[test]
-    fn parse_for_each_player_who_has_lost_the_game() {
-        let qty = parse_for_each_clause("player who has lost the game")
-            .expect("lost-game for-each clause must parse");
-        assert_eq!(
-            qty,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            }
-        );
-        let number = parse_quantity_ref("the number of players who have lost the game")
-            .expect("lost-game number-of clause must parse");
-        assert_eq!(
-            number,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
             }
         );
     }
