@@ -128,10 +128,12 @@ function CardPreviewInner({
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
-  // `card_report` context needs a live game: `obj == null` (deck builder) has no
-  // zone and a possibly-stale `gameMode`, and `gameId == null` means no game at
-  // all — a report in either case would pollute `game_mode`, so skip the button.
+  // `card_report` context needs a live, participating game: `obj == null` (deck
+  // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
+  // no game at all, and spectators don't report — building no context in these
+  // cases keeps both the event and the button's wrapper elements out entirely.
   const gameId = useGameStore((s) => s.gameId);
+  const gameMode = useGameStore((s) => s.gameMode);
 
   // Auto-derive back face name from " // " separator when not explicitly provided
   // (e.g., deck builder passes "Delver of Secrets // Insectile Aberration" as cardName)
@@ -328,9 +330,12 @@ function CardPreviewInner({
   // sees. Undefined outside a live game (`obj == null` or `gameId == null`), so
   // the button never renders in the deck builder. On mobile `showOtherFace` is
   // always false, so this resolves to the front face there.
-  const reportItems = showOtherFace && backParseDetails ? backParseDetails : frontParseDetails;
+  // No front-face fallback for the counts: if the back face's parse details
+  // haven't loaded, 0/0 ("no parse data") is honest — front-face counts under a
+  // back-face identity would corrupt the misparse-vs-known-gap triage columns.
+  const reportItems = showOtherFace ? backParseDetails : frontParseDetails;
   const reportContext: CardReportContext | undefined =
-    obj != null && gameId !== null
+    obj != null && gameId !== null && gameMode !== "spectate"
       ? {
           oracleId:
             (showOtherFace ? obj.back_face?.printed_ref?.oracle_id : obj.printed_ref?.oracle_id) ?? "",

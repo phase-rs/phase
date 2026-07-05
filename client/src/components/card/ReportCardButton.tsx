@@ -29,7 +29,10 @@ export interface CardReportContext {
  * One-click "report this card" affordance. A single click sends a `card_report`
  * telemetry event — no modal, no confirm step, no free text. The existing
  * GitHub-issue and Discord report flows are untouched; this is the
- * low-friction, identity-free counter. Renders nothing in `spectate` mode.
+ * low-friction, identity-free counter. Callers only build a
+ * {@link CardReportContext} in a live, participating (non-spectate) game — the
+ * guard lives at the call site so the button's styled wrapper elements stay
+ * out of the DOM too, not just the button itself.
  *
  * Callers pass `key={oracleId || name}` so switching cards remounts the button
  * and re-derives the sent state from {@link reportedThisSession}.
@@ -40,8 +43,6 @@ export function ReportCardButton({ oracleId, faceName, name, zone, supported, to
   const turn = useGameStore((s) => s.gameState?.turn_number ?? null);
   const dedupKey = oracleId || name;
   const [sent, setSent] = useState(() => reportedThisSession.has(dedupKey));
-
-  if (gameMode === "spectate") return null;
 
   const handleClick = () => {
     if (sent) return;
