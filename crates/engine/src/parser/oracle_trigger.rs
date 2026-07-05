@@ -4353,9 +4353,9 @@ fn parse_zone_change_object_token_contraction_intervening_if(
 /// filter for a named alt-cost keyword on the triggering object.
 fn event_object_has_alt_cost_keyword_condition(keyword: KeywordKind) -> TriggerCondition {
     TriggerCondition::EventObjectMatchesFilter {
-        filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
-            FilterProp::HasKeywordKind { value: keyword },
-        ])),
+        filter: TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::HasKeywordKind { value: keyword }]),
+        ),
     }
 }
 
