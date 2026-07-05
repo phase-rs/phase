@@ -594,7 +594,9 @@
     "clearAll": "Alle löschen",
     "allCopiesHint": "Empfohlen für Spielstein-Auslöser",
     "menuButton": "Diesen Auslöser automatisch überspringen",
-    "menuButtonActive": "Wird automatisch übersprungen – ändern oder widerrufen"
+    "menuButtonActive": "Wird automatisch übersprungen – ändern oder widerrufen",
+    "menuButtonShort": "Auto-Pass",
+    "menuButtonShortActive": "Übersprungen"
   },
   "targeting": {
     "choosePermanentToCopy": "Wähle eine bleibende Karte zum Kopieren",

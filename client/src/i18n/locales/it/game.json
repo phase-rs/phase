@@ -594,7 +594,9 @@
     "clearAll": "Cancella tutto",
     "allCopiesHint": "Consigliato per le pedine",
     "menuButton": "Salta automaticamente questo innesco",
-    "menuButtonActive": "Salto automatico: modifica o revoca"
+    "menuButtonActive": "Salto automatico: modifica o revoca",
+    "menuButtonShort": "Auto-salta",
+    "menuButtonShortActive": "Saltando"
   },
   "targeting": {
     "choosePermanentToCopy": "Scegli un permanente da copiare",

@@ -183,7 +183,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       data-card-hover
       className="relative cursor-pointer"
       onClick={handleClick}
-      onMouseEnter={isMobile ? undefined : () => {
+      onMouseEnter={isMobile || yieldMenuOpen ? undefined : () => {
         inspectObject(entry.source_id);
         onHoverChange?.(true);
       }}
@@ -315,18 +315,30 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           aria-label={matchingYield ? t("priorityYield.menuButtonActive") : t("priorityYield.menuButton")}
           aria-pressed={matchingYield != null}
           title={matchingYield ? t("priorityYield.menuButtonActive") : t("priorityYield.menuButton")}
-          className={`absolute right-1 top-1/2 z-30 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full shadow-md ring-1 transition-colors ${
+          className={`absolute right-1 top-1/2 z-30 flex -translate-y-1/2 items-center gap-1 rounded-full px-2 py-1 text-[9px] font-bold shadow-lg ring-2 transition-colors ${
             matchingYield
-              ? "bg-amber-500/90 text-black ring-amber-200"
-              : "bg-gray-900/85 text-purple-100 ring-white/25 hover:bg-gray-800"
+              ? "bg-amber-400 text-black ring-amber-200"
+              : "bg-indigo-600 text-white ring-white/80 hover:bg-indigo-500"
           }`}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
-            setYieldMenuOpen((open) => !open);
+            const opening = !yieldMenuOpen;
+            setYieldMenuOpen(opening);
+            // Opening the menu drops any hover/sticky card preview so the options
+            // aren't rendered on top of the previewed card; the hover handler is
+            // gated off (above) while the menu stays open so it can't re-arm.
+            if (opening) {
+              inspectObject(null);
+              setPreviewSticky(false);
+              onHoverChange?.(false);
+            }
           }}
         >
           <YieldMuteIcon muted={matchingYield != null} />
+          <span className="whitespace-nowrap">
+            {matchingYield ? t("priorityYield.menuButtonShortActive") : t("priorityYield.menuButtonShort")}
+          </span>
         </button>
       )}
 
@@ -412,7 +424,7 @@ function YieldMuteIcon({ muted }: { muted: boolean }) {
   return (
     <svg
       viewBox="0 0 24 24"
-      className="h-4 w-4"
+      className="h-3.5 w-3.5 shrink-0"
       fill="none"
       stroke="currentColor"
       strokeWidth={2}

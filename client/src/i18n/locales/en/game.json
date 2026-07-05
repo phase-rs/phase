@@ -626,7 +626,9 @@
     "clearAll": "Clear all",
     "allCopiesHint": "Recommended for token triggers",
     "menuButton": "Auto-pass this trigger",
-    "menuButtonActive": "Auto-passing — change or revoke"
+    "menuButtonActive": "Auto-passing — change or revoke",
+    "menuButtonShort": "Auto-pass",
+    "menuButtonShortActive": "Auto-passing"
   },
   "targeting": {
     "choosePermanentToCopy": "Choose a permanent to copy",

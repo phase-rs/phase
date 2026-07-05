@@ -594,7 +594,9 @@
     "clearAll": "Borrar todo",
     "allCopiesHint": "Recomendado para disparos de fichas",
     "menuButton": "Pasar automáticamente este disparo",
-    "menuButtonActive": "Pasando automáticamente: cambiar o revocar"
+    "menuButtonActive": "Pasando automáticamente: cambiar o revocar",
+    "menuButtonShort": "Auto-pasar",
+    "menuButtonShortActive": "Pasando"
   },
   "targeting": {
     "choosePermanentToCopy": "Elige un permanente para copiar",

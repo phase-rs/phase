@@ -594,7 +594,9 @@
     "clearAll": "Limpar tudo",
     "allCopiesHint": "Recomendado para gatilhos de fichas",
     "menuButton": "Passar automaticamente este gatilho",
-    "menuButtonActive": "Passando automaticamente — alterar ou revogar"
+    "menuButtonActive": "Passando automaticamente — alterar ou revogar",
+    "menuButtonShort": "Auto-passar",
+    "menuButtonShortActive": "Passando"
   },
   "targeting": {
     "choosePermanentToCopy": "Escolha um permanente para copiar",

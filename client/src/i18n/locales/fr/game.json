@@ -594,7 +594,9 @@
     "clearAll": "Tout effacer",
     "allCopiesHint": "Recommandé pour les capacités de jetons",
     "menuButton": "Passer automatiquement ce déclencheur",
-    "menuButtonActive": "Passage automatique – modifier ou révoquer"
+    "menuButtonActive": "Passage automatique – modifier ou révoquer",
+    "menuButtonShort": "Auto-passer",
+    "menuButtonShortActive": "Passage auto"
   },
   "targeting": {
     "choosePermanentToCopy": "Choisissez un permanent à copier",
