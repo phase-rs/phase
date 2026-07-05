@@ -7169,7 +7169,7 @@ mod admin_auth_tests {
         }
     }
 
-    fn test_admin_router(app_state: AppState, admin_token: Option<&str>) -> Router<AppState> {
+    fn test_admin_router(app_state: AppState, admin_token: Option<&str>) -> Router {
         let mut app = Router::new();
         if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
             app = mount_admin_routes(app, token);
@@ -7177,7 +7177,9 @@ mod admin_auth_tests {
         app.with_state(app_state)
     }
 
-    async fn spawn_admin_test_server(app: Router<AppState>) -> (String, tokio::task::JoinHandle<()>) {
+    async fn spawn_admin_test_server(
+        app: Router,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -7254,7 +7256,10 @@ mod admin_auth_tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app = test_admin_router(test_app_state(&temp_dir), None);
         let (base_url, server) = spawn_admin_test_server(app).await;
-        assert_eq!(get_admin_drafts(&base_url, None).await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            get_admin_drafts(&base_url, None).await,
+            StatusCode::NOT_FOUND
+        );
         server.abort();
     }
 
@@ -7263,7 +7268,10 @@ mod admin_auth_tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app = test_admin_router(test_app_state(&temp_dir), Some(TOKEN));
         let (base_url, server) = spawn_admin_test_server(app).await;
-        assert_eq!(get_admin_drafts(&base_url, None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            get_admin_drafts(&base_url, None).await,
+            StatusCode::UNAUTHORIZED
+        );
         server.abort();
     }
 
