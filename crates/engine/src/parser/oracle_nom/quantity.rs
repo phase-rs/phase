@@ -2910,6 +2910,23 @@ fn parse_distinct_quality_among_objects(input: &str) -> OracleResult<'_, Quantit
     ))
 }
 
+// CR 105.1 + CR 109.1: "color among [object filter]" counts distinct colors
+// among matching objects, not the number of matching objects.
+fn parse_for_each_distinct_colors_among_permanents(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("color among ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if !remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !quantity_filter_has_meaningful_content(&filter)
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }))
+}
+
 pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -2990,6 +3007,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
+        parse_for_each_distinct_colors_among_permanents,
         // CR 122.1: "kind of counter on/among <filter>" (Bribe Taker). Placed
         // before the generic `<type> you control` arm so the leading "kind"
         // token does not commit to it.
@@ -5742,6 +5760,28 @@ mod tests {
             },
             other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_for_each_color_among_permanents_is_distinct_colors() {
+        let (rest, q) = parse_for_each_clause_ref("color among permanents you control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctColorsAmongPermanents { filter } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed permanent filter, got {other:?}"),
+            },
+            other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
+        }
+
+        assert!(
+            parse_for_each_clause_ref("color among the exiled cards used to craft this creature")
+                .is_err(),
+            "craft-linked color iteration stays out of the generic for-each quantity path"
+        );
     }
 
     #[test]

@@ -2702,16 +2702,6 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
-    // CR 106.1 + CR 109.1: "color among [type-phrase]" — distinct colors among
-    // matching objects. Used by Faeburrow Elder's "+1/+1 for each color among
-    // permanents you control" and by the Converge mechanic adjacent class.
-    if let Ok((after_among, _)) = tag::<_, _, OracleError<'_>>("color among ").parse(clause) {
-        let (filter, remainder) = parse_type_phrase(after_among);
-        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Some(QuantityRef::DistinctColorsAmongPermanents { filter });
-        }
-    }
-
     if let Ok((rest, (relation, action))) = parse_optional_offer_accepted_clause(clause) {
         if rest.is_empty() {
             return Some(QuantityRef::PlayerCount {
@@ -5811,23 +5801,6 @@ mod tests {
                 },
             }
         );
-    }
-
-    /// CR 106.1 + CR 109.1: "for each color among permanents you control" must
-    /// lower to `DistinctColorsAmongPermanents`, not `ObjectCount` over a bogus
-    /// "color" subject. Faeburrow Elder class.
-    #[test]
-    fn for_each_color_among_permanents() {
-        let qty = parse_for_each_clause("color among permanents you control").unwrap();
-        match qty {
-            QuantityRef::DistinctColorsAmongPermanents { filter } => {
-                assert!(
-                    matches!(filter, TargetFilter::Typed(_)),
-                    "expected Typed filter, got {filter:?}"
-                );
-            }
-            other => panic!("Expected DistinctColorsAmongPermanents, got {other:?}"),
-        }
     }
 
     /// CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it"

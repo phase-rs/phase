@@ -13977,6 +13977,38 @@ fn spell_cost_reduction_for_creatures_that_attacked_stays_static() {
     );
 }
 
+#[test]
+fn vivid_spell_cost_reduction_uses_distinct_colors_quantity() {
+    let r = parse(
+        "Vivid — This spell costs {1} less to cast for each color among permanents you control.\nDraw a card.",
+        "Rime Chill",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Rime Chill-style cost reducer must not leave Unimplemented: {r:#?}"
+    );
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 1, .. },
+        dynamic_count:
+            Some(QuantityRef::DistinctColorsAmongPermanents {
+                filter: TargetFilter::Typed(tf),
+            }),
+        ..
+    } = &r.statics[0].mode
+    else {
+        panic!(
+            "expected self-spell ReduceCost over distinct permanent colors, got {:?}",
+            r.statics
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+}
+
 /// CR 701.26b + CR 614.6: Blossombind — the compound "Enchanted creature
 /// can't become untapped and can't have counters put on it." is two
 /// replacement effects: an unconditional `Untap` prevention (CR 701.26b — the
@@ -16735,6 +16767,85 @@ fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
             ..
         }
     ));
+}
+
+#[test]
+fn activated_draw_for_each_color_among_permanents_uses_distinct_colors_quantity() {
+    let parsed = parse(
+        "{5}, {T}: Draw a card for each color among permanents you control.",
+        "Chromatic Orrery",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Chromatic Orrery draw ability must not leave Unimplemented: {parsed:#?}"
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("expected parsed draw ability");
+    let Effect::Draw {
+        count:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::DistinctColorsAmongPermanents {
+                        filter: TargetFilter::Typed(tf),
+                    },
+            },
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected Draw count over distinct permanent colors, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+}
+
+#[test]
+fn mana_for_each_color_among_monocolored_permanents_stays_mana_path() {
+    let parsed = parse(
+        "{1}, {T}: For each color among monocolored permanents you control, add one mana of that color.",
+        "Tarnation Vista",
+        &[],
+        &["Land"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Tarnation Vista mana ability must not leave Unimplemented: {parsed:#?}"
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("expected parsed mana ability");
+    let Effect::Mana {
+        produced:
+            crate::types::ability::ManaProduction::DistinctColorsAmongPermanents {
+                filter: TargetFilter::Typed(tf),
+            },
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected mana production over distinct monocolored permanent colors, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::ColorCount { count: 1, .. })));
+    assert!(
+        ability.repeat_for.is_none(),
+        "mana path must not be split into repeat_for + generic mana"
+    );
 }
 
 #[test]
