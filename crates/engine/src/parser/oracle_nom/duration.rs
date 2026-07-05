@@ -3,9 +3,9 @@
 //! **Single authority for the phrase→`Duration` grammar** (oracle-parser
 //! SKILL §7). Parses: "until end of turn", "until end of combat", "until the
 //! end of your/their next turn", "until your/their next turn", "until your
-//! next end step", "until ~/this creature leaves the battlefield", "for the
-//! rest of the game", "for as long as [condition]", "this turn", "this/that
-//! combat".
+//! next end step", "until ~/this creature leaves the battlefield", "until you
+//! exile another card with ~", "for the rest of the game", "for as long as
+//! [condition]", "this turn", "this/that combat".
 //!
 //! Positional wrappers (`strip_trailing_duration` / `strip_leading_duration`
 //! in `oracle_effect/lower.rs`, the clause shell, and the combat-grant
@@ -68,6 +68,12 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
                 alt((tag("~"), tag("this creature"))),
                 tag(" leaves the battlefield"),
             ),
+        ),
+        // CR 607.2a + CR 611.2a: source-linked impulse grants such as
+        // Furious Rise last until the same source exiles another card.
+        value(
+            Duration::UntilSourceExilesAnotherCard,
+            tag("you exile another card with ~"),
         ),
     ))
     .parse(input)

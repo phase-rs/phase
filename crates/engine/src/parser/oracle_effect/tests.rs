@@ -34600,6 +34600,36 @@ fn play_exiled_card_this_turn_regression_unchanged() {
     assert_eq!(mana_spend_permission, None);
 }
 
+/// CR 607.2a + CR 611.2a: Furious Rise / Superior Foes / Unstable Amulet
+/// grant permission to play the just-exiled card only until the same source
+/// exiles another card.
+#[test]
+fn play_from_exile_until_source_exiles_another_card_uses_source_exile_duration() {
+    for text in [
+        "you may play that card until you exile another card with ~",
+        "you may play it until you exile another card with ~",
+    ] {
+        let e = parse_effect(text);
+        let Effect::GrantCastingPermission {
+            permission, target, ..
+        } = e
+        else {
+            panic!("expected GrantCastingPermission for {text:?}, got {e:?}");
+        };
+        let CastingPermission::PlayFromExile { duration, .. } = permission else {
+            panic!("expected PlayFromExile permission for {text:?}");
+        };
+        assert_eq!(duration, Duration::UntilSourceExilesAnotherCard);
+        assert_eq!(
+            target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+            "source-exile duration must still bind the grant to the tracked exile set"
+        );
+    }
+}
+
 /// Discriminating: the "for as long as it remains exiled, and mana of any
 /// type..." form (Blightwing Bandit class) must keep dispatching to
 /// `try_parse_exile_play_grant_with_any_mana` (duration `Permanent`), NOT be
