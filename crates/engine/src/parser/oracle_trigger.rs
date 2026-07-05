@@ -46,9 +46,9 @@ use crate::types::ability::{
     TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
     TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
-use crate::types::keywords::KeywordKind;
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};

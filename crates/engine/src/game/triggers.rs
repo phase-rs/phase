@@ -6375,14 +6375,11 @@ pub(crate) fn check_trigger_condition(
                 if super::filter::matches_target_filter(state, object_id, filter, &ctx) {
                     return true;
                 }
-                state
-                    .lki_cache
-                    .get(&object_id)
-                    .is_some_and(|lki| {
-                        super::filter::matches_target_filter_on_lki_snapshot(
-                            state, object_id, lki, filter, &ctx,
-                        )
-                    })
+                state.lki_cache.get(&object_id).is_some_and(|lki| {
+                    super::filter::matches_target_filter_on_lki_snapshot(
+                        state, object_id, lki, filter, &ctx,
+                    )
+                })
             }),
         // CR 120.1 + CR 108.3: "deals combat damage to its owner" — the damaged
         // player must be the owner of the object that dealt the damage (CR 120.1:

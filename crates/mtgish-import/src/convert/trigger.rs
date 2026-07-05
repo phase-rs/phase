@@ -868,36 +868,9 @@ fn discard_trigger(
         other => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "TriggerDefinition",
-                needed_variant: format!("{idiom} with discarded-card filter: CardsInHand::{other:?}"),
-            });
-        }
-    }
-    Ok(def)
-}
-
-/// CR 701.9 + CR 603: Build a `Discarded` trigger with the player axis on
-/// `valid_target` and optional discarded-card predicates on `valid_card`.
-fn discard_trigger(
-    players: &Players,
-    cards: &CardsInHand,
-    idiom: &'static str,
-) -> ConvResult<TriggerDefinition> {
-    let mut def = TriggerDefinition::new(TriggerMode::Discarded);
-    if !matches!(players, Players::AnyPlayer) {
-        let controller = players_to_controller(players)?;
-        def.valid_target = Some(TargetFilter::Typed(
-            TypedFilter::default().controller(controller),
-        ));
-    }
-    match cards {
-        CardsInHand::AnyCard => {}
-        CardsInHand::SingleCardInHand(crate::schema::types::CardInHand::ThisCardInHand) => {
-            def.valid_card = Some(TargetFilter::SelfRef);
-        }
-        other => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "TriggerDefinition",
-                needed_variant: format!("{idiom} with discarded-card filter: CardsInHand::{other:?}"),
+                needed_variant: format!(
+                    "{idiom} with discarded-card filter: CardsInHand::{other:?}"
+                ),
             });
         }
     }
