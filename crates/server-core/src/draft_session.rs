@@ -121,6 +121,7 @@ fn redact_persisted_draft_secrets(mut ps: PersistedDraftSession) -> PersistedDra
         meta.password = None;
     }
     ps.config.rng_seed = 0;
+    ps.session.config.rng_seed = 0;
     ps
 }
 
@@ -1203,6 +1204,7 @@ mod tests {
         let admin = session.to_admin_snapshot();
         assert_eq!(admin.lobby_meta.as_ref().unwrap().password, None);
         assert_eq!(admin.config.rng_seed, 0);
+        assert_eq!(admin.session.config.rng_seed, 0);
     }
 
     #[test]

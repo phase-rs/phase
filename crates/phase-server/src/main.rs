@@ -7366,6 +7366,7 @@ mod admin_auth_tests {
         );
         assert_eq!(json["lobby_meta"]["password"], serde_json::Value::Null);
         assert_eq!(json["config"]["rng_seed"], 0);
+        assert_eq!(json["session"]["config"]["rng_seed"], 0);
         server.abort();
     }
 }
