@@ -584,6 +584,11 @@ impl ControlNamedConnector {
 /// "you control" twice and joins distinct typed filters); here the bare type
 /// word is shared across both names.
 ///
+/// CR 201.2: Named-card conditions compare game objects by their English card
+/// names.
+/// CR 603.4: Intervening-if trigger conditions must end before the effect
+/// clause that follows them.
+///
 /// Must precede `parse_compound_control_presence` so the trailing " and "
 /// is bound to the names list, not interpreted as a second `you control` clause.
 fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -620,6 +625,7 @@ fn parse_control_named_type_filter<'a>(
     Ok(filter)
 }
 
+/// CR 201.2: Repeated named-card members each identify a separate named object.
 fn parse_control_named_pair_members<'a>(
     input: &'a str,
     filter_base: &TargetFilter,
@@ -634,6 +640,8 @@ fn parse_control_named_pair_members<'a>(
     parse_shared_type_control_named_pair(input, filter_base)
 }
 
+/// CR 201.2: A repeated typed "named" clause changes the object type for the
+/// second named card instead of extending the first card name.
 fn find_repeated_typed_control_named_pair(
     input: &str,
 ) -> Option<(&str, &str, ControlNamedConnector, TargetFilter)> {
@@ -712,6 +720,11 @@ fn parse_shared_type_control_named_pair<'a>(
 /// stay inside the name so legendary names such as "Guan Yu, Sainted Warrior"
 /// survive, while a comma followed by an effect lead remains available to the
 /// caller as the condition terminator.
+///
+/// CR 201.2: Card names may include punctuation, so punctuation alone is not a
+/// safe name boundary.
+/// CR 603.4: In an intervening-if trigger, the comma-prefixed effect clause
+/// remains outside the condition.
 fn parse_control_named_final_name(input: &str) -> OracleResult<'_, &str> {
     let mut remaining = input;
     while !remaining.is_empty() {
@@ -750,6 +763,16 @@ fn parse_control_named_condition_terminator(
                     value((), tag("transform")),
                     value((), tag("you ")),
                     value((), tag("target ")),
+                    value((), tag("exile ")),
+                    value((), tag("destroy ")),
+                    value((), tag("return ")),
+                    value((), tag("discard ")),
+                    value((), tag("it ")),
+                    value((), tag("its ")),
+                    value((), tag("their ")),
+                    value((), tag("each ")),
+                    value((), tag("all ")),
+                    value((), tag("choose ")),
                 )),
             ),
         ),
@@ -9223,6 +9246,27 @@ mod tests {
             names,
             vec!["guan yu, sainted warrior", "zhang fei, fierce warrior"]
         );
+    }
+
+    #[test]
+    fn control_named_final_name_stops_before_common_effect_leads() {
+        for tail in [
+            ", exile it",
+            ", destroy target artifact",
+            ", return it to its owner's hand",
+            ", discard a card",
+            ", it gains flying",
+            ", its controller draws a card",
+            ", their controller draws a card",
+            ", each opponent loses 1 life",
+            ", all creatures get +1/+1",
+            ", choose one",
+        ] {
+            let input = format!("throne of empires{tail}");
+            let (rest, name) = parse_control_named_final_name(&input).unwrap();
+            assert_eq!(name, "throne of empires");
+            assert_eq!(rest, tail);
+        }
     }
 
     #[test]
