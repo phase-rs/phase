@@ -3892,12 +3892,12 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
-    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has madness" — intervening-if on
-    // discard triggers whose subject is the discarded card (Anje Falkenrath).
-    // MUST precede the zone-change-object "if it " arms below, which would
-    // otherwise mis-route this predicate.
+    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" —
+    // intervening-if on discard triggers whose subject is the discarded card
+    // (Anje Falkenrath: "if it has madness"). MUST precede the zone-change-
+    // object "if it " arms below, which would otherwise mis-route this predicate.
     if let Some((before, condition, rest)) =
-        scan_preceded(&lower, parse_discarded_card_has_madness_intervening_if)
+        scan_preceded(&lower, parse_event_object_has_alt_cost_keyword_intervening_if)
     {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();
@@ -4349,18 +4349,18 @@ fn parse_zone_change_object_token_contraction_intervening_if(
     Ok((rest, zone_change_object_token_condition(true)))
 }
 
-/// CR 603.4 + CR 701.9a + CR 702.35a: "if it has madness" on discard triggers.
-fn parse_discarded_card_has_madness_intervening_if(
+/// CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" on
+/// event-object intervening-ifs (e.g. discard triggers: "if it has madness").
+fn parse_event_object_has_alt_cost_keyword_intervening_if(
     input: &str,
 ) -> OracleResult<'_, TriggerCondition> {
-    let (rest, _) = tag("if it has madness").parse(input)?;
+    let (rest, _) = tag("if it has ").parse(input)?;
+    let (rest, keyword) = nom_primitives::parse_alt_cost_keyword_name_to_kind.parse(rest)?;
     Ok((
         rest,
         TriggerCondition::EventObjectMatchesFilter {
             filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
-                FilterProp::HasKeywordKind {
-                    value: KeywordKind::Madness,
-                },
+                FilterProp::HasKeywordKind { value: keyword },
             ])),
         },
     ))
