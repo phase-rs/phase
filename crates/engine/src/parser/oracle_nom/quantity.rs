@@ -16,7 +16,7 @@ use super::context::ParseContext;
 use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
-    parse_article, parse_counter_type_typed, parse_keyword_name, parse_number,
+    parse_article, parse_color, parse_counter_type_typed, parse_keyword_name, parse_number,
 };
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
@@ -27,8 +27,8 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
-    ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter,
-    ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
+    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+    TargetFilter, ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -1062,6 +1062,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
         parse_player_counter_ref_tail,
+        parse_lost_game_player_count,
         // CR 122.1: "[kind] counters on [object]" — counter count on an object.
         // Must precede generic type-filter arm. Used for patterns like
         // "equal to the number of charge counters on it".
@@ -1754,7 +1755,22 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((
         rest,
         QuantityRef::PlayerCount {
-            filter: crate::types::ability::PlayerFilter::Opponent,
+            filter: PlayerFilter::Opponent,
+        },
+    ))
+}
+
+/// CR 104.3 + CR 104.5: A player who has lost the game is counted after leaving
+/// the game for effects that refer to players who have lost.
+fn parse_lost_game_player_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("players "), tag("player "))).parse(input)?;
+    let (rest, _) = alt((tag("who "), tag("that "))).parse(rest)?;
+    let (rest, _) = alt((tag("has "), tag("have "))).parse(rest)?;
+    let (rest, _) = tag("lost the game").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::PlayerCount {
+            filter: PlayerFilter::HasLostTheGame,
         },
     ))
 }
@@ -1766,7 +1782,6 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
 /// "of your "/"of " is optional. Each qualifier is one `alt()` arm — no
 /// permutation enumeration.
 fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, QuantityRef> {
-    use crate::types::ability::PlayerFilter;
     let (rest, _) = opt(alt((tag("of your "), tag("of ")))).parse(input)?;
     // Singular "opponent who lost life this turn" (Gev, Scaled Scorch's per-each
     // counter scaling) and plural "opponents who …" (Belbe, Corrupted Observer)
@@ -2910,6 +2925,23 @@ fn parse_distinct_quality_among_objects(input: &str) -> OracleResult<'_, Quantit
     ))
 }
 
+// CR 105.1 + CR 109.1: "color among [object filter]" counts distinct colors
+// among matching objects, not the number of matching objects.
+fn parse_for_each_distinct_colors_among_permanents(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("color among ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if !remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !quantity_filter_has_meaningful_content(&filter)
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }))
+}
+
 pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -2926,6 +2958,15 @@ fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityR
     Ok((rest, QuantityRef::EventContextAmount))
 }
 
+/// CR 106.4: "unspent [color] mana you have" counts floating mana in the
+/// controller's mana pool.
+fn parse_for_each_unspent_mana(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("unspent ").parse(input)?;
+    let (rest, color) = opt(terminated(parse_color, tag(" "))).parse(rest)?;
+    let (rest, _) = tag("mana you have").parse(rest)?;
+    Ok((rest, QuantityRef::UnspentMana { color }))
+}
+
 fn parse_for_each_clause_ref_with_they_controller(
     input: &str,
     they_controller: ControllerRef,
@@ -2934,7 +2975,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_card_drawn_this_way,
         alt((
             parse_for_each_one_life_changed,
-            parse_for_each_opponents_life_change,
+            alt((
+                parse_for_each_opponents_life_change,
+                parse_lost_game_player_count,
+            )),
             parse_counter_added_this_turn_for_each,
             parse_color_of_object_for_each,
             parse_object_colors_for_each,
@@ -2990,6 +3034,8 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
+        parse_for_each_unspent_mana,
+        parse_for_each_distinct_colors_among_permanents,
         // CR 122.1: "kind of counter on/among <filter>" (Bribe Taker). Placed
         // before the generic `<type> you control` arm so the leading "kind"
         // token does not commit to it.
@@ -4302,6 +4348,118 @@ mod tests {
         assert_eq!(rest, " damage");
     }
 
+    fn assert_lost_game_player_count(qty: QuantityRef) {
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_for_each_clause_ref_handles_lost_game_player_count_surfaces() {
+        for phrase in [
+            "player who has lost the game",
+            "players who have lost the game",
+            "player that has lost the game",
+            "players that have lost the game",
+            "player who have lost the game",
+            "players who has lost the game",
+            "player that have lost the game",
+            "players that has lost the game",
+        ] {
+            let (rest, qty) = parse_for_each_clause_ref(phrase)
+                .unwrap_or_else(|_| panic!("lost-game for-each phrase should parse: {phrase}"));
+            assert_eq!(rest, "", "lost-game for-each phrase should fully consume");
+            assert_lost_game_player_count(qty);
+        }
+    }
+
+    #[test]
+    fn parse_quantity_ref_handles_lost_game_player_count_number_surfaces() {
+        for phrase in [
+            "the number of player who has lost the game",
+            "the number of players who have lost the game",
+            "the number of player that has lost the game",
+            "the number of players that have lost the game",
+            "the number of player who have lost the game",
+            "the number of players who has lost the game",
+            "the number of player that have lost the game",
+            "the number of players that has lost the game",
+        ] {
+            let (rest, qty) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|_| panic!("lost-game number phrase should parse: {phrase}"));
+            assert_eq!(rest, "", "lost-game number phrase should fully consume");
+            assert_lost_game_player_count(qty);
+        }
+    }
+
+    #[test]
+    fn parse_lost_game_player_count_rejects_lost_match_phrases() {
+        let (rest, qty) = parse_for_each_clause_ref("player who has lost the game")
+            .expect("positive lost-game phrase should reach parser");
+        assert_eq!(rest, "");
+        assert_lost_game_player_count(qty);
+
+        assert!(parse_for_each_clause_ref("player who has lost the match").is_err());
+        assert!(parse_for_each_clause_ref("players who have lost the match").is_err());
+    }
+
+    fn assert_opponent_life_change_count(qty: QuantityRef, expected: PlayerFilter) {
+        assert_eq!(qty, QuantityRef::PlayerCount { filter: expected });
+    }
+
+    #[test]
+    fn parse_for_each_opponents_life_change_full_surfaces() {
+        for (phrase, expected) in [
+            (
+                "opponents who lost life this turn",
+                PlayerFilter::OpponentLostLife,
+            ),
+            (
+                "opponent who lost life this turn",
+                PlayerFilter::OpponentLostLife,
+            ),
+            (
+                "of your opponents who lost life this turn",
+                PlayerFilter::OpponentLostLife,
+            ),
+            (
+                "of opponents who gained life this turn",
+                PlayerFilter::OpponentGainedLife,
+            ),
+            (
+                "of your opponent who gained life this turn",
+                PlayerFilter::OpponentGainedLife,
+            ),
+            (
+                "opponents who gained life this turn",
+                PlayerFilter::OpponentGainedLife,
+            ),
+        ] {
+            let (rest, qty) = parse_for_each_clause_ref_complete(phrase)
+                .unwrap_or_else(|_| panic!("life-change phrase should parse: {phrase}"));
+            assert_eq!(rest, "", "life-change phrase should fully consume");
+            assert_opponent_life_change_count(qty, expected);
+        }
+    }
+
+    #[test]
+    fn parse_for_each_opponents_life_change_rejects_suffix_and_wrong_duration() {
+        let (rest, qty) = parse_for_each_clause_ref_complete("opponent who lost life this turn")
+            .expect("positive life-change phrase should reach parser");
+        assert_eq!(rest, "");
+        assert_opponent_life_change_count(qty, PlayerFilter::OpponentLostLife);
+
+        assert!(parse_for_each_clause_ref_complete(
+            "opponent who lost life this turn and controls a creature"
+        )
+        .is_err());
+        assert!(parse_for_each_clause_ref_complete("opponent who lost life this game").is_err());
+        assert!(parse_for_each_clause_ref_complete("opponents who gained life this game").is_err());
+    }
+
     #[test]
     fn parse_object_property_aggregate_greatest_power() {
         let (rest, q) =
@@ -5270,6 +5428,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_for_each_unspent_mana() {
+        let (rest, q) = parse_for_each_clause_ref("unspent green mana you have").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::UnspentMana {
+                color: Some(ManaColor::Green),
+            }
+        );
+
+        let (rest, q) = parse_for_each_clause_ref("unspent mana you have").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::UnspentMana { color: None });
+
+        for (word, color) in [
+            ("white", ManaColor::White),
+            ("blue", ManaColor::Blue),
+            ("black", ManaColor::Black),
+            ("red", ManaColor::Red),
+            ("green", ManaColor::Green),
+        ] {
+            let input = format!("unspent {word} mana you have");
+            let (rest, q) = parse_for_each_clause_ref(&input)
+                .unwrap_or_else(|_| panic!("failed to parse {input:?}"));
+            assert_eq!(rest, "", "{input:?} left remainder {rest:?}");
+            assert_eq!(
+                q,
+                QuantityRef::UnspentMana { color: Some(color) },
+                "wrong ref for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_for_each_unspent_mana_rejects_invalid_color_and_spent_to_cast() {
+        assert!(parse_for_each_clause_ref("unspent purple mana you have").is_err());
+        assert!(parse_for_each_clause_ref("unspent green mana spent to cast it").is_err());
+
+        let (rest, q) = parse_for_each_clause_ref("mana spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::Total
+            }
+        );
+    }
+
+    #[test]
     fn parse_for_each_mana_from_source_spent_to_cast_it() {
         let (rest, q) = parse_for_each_clause_ref("mana from a cave spent to cast it").unwrap();
         assert_eq!(rest, "");
@@ -5742,6 +5950,28 @@ mod tests {
             },
             other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_for_each_color_among_permanents_is_distinct_colors() {
+        let (rest, q) = parse_for_each_clause_ref("color among permanents you control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctColorsAmongPermanents { filter } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed permanent filter, got {other:?}"),
+            },
+            other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
+        }
+
+        assert!(
+            parse_for_each_clause_ref("color among the exiled cards used to craft this creature")
+                .is_err(),
+            "craft-linked color iteration stays out of the generic for-each quantity path"
+        );
     }
 
     #[test]
