@@ -552,6 +552,102 @@ pub(crate) fn try_parse_self_is_also_subtypes(
 ///
 /// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
 /// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
+/// CR 205.1a + CR 613.1d (Layer 4) + CR 604.1 (Layer 6): Imprisoned-in-the-Moon
+/// class — an Aura that turns the enchanted permanent into a colorless permanent
+/// of a single card type carrying a granted ability while stripping everything
+/// else: "Enchanted <subject> is a[n] colorless <core type> with "<quoted
+/// ability>" and loses all other card types and abilities." Imprisoned in the
+/// Moon ("Enchanted permanent is a colorless land with "{T}: Add {C}" and loses
+/// all other card types and abilities.") is the type specimen.
+///
+/// Emits, in written order: `SetCardTypes` (replace all card types with
+/// <core type>, CR 205.1a), `SetColor([])` (become colorless, CR 105.2),
+/// `RemoveAllAbilities` (the permanent loses its own abilities), then the
+/// `GrantAbility` produced by the shared `parse_quoted_ability_modifications`
+/// authority. `RemoveAllAbilities` is emitted BEFORE the grant so the granted
+/// ability SURVIVES the wipe (CR 613.7a intra-effect written order — the same
+/// ordering the `RemoveAllSubtypes` → `AddChosenSubtype` composition relies on).
+/// No new variant, no new runtime.
+///
+/// Dispatched BEFORE [`parse_enchanted_is_type`], whose ` with base power and
+/// toughness ` split does not model a `with "<ability>"` clause and so drops
+/// both the grant and the ability-strip (issue #4770). The plain family (Song of
+/// the Dryads, Darksteel Mutation) carries no quoted-ability clause and falls
+/// through unchanged. Closes #4770.
+pub(crate) fn parse_enchanted_becomes_type_with_ability(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    use crate::types::card_type::CoreType;
+    // Isolate the ` with ` seam so the quoted ability (original-case {T}/{C}
+    // symbols) and the trailing ability-strip clause are parsed separately.
+    let (before, after) = tp.split_around(" with ")?;
+
+    // BEFORE: "enchanted <subject> is a[n] colorless <core type>".
+    let before_rest = nom_tag_tp(&before, "enchanted ")?;
+    let (r, perm_tf) = nom_target::parse_type_filter_word(before_rest.lower).ok()?;
+    let (r, _) = alt((tag::<_, _, OracleError<'_>>(" is a "), tag(" is an ")))
+        .parse(r)
+        .ok()?;
+    let (r, _) = tag::<_, _, OracleError<'_>>("colorless ").parse(r).ok()?;
+    let (r, type_tf) = nom_target::parse_type_filter_word(r).ok()?;
+    if !r.trim().is_empty() {
+        return None;
+    }
+    let core_type = match type_tf {
+        TypeFilter::Creature => CoreType::Creature,
+        TypeFilter::Artifact => CoreType::Artifact,
+        TypeFilter::Enchantment => CoreType::Enchantment,
+        TypeFilter::Land => CoreType::Land,
+        TypeFilter::Planeswalker => CoreType::Planeswalker,
+        _ => return None,
+    };
+
+    // AFTER: `"<quoted ability>" and loses all other card types and abilities[.]`.
+    // The quoted ability → GrantAbility via the shared authority (original case).
+    let grant_modifications = parse_quoted_ability_modifications(after.original);
+    if grant_modifications.is_empty() {
+        return None;
+    }
+    // Structural gate: the ability-strip clause must follow the closing quote, so
+    // this handler only claims the full Imprisoned shape. Consume the quoted
+    // ability with combinators (open-quote, body, close-quote) rather than a raw
+    // split, then require the trailing strip clause to full consumption.
+    let (after_quote, _) = tag::<_, _, OracleError<'_>>("\"")
+        .parse(after.lower.trim_start())
+        .ok()?;
+    let (after_quote, _) = take_until::<_, _, OracleError<'_>>("\"")
+        .parse(after_quote)
+        .ok()?;
+    let (after_quote, _) = tag::<_, _, OracleError<'_>>("\"").parse(after_quote).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("and loses all other card types and abilities")
+        .parse(after_quote.trim_start())
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut modifications = vec![
+        ContinuousModification::SetCardTypes {
+            core_types: vec![core_type],
+        },
+        ContinuousModification::SetColor { colors: Vec::new() },
+        ContinuousModification::RemoveAllAbilities,
+    ];
+    // GrantAbility AFTER RemoveAllAbilities so the granted ability survives.
+    modifications.extend(grant_modifications);
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
 pub(crate) fn parse_enchanted_is_type(
     tp: &TextPair,
     description: &str,

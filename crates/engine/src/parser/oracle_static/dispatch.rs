@@ -1048,6 +1048,13 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 205.1a + CR 604.1: Imprisoned-in-the-Moon — "Enchanted <subject> is a
+    // colorless <type> with "<ability>" and loses all other card types and
+    // abilities." Must precede parse_enchanted_is_type, whose base-P/T split does
+    // not model the with-"<ability>" clause (issue #4770).
+    if let Some(def) = parse_enchanted_becomes_type_with_ability(&tp, &text) {
+        return Some(def);
+    }
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.
