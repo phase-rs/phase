@@ -486,9 +486,7 @@ fn resolve_then_flashback_recast_reprompts_creature_type() {
         "precondition: the prior cast left the chosen creature type on the spell object"
     );
 
-    let flashback = Keyword::Flashback(FlashbackCost::Mana(ManaCost::generic(
-        2,
-    )));
+    let flashback = Keyword::Flashback(FlashbackCost::Mana(ManaCost::generic(2)));
     {
         let obj = s.runner.state_mut().objects.get_mut(&s.spell).unwrap();
         obj.base_keywords.push(flashback.clone());
