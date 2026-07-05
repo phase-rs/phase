@@ -49,7 +49,6 @@ use crate::types::ability::{
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
-use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
@@ -3892,10 +3891,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
-    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" —
-    // intervening-if on discard triggers whose subject is the discarded card
-    // (Anje Falkenrath: "if it has madness"). MUST precede the zone-change-
-    // object "if it " arms below, which would otherwise mis-route this predicate.
+    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" — intervening-if
+    // on discard triggers whose subject is the discarded card (Anje Falkenrath: "if it has
+    // madness"). MUST precede the zone-change-object "if it " arms below, which would
+    // otherwise mis-route this predicate.
     if let Some((before, condition, rest)) =
         scan_preceded(&lower, parse_event_object_has_alt_cost_keyword_intervening_if)
     {
