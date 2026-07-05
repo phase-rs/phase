@@ -7319,14 +7319,20 @@ mod admin_auth_tests {
             let mut drafts = app_state.draft_sessions.lock().await;
             let (code, _host_token, _) = drafts.create_draft(
                 draft_core::types::DraftConfig {
+                    source: draft_core::types::DraftSource::Set {
+                        code: "TST".to_string(),
+                    },
                     set_code: "TST".to_string(),
+                    kind: draft_core::types::DraftKind::Premier,
                     pod_size: 4,
-                    bot_count: 0,
-                    pack_count: 3,
                     cards_per_pack: 14,
-                    kind: draft_core::types::DraftKind::Pack,
-                    packs: Vec::new(),
+                    pack_count: 3,
+                    min_deck_size: 40,
+                    addable_cards: draft_core::types::DeckAddableCards::standard_basics(),
                     rng_seed: 0xdead_beef_cafe_babe,
+                    tournament_format: draft_core::types::TournamentFormat::Swiss,
+                    pod_policy: draft_core::types::PodPolicy::Competitive,
+                    spectator_visibility: draft_core::types::SpectatorVisibility::default(),
                 },
                 "Alice".to_string(),
             );
