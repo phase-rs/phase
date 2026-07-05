@@ -5136,7 +5136,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 30. Token/named-card name corrupted by normalization or overrun  (12 cards)
+### 30. Token/named-card name corrupted by normalization or overrun  (11 cards)
 
 **Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
 
@@ -5149,7 +5149,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - High Marshal Arguel
 - Kookus
 - Liu Bei, Lord of Shu
-- Sift Through Sands
 - Thran Golem
 - Thrasta, Tempest's Roar
 - Wrathful Raptors
