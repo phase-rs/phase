@@ -1055,6 +1055,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 613.1d (Layer 4) + CR 205.1b: "[Enchanted|Equipped] <subject> isn't a
+    // <type> and is a <type> in addition to its other types" — attached-permanent
+    // type SWAP (Luxior: equipped planeswalker loses Planeswalker, gains
+    // Creature). Placed after `parse_enchanted_is_type` (whose "is a" copula
+    // parse rejects the "isn't a ..." lead) and before the generic
+    // enchanted/equipped predicate arms so the type-removal clause is preserved.
+    if let Some(def) = parse_attached_isnt_and_is_type(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
