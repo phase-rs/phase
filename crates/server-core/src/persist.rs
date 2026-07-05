@@ -69,6 +69,9 @@ pub struct PersistedDraftSession {
     pub config: DraftConfig,
     pub active_matches: HashMap<String, String>,
     pub lobby_meta: Option<PersistedLobbyMeta>,
+    /// Pod password retained after lobby unregistration for spectator gating.
+    #[serde(default)]
+    pub spectator_password: Option<String>,
     pub timer_remaining_ms: Option<u32>,
 }
 

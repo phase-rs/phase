@@ -40,7 +40,7 @@ use server_core::client_message_wire_guard::{
 };
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::{
-    check_draft_lobby_password, draft_seats_needing_auto_pick, DraftSessionManager,
+    check_draft_spectator_password, draft_seats_needing_auto_pick, DraftSessionManager,
 };
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
@@ -5429,6 +5429,7 @@ async fn handle_client_message(
                         start_when_full: true,
                         ranked: false,
                     });
+                    session.spectator_password = password.clone();
                 }
                 (draft_code, player_token, seat_index)
             };
@@ -5813,15 +5814,12 @@ async fn handle_client_message(
             let visibility = {
                 let drafts = draft_state.lock().await;
                 match drafts.sessions.get(&draft_code) {
-                    Some(session) => {
-                        if let Err(reason) =
-                            check_draft_lobby_password(&session.lobby_meta, password.as_deref())
-                        {
-                            Err(reason)
-                        } else {
-                            Ok(session.config.spectator_visibility)
-                        }
-                    }
+                    Some(session) => check_draft_spectator_password(
+                        &session.lobby_meta,
+                        &session.spectator_password,
+                        password.as_deref(),
+                    )
+                    .map(|_| session.config.spectator_visibility),
                     None => Err("Draft not found".to_string()),
                 }
             };
@@ -7306,5 +7304,227 @@ mod admin_auth_tests {
             StatusCode::OK
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod spectate_draft_password_tests {
+    use super::*;
+    use draft_core::types::{DraftAction, DraftKind, PodPolicy, TournamentFormat};
+    use futures_util::{SinkExt, StreamExt};
+    use server_core::protocol::{ClientMessage, ServerMessage};
+    use std::io::Write;
+    use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use tokio_tungstenite::WebSocketStream;
+
+    fn fixture_draft_pools() -> Arc<draft_pools::DraftPools> {
+        let mut file = tempfile::NamedTempFile::new().expect("temp draft pools file");
+        write!(
+            file,
+            r#"{{
+                "TST": {{
+                    "code": "TST",
+                    "name": "Test Set",
+                    "release_date": null,
+                    "pack_variants": [],
+                    "pack_variants_total_weight": 0,
+                    "sheets": {{}},
+                    "prints": [],
+                    "basic_lands": []
+                }}
+            }}"#
+        )
+        .expect("write draft pools fixture");
+        Arc::new(
+            draft_pools::DraftPools::from_path(file.path()).expect("load draft pools fixture"),
+        )
+    }
+
+    async fn spawn_server(
+        draft_pools: Arc<draft_pools::DraftPools>,
+    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let game_db = Arc::new(
+            persistence::GameDb::open(&temp_dir.path().join("games.db")).expect("game db"),
+        );
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(AppState {
+                sessions: Arc::new(Mutex::new(SessionManager::new())),
+                draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+                draft_pools,
+                connections: Arc::new(Mutex::new(HashMap::new())),
+                db: Arc::new(CardDatabase::default()),
+                lobby: Arc::new(Mutex::new(Broker::new())),
+                lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+                player_count: Arc::new(AtomicU32::new(0)),
+                game_db,
+                draft_spectators: Arc::new(Mutex::new(HashMap::new())),
+                game_spectators: Arc::new(Mutex::new(HashMap::new())),
+                mode: ServerMode::Full,
+                public_url: None,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        (format!("ws://{addr}/ws"), handle, temp_dir)
+    }
+
+    async fn recv_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let msg = socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame");
+        match msg {
+            WsMessage::Text(text) => serde_json::from_str(&text).expect("server message"),
+            other => panic!("expected text server message, got {other:?}"),
+        }
+    }
+
+    async fn connect_and_hello(
+        url: &str,
+    ) -> WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect");
+        assert!(matches!(
+            recv_server_message(&mut socket).await,
+            ServerMessage::ServerHello { .. }
+        ));
+        let hello = ClientMessage::ClientHello {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_commit: build_commit().to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&hello).expect("hello json").into(),
+            ))
+            .await
+            .expect("send hello");
+        socket
+    }
+
+    async fn expect_error_message<S>(socket: &mut WebSocketStream<S>, expected: &str)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match recv_server_message(socket).await {
+                ServerMessage::Error { message } => {
+                    assert_eq!(message, expected);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        panic!("timed out waiting for Error: {expected}");
+    }
+
+    #[tokio::test]
+    async fn spectate_draft_rejects_without_password_after_draft_starts() {
+        let pools = fixture_draft_pools();
+        let (url, server, _temp) = spawn_server(pools).await;
+
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut host = connect_and_hello(&url).await;
+            let create = ClientMessage::CreateDraftWithSettings {
+                display_name: "Alice".to_string(),
+                set_code: "TST".to_string(),
+                kind: DraftKind::Premier,
+                public: false,
+                password: Some("secret".to_string()),
+                timer_seconds: None,
+                tournament_format: TournamentFormat::Swiss,
+                pod_policy: PodPolicy::Competitive,
+                pod_size: 2,
+            };
+            host.send(WsMessage::Text(
+                serde_json::to_string(&create).expect("create json").into(),
+            ))
+            .await
+            .expect("send create");
+
+            let draft_code = loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::DraftCreated { draft_code, .. } => break draft_code,
+                    _ => {}
+                }
+            };
+
+            let start = ClientMessage::DraftAction {
+                draft_code: draft_code.clone(),
+                action: DraftAction::StartDraft,
+            };
+            host.send(WsMessage::Text(
+                serde_json::to_string(&start).expect("start json").into(),
+            ))
+            .await
+            .expect("send start");
+
+            let mut spectator = connect_and_hello(&url).await;
+            spectator
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::SpectateDraft {
+                        draft_code: draft_code.clone(),
+                        password: None,
+                    })
+                    .expect("spectate json")
+                    .into(),
+                ))
+                .await
+                .expect("send spectate without password");
+            expect_error_message(&mut spectator, "password_required").await;
+
+            spectator
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::SpectateDraft {
+                        draft_code: draft_code.clone(),
+                        password: Some("wrong".to_string()),
+                    })
+                    .expect("spectate json")
+                    .into(),
+                ))
+                .await
+                .expect("send spectate with wrong password");
+            expect_error_message(&mut spectator, "Wrong password").await;
+
+            spectator
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::SpectateDraft {
+                        draft_code,
+                        password: Some("secret".to_string()),
+                    })
+                    .expect("spectate json")
+                    .into(),
+                ))
+                .await
+                .expect("send spectate with correct password");
+            loop {
+                if matches!(
+                    recv_server_message(&mut spectator).await,
+                    ServerMessage::DraftSpectatorView { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "spectate password production-path test failed: {result:?}"
+        );
     }
 }

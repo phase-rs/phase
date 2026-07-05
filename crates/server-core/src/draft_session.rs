@@ -22,15 +22,32 @@ pub fn check_draft_lobby_password(
     lobby_meta: &Option<PersistedLobbyMeta>,
     password: Option<&str>,
 ) -> Result<(), String> {
-    if let Some(meta) = lobby_meta {
-        match (&meta.password, password) {
-            (None, _) => Ok(()),
-            (Some(_), None) => Err("password_required".to_string()),
-            (Some(expected), Some(provided)) if expected == provided => Ok(()),
-            (Some(_), Some(_)) => Err("Wrong password".to_string()),
-        }
-    } else {
-        Ok(())
+    verify_draft_password(
+        lobby_meta.as_ref().and_then(|m| m.password.as_deref()),
+        password,
+    )
+}
+
+/// Enforce the pod password for `SpectateDraft`, including after `lobby_meta` is
+/// cleared at draft start.
+pub fn check_draft_spectator_password(
+    lobby_meta: &Option<PersistedLobbyMeta>,
+    spectator_password: &Option<String>,
+    password: Option<&str>,
+) -> Result<(), String> {
+    let required = lobby_meta
+        .as_ref()
+        .and_then(|m| m.password.as_deref())
+        .or(spectator_password.as_deref());
+    verify_draft_password(required, password)
+}
+
+fn verify_draft_password(required: Option<&str>, provided: Option<&str>) -> Result<(), String> {
+    match (required, provided) {
+        (None, _) => Ok(()),
+        (Some(_), None) => Err("password_required".to_string()),
+        (Some(expected), Some(provided)) if expected == provided => Ok(()),
+        (Some(_), Some(_)) => Err("Wrong password".to_string()),
     }
 }
 
@@ -50,6 +67,8 @@ pub struct DraftSession {
     pub active_matches: HashMap<String, String>,
     /// Lobby metadata -- set at creation, cleared when draft starts.
     pub lobby_meta: Option<PersistedLobbyMeta>,
+    /// Pod password retained after `lobby_meta` is cleared so `SpectateDraft` stays gated.
+    pub spectator_password: Option<String>,
     /// Server-side remaining pick timer in ms. Injected into DraftPlayerView before send.
     pub timer_remaining_ms: Option<u32>,
     /// JoinHandle for the active pick timer task (prevents double-fire).
@@ -84,6 +103,7 @@ impl DraftSession {
             config: self.config.clone(),
             active_matches: self.active_matches.clone(),
             lobby_meta: self.lobby_meta.clone(),
+            spectator_password: self.spectator_password.clone(),
             timer_remaining_ms: self.timer_remaining_ms,
         }
     }
@@ -94,6 +114,9 @@ impl DraftSession {
     /// should re-arm from `timer_remaining_ms` if needed.
     pub fn from_persisted(ps: PersistedDraftSession) -> Self {
         let pod_size = ps.player_tokens.len();
+        let spectator_password = ps
+            .spectator_password
+            .or_else(|| ps.lobby_meta.as_ref().and_then(|m| m.password.clone()));
         Self {
             draft_code: ps.draft_code,
             session: ps.session,
@@ -103,6 +126,7 @@ impl DraftSession {
             config: ps.config,
             active_matches: ps.active_matches,
             lobby_meta: ps.lobby_meta,
+            spectator_password,
             timer_remaining_ms: ps.timer_remaining_ms,
             timer_task: None,
         }
@@ -215,6 +239,7 @@ impl DraftSessionManager {
             config,
             active_matches: HashMap::new(),
             lobby_meta: None,
+            spectator_password: None,
             timer_remaining_ms: None,
             timer_task: None,
         };
@@ -317,6 +342,12 @@ impl DraftSessionManager {
             })?;
 
         if clears_lobby {
+            if session.spectator_password.is_none() {
+                session.spectator_password = session
+                    .lobby_meta
+                    .as_ref()
+                    .and_then(|meta| meta.password.clone());
+            }
             session.lobby_meta = None;
         }
 
@@ -350,6 +381,12 @@ impl DraftSessionManager {
             })?;
 
         if clears_lobby {
+            if session.spectator_password.is_none() {
+                session.spectator_password = session
+                    .lobby_meta
+                    .as_ref()
+                    .and_then(|meta| meta.password.clone());
+            }
             session.lobby_meta = None;
         }
 
@@ -793,6 +830,66 @@ mod tests {
         assert_eq!(token.len(), 32);
         assert_eq!(seat, 0);
         assert!(mgr.sessions.contains_key(&code));
+    }
+
+    #[test]
+    fn check_draft_spectator_password_survives_cleared_lobby_meta() {
+        let meta = PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: false,
+            password: Some("secret".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        };
+        let retained = Some("secret".to_string());
+
+        assert_eq!(
+            check_draft_spectator_password(&None, &retained, None).unwrap_err(),
+            "password_required"
+        );
+        assert_eq!(
+            check_draft_spectator_password(&None, &retained, Some("wrong")).unwrap_err(),
+            "Wrong password"
+        );
+        assert!(check_draft_spectator_password(&None, &retained, Some("secret")).is_ok());
+        assert!(check_draft_spectator_password(&Some(meta), &None, Some("secret")).is_ok());
+    }
+
+    #[test]
+    fn spectator_password_retained_after_draft_start() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        mgr.sessions.get_mut(&code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: false,
+            password: Some("secret".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+        mgr.sessions.get_mut(&code).unwrap().spectator_password = Some("secret".to_string());
+
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+            pack_count: 3,
+        };
+        mgr.apply_system_action(&code, DraftAction::StartDraft, Some(&source))
+            .unwrap();
+
+        let session = &mgr.sessions[&code];
+        assert!(session.lobby_meta.is_none());
+        assert_eq!(session.spectator_password.as_deref(), Some("secret"));
+        assert_eq!(
+            check_draft_spectator_password(
+                &session.lobby_meta,
+                &session.spectator_password,
+                None,
+            )
+            .unwrap_err(),
+            "password_required"
+        );
     }
 
     #[test]
