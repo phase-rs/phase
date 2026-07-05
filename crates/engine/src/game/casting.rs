@@ -3822,26 +3822,19 @@ fn casting_variant_candidates(
     };
     let mut candidates = Vec::new();
 
-    // CR 702.102a-b + CR 202.3d: Fuse-capability predicate for the pre-payment
-    // keyword-grant reads below. This function PRODUCES the candidate list
-    // (including Fuse itself, pushed later), so it has no `variant_override` to
-    // derive the fused intent from; instead it mirrors the `has_fuse_candidate`
-    // gate (a Fuse keyword plus a Split back face in hand). A fuse-capable card is
-    // the only card that could ever be cast fused, and the combined characteristics
-    // are exactly what a fused cast would present, so the granted-keyword
-    // (`CastWithKeyword` / `CastWithAlternativeCost`) reads must evaluate the
-    // candidate against the COMBINED mana value / colors — otherwise the granted
-    // alt-cost candidate (Dash/Blitz/etc.) is decided from the front half only and
-    // may be wrongly offered or withheld for the fused cast.
-    let is_fuse_capable = obj.zone == Zone::Hand
-        && obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Fuse))
-        && obj
-            .back_face
-            .as_ref()
-            .is_some_and(|bf| bf.layout_kind == Some(LayoutKind::Split));
+    // CR 601.2b + CR 702.102b: NON-Fuse alternative-cost candidate discovery
+    // (Dash/Evoke/Overload/Freerunning/Prowl/Surge/Emerge/Blitz/Spectacle below)
+    // reads the FRONT-HALF projection via plain `effective_spell_keywords`, NOT the
+    // fused combined projection. A non-Fuse alternative cast executes as its own
+    // cast method (a split spell can't combine Fuse with another alternative cost —
+    // CR 601.2b), and its preparation/cost reader uses the front half, so its
+    // candidate gate must match the front half too. The COMBINED projection is
+    // routed ONLY through the actual `CastingVariant::Fuse` prepare/check path
+    // (`is_fuse_variant`). Admitting a Dash/Evoke option from combined
+    // characteristics would surface an option the later non-fused preparation can't
+    // honor (the granted keyword no longer matches the front half), wrongly falling
+    // back to the printed cost. The Fuse candidate itself is gated intrinsically by
+    // `has_fuse_candidate` (printed Fuse keyword + Split back face) below.
 
     if obj.zone == Zone::Graveyard {
         if super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
@@ -3952,7 +3945,7 @@ fn casting_variant_candidates(
     // turn by an Assassin creature or commander you control") is read from
     // the per-turn ledger maintained in `triggers::collect_pending_triggers`.
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, Keyword::Freerunning(_)))
         && state
@@ -3967,7 +3960,7 @@ fn casting_variant_candidates(
     // any of this spell's creature types. The per-turn creature-type ledger is
     // snapshot at damage time (`creature_types_dealt_combat_damage_this_turn`).
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, Keyword::Prowl(_)))
         && prowl_damage_ledger_satisfied(state, player, object_id)
@@ -3982,7 +3975,7 @@ fn casting_variant_candidates(
     // `spells_cast_this_turn_by_player` yet at offer time, so any prior entry
     // for the caster or a teammate satisfies "another spell".
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, Keyword::Surge(_)))
         && std::iter::once(player)
@@ -4002,7 +3995,7 @@ fn casting_variant_candidates(
     // offers it when the printed cost is unaffordable. effective_spell_keywords
     // covers printed (obj.keywords) AND granted (CastWithKeyword) evoke.
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Evoke(_)))
     {
@@ -4014,7 +4007,7 @@ fn casting_variant_candidates(
     // target (the overload mode requires none — CR 702.96b). effective_spell_keywords
     // covers printed (obj.keywords) AND granted (CastWithKeyword) overload.
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Overload(_)))
     {
@@ -4025,7 +4018,7 @@ fn casting_variant_candidates(
     // requires sacrificing a creature and reducing the emerge cost by that
     // creature's mana value.
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Emerge(_)))
     {
@@ -4037,7 +4030,7 @@ fn casting_variant_candidates(
     // cost is unaffordable). Read the *effective* spell keywords so a Dash cost
     // granted by a static (CR 604.1) is honored, not just printed Dash.
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Dash(_)))
     {
@@ -4051,7 +4044,7 @@ fn casting_variant_candidates(
     // CR 702.152b: only one Blitz may be applied to a spell, so the dedup-by-kind
     // `effective_spell_keywords` is the correct (single-instance) collector here.
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Blitz(_)))
     {
@@ -4064,7 +4057,7 @@ fn casting_variant_candidates(
     // the *effective* spell keywords so a Spectacle cost granted by a static
     // (CR 604.1) is honored, not just printed Spectacle.
     if obj.zone == Zone::Hand
-        && effective_spell_keywords_for(state, player, object_id, is_fuse_capable)
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Spectacle(_)))
         && an_opponent_lost_life_this_turn(state, player)

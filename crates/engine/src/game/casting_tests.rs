@@ -543,6 +543,13 @@ fn cmc_ge(value: i32) -> TargetFilter {
     }]))
 }
 
+fn cmc_le(value: i32) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+        comparator: Comparator::LE,
+        value: QuantityExpr::Fixed { value },
+    }]))
+}
+
 fn fuse_option_offered(set: &CastingVariantChoiceSet) -> bool {
     set.options
         .iter()
@@ -626,15 +633,21 @@ fn fused_split_spell_blocked_by_combined_mana_value_per_turn_limit_enumeration()
     );
 }
 
-/// Test 2 (keyword-grant path inside `prepare_spell_cast_with_variant_override_inner`).
-/// A `CastWithKeyword { Dash }` static whose `affected` filter is `Cmc >= 5`
-/// grants Dash only to spells of combined MV >= 5. The fused cast (MV 8) must
-/// receive the grant — observable because Dash becomes an offered casting
-/// variant on the fused card. Under `Cmc >= 9` (combined MV 8 < 9) the fused
-/// cast does NOT get Dash. Reverting the projection makes the grant read the
-/// front half (MV 2), so Dash is never granted and the positive case fails.
+/// Test 2 (NON-Fuse alternative-cost candidate discovery uses the FRONT-HALF
+/// projection, end-to-end via `casting_variant_choice_set`). CR 601.2b: a split
+/// spell can't combine Fuse with another alternative cost, so a granted-Dash cast
+/// executes as its own front-half cast method. Its candidate gate must therefore
+/// match the FRONT half, not the fused combined value — otherwise an option is
+/// admitted that the later non-fused preparation can't honor (the grant no longer
+/// matches), wrongly falling back to the printed cost.
+/// - `CastWithKeyword { Dash, affected: Cmc >= 5 }` matches ONLY the combined MV
+///   (8), not the front half (2) → Dash must NOT be offered.
+/// - `CastWithKeyword { Dash, affected: Cmc <= 2 }` matches the front half (2) but
+///   not the combined MV (8) → Dash MUST still be offered.
+///
+/// Reverting the candidate gates to the combined projection flips both assertions.
 #[test]
-fn fused_split_spell_receives_value_keyed_keyword_grant_only_under_combined_projection() {
+fn non_fuse_alt_cost_candidate_uses_front_half_not_combined() {
     use crate::game::scenario::{GameScenario, P0};
     use crate::game::scenario_db::GameScenarioDbExt;
 
@@ -665,15 +678,15 @@ fn fused_split_spell_receives_value_keyed_keyword_grant_only_under_combined_proj
     };
 
     assert!(
-        dash_offered(cmc_ge(5)),
-        "a `CastWithKeyword {{ Dash }}` gated on Cmc >= 5 must grant Dash to the fused \
-         Breaking // Entering (combined MV 8) — so Dash is an offered variant. Reverting the \
-         combined projection reads the front half (MV 2 < 5) and never grants Dash."
+        !dash_offered(cmc_ge(5)),
+        "a combined-only `CastWithKeyword {{ Dash, Cmc >= 5 }}` grant (matches combined MV 8, \
+         NOT front MV 2) must NOT surface a separate non-Fuse Dash option — a Dash cast is \
+         front-half and the grant would not cover it at preparation time"
     );
     assert!(
-        !dash_offered(cmc_ge(9)),
-        "gated on Cmc >= 9 the fused cast (combined MV 8 < 9) must NOT receive Dash — this \
-         proves the grant compares the exact combined MV (8), not just a large number."
+        dash_offered(cmc_le(2)),
+        "a front-half `CastWithKeyword {{ Dash, Cmc <= 2 }}` grant (matches front MV 2, not \
+         combined MV 8) must still surface the non-Fuse Dash option"
     );
 }
 
@@ -837,16 +850,19 @@ fn fused_split_spell_granted_flash_timing_uses_combined_projection() {
 }
 
 /// Test 3 (candidate-enumeration path in `casting_variant_candidates`). The Dash
-/// CANDIDATE is only pushed when the spell's effective keywords include Dash,
-/// which for a value-keyed `CastWithKeyword { Dash, affected: Cmc >= 5 }` grant
-/// depends on the projected mana value at candidate-enumeration time — BEFORE the
-/// Fuse candidate itself is pushed. This exercises the fuse-capability predicate
-/// in `casting_variant_candidates`, distinct from Test 2's per-variant prepare
-/// path. Under `Cmc >= 9` the Dash candidate is absent (combined MV 8 < 9).
-/// Reverting the candidate-enumeration projection reads the front half and never
-/// enumerates Dash, so the positive assertion fails.
+/// Test 3 (direct-enumeration counterpart to `non_fuse_alt_cost_candidate_uses_
+/// front_half_not_combined`). Inspects `casting_variant_candidates` directly (BEFORE
+/// `can_cast_prepared_now` filtering) so it isolates the enumeration projection from
+/// downstream affordability/legality. The non-Fuse Dash candidate must be gated on
+/// the FRONT-HALF projection even for a fuse-capable Breaking // Entering:
+/// - `CastWithKeyword { Dash, affected: Cmc >= 5 }` (combined MV 8 only) → Dash
+///   candidate ABSENT (front MV 2 < 5).
+/// - `CastWithKeyword { Dash, affected: Cmc <= 2 }` (front MV 2) → Dash candidate
+///   PRESENT.
+///
+/// Reverting the candidate-enumeration gates to the combined projection flips both.
 #[test]
-fn fused_split_spell_candidate_enumeration_uses_combined_projection_for_granted_keyword() {
+fn non_fuse_alt_cost_candidate_enumeration_uses_front_half() {
     use crate::game::scenario::{GameScenario, P0};
     use crate::game::scenario_db::GameScenarioDbExt;
 
@@ -856,8 +872,6 @@ fn fused_split_spell_candidate_enumeration_uses_combined_projection_for_granted_
         generic: 1,
     });
 
-    // Directly inspect the candidate list (pre-`can_cast_prepared_now` filtering)
-    // so this asserts the enumeration projection, not downstream legality.
     let dash_candidate_present = |filter: TargetFilter| -> bool {
         let mut sc = GameScenario::new();
         sc.at_phase(Phase::PreCombatMain);
@@ -875,16 +889,15 @@ fn fused_split_spell_candidate_enumeration_uses_combined_projection_for_granted_
     };
 
     assert!(
-        dash_candidate_present(cmc_ge(5)),
-        "candidate enumeration for a fuse-capable Breaking // Entering must project the \
-         COMBINED MV (8) when reading granted keywords, so a `CastWithKeyword {{ Dash }}` \
-         gated on Cmc >= 5 enumerates the Dash candidate. Reverting the candidate-path \
-         projection reads the front half (MV 2 < 5) and never enumerates Dash."
+        !dash_candidate_present(cmc_ge(5)),
+        "a combined-only `CastWithKeyword {{ Dash, Cmc >= 5 }}` grant (front MV 2 < 5) must \
+         NOT enumerate a non-Fuse Dash candidate — enumeration reads the front half, since a \
+         Dash cast executes front-half"
     );
     assert!(
-        !dash_candidate_present(cmc_ge(9)),
-        "gated on Cmc >= 9 the combined MV 8 < 9, so the Dash candidate must be absent — \
-         proving the enumeration compares the exact combined MV."
+        dash_candidate_present(cmc_le(2)),
+        "a front-half `CastWithKeyword {{ Dash, Cmc <= 2 }}` grant (front MV 2) must still \
+         enumerate the Dash candidate"
     );
 }
 
