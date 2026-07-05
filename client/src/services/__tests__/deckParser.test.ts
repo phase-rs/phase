@@ -313,6 +313,34 @@ Deck
     expect(parseMtgaDeck('1 Wear //Tear').main).toEqual([{ count: 1, name: 'Wear // Tear' }]);
   });
 
+  it('keeps real double-faced card names intact (spaced and one-sided spacing)', () => {
+    // These are genuine DFCs whose two faces are separated by "//". Real
+    // importers (Moxfield/Archidekt/MTGA) emit the canonical spaced form, which
+    // must pass through unchanged; one-sided spacing is repaired to canonical.
+    expect(parseMtgaDeck('1 Peter Parker // The Amazing Spider-Man').main).toEqual([
+      { count: 1, name: 'Peter Parker // The Amazing Spider-Man' },
+    ]);
+    expect(parseMtgaDeck('1 Witch Enchanter // Witch-blessed Meadow').main).toEqual([
+      { count: 1, name: 'Witch Enchanter // Witch-blessed Meadow' },
+    ]);
+    expect(parseMtgaDeck('1 Peter Parker //The Amazing Spider-Man').main).toEqual([
+      { count: 1, name: 'Peter Parker // The Amazing Spider-Man' },
+    ]);
+  });
+
+  it('leaves a glued double-faced name glued (engine resolves it via the front face)', () => {
+    // A fully glued "A//B" is syntactically indistinguishable from a printed
+    // name like "SP//dr", so the parser leaves it verbatim. The engine's
+    // lookup_key splits on bare "//" and resolves it to the front face, so the
+    // deck still loads.
+    expect(parseMtgaDeck('1 Peter Parker//The Amazing Spider-Man').main).toEqual([
+      { count: 1, name: 'Peter Parker//The Amazing Spider-Man' },
+    ]);
+    expect(parseMtgaDeck('1 Witch Enchanter//Witch-blessed Meadow').main).toEqual([
+      { count: 1, name: 'Witch Enchanter//Witch-blessed Meadow' },
+    ]);
+  });
+
   it('preserves an explicit sideboard header instead of promoting commander heuristically', () => {
     const content = `Deck
 1 Sol Ring
