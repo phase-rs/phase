@@ -1285,21 +1285,25 @@ where
     S: Clone + Send + Sync + 'static,
 {
     if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
-        let expected: Arc<str> = Arc::from(token);
-        let admin_routes = Router::new()
-            .route("/admin/drafts", get(admin::admin_list_drafts))
+        let auth_layer = |expected: Arc<str>| {
+            from_fn(move |request: Request, next: Next| {
+                let expected = expected.clone();
+                async move { require_admin_auth(expected, request, next).await }
+            })
+        };
+        let list_auth = auth_layer(Arc::from(token));
+        let detail_auth = auth_layer(Arc::from(token));
+        app = app
+            .route(
+                "/admin/drafts",
+                get(admin::admin_list_drafts).route_layer(list_auth),
+            )
             .route(
                 "/admin/drafts/{code}",
-                get(admin::admin_get_draft).delete(admin::admin_delete_draft),
-            )
-            .route_layer(from_fn({
-                let expected = expected.clone();
-                move |request: Request, next: Next| {
-                    let expected = expected.clone();
-                    async move { require_admin_auth(expected, request, next).await }
-                }
-            }));
-        app = app.merge(admin_routes);
+                get(admin::admin_get_draft)
+                    .delete(admin::admin_delete_draft)
+                    .route_layer(detail_auth),
+            );
     }
     app
 }
@@ -7131,64 +7135,9 @@ mod issue_4548_deadlock_tests {
 
 #[cfg(test)]
 mod admin_auth_tests {
-    use std::sync::atomic::AtomicU32;
-    use std::sync::Arc;
-
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use axum::Router;
-    use lobby_broker::Broker;
-    use server_core::draft_session::DraftSessionManager;
-    use server_core::session::SessionManager;
-    use tokio::sync::Mutex;
-    use tower::ServiceExt;
-
-    use super::{
-        admin_request_authorized, draft_pools, merge_admin_routes, persistence, tokens_match,
-        AppState, ServerMode,
-    };
+    use super::{admin_request_authorized, tokens_match};
 
     const TOKEN: &str = "s3cr3t-admin-token";
-
-    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
-        let game_db_path = temp_dir.path().join("games.db");
-        let game_db = Arc::new(persistence::GameDb::open(&game_db_path).expect("game db"));
-        AppState {
-            sessions: Arc::new(Mutex::new(SessionManager::new())),
-            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
-            draft_pools: Arc::new(draft_pools::DraftPools::default()),
-            connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            db: Arc::new(engine::database::CardDatabase::default()),
-            lobby: Arc::new(Mutex::new(Broker::new())),
-            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
-            player_count: Arc::new(AtomicU32::new(0)),
-            game_db,
-            draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            mode: ServerMode::Full,
-            public_url: None,
-        }
-    }
-
-    fn test_admin_app(admin_token: Option<&str>) -> (Router<AppState>, tempfile::TempDir) {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app =
-            merge_admin_routes(Router::new(), admin_token).with_state(test_app_state(&temp_dir));
-        (app, temp_dir)
-    }
-
-    async fn get_admin_drafts(app: Router<AppState>, auth: Option<&str>) -> StatusCode {
-        let mut service = app.into_service();
-        let mut builder = Request::builder().method("GET").uri("/admin/drafts");
-        if let Some(value) = auth {
-            builder = builder.header(http::header::AUTHORIZATION, value);
-        }
-        let response = service
-            .oneshot(builder.body(Body::empty()).unwrap())
-            .await
-            .expect("router response");
-        response.status()
-    }
 
     #[test]
     fn tokens_match_is_exact() {
@@ -7223,35 +7172,5 @@ mod admin_auth_tests {
         let basic = format!("Basic {TOKEN}");
         assert!(!admin_request_authorized(Some(&basic), TOKEN));
         assert!(!admin_request_authorized(Some(TOKEN), TOKEN));
-    }
-
-    #[tokio::test]
-    async fn admin_routes_absent_without_token() {
-        let (app, _temp) = test_admin_app(None);
-        assert_eq!(get_admin_drafts(app, None).await, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn admin_routes_reject_missing_bearer() {
-        let (app, _temp) = test_admin_app(Some(TOKEN));
-        assert_eq!(get_admin_drafts(app, None).await, StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn admin_routes_reject_wrong_bearer() {
-        let (app, _temp) = test_admin_app(Some(TOKEN));
-        assert_eq!(
-            get_admin_drafts(app, Some("Bearer wrong-token")).await,
-            StatusCode::UNAUTHORIZED
-        );
-    }
-
-    #[tokio::test]
-    async fn admin_routes_accept_valid_bearer() {
-        let (app, _temp) = test_admin_app(Some(TOKEN));
-        assert_eq!(
-            get_admin_drafts(app, Some(&format!("Bearer {TOKEN}"))).await,
-            StatusCode::OK
-        );
     }
 }

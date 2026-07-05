@@ -40,4 +40,3 @@ ngrok = ["dep:ngrok"]
 futures-util = "0.3"
 tempfile = "3"
 tokio-tungstenite = "0.29"
-tower = { version = "0.5", features = ["util"] }
