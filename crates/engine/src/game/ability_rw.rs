@@ -2693,6 +2693,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Detain { target }
         | Effect::SetRoomDoorLock { target, .. }
         | Effect::RemoveFromCombat { target }
+        | Effect::BecomeBlocked { target }
         | Effect::ApplyPerpetual { target, .. }
         | Effect::TurnFaceUp { target }
         | Effect::TurnFaceDown { target, .. }
@@ -4973,6 +4974,15 @@ fn rw_effect(
         // that falsely conflicted (Gustcloak Savior / Lost in the Woods / Time
         // Bends to My Will).
         Effect::RemoveFromCombat { target } => {
+            let mut p = ext_write(StateKind::TurnStructure);
+            flag_legacy_write_target(&mut p, target);
+            (p, None)
+        }
+        // CR 509.1h: making an attacking creature become blocked writes the
+        // combat `blocked` flag — a turn/combat-structure write, idempotent on a
+        // non-attacker/already-blocked target (mirrors RemoveFromCombat above,
+        // NOT the maximal-conservative fallback).
+        Effect::BecomeBlocked { target } => {
             let mut p = ext_write(StateKind::TurnStructure);
             flag_legacy_write_target(&mut p, target);
             (p, None)
