@@ -237,5 +237,11 @@
     "heading": "Algo salió mal",
     "body": "La aplicación encontró un error inesperado y no puede continuar en esta pantalla. Recargar suele solucionarlo.",
     "reload": "Recargar"
+  },
+  "actionError": {
+    "title": "{{action}} falló",
+    "skipTarget": "Omitir objetivo",
+    "genericAction": "Acción",
+    "unknownEngineError": "Error desconocido del motor"
   }
 }

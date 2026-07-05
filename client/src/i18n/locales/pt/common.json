@@ -237,5 +237,11 @@
     "heading": "Algo deu errado",
     "body": "O aplicativo encontrou um erro inesperado e não pode continuar nesta tela. Recarregar geralmente resolve.",
     "reload": "Recarregar"
+  },
+  "actionError": {
+    "title": "{{action}} falhou",
+    "skipTarget": "Pular alvo",
+    "genericAction": "Ação",
+    "unknownEngineError": "Erro desconhecido do motor"
   }
 }

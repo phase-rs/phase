@@ -9,7 +9,9 @@ import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
 import { flashInGameRolls } from "./diceContest";
+import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
+import { useAppNotificationStore } from "../stores/appToastStore";
 import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckpoints } from "../stores/gameStore";
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
@@ -155,6 +157,31 @@ function isEngineUnresponsive(err: unknown): boolean {
  */
 function isStaleAction(err: unknown): boolean {
   return err instanceof AdapterError && err.code === AdapterErrorCode.STALE_ACTION;
+}
+
+function actionErrorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string" && err.length > 0) return err;
+  return i18n.t("actionError.unknownEngineError");
+}
+
+function actionLabel(action: GameAction): string {
+  if (action.type === "ChooseTarget" && action.data.target === null) {
+    return i18n.t("actionError.skipTarget");
+  }
+  return i18n.t("actionError.genericAction");
+}
+
+function shouldShowActionError(err: unknown): boolean {
+  return !isStateLost(err) && !isEnginePanic(err) && !isEngineUnresponsive(err) && !isStaleAction(err);
+}
+
+function showActionError(action: GameAction, err: unknown): void {
+  if (!shouldShowActionError(err)) return;
+  useAppNotificationStore.getState().showNotification({
+    title: i18n.t("actionError.title", { action: actionLabel(action) }),
+    description: actionErrorMessage(err),
+  });
 }
 
 async function processAction(action: GameAction, actor: number): Promise<void> {
@@ -457,6 +484,9 @@ async function processQueue(): Promise<void> {
       next.resolve();
     } catch (err) {
       debugLog(`processQueue error (${next.kind}): ${err instanceof Error ? err.message : String(err)}`);
+      if (next.kind === "local") {
+        showActionError(next.action, err);
+      }
       next.reject(err);
       // If processAction escalated to Layer 3 (notifyEngineLost already
       // fired), drain the rest of the queue with the same error. Without
@@ -558,6 +588,7 @@ export async function dispatchAction(
     await processAction(submittedAction, actor);
   } catch (e) {
     debugLog(`dispatch error for ${submittedAction.type}: ${e instanceof Error ? e.message : String(e)}`);
+    showActionError(submittedAction, e);
     throw e;
   } finally {
     inFlightLocalAction = null;

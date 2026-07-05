@@ -11335,6 +11335,21 @@ pub(super) fn can_feasibly_pay_mana_cost(
     can_feasibly_pay_mana_cost_with_probe(state, player, source_id, cost, None)
 }
 
+pub(super) fn has_manual_mana_ability_for_spell_payment(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let spell_meta = build_spell_meta(state, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+        state,
+        player,
+        Some(source_id),
+        spell_ctx.as_ref(),
+    )
+}
+
 pub(super) fn can_feasibly_pay_mana_cost_with_probe(
     state: &GameState,
     player: PlayerId,

@@ -237,5 +237,11 @@
     "heading": "Qualcosa è andato storto",
     "body": "L'app ha riscontrato un errore imprevisto e non può continuare in questa schermata. Ricaricare di solito risolve il problema.",
     "reload": "Ricarica"
+  },
+  "actionError": {
+    "title": "{{action}} non riuscita",
+    "skipTarget": "Salta bersaglio",
+    "genericAction": "Azione",
+    "unknownEngineError": "Errore motore sconosciuto"
   }
 }

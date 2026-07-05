@@ -237,5 +237,11 @@
     "heading": "Une erreur est survenue",
     "body": "L'application a rencontré une erreur inattendue et ne peut pas continuer sur cet écran. Recharger règle généralement le problème.",
     "reload": "Recharger"
+  },
+  "actionError": {
+    "title": "Échec de {{action}}",
+    "skipTarget": "Ignorer la cible",
+    "genericAction": "Action",
+    "unknownEngineError": "Erreur moteur inconnue"
   }
 }
