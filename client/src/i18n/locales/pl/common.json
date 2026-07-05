@@ -211,6 +211,11 @@
       "message": "Skonfiguruj dowolny stan pola bitwy za pomocą <tools>Narzędzi piaskownicy</tools> — dodawaj karty i żetony, zmieniaj życie i znaczniki, kopiuj trwałe permanenty lub przeskakuj fazy. Otwórz je w dowolnej chwili klawiszem <key>`</key>.",
       "dismiss": "Odrzuć",
       "open": "Otwórz Narzędzia piaskownicy"
+    },
+    "reportCardNudge": {
+      "message": "Karta wyświetla się lub działa źle? Dotknij <flag>flagi zgłoszenia</flag> w lewym górnym rogu, aby ją zgłosić, a my ją naprawimy.",
+      "dismiss": "Odrzuć",
+      "open": "Zgłoś kartę"
     }
   },
   "splash": {

@@ -211,6 +211,11 @@
       "message": "Configurez n'importe quel état du plateau avec les <tools>Outils bac à sable</tools> — ajoutez des cartes et des jetons, modifiez les points de vie et les marqueurs, copiez des permanents ou changez de phase. Ouvrez-les à tout moment avec la touche <key>`</key>.",
       "dismiss": "Ignorer",
       "open": "Ouvrir les outils bac à sable"
+    },
+    "reportCardNudge": {
+      "message": "Une carte s'affiche ou se joue mal ? Touchez le <flag>drapeau de signalement</flag> en haut à gauche pour la signaler afin que nous la corrigions.",
+      "dismiss": "Ignorer",
+      "open": "Signaler une carte"
     }
   },
   "splash": {

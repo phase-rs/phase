@@ -211,6 +211,11 @@
       "message": "Richte mit den <tools>Sandbox-Werkzeugen</tools> einen beliebigen Spielzustand ein — füge Karten und Spielsteine hinzu, ändere Leben und Marken, kopiere bleibende Karten oder springe zwischen Phasen. Öffne sie jederzeit mit der Taste <key>`</key>.",
       "dismiss": "Schließen",
       "open": "Sandbox-Werkzeuge öffnen"
+    },
+    "reportCardNudge": {
+      "message": "Wird eine Karte falsch dargestellt oder gespielt? Tippe oben links auf die <flag>Melden-Flagge</flag>, um sie zu melden, damit wir sie beheben können.",
+      "dismiss": "Schließen",
+      "open": "Karte melden"
     }
   },
   "splash": {

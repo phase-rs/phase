@@ -211,6 +211,11 @@
       "message": "Configura cualquier estado del tablero con <tools>Herramientas de sandbox</tools> — añade cartas y fichas, cambia vidas y contadores, copia permanentes o salta fases. Ábrelo en cualquier momento con la tecla <key>`</key>.",
       "dismiss": "Descartar",
       "open": "Abrir Herramientas de sandbox"
+    },
+    "reportCardNudge": {
+      "message": "¿Una carta se muestra o juega mal? Toca la <flag>bandera de reporte</flag> arriba a la izquierda para reportarla y poder corregirla.",
+      "dismiss": "Descartar",
+      "open": "Reportar carta"
     }
   },
   "splash": {

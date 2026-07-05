@@ -46,6 +46,7 @@ import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
+import { ReportCardNudge } from "../components/help/ReportCardNudge.tsx";
 import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
 import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
@@ -841,6 +842,8 @@ function GamePageContent({
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
   const dismissedSandboxToolsNudge = usePreferencesStore((s) => s.dismissedSandboxToolsNudge);
+  const dismissedReportCardNudge = usePreferencesStore((s) => s.dismissedReportCardNudge);
+  const cardReportDialogOpen = useUiStore((s) => s.cardReportDialogOpen);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
@@ -1176,6 +1179,31 @@ function GamePageContent({
     canActForWaitingState &&
     stackLength === 0;
 
+  // Last in the first-run hint chain (requires the sandbox nudge dismissed first)
+  // so the three hints never stack. Same calm-moment guards, plus: gated on the
+  // report affordance being available and hidden once the dialog is already open.
+  const showReportCardNudge =
+    !dismissedReportCardNudge &&
+    dismissedSandboxToolsNudge &&
+    canReportCard &&
+    !cardReportDialogOpen &&
+    !debugPanelOpen &&
+    !helpSheetOpen &&
+    (mode === "ai" || mode === "local") &&
+    viewingZone == null &&
+    preferencesOpen == null &&
+    boardContextMenu == null &&
+    !showCardDataMissing &&
+    resumeResetReason == null &&
+    !showConcedeDialog &&
+    disconnectChoice == null &&
+    pauseReason == null &&
+    reconnectState.status === "idle" &&
+    waitingFor?.type === "Priority" &&
+    waitingFor.data.player === playerId &&
+    canActForWaitingState &&
+    stackLength === 0;
+
   return (
     <div
       ref={containerRef}
@@ -1390,6 +1418,7 @@ function GamePageContent({
         >
           {showFlowHelpNudge && <FlowHelpNudge />}
           {showSandboxToolsNudge && <SandboxToolsNudge />}
+          {showReportCardNudge && <ReportCardNudge />}
           <div className="hidden max-lg:landscape:block lg:block">
             <CombatPhaseIndicator />
           </div>

@@ -211,6 +211,11 @@
       "message": "Configure qualquer estado de tabuleiro com as <tools>Ferramentas de Sandbox</tools> — adicione cartas e fichas, altere vidas e marcadores, copie permanentes ou avance fases. Abra a qualquer momento com a tecla <key>`</key>.",
       "dismiss": "Dispensar",
       "open": "Abrir Ferramentas de Sandbox"
+    },
+    "reportCardNudge": {
+      "message": "Uma carta é exibida ou jogada de forma errada? Toque na <flag>bandeira de reporte</flag> no canto superior esquerdo para reportá-la e podermos corrigi-la.",
+      "dismiss": "Dispensar",
+      "open": "Reportar carta"
     }
   },
   "splash": {

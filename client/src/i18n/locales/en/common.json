@@ -211,6 +211,11 @@
       "message": "Set up any board state with <tools>Sandbox Tools</tools> — add cards and tokens, change life and counters, copy permanents, or jump phases. Open it anytime with the <key>`</key> key.",
       "dismiss": "Dismiss",
       "open": "Open Sandbox Tools"
+    },
+    "reportCardNudge": {
+      "message": "See a card render or play wrong? Tap the <flag>report flag</flag> in the top-left to flag it so we can fix it.",
+      "dismiss": "Dismiss",
+      "open": "Report a Card"
     }
   },
   "splash": {

@@ -211,6 +211,11 @@
       "message": "Imposta qualsiasi stato del campo con <tools>Strumenti Sandbox</tools> — aggiungi carte e pedine, cambia punti vita e segnalini, copia permanenti o salta le fasi. Aprilo in qualsiasi momento con il tasto <key>`</key>.",
       "dismiss": "Ignora",
       "open": "Apri Strumenti Sandbox"
+    },
+    "reportCardNudge": {
+      "message": "Una carta viene mostrata o giocata in modo errato? Tocca la <flag>bandierina di segnalazione</flag> in alto a sinistra per segnalarla così possiamo correggerla.",
+      "dismiss": "Ignora",
+      "open": "Segnala una carta"
     }
   },
   "splash": {
