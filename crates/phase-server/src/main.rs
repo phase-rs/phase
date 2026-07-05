@@ -7169,7 +7169,7 @@ mod admin_auth_tests {
         }
     }
 
-    fn test_admin_router(app_state: AppState, admin_token: Option<&str>) -> Router {
+    fn test_admin_router(app_state: AppState, admin_token: Option<&str>) {
         let mut app = Router::new();
         if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
             app = mount_admin_routes(app, token);
@@ -7177,7 +7177,11 @@ mod admin_auth_tests {
         app.with_state(app_state)
     }
 
-    async fn spawn_admin_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+    async fn spawn_admin_http_test(
+        admin_token: Option<&str>,
+    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app = test_admin_router(test_app_state(&temp_dir), admin_token);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -7185,7 +7189,7 @@ mod admin_auth_tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("test server");
         });
-        (format!("http://{addr}"), handle)
+        (format!("http://{addr}"), handle, temp_dir)
     }
 
     async fn get_admin_drafts(base_url: &str, auth: Option<&str>) -> StatusCode {
@@ -7251,9 +7255,7 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_absent_without_token() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app = test_admin_router(test_app_state(&temp_dir), None);
-        let (base_url, server) = spawn_admin_test_server(app).await;
+        let (base_url, server, _temp) = spawn_admin_http_test(None).await;
         assert_eq!(
             get_admin_drafts(&base_url, None).await,
             StatusCode::NOT_FOUND
@@ -7263,9 +7265,7 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_reject_missing_bearer() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app = test_admin_router(test_app_state(&temp_dir), Some(TOKEN));
-        let (base_url, server) = spawn_admin_test_server(app).await;
+        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
         assert_eq!(
             get_admin_drafts(&base_url, None).await,
             StatusCode::UNAUTHORIZED
@@ -7275,9 +7275,7 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_reject_wrong_bearer() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app = test_admin_router(test_app_state(&temp_dir), Some(TOKEN));
-        let (base_url, server) = spawn_admin_test_server(app).await;
+        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
         assert_eq!(
             get_admin_drafts(&base_url, Some("Bearer wrong-token")).await,
             StatusCode::UNAUTHORIZED
@@ -7287,9 +7285,7 @@ mod admin_auth_tests {
 
     #[tokio::test]
     async fn admin_routes_accept_valid_bearer() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app = test_admin_router(test_app_state(&temp_dir), Some(TOKEN));
-        let (base_url, server) = spawn_admin_test_server(app).await;
+        let (base_url, server, _temp) = spawn_admin_http_test(Some(TOKEN)).await;
         assert_eq!(
             get_admin_drafts(&base_url, Some(&format!("Bearer {TOKEN}"))).await,
             StatusCode::OK
