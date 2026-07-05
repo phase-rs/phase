@@ -78,6 +78,7 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
             target: Some(TargetRef::Object(bear)),
         })
         .expect("second ChooseTarget (creature) should succeed");
+
     // Skip remaining optional slots — mirrors the client "done" action.
     runner
         .act(GameAction::ChooseTarget {
