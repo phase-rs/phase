@@ -78,16 +78,12 @@ fn violent_eruption_choose_target_path_divides_damage_among_two_targets() {
             target: Some(TargetRef::Object(bear)),
         })
         .expect("second ChooseTarget (creature) should succeed");
-
     // Skip remaining optional slots — mirrors the client "done" action.
     runner
-        .act(GameAction::ChooseTarget {
-            target: None,
-        })
+        .act(GameAction::ChooseTarget { target: None })
         .expect("skipping optional tail should complete target selection");
 
-    let WaitingFor::DistributeAmong { total, targets, .. } =
-        runner.state().waiting_for.clone()
+    let WaitingFor::DistributeAmong { total, targets, .. } = runner.state().waiting_for.clone()
     else {
         panic!(
             "expected DistributeAmong after slot-by-slot target selection, got {:?}",
