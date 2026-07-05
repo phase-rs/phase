@@ -1655,6 +1655,18 @@ fn unmask_card_name_keyword_action(text: String, originals: &[String]) -> String
 
 fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, usize> {
     alt((
+        value("permanents named ".len(), tag("permanents named ")),
+        value("permanent named ".len(), tag("permanent named ")),
+        value("creatures named ".len(), tag("creatures named ")),
+        value("creature named ".len(), tag("creature named ")),
+        value("artifacts named ".len(), tag("artifacts named ")),
+        value("artifact named ".len(), tag("artifact named ")),
+        value("enchantments named ".len(), tag("enchantments named ")),
+        value("enchantment named ".len(), tag("enchantment named ")),
+        value("lands named ".len(), tag("lands named ")),
+        value("land named ".len(), tag("land named ")),
+        value("spells named ".len(), tag("spells named ")),
+        value("spell named ".len(), tag("spell named ")),
         value("cards named ".len(), tag("cards named ")),
         value("card named ".len(), tag("card named ")),
     ))
@@ -1827,10 +1839,11 @@ fn card_named_literal_span_len(lower: &str) -> usize {
         .unwrap_or(lower.len())
 }
 
-/// CR 201.2 / CR 201.5: the text after "card(s) named ..." is a literal card
-/// name, not a self-reference to the source card. Mask only that literal name
-/// span while `normalize_card_name_refs` runs so first-word fallback cannot
-/// rewrite cards like Emerald Collector's "Mox Emerald" into "Mox ~".
+/// CR 201.2 / CR 201.5: the text after "[object] named ..." is a literal name,
+/// not a self-reference to the source card. Mask only that literal name span
+/// while `normalize_card_name_refs` runs so first-word fallback cannot rewrite
+/// cards like Emerald Collector's "Mox Emerald" into "Mox ~" or Kookus's
+/// "Keeper of Kookus" into "Keeper of ~".
 fn mask_card_named_literal_spans(text: &str) -> (String, Vec<String>) {
     let lower = text.to_ascii_lowercase();
     let mut masked = String::with_capacity(text.len());
@@ -2358,6 +2371,17 @@ mod tests {
                 "Stomping Slabs",
             ),
             "If a card named Stomping Slabs was revealed this way, ~ deals 7 damage to any target."
+        );
+    }
+
+    #[test]
+    fn normalize_named_object_literal_preserves_embedded_source_name() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "At the beginning of your upkeep, if you don't control a creature named Keeper of Kookus, this creature deals 3 damage to you.",
+                "Kookus",
+            ),
+            "At the beginning of your upkeep, if you don't control a creature named Keeper of Kookus, ~ deals 3 damage to you."
         );
     }
 

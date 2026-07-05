@@ -10,7 +10,8 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope,
     PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    SharedQuality, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -115,6 +116,73 @@ fn parse_damage_to_qualifier_player_planeswalker_or_battle() {
             )));
         }
         other => panic!("expected Or {{ Player, Planeswalker, Battle }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_kookus_named_creature_condition_preserves_literal_name_and_body() {
+    let parsed = parse_oracle_text(
+        "Trample\nAt the beginning of your upkeep, if you don't control a creature named Keeper of Kookus, this creature deals 3 damage to you and attacks this turn if able.\n{R}: This creature gets +1/+0 until end of turn.",
+        "Kookus",
+        &[],
+        &[],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Keeper of Kookus"))
+        })
+        .expect("Kookus upkeep trigger should parse");
+
+    let condition = trigger.condition.clone().expect("trigger condition");
+    match condition {
+        TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } => match filter {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                assert!(properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::Named { name } if name == "keeper of kookus"
+                )));
+            }
+            other => panic!("expected named creature filter, got {other:?}"),
+        },
+        other => panic!("expected no-Keeper condition, got {other:?}"),
+    }
+
+    let execute = trigger.execute.as_ref().expect("trigger body");
+    match execute.effect.as_ref() {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            ..
+        } => {}
+        other => panic!("expected damage to controller, got {other:?}"),
+    }
+
+    let must_attack = execute
+        .sub_ability
+        .as_ref()
+        .expect("must-attack continuation");
+    match must_attack.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => assert!(static_abilities
+            .iter()
+            .any(|static_ability| static_ability.mode == StaticMode::MustAttack)),
+        other => panic!("expected must-attack continuation, got {other:?}"),
     }
 }
 

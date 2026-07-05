@@ -1658,6 +1658,7 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
             (
                 tag(", "),
                 alt((
+                    tag("~ "),
                     tag("it "),
                     tag("they "),
                     tag("he "),
@@ -6780,6 +6781,12 @@ mod tests {
         // punctuation) when no clause boundary follows.
         let (name, _) = named_of("a creature named Bruna, the Fading Light");
         assert_eq!(name, "Bruna, the Fading Light");
+
+        // A comma followed by the normalized self-reference opens the next
+        // clause, not part of the literal name (Kookus class).
+        let (name, rest) = named_of("a creature named Keeper of Kookus, ~ deals 3 damage");
+        assert_eq!(name, "Keeper of Kookus");
+        assert_eq!(rest.trim_start_matches([',', ' ']), "~ deals 3 damage");
 
         // Period still ends the name.
         let (name, _) = named_of("a creature named Storm Crow.");
