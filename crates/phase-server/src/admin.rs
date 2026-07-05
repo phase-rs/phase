@@ -54,7 +54,7 @@ pub async fn admin_get_draft(
     let drafts = app_state.draft_sessions.lock().await;
     match drafts.sessions.get(&code) {
         Some(session) => {
-            let persisted = session.to_persisted();
+            let persisted = session.to_admin_snapshot();
             match serde_json::to_value(&persisted) {
                 Ok(val) => Json(val).into_response(),
                 Err(_) => {

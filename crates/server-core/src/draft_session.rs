@@ -71,6 +71,16 @@ impl DraftSession {
         }
     }
 
+    /// Admin HTTP snapshot: same shape as [`Self::to_persisted`] but with
+    /// impersonation credentials and competitive RNG material stripped.
+    ///
+    /// `GET /admin/drafts/{code}` is bearer-gated, but the response must still
+    /// not disclose per-seat `player_tokens` or the lobby password — a leaked
+    /// admin token must not grant seat impersonation.
+    pub fn to_admin_snapshot(&self) -> PersistedDraftSession {
+        redact_persisted_draft_secrets(self.to_persisted())
+    }
+
     /// Restore a draft session from a persisted snapshot.
     ///
     /// All players start disconnected. `timer_task` is None — the caller
@@ -97,6 +107,21 @@ impl DraftSession {
         view.timer_remaining_ms = self.timer_remaining_ms;
         view
     }
+}
+
+/// Strip impersonation credentials and competitive RNG material from a draft
+/// persistence snapshot before it is returned over the admin HTTP surface.
+fn redact_persisted_draft_secrets(mut ps: PersistedDraftSession) -> PersistedDraftSession {
+    for token in &mut ps.player_tokens {
+        if !token.is_empty() {
+            token.clear();
+        }
+    }
+    if let Some(meta) = &mut ps.lobby_meta {
+        meta.password = None;
+    }
+    ps.config.rng_seed = 0;
+    ps
 }
 
 /// Seats that still owe a pick this round and have not yet submitted one.
@@ -1131,6 +1156,45 @@ mod tests {
 
         assert!(spawns.is_empty());
         assert!(game_mgr.sessions.is_empty());
+    }
+
+    #[test]
+    fn to_admin_snapshot_redacts_player_tokens_but_preserves_occupancy() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        for i in 1..4 {
+            mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
+        }
+
+        let session = &mgr.sessions[&code];
+        let real = session.to_persisted();
+        let admin = session.to_admin_snapshot();
+
+        assert_eq!(admin.player_tokens.len(), real.player_tokens.len());
+        assert!(real.player_tokens.iter().any(|t| !t.is_empty()));
+        assert!(admin.player_tokens.iter().all(|t| t.is_empty()));
+        assert_ne!(host_token, "");
+        assert!(!admin.player_tokens.contains(&host_token));
+    }
+
+    #[test]
+    fn to_admin_snapshot_redacts_lobby_password_and_rng_seed() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: false,
+            password: Some("secret-pod".to_string()),
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+        session.config.rng_seed = 0xdead_beef_cafe_babe;
+
+        let admin = session.to_admin_snapshot();
+        assert_eq!(admin.lobby_meta.as_ref().unwrap().password, None);
+        assert_eq!(admin.config.rng_seed, 0);
     }
 
     #[test]
