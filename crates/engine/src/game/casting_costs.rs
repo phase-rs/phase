@@ -124,6 +124,157 @@ fn recompute_pending_cast_cost_after_additional_cost(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclaredManaSplit {
+    pub declared: Vec<ManaCost>,
+    pub residual: Option<AbilityCost>,
+    pub payment_mode: Option<ConvokeMode>,
+}
+
+fn residual_from_parts(mut residuals: Vec<AbilityCost>) -> Option<AbilityCost> {
+    match residuals.len() {
+        0 => None,
+        1 => residuals.pop(),
+        _ => Some(AbilityCost::Composite { costs: residuals }),
+    }
+}
+
+pub(crate) fn split_declared_mana_addition_and_residual(
+    state: &GameState,
+    pending: &PendingCast,
+    cost: AbilityCost,
+) -> Result<DeclaredManaSplit, EngineError> {
+    match cost {
+        AbilityCost::Mana { cost } => Ok(DeclaredManaSplit {
+            declared: vec![cost],
+            residual: None,
+            payment_mode: None,
+        }),
+        AbilityCost::ManaDynamic { quantity } => {
+            let amount =
+                super::quantity::resolve_quantity_with_targets(state, &quantity, &pending.ability)
+                    .max(0) as u32;
+            Ok(DeclaredManaSplit {
+                declared: vec![ManaCost::generic(amount)],
+                residual: None,
+                payment_mode: None,
+            })
+        }
+        AbilityCost::KeywordCostOfCastSpell { keyword } => {
+            let cost =
+                super::keywords::effective_keyword_mana_cost(state, pending.object_id, keyword)
+                    .ok_or_else(|| {
+                        EngineError::ActionNotAllowed(
+                            "Cannot resolve keyword cost for this spell; cast aborted".to_string(),
+                        )
+                    })?;
+            Ok(DeclaredManaSplit {
+                declared: vec![cost],
+                residual: None,
+                payment_mode: None,
+            })
+        }
+        AbilityCost::Waterbend { cost } => Ok(DeclaredManaSplit {
+            declared: vec![cost],
+            residual: None,
+            payment_mode: Some(ConvokeMode::Waterbend),
+        }),
+        AbilityCost::Composite { costs } => {
+            let mut declared = Vec::new();
+            let mut residuals = Vec::new();
+            let mut payment_mode = None;
+            for cost in costs {
+                let split = split_declared_mana_addition_and_residual(state, pending, cost)?;
+                declared.extend(split.declared);
+                if let Some(residual) = split.residual {
+                    residuals.push(residual);
+                }
+                if split.payment_mode.is_some() {
+                    payment_mode = split.payment_mode;
+                }
+            }
+            Ok(DeclaredManaSplit {
+                declared,
+                residual: residual_from_parts(residuals),
+                payment_mode,
+            })
+        }
+        AbilityCost::OneOf { .. } => Err(EngineError::ActionNotAllowed(
+            "Cannot split unresolved choice cost".to_string(),
+        )),
+        residual => Ok(DeclaredManaSplit {
+            declared: Vec::new(),
+            residual: Some(residual),
+            payment_mode: None,
+        }),
+    }
+}
+
+pub(crate) fn additional_cost_declaration_is_offerable(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    cost: AbilityCost,
+) -> Result<bool, EngineError> {
+    let split = split_declared_mana_addition_and_residual(state, pending, cost)?;
+    if let Some(residual) = split.residual.as_ref() {
+        if !residual.is_payable(state, player, pending.object_id) {
+            return Ok(false);
+        }
+    }
+    let mut pending = pending.clone();
+    pending.declared_mana_additions.extend(split.declared);
+    let total = super::casting::recompute_pending_mana_total(
+        state,
+        player,
+        &pending,
+        pending.ability.chosen_x,
+    );
+    let can_pay_normally =
+        super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total);
+    if can_pay_normally {
+        return Ok(true);
+    }
+    Ok(split.payment_mode.is_some_and(|mode| {
+        super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
+            state,
+            player,
+            pending.object_id,
+            &total,
+            mode,
+        )
+    }))
+}
+
+fn continue_after_declared_mana_split(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    split: DeclaredManaSplit,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !split.declared.is_empty() {
+        pending.declared_mana_additions.extend(split.declared);
+        pending.cost = super::casting::recompute_pending_mana_total(
+            state,
+            player,
+            &pending,
+            pending.ability.chosen_x,
+        );
+    }
+    if split.payment_mode.is_some() {
+        pending.additional_cost_payment_mode = split.payment_mode;
+    }
+    if let Some(residual) = split.residual {
+        return pay_additional_cost(state, player, residual, pending, events);
+    }
+    if let Some(payment_mode) = pending.additional_cost_payment_mode.take() {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, Some(payment_mode), events);
+    }
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
 ///
 /// For `Optional`: `pay=true` pays the cost and sets `additional_cost_paid`, `pay=false` skips.
@@ -193,6 +344,8 @@ pub(crate) fn handle_decide_additional_cost(
     // a `ReduceCost { condition: AdditionalCostPaid }` static only applies once
     // `additional_cost_paid` is set.
     let mut optional_cost_paid = false;
+    let mut alternative_base_override = None;
+    let mut recompute_choice_cost = false;
 
     let cost_to_pay = match additional_cost {
         // CR 702.33a: Kicker is an optional additional cost.
@@ -244,9 +397,37 @@ pub(crate) fn handle_decide_additional_cost(
                     // additional costs; gate riders via `alternative_mana_cost_paid`.
                     ability.context.alternative_mana_cost_paid = true;
                 }
-                Some(preferred.clone())
+                let is_spell_alternative_choice =
+                    !is_card_additional_cost_choice && matches!(fallback, AbilityCost::Mana { .. });
+                if is_spell_alternative_choice {
+                    ability.context.alternative_mana_cost_paid = true;
+                    recompute_choice_cost = true;
+                    match preferred {
+                        AbilityCost::Mana { cost } => {
+                            alternative_base_override = Some(cost.clone());
+                            None
+                        }
+                        _ => {
+                            alternative_base_override = Some(ManaCost::NoCost);
+                            Some(preferred.clone())
+                        }
+                    }
+                } else {
+                    Some(preferred.clone())
+                }
             } else {
-                Some(fallback.clone())
+                let is_spell_alternative_choice = !state
+                    .objects
+                    .get(&pending.object_id)
+                    .and_then(|obj| obj.additional_cost.as_ref())
+                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
+                    && matches!(fallback, AbilityCost::Mana { .. });
+                if is_spell_alternative_choice {
+                    recompute_choice_cost = true;
+                    None
+                } else {
+                    Some(fallback.clone())
+                }
             }
         }
         AdditionalCost::Required(cost) => {
@@ -268,6 +449,17 @@ pub(crate) fn handle_decide_additional_cost(
     };
 
     let mut updated_pending = PendingCast { ability, ..pending };
+    if let Some(base) = alternative_base_override {
+        updated_pending.base_cost = Some(base);
+    }
+    if recompute_choice_cost {
+        updated_pending.cost = super::casting::recompute_pending_mana_total(
+            state,
+            player,
+            &updated_pending,
+            updated_pending.ability.chosen_x,
+        );
+    }
     if current_instance.is_some() {
         updated_pending.additional_cost_queue.remove(0);
         if updated_pending.additional_cost_queue.is_empty() {
@@ -509,8 +701,8 @@ fn next_kicker_option(
 
     if repeatability.is_repeatable() {
         let cost = costs.first()?.clone();
-        return cost
-            .is_payable(state, player, pending.object_id)
+        return additional_cost_declaration_is_offerable(state, player, pending, cost.clone())
+            .unwrap_or(false)
             .then_some((
                 KickerVariant::First,
                 cost,
@@ -529,7 +721,9 @@ fn next_kicker_option(
         {
             continue;
         }
-        if cost.is_payable(state, player, pending.object_id) {
+        if additional_cost_declaration_is_offerable(state, player, pending, cost.clone())
+            .unwrap_or(false)
+        {
             return Some((
                 variant,
                 cost.clone(),
@@ -599,8 +793,8 @@ fn next_repeatable_additional_cost(
         ..
     }) = pending.additional_cost_queue.first()
     {
-        return cost
-            .is_payable(state, player, pending.object_id)
+        return additional_cost_declaration_is_offerable(state, player, pending, cost.clone())
+            .unwrap_or(false)
             .then_some(cost.clone());
     }
 
@@ -612,7 +806,8 @@ fn next_repeatable_additional_cost(
         return None;
     };
 
-    cost.is_payable(state, player, pending.object_id)
+    additional_cost_declaration_is_offerable(state, player, pending, cost.clone())
+        .unwrap_or(false)
         .then_some(cost.clone())
 }
 
@@ -639,7 +834,8 @@ fn finish_pending_cost_or_cast(
                 cost,
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
-                if !cost.is_payable(state, player, pending.object_id) {
+                if !additional_cost_declaration_is_offerable(state, player, &pending, cost.clone())?
+                {
                     pending.additional_cost_queue.remove(0);
                     return finish_pending_cost_or_cast(state, player, pending, events);
                 }
@@ -657,7 +853,8 @@ fn finish_pending_cost_or_cast(
                 cost,
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
             } => {
-                if cost.is_payable(state, player, pending.object_id) {
+                if additional_cost_declaration_is_offerable(state, player, &pending, cost.clone())?
+                {
                     let times_kicked = pending.ability.context.instance_payment_count_for_ordinal(
                         instance.origin,
                         instance.origin_ordinal,
@@ -885,6 +1082,11 @@ fn finish_pending_cost_or_cast(
             pending,
             events,
         );
+    }
+
+    if let Some(payment_mode) = pending.additional_cost_payment_mode.take() {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, Some(payment_mode), events);
     }
 
     if pending.activation_ability_index.is_some()
@@ -3479,17 +3681,29 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
                 && alt_cost.timing_permission == cast_timing_permission;
             if alt_cost_required_for_timing {
-                if matches!(alt_cost.cost, AbilityCost::Mana { .. }) {
-                    pending.ability.context.alternative_mana_cost_paid = true;
+                match alt_cost.cost {
+                    AbilityCost::Mana { cost: alt_mana } => {
+                        pending.ability.context.alternative_mana_cost_paid = true;
+                        pending.base_cost = Some(alt_mana);
+                        pending.cost = super::casting::recompute_pending_mana_total(
+                            state,
+                            player,
+                            &pending,
+                            pending.ability.chosen_x,
+                        );
+                        return finish_pending_cost_or_cast(state, player, pending, events);
+                    }
+                    cost => {
+                        return pay_additional_cost_with_source(
+                            state,
+                            player,
+                            cost,
+                            SpellCostSource::Other,
+                            pending,
+                            events,
+                        );
+                    }
                 }
-                return pay_additional_cost_with_source(
-                    state,
-                    player,
-                    alt_cost.cost,
-                    SpellCostSource::Other,
-                    pending,
-                    events,
-                );
             }
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
@@ -3520,13 +3734,6 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if let Some(additional_cost) = additional {
         match &additional_cost {
             AdditionalCost::Required(req_cost) => {
-                // CR 601.2b: Required additional cost whose choice-of-object is
-                // unavailable makes the spell uncastable.
-                if !req_cost.is_payable(state, player, object_id) {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Cannot pay required additional cost".to_string(),
-                    ));
-                }
                 // Required additional costs bypass the choice prompt — pay directly.
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.base_cost = base_cost.clone();
@@ -3534,6 +3741,19 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                // CR 601.2b + CR 601.2f: Required additional cost whose
+                // residual object choice is unavailable or whose declared mana
+                // total is unaffordable makes the spell uncastable.
+                if !additional_cost_declaration_is_offerable(
+                    state,
+                    player,
+                    &pending,
+                    req_cost.clone(),
+                )? {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay required additional cost".to_string(),
+                    ));
+                }
                 return pay_additional_cost_with_source(
                     state,
                     player,
@@ -3610,7 +3830,12 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 // CR 601.2b: If the optional additional cost requires a choice
                 // of object and no legal object exists, skip the prompt and
                 // proceed as if the player declined to pay.
-                if !opt_cost.is_payable(state, player, object_id) {
+                if !additional_cost_declaration_is_offerable(
+                    state,
+                    player,
+                    &pending,
+                    opt_cost.clone(),
+                )? {
                     return finish_pending_cost_or_cast(state, player, pending, events);
                 }
                 return Ok(WaitingFor::OptionalCostChoice {
@@ -3633,8 +3858,18 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 // CR 601.2b: If the preferred branch is unpayable, fall through
                 // to the fallback without prompting. If both are unpayable, the
                 // spell cannot be cast.
-                if !preferred.is_payable(state, player, object_id) {
-                    if !fallback.is_payable(state, player, object_id) {
+                if !additional_cost_declaration_is_offerable(
+                    state,
+                    player,
+                    &pending,
+                    preferred.clone(),
+                )? {
+                    if !additional_cost_declaration_is_offerable(
+                        state,
+                        player,
+                        &pending,
+                        fallback.clone(),
+                    )? {
                         return Err(EngineError::ActionNotAllowed(
                             "Cannot pay either alternative additional cost".to_string(),
                         ));
@@ -3911,11 +4146,6 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     }
 
     if let Some(imposed_cost) = imposed_required_cost {
-        if !imposed_cost.is_payable(state, player, object_id) {
-            return Err(EngineError::ActionNotAllowed(
-                "Cannot pay imposed additional cost".to_string(),
-            ));
-        }
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
@@ -3923,6 +4153,12 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        if !additional_cost_declaration_is_offerable(state, player, &pending, imposed_cost.clone())?
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay imposed additional cost".to_string(),
+            ));
+        }
         return pay_additional_cost(state, player, imposed_cost, pending, events);
     }
 
@@ -4332,17 +4568,12 @@ fn pay_additional_cost_with_source(
             });
         }
         AbilityCost::Mana { cost: mana_cost } => {
-            // Add mana cost to the pending payment (handled by pay_and_push → pay_mana_cost)
-            let combined = super::restrictions::add_mana_cost(&pending.cost, &mana_cost);
-            return finish_pending_cost_or_cast(
-                state,
-                player,
-                PendingCast {
-                    cost: combined,
-                    ..pending
-                },
-                events,
-            );
+            let split = DeclaredManaSplit {
+                declared: vec![mana_cost],
+                residual: None,
+                payment_mode: None,
+            };
+            return continue_after_declared_mana_split(state, player, pending, split, events);
         }
         AbilityCost::KeywordCostOfCastSpell { keyword } => {
             // CR 118.9 + CR 702.62a: pay the cast spell's borrowed keyword cost as
@@ -4366,16 +4597,12 @@ fn pay_additional_cost_with_source(
                     "Cannot resolve keyword cost for this spell; cast aborted".to_string(),
                 ));
             };
-            let combined = super::restrictions::add_mana_cost(&pending.cost, &cost);
-            return finish_pending_cost_or_cast(
-                state,
-                player,
-                PendingCast {
-                    cost: combined,
-                    ..pending
-                },
-                events,
-            );
+            let split = DeclaredManaSplit {
+                declared: vec![cost],
+                residual: None,
+                payment_mode: None,
+            };
+            return continue_after_declared_mana_split(state, player, pending, split, events);
         }
         AbilityCost::Sacrifice(cost) => {
             let target = &cost.target;
@@ -4544,28 +4771,20 @@ fn pay_additional_cost_with_source(
             });
         }
         AbilityCost::Waterbend { cost: wb_cost } => {
-            // Waterbend: combine waterbend mana with spell mana, enter ManaPayment with Waterbend mode.
-            let combined = restrictions::add_mana_cost(&pending.cost, &wb_cost);
-            state.pending_cast = Some(Box::new(PendingCast {
-                cost: combined,
-                ..pending
-            }));
-            return enter_payment_step(state, player, Some(ConvokeMode::Waterbend), events);
+            let split = DeclaredManaSplit {
+                declared: vec![wb_cost],
+                residual: None,
+                payment_mode: Some(ConvokeMode::Waterbend),
+            };
+            return continue_after_declared_mana_split(state, player, pending, split, events);
         }
         AbilityCost::Composite { costs } => {
-            let mut costs = costs.into_iter();
-            let Some(first) = costs.next() else {
-                return finish_pending_cost_or_cast(state, player, pending, events);
-            };
-            let remaining: Vec<_> = costs.collect();
-            let mut pending = pending;
-            if !remaining.is_empty() {
-                pending.additional_cost_flow =
-                    Some(AdditionalCost::Required(AbilityCost::Composite {
-                        costs: remaining,
-                    }));
-            }
-            return pay_additional_cost(state, player, first, pending, events);
+            let split = split_declared_mana_addition_and_residual(
+                state,
+                &pending,
+                AbilityCost::Composite { costs },
+            )?;
+            return continue_after_declared_mana_split(state, player, pending, split, events);
         }
         // CR 118.9 + CR 601.2h + CR 701.13: Exile a permanent you control on the
         // battlefield as an additional/alternative cost (Food Chain class; Lunar
@@ -4654,7 +4873,11 @@ fn pay_additional_cost_with_source(
         }
         AbilityCost::CollectEvidence { amount } => {
             return super::effects::collect_evidence::begin_cost_payment(
-                state, player, amount, pending,
+                state,
+                player,
+                amount,
+                pending,
+                cost_source,
             );
         }
         AbilityCost::TapCreatures {
@@ -7840,10 +8063,9 @@ pub(super) fn max_x_value_excluding(
     else {
         return formula_max;
     };
-    let Some(base) = pending.base_cost.clone() else {
+    if pending.base_cost.is_none() {
         return formula_max;
-    };
-    let ability = pending.ability.clone();
+    }
 
     // CR 601.2b / CR 601.2f: The concrete total is monotonic non-decreasing in X.
     // `concretize_x` adds `x * x_count` generic; non-floor and target-dependent
@@ -7860,8 +8082,7 @@ pub(super) fn max_x_value_excluding(
     // old linear loop's `saturating_sub(1)` floor exactly: when even X=0
     // overshoots, the cap is 0 (not an underflow).
     largest_x_satisfying(formula_max, |x| {
-        super::casting::concrete_cost_for_x(state, player, spell_id, &ability, &base, x)
-            .mana_value()
+        super::casting::recompute_pending_mana_total(state, player, pending, Some(x)).mana_value()
             <= available
     })
 }
@@ -9286,6 +9507,7 @@ mod tests {
             ),
             cost: ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: Some(0),
             target_constraints: Vec::new(),
@@ -9297,6 +9519,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -14113,6 +14336,7 @@ mod tests {
             ),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -14124,6 +14348,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -14240,6 +14465,7 @@ mod tests {
             ),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -14251,6 +14477,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -14336,6 +14563,7 @@ mod tests {
             ),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -14347,6 +14575,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -14421,6 +14650,7 @@ mod tests {
             ),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -14432,6 +14662,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -14539,6 +14770,7 @@ mod tests {
             ),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -14550,6 +14782,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -15147,6 +15380,102 @@ battlefield, then shuffle.";
             3,
             "Waterbend must not double-count an overlapping mana-rock"
         );
+    }
+
+    #[test]
+    fn additional_cost_waterbend_offerability_counts_waterbend_taps() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        scenario.add_creature(PlayerId(0), "Waterbender", 1, 1);
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Waterbend Additional", true);
+        builder.with_mana_cost(ManaCost::zero());
+        let spell_id = builder.id();
+
+        let runner = scenario.build();
+        let state = runner.state().clone();
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], spell_id, PlayerId(0));
+        let mut pending = PendingCast::new(
+            spell_id,
+            state.objects[&spell_id].card_id,
+            ability,
+            ManaCost::zero(),
+        );
+        pending.base_cost = Some(ManaCost::zero());
+
+        assert!(
+            additional_cost_declaration_is_offerable(
+                &state,
+                PlayerId(0),
+                &pending,
+                AbilityCost::Waterbend {
+                    cost: ManaCost::generic(1),
+                },
+            )
+            .expect("waterbend offerability should compute"),
+            "CR 601.2f/h: additional-cost Waterbend must count eligible artifacts/creatures even when the spell lacks the Waterbend keyword"
+        );
+    }
+
+    #[test]
+    fn composite_additional_cost_preserves_waterbend_mode_after_residual() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        scenario.add_creature(PlayerId(0), "Waterbender", 1, 1);
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Composite Waterbend", true);
+        builder.with_mana_cost(ManaCost::zero());
+        let spell_id = builder.id();
+
+        let mut runner = scenario.build();
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], spell_id, PlayerId(0));
+        let mut pending = PendingCast::new(
+            spell_id,
+            runner.state().objects[&spell_id].card_id,
+            ability,
+            ManaCost::zero(),
+        );
+        pending.base_cost = Some(ManaCost::zero());
+
+        let split = split_declared_mana_addition_and_residual(
+            runner.state(),
+            &pending,
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Waterbend {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            },
+        )
+        .expect("composite cost should split");
+
+        let mut events = Vec::new();
+        let waiting_for = continue_after_declared_mana_split(
+            runner.state_mut(),
+            PlayerId(0),
+            pending,
+            split,
+            &mut events,
+        )
+        .expect("composite cost should continue to mana payment");
+        runner.state_mut().waiting_for = waiting_for;
+
+        assert_eq!(runner.state().players[0].life, 19);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Waterbend),
+                ..
+            }
+        ));
     }
 
     /// Issue #490 follow-up — runtime end-to-end. The X chooser's offered `max`
