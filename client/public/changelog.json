@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 163,
+      "date": "2026-07-05",
+      "title": "Priority yields and card reports",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Dazzling Beauty now works, including the unusual “becomes blocked” effect where an unblocked attacker becomes blocked without any blocker assigned\n• Sylvan Echoes now listens for clash wins correctly, so losing or tying a clash no longer creates a stray trigger\n• More card text is live for Realmwright, Luxior, Giada's Gift, Shadowspear, the Prophecy Familiar cycle, Axebane Guardian, Doorkeeper, Coral Colony, Vent Sentinel, and cards that care about any one color plus another color of mana\n• Perpetual effects and “the number of” quantity phrases now parse more accurately across more card classes\n\n🛠️ Cards That Now Work Right\n• Jinnie Fay no longer re-prompts for the same token replacement inside nested replacement or choice chains\n• Dread Summons now creates Zombies only for creature cards milled this way, not every card that hit a graveyard\n• Oblivion's Hunger now draws a card only when the targeted creature actually has a +1/+1 counter\n• Plagon, Lord of the Beach and Bill the Pony now grant “assign combat damage equal to toughness” correctly\n• Curse of Opulence, Curse of Vitality, Curse of Verbosity, and Curse of Disturbance now let each attacking opponent do the copied reward for themselves\n• Single-graveyard targets, named Kookus conditions, older verb-cost clauses, and several quantity grammar forms now preserve their full restrictions\n\n⚔️ Combat & Gameplay\n• MTGO-style priority yields are here: yield one trigger, yield all copies of a trigger source, revoke active yields, and keep auto-pass sessions flowing through yielded triggers\n• Phase stops can now be scoped to all turns, your turns, or opponents' turns, and pass-until-turn-boundary behavior is clearer in multiplayer\n• Auto-pass no longer gets stuck on an opponent's turn just because you control a mana source with nothing useful to cast\n• Manual mana payment has a fallback path when automatic payment cannot finish, and mana-ability choices stay available even if the original source is gone\n• Rare stale actions and dangling pending-trigger cursors now recover instead of surfacing as fatal engine errors\n\n🖥️ Interface\n• The game menu now has a persistent “Report a card problem” picker that groups visible cards by zone, shows parse coverage, deduplicates copies, and filters out basic lands\n• Card reports are now reachable from the picker, the Alt parse panel, and mobile previews while still respecting spectate mode and hidden-zone visibility\n• Priority-yield menus, active-yield controls, phase-stop scope cycling, and auto-pass timing now have player-facing controls in the board UI\n• Telemetry dashboards can now show reported cards and pending-trigger abandon signals, helping prioritize the cards players actually hit\n\n🌍 Localization\n• New card-report, priority-yield, phase-stop, and auto-pass labels are localized across supported languages\n\n🌐 Multiplayer\n• Draft admin endpoints now require bearer authentication before exposing draft controls\n• P2P draft backup snapshots now redact nested draft-session secrets before storage and echo responses\n• Card-report visibility follows each viewer's reveal permissions, so the picker does not leak hidden opponent card names",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1523377373586788603"
+    },
+    {
       "id": 162,
       "date": "2026-07-04",
       "title": "World rule arrives",
