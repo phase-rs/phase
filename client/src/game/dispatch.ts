@@ -145,6 +145,18 @@ function isEngineUnresponsive(err: unknown): boolean {
   return err instanceof AdapterError && err.code === AdapterErrorCode.ENGINE_UNRESPONSIVE;
 }
 
+/**
+ * A benign actor-authorization rejection: the click landed in the same tick
+ * that priority/turn shifted, so the engine correctly refused the now-stale
+ * action (CR 117 priority / CR 500 turn structure). Nothing mutated engine
+ * state, so dispatch treats it as a no-op rather than propagating an error to
+ * the many fire-and-forget UI `dispatchAction(...)` call sites (which would
+ * otherwise surface as an `unhandledrejection` and pollute crash telemetry).
+ */
+function isStaleAction(err: unknown): boolean {
+  return err instanceof AdapterError && err.code === AdapterErrorCode.STALE_ACTION;
+}
+
 async function processAction(action: GameAction, actor: number): Promise<void> {
   const { adapter, gameState } = useGameStore.getState();
   if (!adapter || !gameState) {
@@ -182,6 +194,13 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   try {
     result = await adapter.submitAction(action, actor);
   } catch (err) {
+    // Stale click after a priority/turn shift: the engine's actor-auth guard
+    // correctly rejected it. Nothing changed engine-side, so drop it as a
+    // no-op instead of letting a benign race escape as an unhandled rejection.
+    if (isStaleAction(err)) {
+      debugLog(`processAction: stale action ${action.type} (actor-auth rejected) — ignoring`, "warn");
+      return;
+    }
     // Engine panic: re-running the same action against the same state is
     // guaranteed to re-panic (the previous "ai-getAction-retry" / similar
     // failure modes were caused by exactly this loop). Surface the captured

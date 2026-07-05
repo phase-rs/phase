@@ -2394,6 +2394,17 @@ export const AdapterErrorCode = {
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
+  /**
+   * The engine's actor-authorization guards (`check_actor_authorization` /
+   * priority checks, CR 117 priority / CR 500 turn structure) rejected the
+   * action because the submitting seat is no longer the authorized submitter
+   * (`EngineError::WrongPlayer`) or no longer holds priority
+   * (`EngineError::NotYourPriority`). Both are the same benign race — a click
+   * lands in the same tick that priority/turn shifts — not a bug: the engine
+   * correctly refused a stale action. Dispatch treats it as a no-op rather
+   * than surfacing it as a crash.
+   */
+  STALE_ACTION: "STALE_ACTION",
 } as const;
 
 /**
@@ -2403,6 +2414,18 @@ export const AdapterErrorCode = {
  */
 export function isStateLostMessage(message: string): boolean {
   return message.startsWith("NOT_INITIALIZED:");
+}
+
+/**
+ * Detect the engine's actor-authorization rejections. `submit_action` in
+ * `engine-wasm/src/lib.rs` formats `EngineError::WrongPlayer` (Display: "Wrong
+ * player") and `EngineError::NotYourPriority` (Display: "Not your priority")
+ * as `Engine error: <display>`. Match the exact strings — these are the benign
+ * stale-action race (see `AdapterErrorCode.STALE_ACTION`), never a state-loss
+ * or panic.
+ */
+export function isStaleActionMessage(message: string): boolean {
+  return message === "Engine error: Wrong player" || message === "Engine error: Not your priority";
 }
 
 /**
