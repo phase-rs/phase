@@ -2199,6 +2199,19 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
         return Some((Comparator::EQ, 0, counter_type, consumed));
     }
 
+    // CR 122.1 + CR 122.1a: an indefinite "a [type] counter" means one or more (>= 1).
+    // Placed before the numeric branch, whose `parse_number` fails fast on the
+    // article "a"/"an" (Oblivion's Hunger: "a +1/+1 counter on it").
+    if let Ok((rest, _)) = nom_primitives::parse_article(text) {
+        if let Ok((after_type, counter_type)) = nom_primitives::parse_counter_type_typed(rest) {
+            let after_type = after_type.trim_start();
+            if let Some(after_on) = parse_counter_on_suffix(after_type) {
+                let consumed = original_len - after_on.len();
+                return Some((Comparator::GE, 1, counter_type, consumed));
+            }
+        }
+    }
+
     let (rest, threshold) = nom_primitives::parse_number.parse(text).ok()?;
     let rest = rest.trim_start();
     type E<'a> = OracleError<'a>;
@@ -2222,11 +2235,12 @@ fn build_counter_condition(
     comparator: Comparator,
     threshold: i32,
     counter_type: CounterType,
+    scope: ObjectScope,
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
-                scope: ObjectScope::Source,
+                scope,
                 counter_type: Some(counter_type),
             },
         },
@@ -2235,33 +2249,70 @@ fn build_counter_condition(
     }
 }
 
-pub(super) fn strip_counter_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_counter_conditional(
+    text: &str,
+    in_trigger: bool,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // Leading form: "if it has [N] [type] counter[s] on it, [effect]". The
+    // subject here is ALWAYS the source ("it"); the demonstrative "that
+    // creature"/"that permanent"/"that card" is deliberately NOT offered in the
+    // leading position. A sentence-initial "If that creature has … counter …,
+    // [source] deals N … instead" belongs to the target-gated *replacement*
+    // class (Bring Low, Strider, Urdnan), whose honest counter/P-T gating is
+    // deferred to the inert `strip_target_keyword_instead` rider (see the CR
+    // 122.1b note there). Offering the demonstrative here would GATE OUT that
+    // deferral and over-accept those cards into a false-green additive
+    // `DealDamage` sibling (the "instead" is a replacement, not additive).
+    // CR 115.1's demonstrative-as-target is honored only in the trailing form
+    // below, where the leading-space needle can't collide with that class.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if it has ").parse(lower.as_str()) {
         if let Some((comparator, threshold, counter_type, consumed)) = parse_counter_threshold(rest)
         {
             let after = rest[consumed..].trim_start();
+            // allow-noncombinator: comma cleanup on the already-parsed remainder (the condition is parsed; not dispatch)
             let after = after.strip_prefix(',').unwrap_or(after).trim_start();
             let offset = text.len() - after.len();
             return (
-                Some(build_counter_condition(comparator, threshold, counter_type)),
+                Some(build_counter_condition(
+                    comparator,
+                    threshold,
+                    counter_type,
+                    ObjectScope::Source,
+                )),
                 text[offset..].to_string(),
             );
         }
     }
 
-    if let Some((before, after)) = tp.rsplit_around(" if it has ") {
-        if let Some((comparator, threshold, counter_type, consumed)) =
-            parse_counter_threshold(after.lower)
-        {
-            let remaining = after.lower[consumed..].trim();
-            if remaining.is_empty() || remaining == "." {
-                return (
-                    Some(build_counter_condition(comparator, threshold, counter_type)),
-                    before.original.trim_end_matches('.').trim().to_string(),
-                );
+    // Trailing form: "[effect] if {subject} has [N] [type] counter[s] on it".
+    // "it" is always offered; the demonstrative "that creature"/"that permanent"/
+    // "that card" only in non-trigger context (CR 115.1: the spell's target).
+    let mut subjects: Vec<(&str, ObjectScope)> = vec![(" if it has ", ObjectScope::Source)];
+    if !in_trigger {
+        subjects.push((" if that creature has ", ObjectScope::Target));
+        subjects.push((" if that permanent has ", ObjectScope::Target));
+        subjects.push((" if that card has ", ObjectScope::Target));
+    }
+    for (needle, scope) in subjects {
+        if let Some((before, after)) = tp.rsplit_around(needle) {
+            if let Some((comparator, threshold, counter_type, consumed)) =
+                parse_counter_threshold(after.lower)
+            {
+                let remaining = after.lower[consumed..].trim();
+                if remaining.is_empty() || remaining == "." {
+                    return (
+                        Some(build_counter_condition(
+                            comparator,
+                            threshold,
+                            counter_type,
+                            scope,
+                        )),
+                        before.original.trim_end_matches('.').trim().to_string(),
+                    );
+                }
             }
         }
     }
