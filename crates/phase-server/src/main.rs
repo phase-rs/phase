@@ -1282,7 +1282,7 @@ fn admin_token_from_env() -> Option<String> {
 }
 
 /// Mount bearer-guarded `/admin/*` routes on a router that will receive `AppState`.
-fn mount_admin_routes(mut app: Router<AppState>, admin_token: &str) -> Router<AppState> {
+fn mount_admin_routes(app: Router<AppState>, admin_token: &str) -> Router<AppState> {
     let auth_layer = |expected: Arc<str>| {
         from_fn(move |request: Request, next: Next| {
             let expected = expected.clone();
@@ -7177,12 +7177,13 @@ mod admin_auth_tests {
         app.with_state(app_state)
     }
 
-    async fn get_admin_drafts(app: Router<AppState>, auth: Option<&str>) -> StatusCode {
+    async fn get_admin_drafts(mut app: Router<AppState>, auth: Option<&str>) -> StatusCode {
+        let mut service = app.as_service();
         let mut builder = Request::builder().method("GET").uri("/admin/drafts");
         if let Some(value) = auth {
             builder = builder.header(http::header::AUTHORIZATION, value);
         }
-        let response = app
+        let response = service
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .expect("router response");
