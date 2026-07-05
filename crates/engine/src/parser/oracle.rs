@@ -1127,6 +1127,10 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::EnteredThisTurn { filter } => target_filter_uses_filter_prop(filter, pred),
         QuantityRef::DistinctCardTypes {
             source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        }
+        | QuantityRef::DistinctSubtypes {
+            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+            ..
         } => target_filter_uses_filter_prop(filter, pred),
         _ => false,
     }

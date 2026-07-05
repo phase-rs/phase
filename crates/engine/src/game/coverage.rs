@@ -1389,6 +1389,23 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 None => "card types among tracked cards".into(),
             },
         },
+        QuantityRef::DistinctSubtypes { source, exclude } => {
+            let suffix = match exclude {
+                crate::types::ability::SubtypeExclusion::CreatureTypes => {
+                    " other than creature types"
+                }
+                crate::types::ability::SubtypeExclusion::None => "",
+            };
+            let scope_desc = match source {
+                CardTypeSetSource::Zone { zone, scope } => {
+                    format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
+                }
+                CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
+                CardTypeSetSource::Objects { filter } => fmt_target(filter),
+                CardTypeSetSource::TrackedSet { .. } => "tracked cards".into(),
+            };
+            format!("subtypes{suffix} among {scope_desc}")
+        }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
         QuantityRef::ZoneCardCount {
@@ -6678,6 +6695,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
+        QuantityRef::DistinctSubtypes { .. } => ("DistinctSubtypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
@@ -6706,7 +6724,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::ZoneChangeAggregateThisTurn { .. } => ("ZoneChangeAggregateThisTurn", Handled),
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
-        QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
+        // CR 500: per-player turn count. Resolver (game/quantity.rs, player.turns_taken)
+        // has always worked; Control Win Condition's CDA now consumes it live. Not a
+        // strict-failure marker anywhere, so it is genuinely handled.
+        QuantityRef::TurnsTaken => ("TurnsTaken", Handled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
         QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),

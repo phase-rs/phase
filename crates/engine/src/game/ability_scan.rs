@@ -1767,6 +1767,7 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             projected: false,
         },
         QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
+        QuantityRef::DistinctSubtypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
         QuantityRef::ZoneCardCount {

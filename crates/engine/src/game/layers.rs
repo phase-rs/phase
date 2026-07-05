@@ -2072,6 +2072,15 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
             | CardTypeSetSource::Objects { .. }
             | CardTypeSetSource::TrackedSet { .. } => false,
         },
+        // CR 613.4a: Distinct subtypes read `zone` when sourced from that zone's
+        // cards (Subgoyf: different subtypes among cards in all graveyards) — layer
+        // 7a CDA P/T must re-derive when that zone changes.
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
+            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
         // Everything else reads player-level state, single-object state, battle-
         // field-only population, history records, choices, or tracked sets — none
         // depend on `zone` membership. Enumerated explicitly (no wildcard) so a
@@ -2168,10 +2177,19 @@ pub(crate) fn any_active_static_reads_zone_membership(state: &GameState, zone: Z
         }
         if obj.static_definitions.iter_all().any(|def| {
             def.mode == StaticMode::Continuous
-                && def
+                && (def
                     .condition
                     .as_ref()
                     .is_some_and(|c| static_condition_reads_zone_membership(c, zone))
+                    // CR 604.3 + CR 613: a continuous MODIFICATION whose dynamic
+                    // quantity reads this zone's membership also depends on it —
+                    // e.g. Subgoyf's CDA `SetDynamicPower`/`SetDynamicToughness`
+                    // counting distinct subtypes among cards in all graveyards.
+                    // The static's `condition` is not the only zone-reading surface.
+                    || def.modifications.iter().any(|m| {
+                        continuous_modification_dynamic_quantity(m)
+                            .is_some_and(|q| quantity_expr_reads_zone(q, zone))
+                    }))
         }) {
             found = true;
         }

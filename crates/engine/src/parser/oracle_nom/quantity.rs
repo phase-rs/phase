@@ -28,7 +28,7 @@ use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
     ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
-    TargetFilter, ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -1086,6 +1086,13 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_distinct_card_types_among_tracked_set,
             parse_distinct_card_types_among_objects,
         )),
+        // CR 205.3 + CR 500 + CR 604.3: counted CDA quantities that read live game
+        // state — "different subtypes … among <source>" (Subgoyf) and "turns
+        // you've taken this game" (Control Win Condition). Both must precede the
+        // generic controlled-type/type-filter arms whose leading token would
+        // otherwise commit. Nested together to stay within nom's top-level `alt`
+        // arity (nom 8.0 max: 21 items).
+        alt((parse_distinct_subtypes_among, parse_turns_taken_this_game)),
         // CR 201.2 + CR 603.4: "differently named <type-phrase>" (distinct-by-name)
         // and "different <power|mana value> among <type>" (distinct-by-quality —
         // Celebrate the Harvest's "the number of different powers among ..."
@@ -1768,6 +1775,71 @@ pub(crate) fn parse_distinct_card_types_among_tracked_set(
             },
         },
     ))
+}
+
+/// CR 205.3 + CR 604.3: "different subtype[s] [other than creature types] among
+/// cards in <zone>" / "... among <objects>" → [`QuantityRef::DistinctSubtypes`].
+///
+/// The subtype peer of [`parse_distinct_card_types_in_zone`] /
+/// [`parse_distinct_card_types_among_objects`]: same `among cards in <zone>` /
+/// `among <type-phrase>` source axis, but tallies distinct `subtypes` (CR 205.3)
+/// instead of card types (CR 205.2). The optional "other than creature types"
+/// rider (CR 205.3m) sets `exclude = CreatureTypes` — Subgoyf: "the number of
+/// different subtypes other than creature types among cards in all graveyards".
+/// Combinator-composed from `alt`/`opt` — no string dispatch.
+fn parse_distinct_subtypes_among(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("different subtype").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    // CR 205.3m: "other than creature types" narrows the count to non-creature
+    // subtypes. Absent → count every distinct subtype value.
+    let (rest, exclude) = map(opt(tag(" other than creature types")), |o| {
+        o.map_or(SubtypeExclusion::None, |_| SubtypeExclusion::CreatureTypes)
+    })
+    .parse(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    // CR 400.1: zone form ("cards in <zone>") vs CR 109.2: object form
+    // ("<type-phrase>"). Zone form is tried first so "cards in …" is not
+    // mis-consumed by the generic type-phrase reader.
+    let (rest, source) = alt((
+        map(
+            preceded(tag("cards in "), parse_scoped_zone_ref),
+            |(zone, scope)| CardTypeSetSource::Zone { zone, scope },
+        ),
+        parse_distinct_subtypes_objects_source,
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::DistinctSubtypes { source, exclude }))
+}
+
+/// CR 109.2: object-set source for [`parse_distinct_subtypes_among`] — mirrors
+/// [`parse_distinct_card_types_among_objects`]'s type-phrase consumption so
+/// "different subtypes among <objects>" shares one `Objects { filter }` reading.
+fn parse_distinct_subtypes_objects_source(input: &str) -> OracleResult<'_, CardTypeSetSource> {
+    let type_text = input.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // `type_text` is a leading slice of `input` (only trailing `.`/`,` trimmed) and
+    // `remainder` is a tail of `type_text`, so the consumed prefix length is the
+    // difference of their lengths — no pointer arithmetic needed.
+    let consumed = type_text.len() - remainder.len();
+    Ok((&input[consumed..], CardTypeSetSource::Objects { filter }))
+}
+
+/// CR 500: "turns you've taken this game" → [`QuantityRef::TurnsTaken`] (Control
+/// Win Condition CDA). The parser already emits `TurnsTaken` for casting
+/// prohibitions (oracle_casting.rs); this arm reaches it from the CDA
+/// "the number of " quantity path. The "this game" tail is optional so the
+/// possessor-qualified "turns you've/you have taken" phrase always parses.
+fn parse_turns_taken_this_game(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("turns ").parse(input)?;
+    let (rest, _) = alt((tag("you've taken"), tag("you have taken"))).parse(rest)?;
+    let (rest, _) = opt(tag(" this game")).parse(rest)?;
+    Ok((rest, QuantityRef::TurnsTaken))
 }
 
 /// CR 406.6 + CR 607.1: Parse bare "cards exiled with ~" (or "cards exiled with this X")

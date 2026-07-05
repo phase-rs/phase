@@ -18,8 +18,8 @@ use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
     FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, RoundingMode, StaticCondition, TargetFilter, TargetRef, TrackedAnaphorSource,
-    TypeFilter, TypedFilter, ZoneRef,
+    ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion, TargetFilter, TargetRef,
+    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -149,6 +149,10 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ObjectCountBySharedQuality { filter, .. }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
+            }
+            | QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Objects { filter },
+                ..
             }
             | QuantityRef::ManaSpentToCast {
                 metric:
@@ -370,6 +374,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
@@ -605,6 +610,15 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
             | CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::TrackedSet { .. } => false,
         },
+        // Distinct subtypes mirrors distinct card types: only the object-filter
+        // source reads battlefield population; zone / linked-exile / tracked-set
+        // sources do not.
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
+            CardTypeSetSource::Objects { .. } => true,
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
         // Player-level, single-object, history-record, payment, and choice
         // references: unaffected by another object's battlefield entry/exit.
         QuantityRef::HandSize { .. }
@@ -759,6 +773,14 @@ fn entered_object_perturbs_quantity_ref(
             // Zone / linked-exile / tracked-set sources are not battlefield
             // population — the classifier returns false for them, so they cannot
             // be perturbed.
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
+            CardTypeSetSource::Objects { filter } => {
+                matches_target_filter(state, entered.id, filter, ctx)
+            }
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::TrackedSet { .. } => false,
@@ -2123,6 +2145,113 @@ fn resolve_ref(
                                 }
                             }
                         }
+                    }
+                }
+            }
+            usize_to_i32_saturating(seen.len())
+        }
+        // CR 205.3 + CR 604.3: Count distinct subtype VALUES across the same
+        // `CardTypeSetSource` scan as `DistinctCardTypes`, but reading
+        // `card_types.subtypes` (CR 205.3) rather than `core_types` (CR 205.2).
+        // A card contributing three subtypes adds three distinct entries; the
+        // HashSet dedupes shared subtype values across cards. When
+        // `exclude == CreatureTypes` (CR 205.3m), subtypes present in
+        // `state.all_creature_types` are skipped (Subgoyf: "different subtypes
+        // other than creature types"). Subtype values are stored capitalized
+        // (e.g. "Goblin"); inserted as-is to preserve consistent casing.
+        QuantityRef::DistinctSubtypes { source, exclude } => {
+            // Gather the source object set first (same scan axis as
+            // `DistinctCardTypes`), then tally distinct subtype values across it.
+            // Collecting ids up front keeps the `&str` subtype borrows tied to
+            // `state.objects` for the lifetime of `seen`.
+            let mut obj_ids: Vec<ObjectId> = Vec::new();
+            match source {
+                CardTypeSetSource::Zone { zone, scope } => match zone {
+                    ZoneRef::Exile => {
+                        for &obj_id in &state.exile {
+                            if let Some(obj) = state.objects.get(&obj_id) {
+                                if count_scope_owner_matches(
+                                    state, scope, ctx, controller, obj.owner,
+                                ) {
+                                    obj_ids.push(obj_id);
+                                }
+                            }
+                        }
+                    }
+                    ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
+                        for player in scoped_players(state, scope, ctx, controller) {
+                            let zone_ids = match zone {
+                                ZoneRef::Graveyard => &player.graveyard,
+                                ZoneRef::Library => &player.library,
+                                ZoneRef::Hand => &player.hand,
+                                ZoneRef::Exile => unreachable!(),
+                            };
+                            obj_ids.extend(zone_ids.iter().copied());
+                        }
+                    }
+                },
+                CardTypeSetSource::ExiledBySource => {
+                    for linked in
+                        crate::game::players::linked_exile_cards_for_source(state, source_id)
+                    {
+                        obj_ids.push(linked.exiled_id);
+                    }
+                }
+                CardTypeSetSource::Objects { filter } => {
+                    let zone = filter
+                        .extract_in_zone()
+                        .unwrap_or(crate::types::zones::Zone::Battlefield);
+                    for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
+                        if matches_target_filter(state, obj_id, filter, &filter_ctx) {
+                            obj_ids.push(obj_id);
+                        }
+                    }
+                }
+                CardTypeSetSource::TrackedSet { caused_by } => {
+                    if let Some((set_id, ids)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    {
+                        for &oid in ids {
+                            let cause_ok = match caused_by {
+                                None => true,
+                                Some(cause) => state
+                                    .tracked_set_member_causes
+                                    .get(set_id)
+                                    .and_then(|causes| causes.get(&oid))
+                                    .is_some_and(|member_cause| member_cause == cause),
+                            };
+                            if cause_ok {
+                                obj_ids.push(oid);
+                            }
+                        }
+                    }
+                }
+            }
+            // CR 205.3m: skip subtypes that are creature types when excluding
+            // creature types. Subtype values are stored capitalized ("Goblin")
+            // and inserted as-is; a card with three subtypes contributes three.
+            let exclude_creature = matches!(exclude, SubtypeExclusion::CreatureTypes);
+            // Collect the creature-type names into a set ONCE for O(1) membership,
+            // rather than a linear scan of `all_creature_types` (hundreds of entries)
+            // per subtype per object — layer 7a recomputes this every pass, so the
+            // inner loop is hot.
+            let creature_types: HashSet<&str> = if exclude_creature {
+                state
+                    .all_creature_types
+                    .iter()
+                    .map(|ct| ct.as_str())
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let mut seen: HashSet<&str> = HashSet::new();
+            for obj_id in &obj_ids {
+                if let Some(obj) = state.objects.get(obj_id) {
+                    for sub in &obj.card_types.subtypes {
+                        if exclude_creature && creature_types.contains(sub.as_str()) {
+                            continue;
+                        }
+                        seen.insert(sub.as_str());
                     }
                 }
             }

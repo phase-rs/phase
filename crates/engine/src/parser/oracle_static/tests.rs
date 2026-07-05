@@ -8,7 +8,7 @@ use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, Comparator, CountScope,
     DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, TypeFilter, ZoneRef,
+    SharedQualityRelation, SubtypeExclusion, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -24932,5 +24932,50 @@ fn creatures_you_control_have_flying_stays_anthem_not_cast_keyword() {
     assert!(
         parse_spells_have_keyword_for_test("Creatures you control have flying.").is_none(),
         "creatures-have-flying is a battlefield anthem, not a casting-keyword grant"
+    );
+}
+
+/// CR 205.3 + CR 208.2 + CR 604.3: Subgoyf's full CDA line (self-name → `~`,
+/// reminder text stripped upstream) — power is the distinct non-creature
+/// subtype count across all graveyards; toughness is that number PLUS 1 (the
+/// `*/1+*` split). Reverting the `both`-branch offset makes toughness bare
+/// `qty`, flipping the second assertion.
+#[test]
+fn subgoyf_cda_power_is_bare_count_toughness_is_count_plus_one() {
+    let def = parse_static_line(
+        "~'s power and toughness are each equal to the number of different subtypes \
+         other than creature types among cards in all graveyards and its toughness \
+         is equal to that number plus 1.",
+    )
+    .expect("Subgoyf CDA P/T line must parse");
+
+    let distinct_subtypes = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctSubtypes {
+            source: CardTypeSetSource::Zone {
+                zone: ZoneRef::Graveyard,
+                scope: CountScope::All,
+            },
+            exclude: SubtypeExclusion::CreatureTypes,
+        },
+    };
+
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetDynamicPower {
+                value: distinct_subtypes.clone(),
+            }),
+        "power must be the bare distinct-subtype count, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetDynamicToughness {
+                value: QuantityExpr::Offset {
+                    inner: Box::new(distinct_subtypes),
+                    offset: 1,
+                },
+            }),
+        "toughness must be count + 1 (the +1 offset), got {:?}",
+        def.modifications
     );
 }

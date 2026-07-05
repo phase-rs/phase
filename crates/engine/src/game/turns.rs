@@ -680,6 +680,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 500: Track per-player turn count for "your Nth turn of the game" conditions.
     state.players[state.active_player.0 as usize].turns_taken += 1;
+    // CR 613.4a + CR 604.3: `turns_taken` is a layer-7a characteristic-defining
+    // input (Control Win Condition: "power and toughness are each equal to the
+    // number of turns you've taken this game", `QuantityRef::TurnsTaken`). Advancing
+    // the count changes that CDA's derived P/T, so the layer cache must be
+    // invalidated here — otherwise a clean cache would keep the stale value until an
+    // unrelated effect happens to dirty it. Mirrors the counter-ledger expiry
+    // invalidation below; unconditional because the increment always changes state.
+    state.layers_dirty.mark_full();
 
     // CR 311.5 / CR 312.4 / CR 901.6: the planar controller is normally whoever
     // the active player is. The turn has committed here (past both turn-skip

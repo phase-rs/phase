@@ -36,6 +36,7 @@ mod call_damage_control_modal_return;
 mod cascade_intervening_if_pipeline;
 mod case_solve_condition;
 mod cast_during_resolution_pipeline;
+mod cda_counted_quantities_pt;
 mod chain_of_smog_copy;
 mod chandra_revolution_doesnt_untap_slot;
 mod charging_cinderhorn_issue_2868;

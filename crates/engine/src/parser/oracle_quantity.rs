@@ -3147,7 +3147,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
-        RoundingMode, TypeFilter, TypedFilter,
+        RoundingMode, SubtypeExclusion, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -7275,5 +7275,106 @@ mod tests {
                 },
             }
         );
+    }
+
+    // --- CDA counted-quantity refs (Control Win Condition, Subgoyf) ---
+
+    fn ref_of(qty: QuantityRef) -> Option<QuantityExpr> {
+        Some(QuantityExpr::Ref { qty })
+    }
+
+    /// CR 500: Control Win Condition — "the number of turns you've taken this
+    /// game" resolves to the per-player `TurnsTaken` ref (parser gap before this
+    /// change: the CDA path had no "turns you've taken" arm).
+    #[test]
+    fn cda_turns_taken_this_game_is_turns_taken_ref() {
+        assert_eq!(
+            parse_cda_quantity("the number of turns you've taken this game"),
+            ref_of(QuantityRef::TurnsTaken)
+        );
+        // "you have taken" and the missing "this game" tail both still parse.
+        assert_eq!(
+            parse_cda_quantity("the number of turns you have taken"),
+            ref_of(QuantityRef::TurnsTaken)
+        );
+    }
+
+    /// Negative: "the number of turns" with no possessor must NOT be read as
+    /// TurnsTaken — the "you've/you have taken" possessor is load-bearing.
+    #[test]
+    fn cda_turns_without_possessor_is_not_turns_taken() {
+        assert_ne!(
+            parse_cda_quantity("the number of turns"),
+            ref_of(QuantityRef::TurnsTaken)
+        );
+    }
+
+    /// CR 205.3 + CR 604.3: Subgoyf's full quantity tail — "the number of
+    /// different subtypes other than creature types among cards in all
+    /// graveyards" → `DistinctSubtypes { Zone{Graveyard, All}, CreatureTypes }`.
+    #[test]
+    fn cda_distinct_subtypes_among_all_graveyards() {
+        assert_eq!(
+            parse_cda_quantity(
+                "the number of different subtypes other than creature types among cards in all graveyards"
+            ),
+            ref_of(QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+                exclude: SubtypeExclusion::CreatureTypes,
+            })
+        );
+    }
+
+    /// Negative: "different subtypes among ..." WITHOUT the "other than creature
+    /// types" rider parses with `exclude: None`, not `CreatureTypes`.
+    #[test]
+    fn cda_distinct_subtypes_without_rider_excludes_nothing() {
+        assert_eq!(
+            parse_cda_quantity("the number of different subtypes among cards in all graveyards"),
+            ref_of(QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+                exclude: SubtypeExclusion::None,
+            })
+        );
+    }
+
+    /// Negative: the sibling "card types among cards in ..." phrase must still
+    /// route to `DistinctCardTypes` — the new subtype arm does not steal it.
+    #[test]
+    fn cda_card_types_still_distinct_card_types() {
+        assert_eq!(
+            parse_cda_quantity("the number of card types among cards in all graveyards"),
+            ref_of(QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+            })
+        );
+    }
+
+    /// Honest gaps: ETB-snapshot and flavor-text CDA tails have no live ref and
+    /// MUST remain `None` (no green-wash). Forcing a live ref would misread
+    /// these (a live recount reads 0 for sacrificed-Forest / life-paid cards).
+    #[test]
+    fn cda_gapped_cards_remain_unparsed() {
+        // Graveyard Busybody — "cards with flavor text in your graveyards"
+        assert_eq!(
+            parse_cda_quantity("the number of cards with flavor text in your graveyards"),
+            None
+        );
+        // Wood Elemental — "Forests sacrificed as it entered" (ETB snapshot)
+        assert_eq!(
+            parse_cda_quantity("the number of Forests sacrificed as it entered"),
+            None
+        );
+        // Minion of the Wastes — "the life paid as it entered" (ETB snapshot)
+        assert_eq!(parse_cda_quantity("the life paid as it entered"), None);
     }
 }
