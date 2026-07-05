@@ -7336,9 +7336,7 @@ mod spectate_draft_password_tests {
             }}"#
         )
         .expect("write draft pools fixture");
-        Arc::new(
-            draft_pools::DraftPools::from_path(file.path()).expect("load draft pools fixture"),
-        )
+        Arc::new(draft_pools::DraftPools::from_path(file.path()).expect("load draft pools fixture"))
     }
 
     async fn spawn_server(

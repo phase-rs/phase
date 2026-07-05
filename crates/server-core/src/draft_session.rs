@@ -873,7 +873,6 @@ mod tests {
         let source = draft_core::pack_source::FixturePackSource {
             set_code: "TST".to_string(),
             cards_per_pack: 14,
-            pack_count: 3,
         };
         mgr.apply_system_action(&code, DraftAction::StartDraft, Some(&source))
             .unwrap();
@@ -882,12 +881,8 @@ mod tests {
         assert!(session.lobby_meta.is_none());
         assert_eq!(session.spectator_password.as_deref(), Some("secret"));
         assert_eq!(
-            check_draft_spectator_password(
-                &session.lobby_meta,
-                &session.spectator_password,
-                None,
-            )
-            .unwrap_err(),
+            check_draft_spectator_password(&session.lobby_meta, &session.spectator_password, None)
+                .unwrap_err(),
             "password_required"
         );
     }
