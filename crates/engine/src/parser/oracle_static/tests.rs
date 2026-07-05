@@ -4525,6 +4525,54 @@ fn static_creature_spells_cost_less() {
     }
 }
 
+// CR 105.1 + CR 601.2f: Prophecy Familiar cycle (Nightscape / Stormscape /
+// Sunscape / Thornscape / Thunderscape Familiar) — "<color> spells and <color>
+// spells you cast cost {1} less to cast." A two-BARE-color compound subject must
+// narrow the reduction to an `Or` of `HasColor` filters, NOT silently drop the
+// color restriction (which would cheapen every spell).
+#[test]
+fn static_compound_bare_color_spells_cost_less_narrows_to_or_of_colors() {
+    let def =
+        parse_static_line("Blue spells and red spells you cast cost {1} less to cast.").unwrap();
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost { generic: 1, .. },
+            ..
+        }
+    ));
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
+    } = def.mode
+    {
+        let filter = spell_filter
+            .as_ref()
+            .expect("compound color must set a spell_filter");
+        match filter {
+            TargetFilter::Or { filters } => {
+                let colors: Vec<_> = filters
+                    .iter()
+                    .filter_map(|f| match f {
+                        TargetFilter::Typed(tf) => tf.properties.iter().find_map(|p| match p {
+                            FilterProp::HasColor { color } => Some(*color),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    colors.contains(&ManaColor::Blue) && colors.contains(&ManaColor::Red),
+                    "must narrow to Blue OR Red HasColor filters: {filters:?}"
+                );
+            }
+            other => panic!("expected Or of HasColor filters, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn static_spells_of_chosen_type_cost_less_carries_chosen_card_type() {
     // Issue #930 — Cloud Key / Umori / Stenn:
