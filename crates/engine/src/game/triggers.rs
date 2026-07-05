@@ -3386,10 +3386,17 @@ enum TriggerOrderingDisposition {
 /// across a group). The recursion is load-bearing: derived `PartialEq` descends
 /// into `sub_ability`/`else_ability`, so their `source_id`s must also be zeroed.
 ///
+/// `source_card_id` is the source's latched card identity (CR 400.7 / CR 704.5d,
+/// for AllCopies priority-yield matching) — a per-instance identity latch with no
+/// bearing on the trigger's game outcome, so it is zeroed alongside `source_id`;
+/// otherwise two outcome-identical triggers off different cards would ride in the
+/// derived `==` as distinguishable and lose their CR 603.3b auto-ordering.
+///
 /// `pub(crate)` so `analysis::resource`'s coverability stack-normalizer shares this
 /// exact identity-stripping rather than keeping a drift-prone parallel copy.
 pub(crate) fn normalize_ability_identity(ability: &mut ResolvedAbility) {
     ability.source_id = ObjectId(0);
+    ability.source_card_id = None;
     if let Some(sub) = ability.sub_ability.as_mut() {
         normalize_ability_identity(sub);
     }
