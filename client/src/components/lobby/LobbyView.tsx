@@ -30,7 +30,7 @@ interface LobbyViewProps {
     context?: LobbyGame,
   ) => void;
   /** Watch a live server game or draft without joining as a player. */
-  onSpectate?: (code: string, context?: LobbyGame) => void;
+  onSpectate?: (code: string, password?: string, context?: LobbyGame) => void;
   connectionMode?: "server" | "p2p";
   onServerOffline?: () => void;
 }
@@ -88,6 +88,7 @@ export function LobbyView({
     /** Full lobby row when click came from the list — propagates into
      * the join handler as deck-picker context. */
     context?: LobbyGame;
+    intent: "join" | "spectate";
   } | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
   const [formatFilter, setFormatFilter] = useState<GameFormat | null>(null);
@@ -173,7 +174,11 @@ export function LobbyView({
           const game = gamesRef.current.find(
             (g) => g.game_code === data.game_code,
           );
-          setPasswordModal({ gameCode: data.game_code, format: game?.format });
+          setPasswordModal({
+            gameCode: data.game_code,
+            format: game?.format,
+            intent: "join",
+          });
           setPasswordInput("");
         }
       };
@@ -198,7 +203,7 @@ export function LobbyView({
       // `PasswordRequired` handler above remains as a fallback for stale
       // rows (server says yes when the client thought no).
       if (game?.has_password) {
-        setPasswordModal({ gameCode: code, format, context: game });
+        setPasswordModal({ gameCode: code, format, context: game, intent: "join" });
         setPasswordInput("");
         return;
       }
@@ -227,22 +232,39 @@ export function LobbyView({
       useMultiplayerStore.getState().setServerAddress(parsed.serverAddress);
     }
     const context = gamesRef.current.find((g) => g.game_code === parsed.code);
-    onSpectate(parsed.code, context);
+    if (context?.has_password) {
+      setPasswordModal({
+        gameCode: parsed.code,
+        context,
+        intent: "spectate",
+      });
+      setPasswordInput("");
+      return;
+    }
+    onSpectate(parsed.code, undefined, context);
   }, [joinCode, onSpectate]);
 
   const handlePasswordSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (passwordModal && passwordInput) {
-      onJoinGame(
-        passwordModal.gameCode,
-        passwordInput,
-        passwordModal.format,
-        passwordModal.context,
-      );
+      if (passwordModal.intent === "spectate") {
+        onSpectate?.(
+          passwordModal.gameCode,
+          passwordInput,
+          passwordModal.context,
+        );
+      } else {
+        onJoinGame(
+          passwordModal.gameCode,
+          passwordInput,
+          passwordModal.format,
+          passwordModal.context,
+        );
+      }
       setPasswordModal(null);
       setPasswordInput("");
     }
-  }, [passwordModal, passwordInput, onJoinGame]);
+  }, [passwordModal, passwordInput, onJoinGame, onSpectate]);
 
   // Only show the room-type segmented filter when the visible list is
   // actually mixed. On a single-purpose deploy (all-P2P or all-server)
@@ -537,7 +559,9 @@ export function LobbyView({
                     disabled: !passwordInput,
                   })}
                 >
-                  {t("lobbyView.join")}
+                  {passwordModal.intent === "spectate"
+                    ? t("lobbyView.watch")
+                    : t("lobbyView.join")}
                 </button>
               </div>
             </form>

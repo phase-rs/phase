@@ -550,19 +550,34 @@ export function MultiplayerPage() {
     [joinDraft, showToast, t],
   );
 
+  const navigateToDraftSpectator = useCallback(
+    (code: string, password?: string) => {
+      navigate(`/draft-spectator?code=${encodeURIComponent(code)}`, {
+        state: password ? { password } : undefined,
+      });
+    },
+    [navigate],
+  );
+
   const handleSpectate = useCallback(
-    async (code: string, context?: LobbyGame) => {
+    async (code: string, password?: string, context?: LobbyGame) => {
       const resolved = context ?? findLobbyGameByCode(code);
       if (resolved?.draft_metadata) {
-        navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+        navigateToDraftSpectator(code, password);
         return;
       }
       // Typed codes skip lobby-row context; drafts not in the public lobby
       // still resolve via SpectateDraft when lookup reports not_found.
       if (!resolved?.draft_metadata && connectionMode === "server") {
-        const lookup = await lookupJoinTargetFromStore(code);
+        const lookup = await lookupJoinTargetFromStore(code, password);
         if (!lookup.ok && lookup.reason === "not_found") {
-          navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+          navigateToDraftSpectator(code, password);
+          return;
+        }
+        if (!lookup.ok && lookup.reason === "password_required") {
+          const entered = window.prompt(t("page.passwordPrompt"));
+          if (!entered) return;
+          navigateToDraftSpectator(code, entered);
           return;
         }
         if (!lookup.ok) {
@@ -574,7 +589,14 @@ export function MultiplayerPage() {
       useGameStore.setState({ gameId });
       navigate(`/game/${gameId}?mode=spectate&code=${encodeURIComponent(code)}`);
     },
-    [navigate, connectionMode, lookupJoinTargetFromStore, showToast],
+    [
+      navigate,
+      navigateToDraftSpectator,
+      connectionMode,
+      lookupJoinTargetFromStore,
+      showToast,
+      t,
+    ],
   );
 
   // Join from lobby → execute immediately if deck exists, otherwise prompt

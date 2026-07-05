@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
@@ -10,11 +10,30 @@ import { MenuPanel } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { useDraftSpectatorStore } from "../stores/draftSpectatorStore";
 
+type DraftSpectatorLocationState = {
+  password?: string;
+};
+
+function isPasswordGateError(message: string | null): boolean {
+  return message === "password_required" || message === "Wrong password";
+}
+
 export function DraftSpectatorPage() {
   const { t } = useTranslation("draft");
+  const { t: tMultiplayer } = useTranslation("multiplayer");
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const code = (searchParams.get("code") ?? "").trim().toUpperCase();
+  const routePassword =
+    (location.state as DraftSpectatorLocationState | null)?.password ??
+    searchParams.get("password") ??
+    undefined;
+
+  const [passwordInput, setPasswordInput] = useState(routePassword ?? "");
+  const [spectatePassword, setSpectatePassword] = useState<string | undefined>(
+    routePassword,
+  );
 
   useAudioContext("menu");
 
@@ -26,9 +45,18 @@ export function DraftSpectatorPage() {
 
   useEffect(() => {
     if (!code) return;
-    void watchDraft(code);
+    void watchDraft(code, spectatePassword);
     return () => leave();
-  }, [code, watchDraft, leave]);
+  }, [code, spectatePassword, watchDraft, leave]);
+
+  const showPasswordForm =
+    status === "error" && isPasswordGateError(error) && !view;
+
+  const handlePasswordSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!passwordInput.trim()) return;
+    setSpectatePassword(passwordInput);
+  };
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -49,7 +77,36 @@ export function DraftSpectatorPage() {
           {status === "connecting" && (
             <p className="text-sm text-slate-400">{t("spectator.connecting")}</p>
           )}
-          {status === "error" && (
+          {showPasswordForm && (
+            <form className="flex flex-col gap-3" onSubmit={handlePasswordSubmit}>
+              <p className="text-sm text-slate-300">
+                {error === "Wrong password"
+                  ? t("spectator.wrongPassword")
+                  : t("spectator.passwordRequired")}
+              </p>
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                placeholder={tMultiplayer("lobbyView.passwordPlaceholder")}
+                className="w-full rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+                autoFocus
+              />
+              <button
+                type="submit"
+                disabled={!passwordInput.trim()}
+                className={menuButtonClass({
+                  tone: "cyan",
+                  size: "sm",
+                  disabled: !passwordInput.trim(),
+                  className: "self-start",
+                })}
+              >
+                {t("spectator.watchWithPassword")}
+              </button>
+            </form>
+          )}
+          {status === "error" && !showPasswordForm && (
             <p className="text-sm text-red-300">{error ?? t("spectator.errorGeneric")}</p>
           )}
           {view && <DraftSpectatorDashboard view={view} />}
