@@ -10,7 +10,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter,
+    QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -329,6 +329,23 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     parse_token_description_with_context(text, &ParseContext::default())
 }
 
+/// True iff a `for each … this way` count restricts to a specific card type
+/// (Dread Summons' "creature card"), so it should override the unfiltered
+/// `TrackedSetSize`. A bare/generic "card" filter (e.g. "card discarded this
+/// way") is not restrictive and keeps `TrackedSetSize`.
+fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
+    let QuantityRef::FilteredTrackedSetSize { filter, .. } = qty else {
+        return false;
+    };
+    let TargetFilter::Typed(typed) = filter.as_ref() else {
+        return false;
+    };
+    typed
+        .type_filters
+        .iter()
+        .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
+}
+
 fn parse_token_description_with_context(
     text: &str,
     ctx: &ParseContext,
@@ -614,6 +631,18 @@ fn parse_token_description_with_context(
                     .ok()
                     .filter(|(rest, _)| rest.is_empty())
                     .map(|(_, qty)| QuantityExpr::Ref { qty })
+                    // CR 609.3 + CR 205.2a: a TYPE-restricted "for each <type> card
+                    // <verb> this way" (Dread Summons: "for each creature card put
+                    // into a graveyard this way") counts only the matching cards
+                    // moved this way — `FilteredTrackedSetSize` — not every card
+                    // moved (`TrackedSetSize`, which would create X tokens). Only a
+                    // restrictive type overrides; a bare/"card" filter keeps
+                    // `TrackedSetSize`.
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                            .filter(tracked_set_count_is_type_restricted)
+                            .map(|qty| QuantityExpr::Ref { qty })
+                    })
                 })
                 .unwrap_or(QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
@@ -1357,6 +1386,33 @@ mod tests {
                 qty: QuantityRef::TrackedSetSize,
             },
             "bare 'card discarded this way' must keep TrackedSetSize"
+        );
+    }
+
+    #[test]
+    fn for_each_creature_card_this_way_counts_only_creatures() {
+        // #4746 Dread Summons: "For each creature card put into a graveyard this
+        // way, you create a … token." The token count must restrict to CREATURE
+        // cards moved this way (`FilteredTrackedSetSize`), not every card
+        // (`TrackedSetSize`, which would create X tokens for X cards milled).
+        let txt = "Create a tapped 2/2 black Zombie creature token for each creature card put into a graveyard this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize { filter, .. },
+        } = &count
+        else {
+            panic!("expected FilteredTrackedSetSize (creature-restricted), got {count:?}");
+        };
+        assert!(
+            matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Creature]
+            ),
+            "count must restrict to creature cards milled, got {filter:?}"
         );
     }
 

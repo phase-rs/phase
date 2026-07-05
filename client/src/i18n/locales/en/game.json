@@ -16,6 +16,8 @@
     "holdCtrlFront": "Hold Ctrl for front face",
     "holdCtrlFlip": "Hold Ctrl to flip",
     "flip": "Flip",
+    "report": "Report a problem",
+    "reported": "Reported ✓",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",

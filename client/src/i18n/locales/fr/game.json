@@ -16,6 +16,8 @@
     "holdCtrlFront": "Maintenez Ctrl pour la face avant",
     "holdCtrlFlip": "Maintenez Ctrl pour pivoter",
     "flip": "Pivoter",
+    "report": "Signaler un problème",
+    "reported": "Signalé ✓",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",

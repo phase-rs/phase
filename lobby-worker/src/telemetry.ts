@@ -26,9 +26,10 @@ export const MAX_EVENTS_PER_BATCH = 25;
 
 /**
  * Per-event allow-list. `blobs` are the event-specific string columns (in
- * order); `doubles` are the numeric/boolean columns (in order). Only these five
- * Tier 1 events are accepted. Array fields (e.g. `unimplemented_oracle_ids`) are
- * flattened to a single comma-joined blob.
+ * order); `doubles` are the numeric/boolean columns (in order). Both the Tier 1
+ * crash/usage events and the Tier 2 report/usage events are accepted. Array
+ * fields (e.g. `unimplemented_oracle_ids`) are flattened to a single
+ * comma-joined blob.
  *
  * Column layout for every point (documented so the AE schema is stable):
  *   indexes: [event]
@@ -36,6 +37,10 @@ export const MAX_EVENTS_PER_BATCH = 25;
  *   doubles: [...schema.doubles]
  * AE hard limits respected by construction: ≤ 20 blobs, ≤ 20 doubles, exactly
  * 1 index, ≤ 16 KB total blob bytes (guarded by the per-field string caps).
+ *
+ * Note on `turn`/`turn_count`: `turn_number` is 1-based, and `toDouble` coerces
+ * a missing/null turn to 0 — so a `turn: 0` (or `turn_count: 0`) column means
+ * "unknown", never turn zero.
  */
 export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] }> = {
   engine_panic: { blobs: ["reason", "panic", "game_mode"], doubles: ["fatal", "turn"] },
@@ -46,6 +51,13 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
     blobs: ["result", "winner_kind", "game_mode", "unimplemented_oracle_ids"],
     doubles: ["turn_count"],
   },
+  card_report: {
+    blobs: ["oracle_id", "face_name", "name", "zone", "game_mode"],
+    doubles: ["turn", "supported", "total"],
+  },
+  session_start: { blobs: ["route"], doubles: [] },
+  game_start: { blobs: ["game_mode"], doubles: ["player_count", "ai_count"] },
+  route_view: { blobs: ["route"], doubles: [] },
 };
 
 /** A validated, column-resolved event ready to become an AE data point. */
