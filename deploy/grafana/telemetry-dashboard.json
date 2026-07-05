@@ -11,22 +11,52 @@
   ],
   "title": "phase.rs Telemetry",
   "uid": "phase-telemetry",
-  "tags": ["phase-rs", "telemetry"],
+  "tags": [
+    "phase-rs",
+    "telemetry"
+  ],
   "timezone": "utc",
-  "time": { "from": "now-7d", "to": "now" },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
   "refresh": "5m",
   "schemaVersion": 39,
   "panels": [
     {
+      "id": 20,
+      "type": "row",
+      "title": "Health",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
       "id": 1,
       "type": "timeseries",
       "title": "Events over time (by type)",
-      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+          "datasource": {
+            "type": "vertamedia-clickhouse-datasource",
+            "uid": "${DS_AE}"
+          },
           "query": "SELECT $timeSeries AS t, blob1 AS event, sum(_sample_interval) AS events FROM phase_telemetry WHERE $timeFilter GROUP BY t, event ORDER BY t",
           "rawQuery": true,
           "format": "time_series",
@@ -36,14 +66,33 @@
           "extrapolate": false
         }
       ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Engine panics",
-      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 0 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -55,14 +104,46 @@
           "extrapolate": false
         }
       ],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 10 } ] } }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 3,
       "type": "stat",
       "title": "JS errors",
-      "gridPos": { "h": 3, "w": 4, "x": 20, "y": 0 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -74,14 +155,46 @@
           "extrapolate": false
         }
       ],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 5 }, { "color": "red", "value": 50 } ] } }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 4,
       "type": "stat",
       "title": "Games ended",
-      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 3 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 16,
+        "y": 4
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -98,8 +211,16 @@
       "id": 5,
       "type": "stat",
       "title": "Stuck decisions",
-      "gridPos": { "h": 3, "w": 4, "x": 20, "y": 3 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 20,
+        "y": 4
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -111,14 +232,42 @@
           "extrapolate": false
         }
       ],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 } ] } }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 6,
       "type": "stat",
       "title": "Chunk reloads",
-      "gridPos": { "h": 3, "w": 8, "x": 16, "y": 6 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 16,
+        "y": 7
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -135,8 +284,16 @@
       "id": 7,
       "type": "table",
       "title": "Recent errors (js_error + engine_panic)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 9 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -153,8 +310,16 @@
       "id": 8,
       "type": "table",
       "title": "Error signatures (grouped)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -171,8 +336,16 @@
       "id": 9,
       "type": "table",
       "title": "Game outcomes (mode x winner_kind, avg turns)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -186,16 +359,24 @@
       ]
     },
     {
-      "id": 10,
+      "id": 16,
       "type": "table",
-      "title": "Unimplemented-card demand (raw id lists from game_end)",
-      "description": "blob8 is a comma-joined oracle-id list per game. The AE SQL dialect has no arrayJoin, so per-card ranking needs client-side splitting (see scripts note in the setup guide) — this table surfaces the raw lists for eyeballing until volume justifies that.",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 27 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "title": "Pending-trigger abandons (recent)",
+      "description": "game_end rows whose pending_trigger_abandons diagnostic is non-empty: the engine recovered from a dangling push-first trigger-construction cursor (an unidentified state-coherence defect \u2014 see issue #5118). Each descriptor is '<source name> (stack entry N)'; comma-joined per game. Any row here is a producer-hunt lead.",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
-          "query": "SELECT timestamp, blob7 AS game_mode, blob8 AS unimplemented_oracle_ids FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_end' AND blob8 != '' ORDER BY timestamp DESC LIMIT 100",
+          "query": "SELECT timestamp, blob2 AS version, blob3 AS build, blob7 AS game_mode, blob9 AS abandons FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_end' AND blob9 != '' ORDER BY timestamp DESC LIMIT 50",
           "rawQuery": true,
           "format": "table",
           "dateTimeType": "DATETIME",
@@ -205,72 +386,33 @@
       ]
     },
     {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Sessions per day",
-      "description": "session_start fires once per page load — an approximate session count (no install id, so distinct-user DAU is not derivable).",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "SELECT $timeSeries AS t, sum(_sample_interval) AS sessions FROM phase_telemetry WHERE $timeFilter AND blob1 = 'session_start' GROUP BY t ORDER BY t",
-          "rawQuery": true,
-          "format": "time_series",
-          "dateTimeType": "DATETIME",
-          "dateTimeColDataType": "timestamp",
-          "round": "0s",
-          "extrapolate": false
-        }
-      ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] }
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Games started per day (by mode)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "SELECT $timeSeries AS t, blob5 AS game_mode, sum(_sample_interval) AS games FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_start' GROUP BY t, game_mode ORDER BY t",
-          "rawQuery": true,
-          "format": "time_series",
-          "dateTimeType": "DATETIME",
-          "dateTimeColDataType": "timestamp",
-          "round": "0s",
-          "extrapolate": false
-        }
-      ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }, "overrides": [] }
-    },
-    {
-      "id": 13,
-      "type": "table",
-      "title": "Game completion (starts vs ends by mode)",
-      "description": "A mid-game reload re-emits game_start in the new client session; game_end re-emits too, so a resumed-and-finished game stays balanced. Only reload-then-abandon leaves starts > ends, which is itself signal.",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 43 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
-      "targets": [
-        {
-          "refId": "A",
-          "query": "SELECT mode, sum(if(event = 'game_start', n, 0)) AS starts, sum(if(event = 'game_end', n, 0)) AS ends FROM (SELECT blob5 AS mode, blob1 AS event, sum(_sample_interval) AS n FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_start' GROUP BY mode, event UNION ALL SELECT blob7 AS mode, blob1 AS event, sum(_sample_interval) AS n FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_end' GROUP BY mode, event) GROUP BY mode ORDER BY starts DESC",
-          "rawQuery": true,
-          "format": "table",
-          "dateTimeType": "DATETIME",
-          "dateTimeColDataType": "timestamp",
-          "extrapolate": false
-        }
-      ]
+      "id": 21,
+      "type": "row",
+      "title": "Card triage",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "panels": []
     },
     {
       "id": 14,
       "type": "table",
       "title": "Top reported cards",
       "description": "Player 'report this card' clicks grouped by oracle_id + name. avg_supported / avg_total triage misparse-vs-known-gap: a low ratio means the parser is missing clauses the card claims, a full ratio (supported = total) points at a runtime/engine bug on an already-parsed card.",
-      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 43 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
@@ -284,12 +426,230 @@
       ]
     },
     {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Card reports per day (by mode)",
+      "description": "Report volume over time \u2014 a step change after a release points at a regression rather than organic discovery.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "SELECT $timeSeries AS t, blob9 AS game_mode, sum(_sample_interval) AS reports FROM phase_telemetry WHERE $timeFilter AND blob1 = 'card_report' GROUP BY t, game_mode ORDER BY t",
+          "rawQuery": true,
+          "format": "time_series",
+          "dateTimeType": "DATETIME",
+          "dateTimeColDataType": "timestamp",
+          "extrapolate": false,
+          "round": "0s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "table",
+      "title": "Reports by zone x mode",
+      "description": "Where reported cards were sitting when reported. Battlefield-heavy reports skew toward runtime/static-ability bugs; hand/stack-heavy toward casting and parser gaps.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 43
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "SELECT blob8 AS zone, blob9 AS game_mode, sum(_sample_interval) AS reports FROM phase_telemetry WHERE $timeFilter AND blob1 = 'card_report' GROUP BY zone, game_mode ORDER BY reports DESC",
+          "rawQuery": true,
+          "format": "table",
+          "dateTimeType": "DATETIME",
+          "dateTimeColDataType": "timestamp",
+          "extrapolate": false
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Unimplemented-card demand (raw id lists from game_end)",
+      "description": "blob8 is a comma-joined oracle-id list per game. The AE SQL dialect has no arrayJoin, so per-card ranking needs client-side splitting (see scripts note in the setup guide) \u2014 this table surfaces the raw lists for eyeballing until volume justifies that.",
+      "gridPos": {
+        "h": 7,
+        "w": 16,
+        "x": 8,
+        "y": 43
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "SELECT timestamp, blob7 AS game_mode, blob8 AS unimplemented_oracle_ids FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_end' AND blob8 != '' ORDER BY timestamp DESC LIMIT 100",
+          "rawQuery": true,
+          "format": "table",
+          "dateTimeType": "DATETIME",
+          "dateTimeColDataType": "timestamp",
+          "extrapolate": false
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "row",
+      "title": "Usage",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Sessions per day",
+      "description": "session_start fires once per page load \u2014 an approximate session count (no install id, so distinct-user DAU is not derivable).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "SELECT $timeSeries AS t, sum(_sample_interval) AS sessions FROM phase_telemetry WHERE $timeFilter AND blob1 = 'session_start' GROUP BY t ORDER BY t",
+          "rawQuery": true,
+          "format": "time_series",
+          "dateTimeType": "DATETIME",
+          "dateTimeColDataType": "timestamp",
+          "round": "0s",
+          "extrapolate": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Games started per day (by mode)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 51
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "SELECT $timeSeries AS t, blob5 AS game_mode, sum(_sample_interval) AS games FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_start' GROUP BY t, game_mode ORDER BY t",
+          "rawQuery": true,
+          "format": "time_series",
+          "dateTimeType": "DATETIME",
+          "dateTimeColDataType": "timestamp",
+          "round": "0s",
+          "extrapolate": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Game completion (starts vs ends by mode)",
+      "description": "A mid-game reload re-emits game_start in the new client session; game_end re-emits too, so a resumed-and-finished game stays balanced. Only reload-then-abandon leaves starts > ends, which is itself signal.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 59
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "SELECT mode, sum(if(event = 'game_start', n, 0)) AS starts, sum(if(event = 'game_end', n, 0)) AS ends FROM (SELECT blob5 AS mode, blob1 AS event, sum(_sample_interval) AS n FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_start' GROUP BY mode, event UNION ALL SELECT blob7 AS mode, blob1 AS event, sum(_sample_interval) AS n FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_end' GROUP BY mode, event) GROUP BY mode ORDER BY starts DESC",
+          "rawQuery": true,
+          "format": "table",
+          "dateTimeType": "DATETIME",
+          "dateTimeColDataType": "timestamp",
+          "extrapolate": false
+        }
+      ]
+    },
+    {
       "id": 15,
       "type": "table",
       "title": "Route usage",
       "description": "route_view counts per coarse route (ids/params stripped). Shares the route vocabulary of js_error.route and session_start.route.",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 51 },
-      "datasource": { "type": "vertamedia-clickhouse-datasource", "uid": "${DS_AE}" },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 59
+      },
+      "datasource": {
+        "type": "vertamedia-clickhouse-datasource",
+        "uid": "${DS_AE}"
+      },
       "targets": [
         {
           "refId": "A",
