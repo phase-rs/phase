@@ -114,7 +114,7 @@ impl DraftSession {
 fn redact_persisted_draft_secrets(mut ps: PersistedDraftSession) -> PersistedDraftSession {
     for token in &mut ps.player_tokens {
         if !token.is_empty() {
-            token.clear();
+            *token = "REDACTED".to_string();
         }
     }
     if let Some(meta) = &mut ps.lobby_meta {
@@ -1162,7 +1162,7 @@ mod tests {
     fn to_admin_snapshot_redacts_player_tokens_but_preserves_occupancy() {
         let mut mgr = DraftSessionManager::new();
         let (code, host_token, _) = mgr.create_draft(test_config(), "Alice".to_string());
-        for i in 1..4 {
+        for i in 1..3 {
             mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
         }
 
@@ -1172,7 +1172,15 @@ mod tests {
 
         assert_eq!(admin.player_tokens.len(), real.player_tokens.len());
         assert!(real.player_tokens.iter().any(|t| !t.is_empty()));
-        assert!(admin.player_tokens.iter().all(|t| t.is_empty()));
+        assert_eq!(
+            admin.player_tokens,
+            vec![
+                "REDACTED".to_string(),
+                "REDACTED".to_string(),
+                "REDACTED".to_string(),
+                String::new(),
+            ]
+        );
         assert_ne!(host_token, "");
         assert!(!admin.player_tokens.contains(&host_token));
     }

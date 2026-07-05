@@ -7354,12 +7354,10 @@ mod admin_auth_tests {
         let json: serde_json::Value = serde_json::from_str(&body).expect("json body");
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["player_tokens"].as_array().unwrap().len(), 4);
-        assert!(json["player_tokens"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|v| v.as_str() == Some("")));
+        assert_eq!(
+            json["player_tokens"],
+            serde_json::json!(["REDACTED", "REDACTED", "", ""])
+        );
         assert_eq!(json["lobby_meta"]["password"], serde_json::Value::Null);
         assert_eq!(json["config"]["rng_seed"], 0);
         server.abort();
