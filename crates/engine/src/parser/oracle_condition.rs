@@ -90,9 +90,22 @@ fn parse_connector_split(text: &str, connector: &str) -> Option<Vec<ParsedCondit
     }
     fragments
         .into_iter()
-        .map(parse_condition_text)
+        .map(parse_condition_fragment_text)
         .collect::<Option<Vec<_>>>()
         .filter(|v| v.len() >= 2)
+}
+
+fn parse_condition_fragment_text(text: &str) -> Option<ParsedCondition> {
+    parse_condition_text(strip_leading_condition_fragment_marker(text))
+}
+
+fn strip_leading_condition_fragment_marker(text: &str) -> &str {
+    let text = text.trim();
+    if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("if "), tag("only if "))).parse(text) {
+        rest.trim()
+    } else {
+        text
+    }
 }
 
 fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
@@ -311,6 +324,8 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
         tag::<_, _, OracleError<'_>>("this "),
         tag("enchanted "),
         tag("from your "),
+        tag("in "),
+        tag("on "),
         tag("~'s "),
         tag("~ "),
     ))
@@ -437,6 +452,9 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     }
     if let Some(subtypes) = parse_you_control_land_subtypes(text) {
         return Some(ParsedCondition::YouControlLandSubtypeAny { subtypes });
+    }
+    if let Some(condition) = parse_you_control_qualified_type_presence(text) {
+        return Some(condition);
     }
     if let Some((count, subtype)) = parse_you_control_subtype_count(text) {
         return Some(ParsedCondition::YouControlSubtypeCountAtLeast { subtype, count });
@@ -1206,6 +1224,41 @@ fn parse_you_control_land_subtypes(text: &str) -> Option<Vec<String>> {
     Some(subtypes)
 }
 
+fn parse_you_control_qualified_type_presence(text: &str) -> Option<ParsedCondition> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("you control an "),
+        tag("you control a "),
+    ))
+    .parse(text)
+    .ok()?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    let has_qualifier = matches!(&filter, TargetFilter::Typed(tf) if !tf.properties.is_empty());
+    if !has_qualifier {
+        return None;
+    }
+    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
+    let (remainder, _) = opt(one_of::<_, _, OracleError<'_>>(".,;"))
+        .parse(remainder)
+        .ok()?;
+    if !remainder.is_empty() {
+        return None;
+    }
+    Some(object_count_at_least(
+        nom_condition::inject_controller_you(filter),
+        1,
+    ))
+}
+
+fn object_count_at_least(filter: TargetFilter, minimum: i32) -> ParsedCondition {
+    ParsedCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: minimum },
+    }
+}
+
 fn parse_you_control_subtype_count(text: &str) -> Option<(usize, String)> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("you control ")
         .parse(text)
@@ -1318,6 +1371,7 @@ mod tests {
     use crate::types::ability::{
         ControllerRef, CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
     };
+    use crate::types::card_type::Supertype;
 
     /// CR 508.1a: "you attacked with a/an <filter>[ this turn]" parses to a
     /// filtered `YouAttackedWithAtLeast { count: 1 }`, both with and without the
@@ -1430,6 +1484,12 @@ mod tests {
         );
         assert_eq!(
             parse_restriction_condition("From your graveyard"),
+            Some(ParsedCondition::SourceInZone {
+                zone: Zone::Graveyard
+            }),
+        );
+        assert_eq!(
+            parse_restriction_condition("in your graveyard"),
             Some(ParsedCondition::SourceInZone {
                 zone: Zone::Graveyard
             }),
@@ -1722,6 +1782,53 @@ mod tests {
                 if conditions.len() == 2
                     && matches!(conditions[0], ParsedCondition::YouAttackedThisTurn)
                     && matches!(conditions[1], ParsedCondition::YouGainedLifeThisTurn)
+        ));
+    }
+
+    #[test]
+    fn parses_compound_or_if_restriction_fragments() {
+        let parsed =
+            parse_restriction_condition("~ entered this turn or if you control a basic land");
+        let Some(ParsedCondition::Or { conditions }) = parsed else {
+            panic!("expected compound Or, got {parsed:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            conditions[0],
+            ParsedCondition::SourceEnteredThisTurn
+        ));
+        match &conditions[1] {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::HasSupertype { value } if *value == Supertype::Basic)));
+            }
+            other => panic!("expected ObjectCount basic land condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compound_source_zone_shorthand() {
+        let parsed = parse_restriction_condition("~ is on the battlefield or in your graveyard");
+        assert!(matches!(
+            parsed,
+            Some(ParsedCondition::Or { ref conditions })
+                if conditions.len() == 2
+                    && matches!(conditions[0], ParsedCondition::SourceInZone { zone: Zone::Battlefield })
+                    && matches!(conditions[1], ParsedCondition::SourceInZone { zone: Zone::Graveyard })
         ));
     }
 
