@@ -6977,15 +6977,9 @@ fn for_each_token_non_controller_subject_not_misowned_via_fallback() {
         &mut ParseContext::default(),
     );
     assert!(
-        !matches!(
-            clause.as_ref().map(|c| &c.effect),
-            Some(Effect::Token {
-                owner: TargetFilter::Controller,
-                ..
-            })
-        ),
-        "non-controller 'each player creates … for each' must not be accepted as \
-         a Controller-owned token via the subject-stripped fallback, got {clause:?}"
+        clause.is_none(),
+        "non-controller 'each player creates … for each' must DECLINE (return None) at \
+         the controller-only fallback — not merely avoid Controller ownership; got {clause:?}"
     );
 }
 
@@ -6998,15 +6992,9 @@ fn for_each_token_target_opponent_subject_not_misowned_via_fallback() {
         &mut ParseContext::default(),
     );
     assert!(
-        !matches!(
-            clause.as_ref().map(|c| &c.effect),
-            Some(Effect::Token {
-                owner: TargetFilter::Controller,
-                ..
-            })
-        ),
-        "non-controller 'target opponent creates … for each' must not be accepted \
-         as a Controller-owned token via the subject-stripped fallback, got {clause:?}"
+        clause.is_none(),
+        "non-controller 'target opponent creates … for each' must DECLINE (return None) at \
+         the controller-only fallback — not merely avoid Controller ownership; got {clause:?}"
     );
 }
 
