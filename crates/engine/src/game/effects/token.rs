@@ -2524,7 +2524,7 @@ pub(crate) fn inject_catalog_token_abilities(
         return;
     }
 
-    // CR 111.4: A token's abilities are defined by the effect that creates it, so
+    // CR 111.3: A token's abilities are defined by the effect that creates it, so
     // when the creating effect already granted this token abilities via a
     // `with "..."` clause (parsed into `static_definitions` at creation, before
     // this fallback runs), those are authoritative and complete. The catalog
@@ -5451,7 +5451,7 @@ mod tests {
         );
     }
 
-    /// CR 111.4: A Kamigawa Shorikai/Kotori Pilot token ("crews Vehicles as
+    /// CR 111.3: A Kamigawa Shorikai/Kotori Pilot token ("crews Vehicles as
     /// though its power were 2 greater", a `[Crew]`-only contribution) whose body
     /// matches — and is rendered with — the Aetherdrift Pilot art preset ("saddles
     /// Mounts and crews Vehicles …", a `[Saddle, Crew]` contribution) must NOT
