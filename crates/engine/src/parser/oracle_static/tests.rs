@@ -17,6 +17,55 @@ use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributio
 
 /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
 /// "You and creatures you control have protection from the chosen card
+/// CR 207.2c: an ability word is italic flavor with no rules meaning. A leading
+/// ability-word label on a subject-anchored static must be stripped so the static
+/// still parses; a leading label that is NOT a recognized ability word must be
+/// left intact so the fallback can't mis-strip a real subject.
+#[test]
+fn ability_word_prefix_is_stripped_from_subject_anchored_statics() {
+    // Whitelisted ability words (already known) whose statics only dropped
+    // because the static dispatch never stripped the flavor label.
+    assert_eq!(
+        parse_static_line_multi(
+            "Chroma — Each creature you control gets +1/+1 for each white mana symbol in its mana cost."
+        )
+        .len(),
+        1,
+        "Light from Within: Chroma prefix must be stripped"
+    );
+    assert_eq!(
+        parse_static_line_multi(
+            "Fateful hour — As long as you have 5 or less life, other creatures you control get +1/+4."
+        )
+        .len(),
+        1,
+        "Gavony Ironwright: Fateful hour prefix must be stripped"
+    );
+    // Set-specific 40K flavor words newly added to the whitelist.
+    assert_eq!(
+        parse_static_line_multi("Protector — Other artifact creatures you control have hexproof.")
+            .len(),
+        1,
+        "Cryptothrall: Protector prefix must be stripped"
+    );
+    assert_eq!(
+        parse_static_line_multi(
+            "Proclamator Hailer — Each creature you control gets +1/+1 for each +1/+1 counter on it."
+        )
+        .len(),
+        1,
+        "Clamavus: Proclamator Hailer prefix must be stripped"
+    );
+    // Safety: a capitalized em-dash label that is NOT a recognized ability word
+    // must never be stripped — the fallback stays whitelist-gated.
+    assert_eq!(
+        parse_static_line_multi("Vigilant Sentry — Other creatures you control have vigilance.")
+            .len(),
+        0,
+        "unknown em-dash label must not be stripped"
+    );
+}
+
 /// type." must decompose into exactly TWO `StaticDefinition`s:
 ///   - object-half: `Continuous` / `AddKeyword(Protection(ChosenCardType))`
 ///     with a controller-You creatures filter;

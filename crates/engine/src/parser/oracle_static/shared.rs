@@ -1077,7 +1077,34 @@ pub(crate) fn parse_tiered_enters_with_additional_counters_pattern(
     parse_tiered_enters_with_additional_counters_parts(&tp).map(|(_, pattern)| pattern)
 }
 
+/// CR 207.2c: An ability word is italicized flavor text with no rules meaning
+/// (e.g. `Chroma`, `Metalcraft`, `Fateful hour`, and the set-specific `Protector`
+/// / `Proclamator Hailer`). The subject-anchored static parsers match their
+/// subject at the *start* of the line, so a leading ability-word label like
+/// `"Chroma — Each creature you control gets ..."` prevents them from firing and
+/// the whole static silently drops. When the ordinary dispatch classifies
+/// nothing, strip a *recognized* ability-word label — whitelist-gated through the
+/// shared `is_known_ability_word` authority, exactly as the token-grant path in
+/// `keyword_grant.rs` does — and re-enter the dispatch once on the body.
+///
+/// This is a strict fallback: any line the dispatch already parses is returned
+/// untouched, so no existing coverage can regress. The stripped body carries no
+/// further label, so `strip_ability_word_with_name` yields `None` on the retry
+/// and the recursion terminates after a single hop.
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
+    let defs = parse_static_line_multi_dispatch(text);
+    if !defs.is_empty() {
+        return defs;
+    }
+    if let Some((ability_word, body)) = super::oracle_modal::strip_ability_word_with_name(text) {
+        if super::oracle_modal::is_known_ability_word(&ability_word) {
+            return parse_static_line_multi_dispatch(&body);
+        }
+    }
+    defs
+}
+
+fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
