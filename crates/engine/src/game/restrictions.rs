@@ -4156,6 +4156,74 @@ mod tests {
         assert!(check_casting_restrictions(&state, p, src, &restr).is_ok());
     }
 
+    // CR 509.1 + CR 510.1 + CR 511.1: "cast only during combat after blockers are
+    // declared" opens once the declare-blockers turn-based action has placed
+    // blockers and stays open through combat damage and end of combat — the exact
+    // complement of the BeforeBlockersDeclared window. Drives the real CR 601.3
+    // enforcement (`check_casting_restrictions`), not just parser shape: the spell
+    // must be REJECTED before blockers are declared (Begin Combat / Declare
+    // Attackers, and outside combat) and ALLOWED from the declare-blockers step
+    // onward. Backs Aleatory, Chaotic Strike, Curtain of Light, Flash Foliage.
+    #[test]
+    fn after_blockers_declared_window_rejects_pre_blockers_and_admits_post_blockers() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let p = PlayerId(0);
+        let src = ObjectId(10);
+        state.active_player = p;
+        state.priority_player = p;
+        state.waiting_for = WaitingFor::Priority { player: p };
+
+        // The lone new restriction: closed before blockers are declared (and
+        // outside combat entirely), open from the declare-blockers step onward.
+        let after = [CastingRestriction::AfterBlockersDeclared];
+        for phase in [
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+        ] {
+            state.phase = phase;
+            assert!(
+                check_casting_restrictions(&state, p, src, &after).is_err(),
+                "the after-blockers window must be closed in {phase:?} (blockers not yet declared)"
+            );
+        }
+        for phase in [
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+        ] {
+            state.phase = phase;
+            assert!(
+                check_casting_restrictions(&state, p, src, &after).is_ok(),
+                "the after-blockers window must be open in {phase:?} (blockers declared)"
+            );
+        }
+
+        // The full restriction set the parser emits for these cards
+        // (`DuringCombat` AND `AfterBlockersDeclared`): the effective legal window
+        // is exactly the declare-blockers, combat-damage, and end-of-combat steps.
+        let combined = [
+            CastingRestriction::DuringCombat,
+            CastingRestriction::AfterBlockersDeclared,
+        ];
+        for (phase, allowed) in [
+            (Phase::PreCombatMain, false),
+            (Phase::BeginCombat, false),
+            (Phase::DeclareAttackers, false),
+            (Phase::DeclareBlockers, true),
+            (Phase::CombatDamage, true),
+            (Phase::EndCombat, true),
+            (Phase::PostCombatMain, false),
+        ] {
+            state.phase = phase;
+            assert_eq!(
+                check_casting_restrictions(&state, p, src, &combined).is_ok(),
+                allowed,
+                "combined DuringCombat+AfterBlockersDeclared legality wrong in {phase:?}"
+            );
+        }
+    }
+
     // Non-regression: `[DuringYourTurn, BeforeAttackersDeclared]` cards (King's
     // Assassin and the Portal Three Kingdoms tap-ability cycle) must stay pinned
     // to the active player. Widening the before-attackers window to phase-only
