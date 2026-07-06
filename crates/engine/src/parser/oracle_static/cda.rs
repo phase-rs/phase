@@ -11,14 +11,68 @@ use super::support::*;
 ///   and its toughness is equal to that number plus 1."
 /// - "~'s toughness is equal to the number of cards in your hand."
 pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
+    // CR 611.3 + CR 613.7c: peel a leading turn-window timing condition so a CDA
+    // scoped to "During your turn," / "During turns other than yours," carries
+    // that condition (Angry Mob), mirroring the base-P/T-set path. Such a card's
+    // two clauses are split into separate sentences upstream by
+    // `parse_multi_sentence_statics`, so each clause reaches here independently.
+    let (lower, text, timing_condition) =
+        if let Some(rest) = nom_tag_lower(lower, lower, "during your turn, ") {
+            (
+                rest,
+                &text[text.len() - rest.len()..],
+                Some(StaticCondition::DuringYourTurn),
+            )
+        } else if let Some(rest) = nom_tag_lower(lower, lower, "during turns other than yours, ") {
+            (
+                rest,
+                &text[text.len() - rest.len()..],
+                Some(StaticCondition::Not {
+                    condition: Box::new(StaticCondition::DuringYourTurn),
+                }),
+            )
+        } else {
+            (lower, text, None)
+        };
+
     // Detect framing
     let both = nom_primitives::scan_contains(lower, "power and toughness are each equal to");
     let power_only = !both && nom_primitives::scan_contains(lower, "power is equal to");
     let toughness_only =
         !both && !power_only && nom_primitives::scan_contains(lower, "toughness is equal to");
+    // CR 613.4c: constant characteristic-defining P/T — "~'s power and toughness
+    // are each N" (Angry Mob's off-turn clause "... are each 2"): a fixed base
+    // value, not a dynamic quantity. Guarded by `!both` so the dynamic "are each
+    // equal to" framing (which also contains "are each ") keeps priority.
+    let both_const = !both
+        && !power_only
+        && !toughness_only
+        && nom_primitives::scan_contains(lower, "power and toughness are each ");
 
-    if !both && !power_only && !toughness_only {
+    if !both && !power_only && !toughness_only && !both_const {
         return None;
+    }
+
+    if both_const {
+        let after = strip_after(lower, "power and toughness are each ")?;
+        let digits: String = after
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let value = digits.parse::<i32>().ok()?;
+        let mut def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![
+                ContinuousModification::SetPower { value },
+                ContinuousModification::SetToughness { value },
+            ])
+            .cda()
+            .description(text.to_string());
+        if let Some(cond) = timing_condition {
+            def = def.condition(cond);
+        }
+        return Some(def);
     }
 
     // Extract the quantity text after "equal to "
@@ -72,11 +126,13 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
         modifications.push(ContinuousModification::SetDynamicToughness { value: qty });
     }
 
-    Some(
-        StaticDefinition::continuous()
-            .affected(TargetFilter::SelfRef)
-            .modifications(modifications)
-            .cda()
-            .description(text.to_string()),
-    )
+    let mut def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(modifications)
+        .cda()
+        .description(text.to_string());
+    if let Some(cond) = timing_condition {
+        def = def.condition(cond);
+    }
+    Some(def)
 }
