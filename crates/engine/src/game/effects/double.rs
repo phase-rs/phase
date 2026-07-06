@@ -330,6 +330,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
+            amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             optional_targeting: false,

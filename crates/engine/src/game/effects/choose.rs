@@ -71,15 +71,17 @@ pub fn resolve(
         return Ok(());
     }
 
+    let source_id = if persist || choice_type.needs_choice_source_context() {
+        Some(ability.source_id)
+    } else {
+        None
+    };
+
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
         choice_type,
         options,
-        source_id: if persist {
-            Some(ability.source_id)
-        } else {
-            None
-        },
+        source_id,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -148,7 +150,7 @@ pub(crate) fn resolve_random_in_chain(
     let index = state.rng.random_range(0..options.len());
     let chosen = options[index].clone();
 
-    let source_id = if persist {
+    let source_id = if persist || choice_type.needs_choice_source_context() {
         Some(ability.source_id)
     } else {
         None
@@ -186,8 +188,10 @@ pub(crate) fn resolve_random_in_chain(
 /// Faithfully reproduces the state-side binding the interactive handler
 /// performs (`engine_resolution_choices.rs`): when `source_id` is `Some`, a
 /// persistable choice is pushed onto the source's `chosen_attributes` and (for
-/// the layer-affecting choice kinds) layers are recomputed; `last_named_choice`
-/// is always set. The resolution-scoped `chosen_players` append for
+/// the layer-affecting choice kinds) layers are recomputed. Resolution-scoped
+/// land/nonland choices intentionally keep only `last_named_choice` so the
+/// chosen kind or guess can drive the current resolution without rendering a
+/// lasting source-card badge. The resolution-scoped `chosen_players` append for
 /// `Player`/`Opponent` choices is the CALLER's responsibility because its
 /// destination differs (the interactive path appends to the stashed
 /// continuation chain; the random path mutates the resolving ability directly).
@@ -197,7 +201,9 @@ pub(crate) fn bind_named_choice(
     choice: &str,
     source_id: Option<ObjectId>,
 ) {
-    if let Some(obj_id) = source_id {
+    if let Some(obj_id) =
+        source_id.filter(|_| !choice_type.is_resolution_scoped_card_predicate_choice())
+    {
         // CR 608.2d: A multi-keyword choice (`ChoiceType::Keyword { count > 1 }`,
         // e.g. Greymond's "choose two abilities from among ...") arrives as one
         // comma-joined answer ("First Strike, Vigilance"). Split it on ',' and
@@ -447,6 +453,9 @@ fn compute_options(
         ChoiceType::CardName => Vec::new(),
         ChoiceType::NumberRange { min, max } => (*min..=*max).map(|n| n.to_string()).collect(),
         ChoiceType::Labeled { options } => options.clone(),
+        ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
+            ChoiceType::card_predicate_labels(options)
+        }
         // CR 205.3i: Land types include the basic land types plus Cave, Desert, Gate, etc.
         ChoiceType::LandType => to_strings(LAND_TYPES),
         // CR 102.3: An opponent is any player not on the choosing player's team
@@ -841,6 +850,51 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options, &["Left", "Right"]);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn land_nonland_guess_carries_source_context_without_persisting() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::CardPredicateGuess {
+                    options: ChoiceType::land_or_nonland_card_predicate_options(),
+                },
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type,
+                options,
+                source_id,
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(
+                    *choice_type,
+                    ChoiceType::CardPredicateGuess {
+                        options: ChoiceType::land_or_nonland_card_predicate_options()
+                    }
+                );
+                assert_eq!(
+                    options,
+                    &ChoiceType::card_predicate_labels(
+                        &ChoiceType::land_or_nonland_card_predicate_options()
+                    )
+                );
+                assert_eq!(*source_id, Some(ObjectId(100)));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }

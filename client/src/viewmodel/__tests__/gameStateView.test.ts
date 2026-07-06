@@ -325,6 +325,29 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10], objects)).toBe(true);
   });
 
+  it("gates SaddleMount by the engine contribution, not printed power", () => {
+    const choice = getBoardChoiceView({
+      type: "SaddleMount",
+      data: {
+        player: 0,
+        mount_id: 40,
+        saddle_power: 3,
+        eligible_creatures: [10],
+        contributions: [3],
+      },
+    });
+    const objects = buildObjectMap(buildGameObject({ id: 10, power: 1 }));
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(boardChoiceSelectedPower(choice, [10], objects)).toBe(3);
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(true);
+    expect(buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "SaddleMount",
+      data: { mount_id: 40, creature_ids: [10] },
+    });
+  });
+
   it("sums raw power for Slaughter keep sets so negative-power creatures lower the total", () => {
     const choice = getBoardChoiceView({
       type: "KeepWithinTotalPowerChoice",

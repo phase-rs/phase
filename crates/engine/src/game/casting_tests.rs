@@ -930,6 +930,7 @@ fn exile_with_alt_cost_zero_uses_no_cost_path() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
         });
     let prepared = prepare_spell_cast(&state, PlayerId(0), exiled).unwrap();
     assert!(matches!(prepared.mana_cost, ManaCost::NoCost));
@@ -1572,6 +1573,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             characteristic_defining: false,
             description: Some("Assassin spells you cast have freerunning {B}{B}.".to_string()),
             attack_defended: None,
+            source_controller: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -9307,6 +9309,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }]
             .into();
         }
@@ -11798,6 +11801,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
                 "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -14513,6 +14517,7 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
             });
     }
 
@@ -14754,6 +14759,229 @@ fn graveyard_cast_without_rider_has_no_finality_counter() {
     );
 }
 
+/// CR 205.1b + CR 611.2c + CR 613.1d — The Tomb of Aclazotz: a creature cast
+/// from the graveyard under a `CastFromZone` grant carrying the compound rider
+/// ("enters with a finality counter on it AND is a Vampire in addition to its
+/// other types") must, after resolving onto the battlefield:
+///   1. carry BOTH riders on the granted permission (counter + modifications),
+///   2. enter with the finality counter (regression guard on the existing half),
+///   3. be a Vampire ADDITIVELY — the layer-evaluated subtype set retains its
+///      printed subtype (Zombie) and gains Vampire (CR 205.1b additive grant,
+///      applied as a Permanent `TransientContinuousEffect` at cast finalization).
+///
+/// Reverting the finalize TCE block drops the Vampire subtype (assertion 3).
+#[test]
+fn graveyard_cast_this_way_enters_with_type_grant_rider() {
+    use crate::game::effects::cast_from_zone;
+
+    let mut state = setup_game_at_main_phase();
+    let creature = create_object(
+        &mut state,
+        CardId(8210),
+        PlayerId(0),
+        "Graveyard Zombie".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        // Printed subtype the additive grant must PRESERVE (CR 205.1b).
+        obj.card_types.subtypes.push("Zombie".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = ManaCost::zero();
+    }
+
+    // The compound rider as the parser produces it: the counter clause's
+    // sub-ability is the `AddPendingEntersModifications` type grant.
+    let mut counter_rider = ResolvedAbility::new(
+        Effect::AddPendingETBCounters {
+            counter_type: CounterType::Generic("finality".to_string()),
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+        vec![],
+        ObjectId(9110),
+        PlayerId(0),
+    );
+    counter_rider.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::AddPendingEntersModifications {
+            modifications: vec![ContinuousModification::AddSubtype {
+                subtype: "Vampire".to_string(),
+            }],
+        },
+        vec![],
+        ObjectId(9110),
+        PlayerId(0),
+    )));
+    let mut grant = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            mana_spend_permission: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+        },
+        vec![TargetRef::Object(creature)],
+        ObjectId(9110),
+        PlayerId(0),
+    );
+    grant.sub_ability = Some(Box::new(counter_rider));
+
+    cast_from_zone::resolve(&mut state, &grant, &mut Vec::new()).unwrap();
+
+    // Assertion 1: BOTH riders survived onto the granted permission.
+    assert!(
+        state.objects[&creature]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    enters_with_counter: Some(CounterType::Generic(ref s)),
+                    enters_with_modifications,
+                    ..
+                } if s == "finality"
+                    && enters_with_modifications
+                        == &[ContinuousModification::AddSubtype {
+                            subtype: "Vampire".to_string(),
+                        }]
+            )),
+        "the granted permission must carry BOTH the finality counter and the \
+         Vampire type-grant riders; got {:?}",
+        state.objects[&creature].casting_permissions
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: creature,
+            card_id: CardId(8210),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("free graveyard cast should be accepted");
+    for _ in 0..6 {
+        if state.objects[&creature].zone == Zone::Battlefield {
+            break;
+        }
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(
+        state.objects[&creature].zone,
+        Zone::Battlefield,
+        "the creature cast this way should resolve onto the battlefield"
+    );
+
+    // Assertion 2: finality counter present (existing half, regression guard).
+    assert_eq!(
+        state.objects[&creature]
+            .counters
+            .get(&CounterType::Generic("finality".to_string())),
+        Some(&1),
+        "the creature must enter with a finality counter"
+    );
+
+    // Assertion 3: layer-evaluated subtypes are ADDITIVE — printed Zombie
+    // retained AND Vampire granted (CR 205.1b). Reverting the finalize TCE
+    // block drops Vampire and fails this assertion.
+    crate::game::layers::evaluate_layers(&mut state);
+    let subtypes = &state.objects[&creature].card_types.subtypes;
+    assert!(
+        subtypes.contains(&"Vampire".to_string()),
+        "the entered creature must be a Vampire (type grant); got {subtypes:?}"
+    );
+    assert!(
+        subtypes.contains(&"Zombie".to_string()),
+        "the printed Zombie subtype must be retained (CR 205.1b additive); got {subtypes:?}"
+    );
+}
+
+/// Negative control for `graveyard_cast_this_way_enters_with_type_grant_rider`:
+/// an identical Zombie cast under a `CastFromZone` grant with NO type-grant
+/// rider retains its printed Zombie subtype and does NOT become a Vampire —
+/// proving the Vampire type comes from THIS rider and does not leak from the
+/// graveyard-cast path itself. Reaches the same finalize read-back (which
+/// returns an empty modification set), so the assertion is non-vacuous.
+#[test]
+fn graveyard_cast_without_type_rider_is_not_a_vampire() {
+    use crate::game::effects::cast_from_zone;
+
+    let mut state = setup_game_at_main_phase();
+    let creature = create_object(
+        &mut state,
+        CardId(8211),
+        PlayerId(0),
+        "Plain Graveyard Zombie".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Zombie".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = ManaCost::zero();
+    }
+
+    let grant = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            mana_spend_permission: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+        },
+        vec![TargetRef::Object(creature)],
+        ObjectId(9111),
+        PlayerId(0),
+    );
+    cast_from_zone::resolve(&mut state, &grant, &mut Vec::new()).unwrap();
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: creature,
+            card_id: CardId(8211),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("free graveyard cast should be accepted");
+    for _ in 0..6 {
+        if state.objects[&creature].zone == Zone::Battlefield {
+            break;
+        }
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+
+    crate::game::layers::evaluate_layers(&mut state);
+    let subtypes = &state.objects[&creature].card_types.subtypes;
+    assert!(
+        subtypes.contains(&"Zombie".to_string()),
+        "printed Zombie subtype retained; got {subtypes:?}"
+    );
+    assert!(
+        !subtypes.contains(&"Vampire".to_string()),
+        "a graveyard cast without the type rider must NOT become a Vampire; got {subtypes:?}"
+    );
+}
+
 /// CR 608.2c — the enters-with-counter rider must bind to the *consumed*
 /// cast-this-way permission, not "any permission carrying a counter". A
 /// graveyard creature with TWO `ExileWithAltCost` permissions:
@@ -14802,6 +15030,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     graveyard_replacement: None,
                     mana_spend_permission: None,
                     enters_with_counter: rider_on_consumed.clone(),
+                    enters_with_modifications: Vec::new(),
                 });
             // P2: foreign-granted (to the opponent) so it never supports
             // PlayerId(0)'s cast — it is the non-consumed sibling carrying the
@@ -14817,6 +15046,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     graveyard_replacement: None,
                     mana_spend_permission: None,
                     enters_with_counter: Some(CounterType::Generic("finality".to_string())),
+                    enters_with_modifications: Vec::new(),
                 });
         }
 
@@ -14894,6 +15124,7 @@ fn hand_alt_cost_permission_overrides_printed_mana_cost() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
             });
     }
 
@@ -14942,6 +15173,7 @@ fn beseech_style_permission() -> CastingPermission {
         graveyard_replacement: None,
         mana_spend_permission: None,
         enters_with_counter: None,
+        enters_with_modifications: Vec::new(),
     }
 }
 
@@ -14981,6 +15213,7 @@ fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
             });
     }
 
@@ -20073,6 +20306,438 @@ fn kozileks_command_modes_scry_draw_and_exile_graveyard_end_to_end() {
     outcome.assert_zone(&[gy_a, gy_b], Zone::Exile);
 }
 
+const DEADLY_ORACLE: &str = "As an additional cost to cast this spell, you may collect evidence 6.\nDestroy all creatures. If evidence was collected, exile a card from an opponent's graveyard. Then search its owner's graveyard, hand, and library for any number of cards with that name and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.";
+
+/// Deadly Cover-Up fixture: P1 owns two `Grizzly Bears` in GY + one in hand
+/// (same-named), a `Llanowar Elves` decoy in GY and hand, and a two-card library
+/// with no Bears (so a draw is the only library change). P0 owns a same-named
+/// `Grizzly Bears` in hand (owner-axis scoping proof — must survive) and two
+/// MV-3 evidence cards in GY (collect evidence 6 = 3 + 3). Returns
+/// `(runner, [p1_gy_bears x2], p1_gy_elves, p1_hand_bears, p1_hand_elves,
+///  p0_hand_bears, deadly, p1_lib_before)`.
+#[allow(clippy::type_complexity)]
+fn deadly_fixture() -> (
+    crate::game::scenario::GameRunner,
+    [ObjectId; 2],
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+    usize,
+) {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let deadly = scenario
+        .add_spell_to_hand_from_oracle(P0, "Deadly Cover-Up", false, DEADLY_ORACLE)
+        .id();
+    scenario
+        .add_spell_to_graveyard(P0, "Evidence A", false)
+        .with_mana_cost(ManaCost::generic(3));
+    scenario
+        .add_spell_to_graveyard(P0, "Evidence B", false)
+        .with_mana_cost(ManaCost::generic(3));
+    let p1_gy_bears = [
+        scenario
+            .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+            .id(),
+        scenario
+            .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+            .id(),
+    ];
+    let p1_gy_elves = scenario
+        .add_creature_to_graveyard(P1, "Llanowar Elves", 1, 1)
+        .id();
+    let p1_hand_bears = scenario.add_card_to_hand(P1, "Grizzly Bears");
+    let p1_hand_elves = scenario.add_card_to_hand(P1, "Llanowar Elves");
+    scenario.add_card_to_library_top(P1, "Forest");
+    scenario.add_card_to_library_top(P1, "Island");
+    let p0_hand_bears = scenario.add_card_to_hand(P0, "Grizzly Bears");
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    let p1_lib_before = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .unwrap()
+        .library
+        .len();
+    (
+        runner,
+        p1_gy_bears,
+        p1_gy_elves,
+        p1_hand_bears,
+        p1_hand_elves,
+        p0_hand_bears,
+        deadly,
+        p1_lib_before,
+    )
+}
+
+/// Drive Deadly through the full cast+resolution pipeline. The seed exile
+/// ("exile a card from an opponent's graveyard") surfaces a cast-time
+/// `TargetSelection` — a same-named `Grizzly Bears` is chosen as the seed so
+/// `SameNameAsParentTarget` binds that name. Collect evidence is opted in/out via
+/// `pay_evidence`; `SearchChoice` selects all offered (name-matched) cards.
+fn drive_deadly(
+    runner: &mut crate::game::scenario::GameRunner,
+    deadly: ObjectId,
+    pay_evidence: bool,
+) {
+    use crate::types::ability::TargetRef;
+    let card_id = runner.state().objects[&deadly].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: deadly,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("Deadly cast accepted");
+    for _ in 0..25 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                // Choose a Grizzly Bears (not the decoy) as the seed — its name
+                // is what SameNameAsParentTarget matches.
+                let bears = slot
+                    .legal_targets
+                    .iter()
+                    .find(|t| {
+                        matches!(t, TargetRef::Object(id)
+                            if runner.state().objects.get(id).map(|o| o.name.as_str())
+                                == Some("Grizzly Bears"))
+                    })
+                    .cloned();
+                assert!(
+                    bears.is_some(),
+                    "seed must have a Grizzly Bears legal target"
+                );
+                runner
+                    .act(GameAction::ChooseTarget { target: bears })
+                    .expect("seed target accepted");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: pay_evidence })
+                    .expect("optional collect-evidence decision accepted");
+            }
+            WaitingFor::CollectEvidenceChoice { cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("collect-evidence selection accepted");
+            }
+            WaitingFor::SearchChoice { cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("search selection accepted");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.pass_both_players();
+            }
+            other => panic!("unexpected Deadly prompt: {other:?}"),
+        }
+    }
+}
+
+fn p1_library_len(runner: &crate::game::scenario::GameRunner) -> usize {
+    use crate::game::scenario::P1;
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .unwrap()
+        .library
+        .len()
+}
+
+/// CR 701.59b + CR 608.2c: Deadly Cover-Up Case A — collect evidence DECLINED.
+/// The seed exile ("if evidence was collected") is skipped, so the same-name
+/// search never runs: nothing is exiled from P1's zones and P1 draws 0.
+#[test]
+fn deadly_cover_up_case_a_no_evidence_no_exile_no_draw() {
+    let (
+        mut runner,
+        p1_gy_bears,
+        p1_gy_elves,
+        p1_hand_bears,
+        p1_hand_elves,
+        p0_hand_bears,
+        deadly,
+        p1_lib_before,
+    ) = deadly_fixture();
+    drive_deadly(&mut runner, deadly, false);
+
+    // Evidence declined → seed + search skipped: every card survives in place.
+    for id in p1_gy_bears {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Graveyard,
+            "P1 GY Bears survives (no evidence)"
+        );
+    }
+    assert_eq!(runner.state().objects[&p1_gy_elves].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&p1_hand_bears].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&p1_hand_elves].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&p0_hand_bears].zone, Zone::Hand);
+    // No hand exile → no draw.
+    assert_eq!(
+        p1_library_len(&runner),
+        p1_lib_before,
+        "P1 draws 0 with no evidence"
+    );
+}
+
+/// CR 701.23a + CR 108.3 + CR 400.7: Deadly Cover-Up Case B — collect evidence
+/// PAID. The seed (a P1-GY Bears) is exiled, then the owner-axis
+/// (`ParentTargetOwner`) same-name search exiles every other same-named card
+/// across P1's GY/hand/library; P1 shuffles and draws one per Bears exiled from
+/// P1's HAND. Exercises W4's `parent_target_owner_player` branch (distinct from
+/// The End's controller path), W5, and W6 on the owner axis.
+///
+/// Revert-to-red (measured): revert W4 → P0's own hand Bears is exiled and P1's
+/// copies survive (caster searches its own zones), P1 draws 0; revert W5 → draw
+/// 0; revert W6 → caster draws (P1 library unchanged).
+#[test]
+fn deadly_cover_up_case_b_evidence_exiles_owner_zones_and_draws() {
+    let (
+        mut runner,
+        p1_gy_bears,
+        p1_gy_elves,
+        p1_hand_bears,
+        p1_hand_elves,
+        p0_hand_bears,
+        deadly,
+        p1_lib_before,
+    ) = deadly_fixture();
+    drive_deadly(&mut runner, deadly, true);
+
+    // Seed + search: all three P1 same-named Bears (2 GY + 1 hand) exiled.
+    for id in p1_gy_bears {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Exile,
+            "P1 GY Bears exiled (seed + search)"
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&p1_hand_bears].zone,
+        Zone::Exile,
+        "P1 hand Bears exiled by search"
+    );
+    // Decoys survive.
+    assert_eq!(runner.state().objects[&p1_gy_elves].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&p1_hand_elves].zone, Zone::Hand);
+    // W4 owner-axis scoping: the caster's own same-named card is untouched.
+    assert_eq!(
+        runner.state().objects[&p0_hand_bears].zone,
+        Zone::Hand,
+        "caster's Bears survives (W4 owner axis)"
+    );
+    // W5 + W6: P1 (owner) drew exactly 1 (one Bears exiled from P1's hand); the
+    // draw is the only change to P1's library (no Bears there to exile).
+    assert_eq!(
+        p1_library_len(&runner),
+        p1_lib_before - 1,
+        "P1 (owner) draws exactly 1 (W5 count + W6 owner axis)"
+    );
+}
+
+/// R3 [REQUIRED] — CR 701.6a + CR 701.23a + CR 109.4: Test of Talents (S25-P2a).
+/// The seed is a COUNTERED SPELL (not an exiled permanent): the countered spell
+/// is put into its owner's graveyard, `SameNameAsParentTarget` binds that spell's
+/// NAME, and the controller-axis search exiles every same-named card from the
+/// spell's controller's (P1's) zones — who then draws one per card exiled from
+/// their HAND. A path no exiled-permanent test reaches.
+///
+/// Revert-to-red (measured): revert W6 → the caster (P0) draws, P1 library
+/// unchanged; revert W5 → draw 0, P1 library unchanged.
+#[test]
+fn test_of_talents_counters_spell_and_draws_for_its_controller() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+    const TOT: &str = "Counter target instant or sorcery spell. Search its controller's graveyard, hand, and library for any number of cards with the same name as that spell and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tot = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test of Talents", true, TOT)
+        .id();
+    // Same-named copies (name matches the countered spell) + decoys in P1's zones.
+    let p1_gy_bolt = scenario
+        .add_spell_to_graveyard(P1, "Lightning Bolt", true)
+        .id();
+    let p1_gy_decoy = scenario
+        .add_creature_to_graveyard(P1, "Llanowar Elves", 1, 1)
+        .id();
+    let p1_hand_bolt = scenario.add_card_to_hand(P1, "Lightning Bolt");
+    let p1_hand_decoy = scenario.add_card_to_hand(P1, "Llanowar Elves");
+    scenario.add_card_to_library_top(P1, "Forest");
+    scenario.add_card_to_library_top(P1, "Island");
+    // Caster's scoping decoy: a same-named card in P0's hand that must survive.
+    let p0_decoy = scenario.add_card_to_hand(P0, "Lightning Bolt");
+    let mut runner = scenario.build();
+    // Put P1's Lightning Bolt (instant) on the stack as the counter target.
+    let bolt_card = crate::types::identifiers::CardId(9_500);
+    let stack_bolt = crate::game::zones::create_object(
+        runner.state_mut(),
+        bolt_card,
+        P1,
+        "Lightning Bolt".to_string(),
+        Zone::Stack,
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&stack_bolt)
+        .unwrap()
+        .card_types
+        .core_types = vec![CoreType::Instant];
+    runner.state_mut().stack.push_back(StackEntry {
+        id: stack_bolt,
+        source_id: stack_bolt,
+        controller: P1,
+        kind: StackEntryKind::Spell {
+            card_id: bolt_card,
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 1,
+        },
+    });
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    let p1_lib_before = p1_library_len(&runner);
+
+    let outcome = runner
+        .cast(tot)
+        .target_objects(&[stack_bolt])
+        .search_first_legal()
+        .resolve();
+
+    // The countered spell goes to P1's GY, then the same-name search (its own name
+    // matches) exiles it along with the pre-existing GY + hand copies.
+    outcome.assert_zone(&[stack_bolt, p1_gy_bolt, p1_hand_bolt], Zone::Exile);
+    outcome.assert_zone(&[p1_gy_decoy], Zone::Graveyard);
+    outcome.assert_zone(&[p1_hand_decoy], Zone::Hand);
+    // Caster's own same-named card is untouched (controller-axis scoping).
+    outcome.assert_zone(&[p0_decoy], Zone::Hand);
+    // W5 + W6: the countered spell's controller (P1) drew exactly 1 (one Bolt
+    // exiled from P1's hand); the draw is the only change to P1's library.
+    let p1_lib_after = outcome
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .unwrap()
+        .library
+        .len();
+    assert_eq!(
+        p1_lib_after,
+        p1_lib_before - 1,
+        "spell controller (P1) draws exactly 1 (W5 count + W6 controller axis)"
+    );
+}
+
+/// CR 701.23a + CR 108.3 + CR 400.7: The End (S25-P2a) — interactive
+/// object-relative multi-zone name-hate search, driven through the full cast
+/// pipeline. Verifies the three runtime behavioral claims:
+/// - W4: the CASTER searches the SEARCHED player's zones (P1), not their own.
+/// - W5: the shared draw rider counts cards exiled from the searched player's HAND.
+/// - W6: "That player ... draws" draws for the SEARCHED player (P1), not the caster.
+///
+/// Discriminating negatives (each flips when the mapped work item is reverted):
+/// - `p0_decoy` (caster's own same-named card) survives → W4 (revert: caster
+///   searches own zones, so it is exiled and the P1 copies survive).
+/// - P1 library drops by exactly 1 → W5 count (revert: 0 draws) AND W6 axis
+///   (revert: the caster draws from their own library, P1's is untouched).
+#[test]
+fn the_end_searches_target_controller_zones_and_draws_for_them() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    const THE_END: &str = "This spell costs {2} less to cast if your life total is 5 or less.\nExile target creature or planeswalker. Search its controller's graveyard, hand, and library for any number of cards with the same name as that permanent and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let the_end = scenario
+        .add_spell_to_hand_from_oracle(P0, "The End", true, THE_END)
+        .id();
+    // P1's targeted permanent + same-named copies in GY and hand (exiled); a
+    // Llanowar Elves decoy in each zone (survives). No "Grizzly Bears" in P1's
+    // library, so the draw is the ONLY change to P1's library size.
+    let p1_target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let p1_gy_bears = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .id();
+    let p1_gy_decoy = scenario
+        .add_creature_to_graveyard(P1, "Llanowar Elves", 1, 1)
+        .id();
+    let p1_hand_bears = scenario.add_card_to_hand(P1, "Grizzly Bears");
+    let p1_hand_decoy = scenario.add_card_to_hand(P1, "Llanowar Elves");
+    // P1 library filler (draw source), no same-named card.
+    scenario.add_card_to_library_top(P1, "Forest");
+    scenario.add_card_to_library_top(P1, "Island");
+    scenario.add_card_to_library_top(P1, "Mountain");
+    // Caster's scoping decoy: a same-named Bears in P0's hand that must NOT be
+    // exiled (proves the caster searched P1's zones, not their own — W4).
+    let p0_decoy = scenario.add_card_to_hand(P0, "Grizzly Bears");
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_990), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_991), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_992), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_993), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    let p1_lib_before = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .unwrap()
+        .library
+        .len();
+
+    let outcome = runner
+        .cast(the_end)
+        .target_objects(&[p1_target])
+        .search_first_legal()
+        .resolve();
+
+    // Name-match + W4: the targeted permanent and every P1 same-named copy exiled.
+    outcome.assert_zone(&[p1_target, p1_gy_bears, p1_hand_bears], Zone::Exile);
+    // Decoys (different name) survive in their zones.
+    outcome.assert_zone(&[p1_gy_decoy], Zone::Graveyard);
+    outcome.assert_zone(&[p1_hand_decoy], Zone::Hand);
+    // W4 discriminator: the caster's own same-named card is untouched.
+    outcome.assert_zone(&[p0_decoy], Zone::Hand);
+    // W5 + W6: P1 (the searched player) drew exactly 1 (one Bears exiled from
+    // P1's hand). The draw is the only change to P1's library, so its size drops
+    // by exactly 1.
+    let p1_lib_after = outcome
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .unwrap()
+        .library
+        .len();
+    assert_eq!(
+        p1_lib_after,
+        p1_lib_before - 1,
+        "P1 must draw exactly 1 from their own library (W5 count + W6 axis)"
+    );
+}
+
 /// CR 700.2 + CR 700.2d: Kozilek's Command is a "Choose two —" spell, so
 /// `validate_modal_indices` must reject both under-selection (one mode) and
 /// over-selection (three modes) of the real parsed modal metadata.
@@ -22401,6 +23066,7 @@ fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
         });
 
     assert!(is_blocked_by_cast_only_from_zones(
@@ -25122,6 +25788,7 @@ fn cast_with_keyword_convoke_uses_caster_not_stored_controller() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
             });
     }
 
@@ -25661,6 +26328,7 @@ fn is_mana_ability_classifier_authoritative() {
         crate::types::ability::Effect::ControlNextTurn {
             target: TargetFilter::Player,
             grant_extra_turn_after: false,
+            window: crate::types::ability::ControlWindow::NextTurn,
         },
     )
     .cost(crate::types::ability::AbilityCost::Tap);
@@ -40185,6 +40853,396 @@ fn combined_spell_ability_def_tags_top_level_spell_tails_sequential_sibling() {
         crate::types::ability::SubAbilityLink::SequentialSibling,
         "top-level spell instructions must resolve as independent siblings"
     );
+}
+
+/// S25-B3 claims 1 + 2 (runtime cast+resolve): Stolen Uniform's front half
+/// binds each anaphor to its precise declared target slot. "Gain control of
+/// that Equipment" acts on slot 1 (the Equipment); "Attach it to the chosen
+/// creature" attaches slot 1 (the Equipment) to slot 0 (the creature) — not the
+/// slot-collision `ParentTarget` that grabs both announced targets at once.
+///
+/// Revert-failing assertion: `equip.attached_to == Some(Object(creature))`. On
+/// the pre-change build both anaphors lower to plain `ParentTarget`, so the
+/// Attach resolves `attachment == target == [creature, equipment]` (the
+/// attachment picks the first slot, the creature), and the Equipment never
+/// equips the creature — the assertion fails. The hostile second Equipment
+/// (`other_equip`, pre-attached to `bystander`) proves the binding is
+/// slot-specific, not "all attachments".
+#[test]
+fn stolen_uniform_binds_gaincontrol_and_attach_to_precise_slots() {
+    use crate::game::game_object::AttachTarget;
+    use crate::game::scenario::GameScenario;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Slot 0 — "target creature you control".
+    let creature = scenario.add_creature(PlayerId(0), "Bearer", 2, 2).id();
+    // P0's other creature: host for the hostile Equipment.
+    let bystander = scenario.add_creature(PlayerId(0), "Bystander", 1, 1).id();
+
+    // Slot 1 — "target Equipment", controlled by the OPPONENT before resolution.
+    let equip = {
+        let state = &mut scenario.state;
+        let id = create_object(
+            state,
+            CardId(9101),
+            PlayerId(1),
+            "Stolen Blade".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        id
+    };
+    // Hostile fixture: a SECOND Equipment P0 already controls, attached to the
+    // bystander — it must be untouched (proves slot-specific binding).
+    let other_equip = {
+        let state = &mut scenario.state;
+        let id = create_object(
+            state,
+            CardId(9102),
+            PlayerId(0),
+            "Other Blade".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        id
+    };
+    {
+        let state = &mut scenario.state;
+        state.objects.get_mut(&other_equip).unwrap().attached_to =
+            Some(AttachTarget::Object(bystander));
+        state
+            .objects
+            .get_mut(&bystander)
+            .unwrap()
+            .attachments
+            .push(other_equip);
+    }
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Stolen Uniform",
+            true,
+            "Choose target creature you control and target Equipment. Gain control of that Equipment until end of turn. Attach it to the chosen creature. When you lose control of that Equipment this turn, if it's attached to a creature you control, unattach it.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    // Declared intents matched to slots in written order (CR 601.2c): the
+    // creature is slot A, the Equipment is slot B.
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[creature, equip])
+        .resolve();
+    let state = outcome.state();
+
+    // Claim 1: GainControl bound slot 1 → P0 controls the Equipment.
+    assert_eq!(
+        state.objects[&equip].controller,
+        PlayerId(0),
+        "GainControl must bind slot 1 (the Equipment) so P0 gains control of it"
+    );
+    // Claim 2 (revert-failing): the Equipment (slot 1) equips the chosen
+    // creature (slot 0) — attachment and target are distinct slots.
+    assert_eq!(
+        state.objects[&equip].attached_to,
+        Some(AttachTarget::Object(creature)),
+        "Attach must equip slot 1 (the Equipment) to slot 0 (the chosen creature)"
+    );
+    assert!(
+        state.objects[&creature].attachments.contains(&equip),
+        "the chosen creature must carry the Equipment"
+    );
+    // Hostile: the unrelated pre-attached Equipment is untouched.
+    assert_eq!(
+        state.objects[&other_equip].attached_to,
+        Some(AttachTarget::Object(bystander)),
+        "the unrelated Equipment must not move — the binding is slot-specific"
+    );
+    // The chosen creature stays under P0's control.
+    assert_eq!(state.objects[&creature].controller, PlayerId(0));
+}
+
+/// S25-B3 block-D claim 8 (B1↔B3 end-to-end runtime): the whole Stolen Uniform
+/// resolves — front half gains control of the opponent's Equipment E and equips
+/// it to your creature C, AND the last sentence's delayed trigger fires when you
+/// LOSE control of E at end-of-turn cleanup and unattaches E — but ONLY E.
+///
+/// Revert-failing on BOTH block-D and its s07 dependency:
+///   (a) drop the s07 `effect_parent_ref_slots` UnattachAll arm (db603310f) →
+///       the delayed ability snapshots `targets = []` → `attachment:
+///       ParentTargetSlot{1}` resolves against nothing → E stays attached → the
+///       "E unattached" assertion flips.
+///   (b) revert the block-D recognizer → the last sentence is `Unimplemented`,
+///       no delayed trigger is created → E stays attached → same assertion flips.
+///   (c) mis-bind the slot (`attachment: Any`) → the hostile second Equipment F
+///       (attached to another creature you control) is ALSO unattached → the
+///       "F still attached" assertion flips.
+///
+/// BLOCKED PRE-FIX#2 (measured, S25-B3 block-D impl): the runtime did not fire. The
+/// s07-frozen `parent_target_snapshot` (delayed_trigger.rs:180) seeds
+/// `delayed_ability.targets` from the resolving clause's per-clause
+/// `ability.targets`, which for Stolen's tail clause is `[E]` (single element,
+/// E at index 0) — NOT the root chain `[C, E]`. So `ParentTargetSlot{1}` binds
+/// against index 1 → out of range → `valid_card` degrades to `Any` (the trigger
+/// never keys on E) and the effect `attachment` resolves to nothing. Plan §2.5's
+/// premise (snapshot == `[C, E]`) is empirically false; db603310f is necessary
+/// but NOT sufficient. FIX (s07-frozen, out of block-D scope): seed the snapshot
+/// from `parent_chain_targets_from_root(state, ability)` (= `[C, E]`, the exact
+/// root-chain flatten the front-half's `resolve_parent_slot_from_root` already
+/// uses) — then `ParentTargetSlot{1}` → E consistently. Un-`ignore` when that
+/// lands.
+///
+/// RESOLVED by fix#2 (cherry-pick `a410d2d74`, delayed_trigger.rs root-chain reseed):
+/// `parent_target_snapshot` now seeds `[C, E]` → `ParentTargetSlot{1}` binds E. Un-ignored.
+#[test]
+fn stolen_uniform_lose_control_unattaches_only_that_equipment() {
+    use crate::game::game_object::AttachTarget;
+    use crate::game::scenario::GameScenario;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Slot 0 — "target creature you control": the equip host C.
+    let creature = scenario.add_creature(PlayerId(0), "Bearer", 2, 2).id();
+    // A second creature you control, host for the hostile Equipment F.
+    let other_creature = scenario
+        .add_creature(PlayerId(0), "Second Bearer", 1, 1)
+        .id();
+
+    // Slot 1 — "target Equipment", controlled by the OPPONENT before resolution.
+    let equip = {
+        let state = &mut scenario.state;
+        let id = create_object(
+            state,
+            CardId(9111),
+            PlayerId(1),
+            "Stolen Blade".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        id
+    };
+    // Hostile fixture: a SECOND Equipment F you already control, attached to the
+    // other creature you control — it must stay attached (proves the delayed
+    // trigger binds E specifically via ParentTargetSlot{1}, not "all attachments").
+    let other_equip = {
+        let state = &mut scenario.state;
+        let id = create_object(
+            state,
+            CardId(9112),
+            PlayerId(0),
+            "Loyal Blade".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        id
+    };
+    {
+        let state = &mut scenario.state;
+        state.objects.get_mut(&other_equip).unwrap().attached_to =
+            Some(AttachTarget::Object(other_creature));
+        state
+            .objects
+            .get_mut(&other_creature)
+            .unwrap()
+            .attachments
+            .push(other_equip);
+    }
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Stolen Uniform",
+            true,
+            "Choose target creature you control and target Equipment. Gain control of that Equipment until end of turn. Attach it to the chosen creature. When you lose control of that Equipment this turn, if it's attached to a creature you control, unattach it.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner
+        .cast(spell)
+        .target_objects(&[creature, equip])
+        .resolve();
+
+    // Front half resolved: you control E and it equips C.
+    assert_eq!(
+        runner.state().objects[&equip].controller,
+        PlayerId(0),
+        "GainControl (slot 1) — you control the Equipment after resolution"
+    );
+    assert_eq!(
+        runner.state().objects[&equip].attached_to,
+        Some(AttachTarget::Object(creature)),
+        "Attach (slot 1 → slot 0) — E equips the chosen creature"
+    );
+
+    // Tap both your creatures so combat surfaces no attackers (CR 508.8) and the
+    // turn advances cleanly to the next upkeep through this turn's cleanup.
+    for c in [creature, other_creature] {
+        runner.state_mut().objects.get_mut(&c).unwrap().tapped = true;
+    }
+
+    // Advance through this turn's cleanup: the until-EOT GainControl ends, control
+    // of E reverts to owner P1 (CR 514.2 / 613.1b), the ControllerChanged event
+    // fires the ThisTurn delayed trigger (CR 603.7), and UnattachAll resolves.
+    runner.advance_to_phase(Phase::Upkeep);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&equip].controller,
+        PlayerId(1),
+        "control of E reverts to owner P1 at cleanup"
+    );
+    // (a)+(b): the delayed trigger fired and unattached E.
+    assert_eq!(
+        runner.state().objects[&equip].attached_to,
+        None,
+        "the lose-control delayed trigger must UNATTACH E at cleanup"
+    );
+    assert!(
+        !runner.state().objects[&creature]
+            .attachments
+            .contains(&equip),
+        "E must no longer be listed among C's attachments after unattaching"
+    );
+    // (c): the hostile second Equipment F is untouched — slot-specific binding.
+    assert_eq!(
+        runner.state().objects[&other_equip].attached_to,
+        Some(AttachTarget::Object(other_creature)),
+        "the unrelated Equipment F must stay attached — the trigger binds E only"
+    );
+}
+
+/// S25-B3 block-D claim 8 (hostile-if, runtime fold discrimination): the folded
+/// intervening-if host scope (`UnattachAll.target = Typed{Creature, You}`) means
+/// an Equipment attached to an OPPONENT's creature at loss-of-control is NOT a
+/// host and is correctly left attached. Revert-failing: if the fold degraded the
+/// host filter to `Any`, E would be unattached even though its host is not a
+/// creature you control — the final assertion flips.
+///
+/// BLOCKED PRE-FIX#2 (same s07-frozen `parent_target_snapshot` root-chain gap as
+/// `stolen_uniform_lose_control_unattaches_only_that_equipment`): until the
+/// snapshot seeds `[C, E]`, the delayed trigger never fires, so this test would
+/// pass VACUOUSLY (E stays attached because nothing runs). Un-`ignore` with the
+/// fix so it becomes a genuine fold discriminator.
+/// RESOLVED by fix#2 (cherry-pick `a410d2d74`): snapshot now seeds `[C, E]`; the trigger
+/// fires, so this fold discriminator runs genuinely (no longer vacuous). Un-ignored.
+#[test]
+fn stolen_uniform_lose_control_fold_leaves_opponent_hosted_equipment() {
+    use crate::game::game_object::AttachTarget;
+    use crate::game::scenario::GameScenario;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let creature = scenario.add_creature(PlayerId(0), "Bearer", 2, 2).id();
+    // An opponent's creature — E will be moved onto it before cleanup.
+    let opp_creature = scenario.add_creature(PlayerId(1), "Opp Beast", 3, 3).id();
+
+    let equip = {
+        let state = &mut scenario.state;
+        let id = create_object(
+            state,
+            CardId(9121),
+            PlayerId(1),
+            "Stolen Blade".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        id
+    };
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Stolen Uniform",
+            true,
+            "Choose target creature you control and target Equipment. Gain control of that Equipment until end of turn. Attach it to the chosen creature. When you lose control of that Equipment this turn, if it's attached to a creature you control, unattach it.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner
+        .cast(spell)
+        .target_objects(&[creature, equip])
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&equip].attached_to,
+        Some(AttachTarget::Object(creature)),
+        "front half equips E onto your creature"
+    );
+
+    // Move E onto the OPPONENT's creature before cleanup (E is still controlled by
+    // you via the until-EOT GainControl; only its host changes). The folded host
+    // filter must therefore exclude it at resolution.
+    scenario_move_attachment(runner.state_mut(), equip, creature, opp_creature);
+
+    // Tap both creatures so combat surfaces no attackers and the turn advances.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&creature)
+        .unwrap()
+        .tapped = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&opp_creature)
+        .unwrap()
+        .tapped = true;
+
+    runner.advance_to_phase(Phase::Upkeep);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&equip].controller,
+        PlayerId(1),
+        "control of E reverts at cleanup"
+    );
+    // The fold: E's host is an opponent's creature, so E is NOT a host of a
+    // "creature you control" — it stays attached.
+    assert_eq!(
+        runner.state().objects[&equip].attached_to,
+        Some(AttachTarget::Object(opp_creature)),
+        "E on an opponent's creature must NOT be unattached (folded 'you control' host scope)"
+    );
+}
+
+/// Move `attachment` from host `from` to host `to`, keeping both attachment lists
+/// consistent.
+fn scenario_move_attachment(
+    state: &mut crate::types::game_state::GameState,
+    attachment: ObjectId,
+    from: ObjectId,
+    to: ObjectId,
+) {
+    use crate::game::game_object::AttachTarget;
+    state
+        .objects
+        .get_mut(&from)
+        .unwrap()
+        .attachments
+        .retain(|&a| a != attachment);
+    state.objects.get_mut(&attachment).unwrap().attached_to = Some(AttachTarget::Object(to));
+    state
+        .objects
+        .get_mut(&to)
+        .unwrap()
+        .attachments
+        .push(attachment);
 }
 
 #[test]

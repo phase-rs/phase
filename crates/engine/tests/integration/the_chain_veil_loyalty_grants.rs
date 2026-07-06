@@ -136,6 +136,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         chosen_x: None,
         cost_paid_object: None,
         effect_context_object: None,
+        amassed_army_object: None,
         ability_index: None,
         may_trigger_origin: None,
         repeat_for: None,

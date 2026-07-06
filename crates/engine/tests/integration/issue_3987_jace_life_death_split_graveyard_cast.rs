@@ -47,6 +47,7 @@ fn graveyard_split_card_cast_offers_face_choice_for_affordable_half() {
                 duration: Some(Duration::UntilEndOfTurn),
                 graveyard_replacement: Some(SpellStackToGraveyardReplacement::Exile),
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
             });
     }
@@ -100,6 +101,7 @@ fn exiled_split_card_free_cast_permission_stays_free_after_face_choice() {
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
             });
     }

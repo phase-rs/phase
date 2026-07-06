@@ -2,10 +2,13 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId, Zone } from "../../adapter/types.ts";
+import { useCardHover } from "../../hooks/useCardHover.ts";
+import { useCardImage } from "../../hooks/useCardImage.ts";
 import { type CardReportContext, useCardReport } from "../../hooks/useCardReport.ts";
 import { useCardParseDetails } from "../../hooks/useEngineCardData.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { getSeatColor, useSeatColor } from "../../hooks/useSeatColor.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -91,11 +94,16 @@ export function CardReportDialog() {
   const [search, setSearch] = useState("");
   // null = show every seat's cards; otherwise restrict to one seat's cards.
   const [playerFilter, setPlayerFilter] = useState<PlayerId | null>(null);
+  // null = show every zone's cards; otherwise restrict to one zone.
+  const [zoneFilter, setZoneFilter] = useState<Zone | null>(null);
 
-  const { groups, seats } = useMemo(() => {
-    if (!gameState) return { groups: [] as ZoneGroup[], seats: [] as PlayerId[] };
+  const { groups, seats, zones } = useMemo(() => {
+    if (!gameState) {
+      return { groups: [] as ZoneGroup[], seats: [] as PlayerId[], zones: [] as Zone[] };
+    }
     const query = search.trim().toLowerCase();
     const seatSet = new Set<PlayerId>();
+    const zoneSet = new Set<Zone>();
     const byZone = new Map<Zone, GameObject[]>();
     for (const obj of Object.values(gameState.objects)) {
       if (!ZONE_ORDER.includes(obj.zone)) continue; // excludes Library
@@ -109,12 +117,14 @@ export function CardReportDialog() {
       // (reported with an empty oracle_id), and emblems (reported under their
       // source card via `reportIdentity`).
       if (!obj.printed_ref && obj.display_source !== "Token" && !obj.is_emblem) continue;
-      // Record the owning/controlling seat for the filter chips BEFORE applying
-      // the active player/search filters, so selecting one player never removes
-      // the chips for the others.
+      // Record the owning/controlling seat and the zone for the filter chips
+      // BEFORE applying the active player/zone/search filters, so selecting one
+      // filter never removes the chips for the others.
       const seat = labelSeatForZone(obj);
       seatSet.add(seat);
+      zoneSet.add(obj.zone);
       if (playerFilter != null && seat !== playerFilter) continue;
+      if (zoneFilter != null && obj.zone !== zoneFilter) continue;
       if (query && !reportIdentity(obj).name.toLowerCase().includes(query)) continue;
       const list = byZone.get(obj.zone) ?? [];
       list.push(obj);
@@ -142,8 +152,10 @@ export function CardReportDialog() {
     const seats = [...seatSet].sort(
       (a, b) => (seatOrder?.indexOf(a) ?? 0) - (seatOrder?.indexOf(b) ?? 0),
     );
-    return { groups, seats };
-  }, [gameState, viewerId, search, playerFilter, seatOrder]);
+    // Zone chips ordered by ZONE_ORDER so they read the same as the list sections.
+    const zones = ZONE_ORDER.filter((zone) => zoneSet.has(zone));
+    return { groups, seats, zones };
+  }, [gameState, viewerId, search, playerFilter, zoneFilter, seatOrder]);
 
   return (
     <ModalPanelShell
@@ -154,7 +166,7 @@ export function CardReportDialog() {
       maxWidthClassName="max-w-lg"
       bodyClassName="flex flex-col"
     >
-      {/* Pinned controls: the search + player filter stay put while the list scrolls. */}
+      {/* Pinned controls: the search + player/zone filters stay put while the list scrolls. */}
       <div className="flex shrink-0 flex-col gap-2.5 px-4 pt-4 pb-3 lg:px-6">
         <input
           type="text"
@@ -165,18 +177,35 @@ export function CardReportDialog() {
         />
         {seats.length > 1 && (
           <div className="flex flex-wrap gap-1.5">
-            <PlayerFilterChip
+            <FilterChip
               active={playerFilter === null}
               label={t("cardReport.allPlayers")}
               onClick={() => setPlayerFilter(null)}
             />
             {seats.map((seat) => (
-              <PlayerFilterChip
+              <FilterChip
                 key={seat}
                 active={playerFilter === seat}
                 label={getPlayerDisplayName(seat, viewerId)}
                 color={getSeatColor(seat, seatOrder)}
                 onClick={() => setPlayerFilter((cur) => (cur === seat ? null : seat))}
+              />
+            ))}
+          </div>
+        )}
+        {zones.length > 1 && (
+          <div className="flex flex-wrap gap-1.5">
+            <FilterChip
+              active={zoneFilter === null}
+              label={t("cardReport.allZones")}
+              onClick={() => setZoneFilter(null)}
+            />
+            {zones.map((zone) => (
+              <FilterChip
+                key={zone}
+                active={zoneFilter === zone}
+                label={t(`cardReport.zone.${zone}`)}
+                onClick={() => setZoneFilter((cur) => (cur === zone ? null : zone))}
               />
             ))}
           </div>
@@ -213,10 +242,11 @@ export function CardReportDialog() {
   );
 }
 
-/** A quick per-player filter pill. Reuses the seat color dot from the HUD so a
- *  chip reads as the same player as their board nameplate. The "All" chip has no
- *  `color`. */
-function PlayerFilterChip({
+/** A quick filter pill, shared by the player and zone filter rows. When `color`
+ *  is given (player chips) it shows the seat color dot from the HUD so the chip
+ *  reads as the same player as their board nameplate; the "All" chips and the
+ *  zone chips omit `color`. */
+function FilterChip({
   active,
   label,
   color,
@@ -277,6 +307,22 @@ function CardReportRow({
   const seatId = labelSeatForZone(obj);
   const seatColor = useSeatColor(seatId);
   const seatName = getPlayerDisplayName(seatId, viewerId);
+  // Tiny art thumbnail + shared hover/long-press preview, driven off the real
+  // game object so hovering the icon opens the same full card preview overlay the
+  // board uses (display only). `cardImageLookup` already resolves emblems (via
+  // emblem_source), tokens, MDFCs, and transformed faces, so no special-casing.
+  const { handlers: hoverHandlers, firedRef } = useCardHover(obj.id);
+  const imageLookup = cardImageLookup(obj);
+  const isToken = obj.display_source === "Token";
+  const { src: artSrc } = useCardImage(imageLookup.name, {
+    size: "art_crop",
+    faceIndex: imageLookup.faceIndex,
+    isToken,
+    tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: isToken ? obj.token_image_ref : undefined,
+    oracleId: imageLookup.oracleId,
+    faceName: imageLookup.faceName,
+  });
 
   const loaded = parseItems != null;
   const supported = (parseItems ?? []).filter((item) => item.supported).length;
@@ -292,6 +338,19 @@ function CardReportRow({
     total,
   };
   const { sent, report } = useCardReport(context);
+
+  // Tiny art icon; hovering it (or long-pressing on touch) opens the full
+  // preview. Shared across the row's three states, like `info`.
+  const thumb = (
+    <span
+      {...hoverHandlers}
+      className="relative block h-9 w-9 shrink-0 overflow-hidden rounded-[6px] border border-white/10 bg-black/30"
+    >
+      {artSrc && (
+        <img src={artSrc} alt="" draggable={false} className="h-full w-full object-cover" />
+      )}
+    </span>
+  );
 
   // Card name + owning seat — shared across the row's three states.
   const info = (
@@ -326,6 +385,7 @@ function CardReportRow({
   if (sent) {
     return (
       <li className="flex items-center gap-3 rounded-[10px] border border-emerald-400/25 bg-emerald-400/[0.06] px-3 py-2">
+        {thumb}
         {info}
         <span className="shrink-0 text-[11px] font-medium text-emerald-400">
           {t("preview.reported")}
@@ -338,6 +398,7 @@ function CardReportRow({
   if (confirming) {
     return (
       <li className="flex items-center gap-3 rounded-[10px] border border-red-400/30 bg-red-500/[0.07] px-3 py-2">
+        {thumb}
         {info}
         <div className="flex shrink-0 items-center gap-1.5">
           <button
@@ -369,9 +430,14 @@ function CardReportRow({
       <button
         type="button"
         disabled={!loaded}
-        onClick={() => setConfirming(true)}
+        onClick={() => {
+          // Suppress the tap that trails a touch long-press (which just opened
+          // the sticky preview), so previewing the art never fires a report.
+          if (!firedRef.current) setConfirming(true);
+        }}
         className="flex w-full items-center gap-3 rounded-[10px] border border-white/8 bg-white/[0.03] px-3 py-2 transition hover:border-white/15 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
       >
+        {thumb}
         {info}
         {loaded && total > 0 && (
           <span

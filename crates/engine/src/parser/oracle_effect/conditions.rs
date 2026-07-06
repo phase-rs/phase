@@ -20,7 +20,7 @@ use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_wo
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::{ContinuationAst, PutCount};
+use crate::parser::oracle_ir::ast::ContinuationAst;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
@@ -1465,6 +1465,136 @@ fn parse_target_type_membership_condition_text(text: &str) -> Option<AbilityCond
         .ok()
         .map(|(_, condition)| condition);
     parsed
+}
+
+/// CR 608.2c + CR 701.20a: In a top-card predicate guessing sequence, "they
+/// guessed right" means the revealed card matches the most recent opponent
+/// guess. The guess itself is lowered as `ChoiceType::CardPredicateGuess`, so
+/// this can reuse the same transient predicate filter used by "of the chosen
+/// kind" effects.
+fn parse_guessed_right_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, result) = all_consuming(parse_card_predicate_guess_result)
+        .parse(lower.as_str())
+        .ok()?;
+    match (result.subject, result.outcome) {
+        (_, CardPredicateGuessOutcome::Right) => Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![],
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            subtype_filter: None,
+        }),
+    }
+}
+
+pub(super) fn strip_card_predicate_guess_result_conditional(
+    text: &str,
+) -> Option<(AbilityCondition, String)> {
+    let (condition_fragment, body) = split_leading_conditional(text)?;
+    let cond_text = strip_guess_result_condition_prefix(&condition_fragment);
+
+    let condition = parse_guessed_right_condition_text(cond_text)?;
+    Some((condition, body))
+}
+
+pub(super) fn is_card_predicate_guess_result_conditional(text: &str) -> bool {
+    let Some((condition_fragment, _body)) = split_leading_conditional(text) else {
+        return false;
+    };
+    let parsed = all_consuming(parse_any_card_predicate_guess_result)
+        .parse(strip_guess_result_condition_prefix(&condition_fragment))
+        .is_ok();
+    parsed
+}
+
+fn strip_guess_result_condition_prefix(condition_fragment: &str) -> &str {
+    let condition_lower = condition_fragment.to_lowercase();
+    nom_on_lower(condition_fragment, &condition_lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("then, if "),
+                tag("then if "),
+                tag("if "),
+            )),
+        )
+        .parse(i)
+    })
+    .map(|((), rest)| rest)
+    .unwrap_or(condition_fragment)
+    .trim()
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct CardPredicateGuessResult {
+    subject: CardPredicateGuessSubject,
+    outcome: CardPredicateGuessOutcome,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CardPredicateGuessSubject {
+    They,
+    ThatPlayer,
+    ThatOpponent,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CardPredicateGuessOutcome {
+    Right,
+}
+
+fn parse_card_predicate_guess_result(input: &str) -> OracleResult<'_, CardPredicateGuessResult> {
+    let (input, subject) = parse_card_predicate_guess_subject(input)?;
+    let (input, _) = tag(" guessed ").parse(input)?;
+    let (input, outcome) = parse_card_predicate_guess_outcome(input)?;
+    Ok((input, CardPredicateGuessResult { subject, outcome }))
+}
+
+fn parse_any_card_predicate_guess_result(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = parse_any_card_predicate_guess_subject(input)?;
+    let (input, _) =
+        alt((tag::<_, _, OracleError<'_>>(" guessed "), tag(" guesses "))).parse(input)?;
+    let (input, _) = parse_any_card_predicate_guess_outcome(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_predicate_guess_subject(input: &str) -> OracleResult<'_, CardPredicateGuessSubject> {
+    alt((
+        value(CardPredicateGuessSubject::They, tag("they")),
+        value(CardPredicateGuessSubject::ThatPlayer, tag("that player")),
+        value(
+            CardPredicateGuessSubject::ThatOpponent,
+            tag("that opponent"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_any_card_predicate_guess_subject(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        map(parse_card_predicate_guess_subject, |_| ()),
+        value((), tag("target opponent")),
+        value((), tag("the player")),
+        value((), tag("your opponent")),
+        value((), tag("an opponent")),
+    ))
+    .parse(input)
+}
+
+fn parse_card_predicate_guess_outcome(input: &str) -> OracleResult<'_, CardPredicateGuessOutcome> {
+    value(CardPredicateGuessOutcome::Right, tag("right")).parse(input)
+}
+
+fn parse_any_card_predicate_guess_outcome(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("right"),
+            tag("wrong"),
+            tag("correctly"),
+            tag("incorrectly"),
+        )),
+    )
+    .parse(input)
 }
 
 /// Consume a target-anaphoric noun phrase used as the subject of an "instead"
@@ -3661,12 +3791,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // CR 701.20e: Map the typed `PutCount` onto the Dig's keep_count/up_to.
     // `u32::MAX` is an unbounded parser sentinel; the Dig resolver clamps it
     // to the number of seen cards.
-    let (alt_keep_count, alt_up_to) = match alt_quantity {
-        PutCount::All => (Some(u32::MAX), false),
-        PutCount::AnyNumber => (Some(u32::MAX), true),
-        PutCount::Up(n) => (Some(n), true),
-        PutCount::Exactly(n) => (Some(n), false),
-    };
+    let (alt_keep_count, alt_keep_count_expr, alt_up_to) = alt_quantity.to_dig_keep();
 
     // CR 601.2f + CR 608.2c: a teamwork-gated "put ... from among them ...
     // instead" alternative reuses the preceding Dig's source; the base
@@ -3689,6 +3814,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         count: prev_count.clone(),
         destination: alt_destination,
         keep_count: alt_keep_count,
+        keep_count_expr: alt_keep_count_expr,
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),

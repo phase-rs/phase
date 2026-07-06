@@ -1116,23 +1116,27 @@ fn extract_token_count_expression(text: &str) -> Option<String> {
 
 fn extract_token_pt_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-    for needle in [
-        "power and toughness are each equal to ",
-        "power and toughness is each equal to ",
-    ] {
-        if let Some(after) = tp.strip_after(needle) {
-            return Some(
-                after
-                    .original
-                    .trim()
-                    .trim_matches('"')
-                    .trim_end_matches('.')
-                    .to_string(),
-            );
-        }
-    }
-    None
+    // SCAN (not anchor) to the "power and toughness" P/T marker anywhere in the
+    // token suffix, then accept an optional "are "/"is " copula and the shared
+    // "each equal to " tail. `take_until` discards any leading "base " for free,
+    // so the combinator subsumes the two prior literals ("… are/is each equal
+    // to") AND Skullspore's copula-less "base power and toughness each equal to"
+    // — without an anchored `opt(tag("base "))` that would only match at position
+    // 0 and silently regress every existing mid-suffix P/T token to 0/0.
+    let (_, after) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = take_until::<_, _, OracleError<'_>>("power and toughness").parse(i)?;
+        let (i, _) = tag("power and toughness ").parse(i)?;
+        let (i, _) = opt(alt((tag("are "), tag("is ")))).parse(i)?;
+        let (i, _) = tag("each equal to ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    Some(
+        after
+            .trim()
+            .trim_matches('"')
+            .trim_end_matches('.')
+            .to_string(),
+    )
 }
 
 fn parse_token_identity(
@@ -1346,6 +1350,80 @@ mod tests {
     use super::*;
     use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TypeFilter};
     use crate::types::card_type::CoreType;
+
+    #[test]
+    fn extract_token_pt_expression_covers_base_and_are_is_copula_classes() {
+        // Gap A regression guard (scan-not-anchor). `extract_token_pt_expression`
+        // receives the FULL token suffix, so the "power and toughness … each equal
+        // to" marker is MID-suffix. The combinator must SCAN to it, not anchor at
+        // position 0. Each input is a full suffix; each asserts the trailing
+        // expression string (non-vacuous — a bare `is_some` would pass while the
+        // anchored mis-implementation regressed the existing tokens to 0/0).
+        let cases = [
+            // NEW: "base " prefix, no copula (The Skullspore Nexus). Reverting the
+            // scan to the original two literals makes this return None.
+            (
+                "green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures",
+                "the total power of those creatures",
+            ),
+            // EXISTING "are" copula, mid-suffix. Reverting the scan to an anchored
+            // `tag("power and toughness ")` at pos 0 makes this return None.
+            (
+                "0/0 green Ooze creature token with power and toughness are each equal to the number of creatures you control",
+                "the number of creatures you control",
+            ),
+            // EXISTING "is" copula, mid-suffix.
+            (
+                "green Plant creature token with power and toughness is each equal to your life total",
+                "your life total",
+            ),
+        ];
+        for (suffix, expected) in cases {
+            assert_eq!(
+                extract_token_pt_expression(suffix).as_deref(),
+                Some(expected),
+                "full-suffix P/T marker must be scanned, not anchored: {suffix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skullspore_token_lowers_to_triggering_batch_dynamic_pt() {
+        // Gap A + Gap B composed. The Skullspore Nexus create clause (verbatim)
+        // must lower to a dynamic-P/T token whose base P/T reads the triggering
+        // batch's total power. Baseline: `Effect::Unimplemented` (measured).
+        use crate::types::ability::{AggregateFunction, ObjectProperty, TrackedAnaphorSource};
+        let txt = "Create a green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("Skullspore token must parse (was Unimplemented)");
+        let Effect::Token {
+            power,
+            toughness,
+            types,
+            colors,
+            count,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: TrackedAnaphorSource::TriggeringBatch,
+            },
+        });
+        assert_eq!(power, expected_pt.clone(), "base power must be batch sum");
+        assert_eq!(toughness, expected_pt, "base toughness must be batch sum");
+        assert!(types.iter().any(|t| t == "Creature"));
+        assert!(
+            types.iter().any(|t| t == "Fungus") && types.iter().any(|t| t == "Dinosaur"),
+            "subtypes must include Fungus and Dinosaur, got {types:?}"
+        );
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+    }
 
     #[test]
     fn occult_epiphany_token_counts_distinct_types_of_discarded() {

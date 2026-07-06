@@ -1,4 +1,4 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -10,17 +10,14 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let targets: Vec<_> = match &ability.effect {
-        Effect::RemoveFromCombat { .. } => ability
-            .targets
-            .iter()
-            .filter_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect(),
+        Effect::RemoveFromCombat {
+            target: TargetFilter::SelfRef,
+        } => {
+            vec![ability.source_id]
+        }
+        Effect::RemoveFromCombat { target } => {
+            super::effect_object_targets(target, &ability.targets)
+        }
         _ => return Ok(()),
     };
 
@@ -86,7 +83,7 @@ mod tests {
     use super::*;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -353,6 +350,53 @@ mod tests {
         assert!(
             combat.attackers.is_empty(),
             "Self-ref should remove source from combat"
+        );
+    }
+
+    #[test]
+    fn remove_from_combat_self_ref_ignores_inherited_parent_target() {
+        let mut state = GameState::new_two_player(42);
+        let attacker_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Runner".to_string(),
+            Zone::Battlefield,
+        );
+        let inherited_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Revealed Card".to_string(),
+            Zone::Library,
+        );
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker_id,
+                defending_player: PlayerId(1),
+                attack_target: AttackTarget::Player(PlayerId(1)),
+                blocked: false,
+                band_id: None,
+            }],
+            ..Default::default()
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::RemoveFromCombat {
+                target: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(inherited_id)],
+            attacker_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.combat.as_ref().unwrap().attackers.is_empty(),
+            "SelfRef must remove the source, not the inherited revealed-card target"
         );
     }
 }

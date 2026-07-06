@@ -101,6 +101,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "SearchPartitionChoice",
     "OutsideGameChoice",
     "ChooseFromZoneChoice",
+    // CR 701.4a: behold a [quality] — single-pick from a mixed-zone candidate
+    // list (BeholdChoiceModal, rendered via CardChoiceModal).
+    "BeholdChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
@@ -123,6 +126,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "KeepWithinTotalPowerChoice",
     "DistributeAmong",
     "MoveCountersDistribution",
+    // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) — rendered by
+    // MoveCountersDistributionModal in no-destination removal mode.
+    "RemoveCountersChoice",
     "RetargetChoice",
     "CopyRetarget",
     "DamageSourceChoice",

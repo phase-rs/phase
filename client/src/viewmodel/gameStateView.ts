@@ -317,10 +317,10 @@ export interface BoardChoiceView {
  */
 function zipContributions(
   eligibleCreatures: ObjectId[],
-  contributions: number[],
+  contributions?: number[],
 ): Record<ObjectId, number> {
   const map: Record<ObjectId, number> = {};
-  if (eligibleCreatures.length !== contributions.length) {
+  if (!contributions || eligibleCreatures.length !== contributions.length) {
     return map;
   }
   eligibleCreatures.forEach((id, index) => {
@@ -473,7 +473,14 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible_creatures,
         intent: "saddle",
-        selection: { type: "totalPowerAtLeast", power: waitingFor.data.saddle_power },
+        selection: {
+          type: "totalPowerAtLeast",
+          power: waitingFor.data.saddle_power,
+          contributions: zipContributions(
+            waitingFor.data.eligible_creatures,
+            waitingFor.data.contributions,
+          ),
+        },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
       };

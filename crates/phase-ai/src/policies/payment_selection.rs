@@ -449,6 +449,10 @@ mod tests {
         eligible_creatures: Vec<ObjectId>,
         creature_ids: Vec<ObjectId>,
     ) -> f64 {
+        let contributions = eligible_creatures
+            .iter()
+            .map(|&id| object_crew_power_contribution(state, id, CrewAction::Saddle))
+            .collect();
         score_for_action(
             state,
             WaitingFor::SaddleMount {
@@ -456,6 +460,7 @@ mod tests {
                 mount_id,
                 saddle_power,
                 eligible_creatures,
+                contributions,
             },
             GameAction::SaddleMount {
                 mount_id,

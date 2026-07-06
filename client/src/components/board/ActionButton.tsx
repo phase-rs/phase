@@ -15,7 +15,6 @@ import { useBlockRequirements } from "../combat/useBlockRequirements.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
-import { PriorityYieldList } from "./PriorityYieldList.tsx";
 
 type ActionButtonMode =
   | "combat-attackers"
@@ -487,9 +486,6 @@ export function ActionButton() {
           </button>
         )}
       </div>
-
-      {/* CR 117.3d: the viewer's standing priority yields, with revoke controls. */}
-      <PriorityYieldList />
 
       {showTargetPicker && (
         <AttackTargetPicker

@@ -59,21 +59,27 @@ fn assert_zero_unimplemented(oracle: &str, name: &str, types: &[String], subtype
 }
 
 // ---------------------------------------------------------------------------
-// Foraging Wickermaw — HONEST DEFER. "{1}: Add one mana of any color. This
-// creature becomes that color until end of turn." The "that color" anaphor
-// refers to the color the player chooses while producing mana — there is no
-// `ChosenAttribute::Color` binding for a mana-production color choice today, so
-// no color-set modification can read it. This batch only routes the existing
-// SetColor/AddColor/AddChosenColor seam; binding a mana-color choice as a
-// readable chosen attribute is infrastructure beyond color-set, so the
-// "becomes that color" clause stays an honest `Effect::Unimplemented`. The test
-// asserts the defer is honest (the color clause is the only residual) rather
-// than over-claiming runtime support that does not exist.
+// Foraging Wickermaw — "{1}: Add one mana of any color. This creature becomes
+// that color until end of turn." The "that color" anaphor refers to the color
+// the player produces with the mana ability. It now routes through the existing
+// `AddChosenColor` Layer-5 seam: the mana producer records the produced color as
+// `ChosenAttribute::Color` on the source (see `produce_mana_from_ability`), and
+// this `AddChosenColor` reads it live at Layer 5. This is the parser-shape half;
+// the runtime color-follows-choice / staleness / gate discrimination lives in
+// `mana_abilities.rs` tests. CR 105.3 + CR 106.1a + CR 613.1e.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn foraging_wickermaw_becomes_that_color_is_honestly_deferred() {
+fn foraging_wickermaw_becomes_that_color_maps_to_add_chosen_color() {
     const ORACLE: &str = "When this creature enters, surveil 1.\n{1}: Add one mana of any color. This creature becomes that color until end of turn. Activate only once each turn.";
+    // The "becomes that color" clause now parses — zero residual Unimplemented.
+    assert_zero_unimplemented(
+        ORACLE,
+        "Foraging Wickermaw",
+        &creature_types(),
+        &["Lizard".to_string()],
+    );
+
     let parsed = parse_oracle_text(
         ORACLE,
         "Foraging Wickermaw",
@@ -81,19 +87,24 @@ fn foraging_wickermaw_becomes_that_color_is_honestly_deferred() {
         &creature_types(),
         &["Lizard".to_string()],
     );
-    let dbg = format!("{parsed:#?}");
-    // The defer is scoped to the "that color" anaphor only — the mana ability
-    // and the ETB surveil must still parse.
+    // The {1} mana ability carries the become-that-color apply-half.
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|a| format!("{:?}", a.effect).contains("AnyOneColor"))
+        .expect("the '{1}: Add one mana of any color' mana ability must parse");
+    let sub = mana_ability
+        .sub_ability
+        .as_ref()
+        .expect("the 'becomes that color' clause must hang off the mana ability");
     assert!(
-        dbg.contains("Unimplemented") && dbg.contains("that color"),
-        "the 'becomes that color' clause must remain an honest Unimplemented defer; got:\n{dbg}"
+        generic_effect_has_chosen_color(&sub.effect),
+        "'becomes that color' must map to AddChosenColor; got {:?}",
+        sub.effect
     );
+    // The ETB surveil trigger must still parse.
     assert!(
-        dbg.contains("AnyOneColor"),
-        "the '{{1}}: Add one mana of any color' mana ability must still parse"
-    );
-    assert!(
-        dbg.contains("Surveil"),
+        format!("{parsed:#?}").contains("Surveil"),
         "the ETB surveil trigger must still parse"
     );
 }

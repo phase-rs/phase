@@ -1,4 +1,4 @@
-import type { BatchResolveResult, GameAction, GameEvent, GameState, LegalActionsResult, WaitingFor } from "../adapter/types";
+import type { BatchResolveResult, GameAction, GameEvent, GameLogEntry, GameState, LegalActionsResult, WaitingFor } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
@@ -63,6 +63,7 @@ interface PendingRemoteUpdate {
   kind: "remote";
   state: GameState;
   events: GameEvent[];
+  logEntries?: GameLogEntry[];
   legalResult: LegalActionsResult;
   resolve: () => void;
   reject: (err: unknown) => void;
@@ -479,7 +480,7 @@ async function processQueue(): Promise<void> {
           inFlightLocalAction = null;
         }
       } else {
-        await processRemoteUpdateInner(next.state, next.events, next.legalResult);
+        await processRemoteUpdateInner(next.state, next.events, next.legalResult, next.logEntries);
       }
       next.resolve();
     } catch (err) {
@@ -607,6 +608,7 @@ async function processRemoteUpdateInner(
   state: GameState,
   events: GameEvent[],
   legalResult: LegalActionsResult,
+  logEntries: GameLogEntry[] = [],
 ): Promise<void> {
   // 1. Capture snapshot before updating state (for position lookups during animation)
   const snapshot = useAnimationStore.getState().captureSnapshot();
@@ -653,13 +655,23 @@ async function processRemoteUpdateInner(
   }
 
   // 5. Update game state after animations complete
-  useGameStore.setState((prev) => ({
-    gameState: state,
-    events,
-    eventHistory: [...prev.eventHistory, ...events].slice(-1000),
-    waitingFor: state.waiting_for,
-    ...legalResultState(legalResult),
-  }));
+  useGameStore.setState((prev) => {
+    let seq = prev.nextLogSeq;
+    const newLogEntries = logEntries.map((entry) => ({
+      ...entry,
+      seq: seq++,
+    }));
+
+    return {
+      gameState: state,
+      events,
+      eventHistory: [...prev.eventHistory, ...events].slice(-1000),
+      logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
+      nextLogSeq: seq,
+      waitingFor: state.waiting_for,
+      ...legalResultState(legalResult),
+    };
+  });
 
   // 6. Play victory/defeat stinger on GameOver
   const gameOverEvent = events.find((e) => e.type === "GameOver");
@@ -683,16 +695,17 @@ export async function processRemoteUpdate(
   state: GameState,
   events: GameEvent[],
   legalResult: LegalActionsResult,
+  logEntries?: GameLogEntry[],
 ): Promise<void> {
   if (isAnimating) {
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "remote", state, events, legalResult, resolve, reject });
+      pendingQueue.push({ kind: "remote", state, events, logEntries, legalResult, resolve, reject });
     });
   }
 
   isAnimating = true;
   try {
-    await processRemoteUpdateInner(state, events, legalResult);
+    await processRemoteUpdateInner(state, events, legalResult, logEntries);
   } finally {
     if (pendingQueue.length > 0) {
       processQueue().catch(() => { isAnimating = false; });

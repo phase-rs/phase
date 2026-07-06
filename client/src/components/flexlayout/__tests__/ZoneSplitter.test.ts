@@ -47,6 +47,18 @@ describe("resizeBand", () => {
     const next = resizeBand({ pct: 20, pxCap: 200 }, -20, VH, home); // 180px, 30px off
     expect(next.pxCap).toBe(180);
   });
+
+  it("is a no-op on a degenerate (zero/negative/NaN) viewport, never persisting a NaN track", () => {
+    // window.innerHeight can be 0 / NaN transiently (collapsed or pre-layout
+    // container); the result is written to the persisted preferences store, so a
+    // NaN would serialize to null and corrupt the stored track permanently.
+    const track = { pct: 12, pxCap: 100 };
+    expect(resizeBand(track, 50, 0)).toEqual(track);
+    expect(Number.isNaN(resizeBand(track, 50, 0).pct)).toBe(false);
+    expect(resizeBand(track, 50, Number.NaN)).toEqual(track);
+    // A negative viewport would otherwise yield a negative pxCap.
+    expect(resizeBand(track, 50, -100).pxCap).toBeGreaterThan(0);
+  });
 });
 
 describe("ratioFromPointerX", () => {

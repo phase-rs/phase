@@ -1881,6 +1881,178 @@ fn unmask_card_named_literal_spans(text: String, originals: &[String]) -> String
     result
 }
 
+/// CR 201.5a: The granting-object self-reference marker. Emitted by
+/// [`mask_granting_self_reference_in_quotes`] when a card's own printed name
+/// appears in a self-reference (verb-object) position inside a *quoted granted
+/// body*. Unlike the other placeholders in this module it is deliberately NOT
+/// unmasked at the end of normalization — it survives into the parser, where
+/// `parse_self_reference` and the cost self-ref combinators map it to
+/// `TargetFilter::GrantingObject` (concretized to the granting object at
+/// grant-clone time). Any un-migrated parser path that still sees it degrades it
+/// to `~` (host `SelfRef`) via a final cleanup in `parse_quoted_ability`, so a
+/// missed site is never worse than the pre-fix host binding.
+pub(crate) const GRANTING_SELF_PLACEHOLDER: &str = "\u{E0002}";
+
+/// CR 201.5a: Self-reference verb-object trigger phrases — the positions whose
+/// downstream combinator (`parse_cost_self_reference` in `oracle_cost.rs` /
+/// `parse_self_reference` in `oracle_nom/target.rs`) actually CONSUMES the
+/// placeholder as `TargetFilter::GrantingObject`. The masker is an ALLOWLIST: an
+/// in-quote name occurrence is marked ONLY when its immediately-preceding text
+/// ends with one of these. This keeps the placeholder confined to positions that
+/// consume it (so it never survives unconsumed) and leaves every other position
+/// — QuantityRef, condition, damage-source, exclusion, name-filter (`named
+/// <name>`), and nullary self-costs (`unattach`/`tap` <name>) — to normalize to
+/// `~` exactly as before, preserving byte-identical pre-fix parse output.
+///
+/// Singular `counter on ` (PutCounter target: "put a <kind> counter on <name>")
+/// is included; plural `counters on ` (QuantityRef: "number of <kind> counters
+/// on <name>") is deliberately NOT a prefix of it, so the two are distinguished.
+const GRANTER_SELF_REF_VERB_PREFIXES: &[&str] = &[
+    "sacrifice ",  // Sacrifice cost
+    "exile ",      // Exile cost
+    "return ",     // ReturnToHand cost / Bounce effect
+    "counter on ", // PutCounter target ("put a <kind> counter on <name>")
+];
+// Deliberately excluded: `destroy ` / `control of ` — no measured class card
+// references its own name cleanly in those positions (Shuriken's "gains control
+// of Shuriken unless it was unattached from a Ninja" carries an unless-rider that
+// parses to `Unimplemented`, so masking it would leak the placeholder rather than
+// producing GrantingObject). Add such a verb only with a card that provably
+// consumes the placeholder there. Nullary self-costs (`unattach`/`tap <name>`)
+// are also excluded — they carry no TargetFilter and expect `~`.
+
+/// CR 201.5a: Within each double-quoted region of `text`, replace occurrences of
+/// the card's own name with [`GRANTING_SELF_PLACEHOLDER`] ONLY in a
+/// self-reference verb-object position (see [`GRANTER_SELF_REF_VERB_PREFIXES`]),
+/// so a granted ability's by-name reference to its GRANTING object survives
+/// distinct from the host self-reference (`~`, "this creature").
+///
+/// Bounded to quoted regions and to consumer-taught verb-object positions:
+/// everywhere else (outside quotes, or in-quote QuantityRef / condition /
+/// damage-source / exclusion / name-filter positions) the card name still
+/// normalizes to `~` (host self-ref), byte-identical to pre-fix. Only the
+/// deterministic proper-noun variants (full multi-word name and comma-separated
+/// short name) are masked, mirroring `normalize_card_name_refs` strategies 1–2;
+/// the risky single-word / of-short fallbacks are skipped to avoid matching
+/// English words.
+fn mask_granting_self_reference_in_quotes(text: &str, card_name: &str) -> String {
+    // allow-noncombinator: structural masking of a card-name self-reference
+    // before `~` normalization (mirrors `mask_card_name_keyword_action`), not
+    // parsing dispatch.
+    // allow-noncombinator: strip MTGJSON A- prefix (structural, mirrors normalize_card_name_refs)
+    let effective_name = card_name.strip_prefix("A-").unwrap_or(card_name);
+    // (name, case_sensitive). Multi-word / comma-short are case-insensitive
+    // (proper nouns); a single-word name is matched case-sensitively so it only
+    // hits the capitalized card-name occurrence — mirroring
+    // `normalize_card_name_refs`' single-word discipline. Position-gating (the
+    // verb-object allowlist) makes even single-word masking safe here.
+    let mut variants: Vec<(&str, bool)> = Vec::new();
+    if effective_name.contains(' ') {
+        variants.push((effective_name, false));
+    } else if effective_name.len() >= 3 {
+        // `>= 3`: skip 1-2 char names, matching normalize_card_name_refs guards.
+        variants.push((effective_name, true));
+    }
+    // allow-noncombinator: comma-short name extraction (structural, not parsing dispatch)
+    if let Some(comma_pos) = effective_name.find(", ") {
+        let short = &effective_name[..comma_pos];
+        // `>= 2`: matches the comma-short guard in `normalize_card_name_refs`.
+        if short.len() >= 2 && short.contains(' ') {
+            variants.push((short, false));
+        }
+    }
+    if variants.is_empty() {
+        return text.to_string();
+    }
+    // Segments split on `"`: odd indices are inside a quoted region.
+    let mut result = String::with_capacity(text.len());
+    for (seg_idx, segment) in text.split('"').enumerate() {
+        if seg_idx > 0 {
+            result.push('"');
+        }
+        if seg_idx % 2 == 1 {
+            let mut masked = segment.to_string();
+            for &(name, case_sensitive) in &variants {
+                masked = mask_name_occurrences_in_segment(&masked, name, case_sensitive);
+            }
+            result.push_str(&masked);
+        } else {
+            result.push_str(segment);
+        }
+    }
+    result
+}
+
+/// Word-boundary-aware, case-insensitive replacement of `name` occurrences with
+/// [`GRANTING_SELF_PLACEHOLDER`] within a single (already inside-quotes)
+/// `segment`, masking ONLY occurrences in a self-reference verb-object position
+/// ([`GRANTER_SELF_REF_VERB_PREFIXES`]).
+fn mask_name_occurrences_in_segment(segment: &str, name: &str, case_sensitive: bool) -> String {
+    // allow-noncombinator: structural occurrence masking mirroring
+    // `mask_card_name_keyword_action`, not parsing dispatch.
+    let lower_seg = segment.to_ascii_lowercase();
+    let lower_name = name.to_ascii_lowercase();
+    // Case-sensitive matching searches the original segment; case-insensitive
+    // searches the lowercased copy. The verb-object lookbehind always uses the
+    // lowercased prefix.
+    let (haystack, needle): (&str, &str) = if case_sensitive {
+        (segment, name)
+    } else {
+        (lower_seg.as_str(), lower_name.as_str())
+    };
+    let mut out = String::with_capacity(segment.len());
+    let mut rest = segment;
+    let mut hay_rest = haystack;
+    while let Some(idx) = hay_rest.find(needle) {
+        let after = idx + needle.len();
+        let before_ok = idx == 0
+            || !rest[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        let after_ok = after >= rest.len()
+            || !rest[after..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric());
+        // `rest` is always a tail slice of `segment`, so the absolute start of
+        // this occurrence is recoverable for the verb-object lookbehind.
+        let abs_start = segment.len() - rest.len() + idx;
+        let prefix_lower = segment[..abs_start].to_ascii_lowercase();
+        // CR 201.5a: mask (→ GrantingObject) ONLY in a self-reference verb-object
+        // position a downstream self-ref combinator consumes. Positions NOT in the
+        // allowlist — QuantityRef ("... counters on <name>"), condition,
+        // damage-source ("dealt ... by <name>"), exclusion ("other than <name>"),
+        // name-filter ("named <name>"), nullary self-costs ("unattach/tap <name>")
+        // — are left to normalize to `~` (host), byte-identical to pre-fix.
+        //
+        // KNOWN CR 201.5a FOLLOW-UP: the declined non-verb-object granter-name
+        // references (QuantityRef / condition / damage-source / exclusion) host-bind
+        // today but per CR 201.5a should bind to the GRANTER — e.g. Gutter Grime's
+        // token counting "slime counters on Gutter Grime" should count the granting
+        // enchantment's counters, not the token's. Restoring the host binding here
+        // is not a new regression (it is the pre-fix behavior); the correct
+        // granter binding for these channels is a deferred fix-sweep, and this
+        // guard is the boundary that sweep must extend.
+        // allow-noncombinator: verb-object lookbehind (structural masking, not parsing dispatch)
+        let is_self_ref_object = before_ok
+            && after_ok
+            && GRANTER_SELF_REF_VERB_PREFIXES
+                .iter()
+                .any(|p| prefix_lower.ends_with(p));
+        if is_self_ref_object {
+            out.push_str(&rest[..idx]);
+            out.push_str(GRANTING_SELF_PLACEHOLDER);
+        } else {
+            out.push_str(&rest[..after]);
+        }
+        rest = &rest[after..];
+        hay_rest = &hay_rest[after..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     let pre = mask_ring_tempts_you_phrase(text);
     // CR 701.40a/701.58a/701.62a: protect the keyword-action body verb on cards
@@ -1900,6 +2072,11 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // "A-" doesn't cling to a `~` placeholder when the suffix is replaced.
     // Both case-variants ("A-…" and "a-…") show up in normalized text.
     let mut result = text.to_string();
+    // CR 201.5a: mark the card's own name inside quoted granted bodies as a
+    // granting-object self-reference (GRANTING_SELF_PLACEHOLDER) BEFORE it
+    // collapses to `~` below. Bounded to quoted regions and skips `named <name>`
+    // filter positions, so only a granter self-ref is marked.
+    result = mask_granting_self_reference_in_quotes(&result, card_name);
     // allow-noncombinator: structural detection of MTGJSON A-/a- card-name prefix (not parsing)
     if card_name.starts_with("A-") || card_name.starts_with("a-") {
         let prefixed_upper = format!("A-{effective_name}");

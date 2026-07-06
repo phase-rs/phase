@@ -594,6 +594,46 @@ pub(crate) fn is_extra_blockers_static_candidate(lower: &str) -> bool {
 /// resolved by `parse_rule_static_subject_filter`, which returns `None` for a
 /// `target …` subject so a genuine spell/effect form still falls through to the
 /// effect parser.
+/// CR 509.1c: the blocker slot of the "All <blockers> able to block <subject> do
+/// so" grammar, consumed after the leading `tag("all ")`. Returns the remainder
+/// (positioned at the subject) and the optional blocker filter:
+/// - Slot A — the bare "creature(s) able to block " form → `None` (every idle
+///   able creature is compelled: Lure, Ochran Assassin). Byte-identical to the
+///   old single `tag`, so unfiltered lines are unchanged.
+/// - Slot B — "<type-phrase> able to block " (Talruum Piper "creatures with
+///   flying", Marble Priest "Walls") → `Some(filter)`. The type slot is parsed by
+///   the shared `parse_type_phrase` building block; the phrase must fully consume
+///   up to the literal " able to block " (else the Some form is rejected as
+///   mis-scoped and this returns `None`, letting the line fall through).
+///
+/// A runs before B, and B requires the " able to block " tag on its remainder, so
+/// a bare "creatures able to block " is always resolved to `None` by A.
+pub(crate) fn parse_forced_block_blocker_slot(input: &str) -> Option<(&str, Option<TargetFilter>)> {
+    // Slot A: bare "creature(s) able to block " → None (unfiltered lure).
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("creatures able to block "),
+        tag("creature able to block "),
+    ))
+    .parse(input)
+    {
+        return Some((rest, None));
+    }
+    // Slot B: "<type-phrase> able to block " → Some(filter). Scope the type phrase
+    // to the text before the literal " able to block " so `parse_type_phrase`
+    // cannot over-consume into the subject.
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" able to block ")
+        .parse(input)
+        .ok()?;
+    let (filter, filter_remainder) = parse_type_phrase(type_text);
+    if !filter_remainder.trim().is_empty() {
+        return None; // mis-scoped Some — reject rather than accept a partial filter.
+    }
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" able to block ")
+        .parse(rest)
+        .ok()?;
+    Some((rest, Some(filter)))
+}
+
 pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     // Grammar: "all creatures able to block <subject> do so[.]". The subject is
@@ -603,9 +643,17 @@ pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> 
     // is not a rule-static subject, so this returns `None` and the line falls
     // through to `try_parse_mass_forced_block` — no separate duration/target check
     // is needed.
-    let (rest, _) = tag::<_, _, OracleError<'_>>("all creatures able to block ")
+    // Two-slot blocker grammar after "all ": slot A (the bare "creatures able to
+    // block " form) yields `blockers = None` (every idle able creature — Lure,
+    // Ochran Assassin); slot B ("<type-phrase> able to block ", e.g. "creatures
+    // with flying" for Talruum Piper, "Walls" for Marble Priest) yields
+    // `blockers = Some(filter)` (only matching creatures compelled). A runs
+    // before B and is byte-identical to the old literal, so unfiltered lines are
+    // unchanged. CR 509.1c.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("all ")
         .parse(lower.as_str())
         .ok()?;
+    let (rest, blockers) = parse_forced_block_blocker_slot(rest)?;
     let (_, subject_lower) = all_consuming(terminated(
         take_until::<_, _, OracleError<'_>>(" do so"),
         (tag(" do so"), opt(tag(".")), space0),
@@ -618,7 +666,7 @@ pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> 
     let subject = text.get(start..start + subject_lower.len())?.trim();
     let affected = parse_rule_static_subject_filter(subject)?;
     Some(
-        StaticDefinition::new(StaticMode::MustBeBlockedByAll)
+        StaticDefinition::new(StaticMode::MustBeBlockedByAll { blockers })
             .affected(affected)
             .description(text.to_string()),
     )

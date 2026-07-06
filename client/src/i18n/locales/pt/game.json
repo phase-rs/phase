@@ -97,6 +97,7 @@
     },
     "emblemTag": "Emblema",
     "allPlayers": "Todos",
+    "allZones": "Todas as zonas",
     "cancel": "Cancelar"
   },
   "board": {
@@ -269,6 +270,7 @@
     "confirmDistribute_other": "Declarar {{count}} Atacantes"
   },
   "fullControl": {
+    "label": "Controle",
     "on": "Controle Total Ativado",
     "off": "Controle Total Desativado",
     "tooltip": "Mantenha as janelas de prioridade em vez de deixar pontos tranquilos passarem automaticamente. Atalho: F."
@@ -588,11 +590,19 @@
   },
   "priorityYield": {
     "listHeader": "Cessões de prioridade",
-    "yieldThis": "Ceder este",
-    "yieldAllCopies": "Ceder todas as cópias",
+    "menuHeader": "Passar automaticamente este gatilho",
+    "menuExplainer": "Pula a pausa em que o jogo para para perguntar a você toda vez que este gatilho é colocado na pilha. Você ainda pode responder a outras coisas.",
+    "yieldThis": "Apenas este",
+    "yieldThisHint": "Apenas este {{source}}, não outras cópias",
+    "yieldAllCopies": "Todas as cópias",
+    "allCopiesHint": "Cada {{source}}, incluindo as novas",
     "revoke": "Revogar",
+    "revokeHint": "Voltar a parar neste gatilho",
     "clearAll": "Limpar tudo",
-    "allCopiesHint": "Recomendado para gatilhos de fichas"
+    "menuButton": "Passar automaticamente este gatilho",
+    "menuButtonActive": "Passando automaticamente — alterar ou revogar",
+    "menuButtonShort": "Auto-passar",
+    "menuButtonShortActive": "Passando"
   },
   "targeting": {
     "choosePermanentToCopy": "Escolha um permanente para copiar",
@@ -1731,6 +1741,8 @@
       "twoColors": "Escolha Duas Cores",
       "numberRange": "Escolha um Número",
       "labeled": "Faça uma Escolha",
+      "cardPredicate": "Escolha um Tipo de Carta",
+      "cardPredicateGuess": "Adivinhe um Tipo de Carta",
       "keyword": "Escolha uma Habilidade",
       "counterKind": "Escolha um Marcador",
       "fallback": "Faça uma Escolha"
@@ -1908,6 +1920,11 @@
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
+  },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
   },
   "coinFlip": {
     "keep": {
