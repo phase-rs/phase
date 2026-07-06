@@ -4370,16 +4370,20 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
 
     // Require the "wasn't cast" gate and the exile-instead outcome, tolerating an
     // optional "the battlefield" between "would enter" and the gate.
-    preceded(
-        opt(tag::<_, _, OracleError<'_>>(" the battlefield")),
+    all_consuming((
         preceded(
-            alt((
-                tag(" and it wasn't cast"),
-                tag(" and it wasn\u{2019}t cast"),
-            )),
-            preceded(tag(", "), tag("exile it instead")),
+            opt(tag::<_, _, OracleError<'_>>(" the battlefield")),
+            preceded(
+                alt((
+                    tag(" and it wasn't cast"),
+                    tag(" and it wasn\u{2019}t cast"),
+                )),
+                preceded(tag(", "), tag("exile it instead")),
+            ),
         ),
-    )
+        opt(tag(".")),
+        multispace0,
+    ))
     .parse(after_subject)
     .ok()?;
 
@@ -12657,6 +12661,16 @@ mod tests {
                 if tf.properties.iter().any(|p| matches!(p, FilterProp::Not { prop } if matches!(**prop, FilterProp::WasPlayed)))))
             .is_none(),
             "self-referential variant must not match the static enter-exile arm"
+        );
+        assert!(
+            parse_replacement_line(
+                "If a nontoken creature would enter and it wasn't cast, exile it instead, draw a card.",
+                "Trailing Rider Guard",
+            )
+            .filter(|d| d.event == ReplacementEvent::ChangeZone
+                && d.destination_zone == Some(Zone::Battlefield))
+            .is_none(),
+            "static enter-exile arm must not swallow trailing riders after instead"
         );
     }
 
