@@ -3094,6 +3094,17 @@ pub enum TimeTravelPhase {
     Add,
 }
 
+/// CR 119.7-8: One legal outcome of a "redistribute any number of players' life
+/// totals" instruction — a complete assignment of a resulting life total to each
+/// participating player. Enumerated by the engine resolver (which filters
+/// CR 119.7 can't-gain / CR 119.8 can't-lose per receiver and dedupes
+/// behaviorally-identical outcomes); the frontend renders it and returns an
+/// index. `assignment[i] = (receiver, resulting_life)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifeRedistributionOption {
+    pub assignment: Vec<(PlayerId, i32)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -3407,6 +3418,14 @@ pub enum WaitingFor {
     ScryChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+    },
+    /// CR 119.7-8: The controlling player redistributes participating players'
+    /// life totals (Reverse the Sands, The Doctor's Tomb). `options` is the
+    /// engine-enumerated set of legal assignments (identity always present); the
+    /// player submits `GameAction::SubmitLifeRedistribution { option_index }`.
+    RedistributeLifeTotals {
+        player: PlayerId,
+        options: Vec<LifeRedistributionOption>,
     },
     /// CR 705.1 + CR 614.1a: Krark's Thumb — the controller flipped `results.len()`
     /// coins for one logical flip and must ignore all but `keep_count`. `results[i]`
@@ -4940,6 +4959,7 @@ impl WaitingFor {
             WaitingFor::StationTarget { .. } => "StationTarget",
             WaitingFor::SaddleMount { .. } => "SaddleMount",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
@@ -5083,6 +5103,7 @@ impl WaitingFor {
             | WaitingFor::StationTarget { player, .. }
             | WaitingFor::SaddleMount { player, .. }
             | WaitingFor::ScryChoice { player, .. }
+            | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }

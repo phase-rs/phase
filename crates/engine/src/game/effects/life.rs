@@ -289,6 +289,70 @@ pub fn apply_life_loss_after_replacement(
     loss_amount
 }
 
+/// Outcome of applying a life-total permutation via `apply_life_totals_assignment`.
+///
+/// Typed (not a bare bool) so the control-flow signal is self-documenting at
+/// call sites: `Applied` means the caller should emit its `EffectResolved`;
+/// `Deferred` means a competing replacement (CR 614.7) installed a choice
+/// `WaitingFor` and the caller must return without emitting — the resume path
+/// completes resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifeAssignmentOutcome {
+    Applied,
+    Deferred,
+}
+
+/// CR 701.12c / CR 119.7-8: Apply a simultaneous life-total permutation.
+///
+/// `assignment[i] = (receiver, resulting_life)` — each named player's life total
+/// becomes `resulting_life` by *gaining or losing the difference* from a snapshot
+/// taken before any mutation (so the permutation is simultaneous and each delta
+/// is measured against the pre-resolution total, per CR 701.12c). The changes
+/// route through `apply_life_gain` / `apply_damage_life_loss` — not a raw
+/// `player.life = ...` set — so replacement effects may modify them and triggered
+/// abilities (Blood Artist-likes) trigger on the resulting gain/loss.
+///
+/// Shared by `ExchangeLifeTotals` (2-slot swap) and `RedistributeLifeTotals`
+/// (N-slot controller-chosen permutation). Callers that require all-or-nothing
+/// legality (CR 701.12a exchange) must pre-check before calling; the
+/// redistribution resolver instead filters illegal receivers out of each
+/// enumerated option, so every assignment reaching this helper is already legal.
+pub fn apply_life_totals_assignment(
+    state: &mut GameState,
+    assignment: &[(PlayerId, i32)],
+    events: &mut Vec<GameEvent>,
+) -> Result<LifeAssignmentOutcome, EffectError> {
+    // CR 701.12c: snapshot every receiver's current life BEFORE any mutation so
+    // each delta is measured against the pre-permutation total.
+    let deltas: Vec<(PlayerId, i32)> = assignment
+        .iter()
+        .map(|&(pid, new_life)| {
+            let old = state
+                .players
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| p.life)
+                .ok_or(EffectError::PlayerNotFound)?;
+            Ok((pid, new_life - old))
+        })
+        .collect::<Result<Vec<_>, EffectError>>()?;
+
+    for (pid, diff) in deltas {
+        let deferred = match diff.signum() {
+            1 => apply_life_gain(state, pid, diff as u32, events).err(),
+            -1 => apply_damage_life_loss(state, pid, (-diff) as u32, events).err(),
+            _ => None,
+        };
+        if deferred.is_some() {
+            // CR 614.7: a competing replacement required a player choice; the
+            // helper installed the WaitingFor and the resume path completes the
+            // remaining assignments.
+            return Ok(LifeAssignmentOutcome::Deferred);
+        }
+    }
+    Ok(LifeAssignmentOutcome::Applied)
+}
+
 /// CR 119.3: If an effect causes a player to lose life, adjust their life total.
 pub fn resolve_lose(
     state: &mut GameState,
