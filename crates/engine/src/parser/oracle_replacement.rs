@@ -301,8 +301,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If a [filter] would enter and it wasn't cast, exile it instead" ---
-    // CR 614.1a: A permanent-static ETB replacement that exiles creatures which
-    // enter without having been cast. E.g. Containment Priest:
+    // CR 614.1a + CR 614.1d + CR 614.12: A permanent-static ETB replacement
+    // that exiles creatures which enter without having been cast. E.g.
+    // Containment Priest:
     //   "If a nontoken creature would enter and it wasn't cast, exile it instead."
     // Only the clean, always-on static form is handled here; the duration-scoped
     // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) and the
@@ -4334,11 +4335,12 @@ fn parse_creature_die_exile_replacement(
     Some(def)
 }
 
-/// CR 614.1a + CR 603.6e: "If a [filter] would enter and it wasn't cast, exile
-/// it instead." (Containment Priest). A static ETB replacement gated on the
-/// entering object not having been cast. Only the always-on, non-self form is
-/// recognized here — duration-scoped ("Until end of turn, ...") and
-/// self-referential ("if this creature would enter ...") variants return `None`.
+/// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
+/// cast, exile it instead." (Containment Priest). A static ETB replacement
+/// gated on the entering object not having been cast. Only the always-on,
+/// non-self form is recognized here — duration-scoped ("Until end of turn, ...")
+/// and self-referential ("if this creature would enter ...") variants return
+/// `None`.
 ///
 /// The "wasn't cast" gate is expressed as `Not(WasPlayed)` on the valid-card
 /// filter: `WasPlayed` is `played_from_zone.is_some() || cast_from_zone.is_some()`
