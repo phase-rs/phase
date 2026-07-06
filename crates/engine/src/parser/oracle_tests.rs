@@ -9068,6 +9068,100 @@ fn temple_of_atropos_parses_with_zero_unimplemented() {
 }
 
 #[test]
+fn turn_order_and_additional_beginning_phase_cards_parse_claimed_signatures() {
+    fn ability_has_effect(ability: &AbilityDefinition, pred: fn(&Effect) -> bool) -> bool {
+        pred(ability.effect.as_ref())
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| ability_has_effect(sub, pred))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|else_ability| ability_has_effect(else_ability, pred))
+    }
+
+    fn parsed_has_effect(parsed: &ParsedAbilities, pred: fn(&Effect) -> bool) -> bool {
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| ability_has_effect(ability, pred))
+            || parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .any(|ability| ability_has_effect(ability, pred))
+    }
+
+    fn is_reverse_turn_order(effect: &Effect) -> bool {
+        matches!(effect, Effect::ReverseTurnOrder)
+    }
+
+    fn is_additional_beginning_phase(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        )
+    }
+
+    for (name, text, keywords, types, subtypes, pred) in [
+        (
+            "Aeon Engine",
+            "This artifact enters tapped.\n{T}, Exile this artifact: Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)",
+            &[][..],
+            &["Artifact"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Time Distortion",
+            "When you encounter Time Distortion, reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise. Then planeswalk away from this phenomenon.)",
+            &[][..],
+            &["Phenomenon"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Sphinx of the Second Sun",
+            "Flying\nAt the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::Flying][..],
+            &["Creature"][..],
+            &["Sphinx"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Shadow of the Second Sun",
+            "Enchant player\nAt the beginning of each of enchanted player's postcombat main phases, there is an additional beginning phase after this phase. (The end step happens after the added untap, upkeep, and draw steps.)",
+            &[Keyword::Enchant(TargetFilter::Player)][..],
+            &["Enchantment"][..],
+            &["Aura"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Cyclonus, Cybertronian Fighter",
+            "Living metal (During your turn, this Vehicle is also a creature.)\nFlying\nWhenever Cyclonus deals combat damage to a player, convert it. If you do, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::LivingMetal, Keyword::Flying][..],
+            &["Artifact"][..],
+            &["Vehicle"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+    ] {
+        let parsed = parse(text, name, keywords, types, subtypes);
+        assert!(
+            !parsed_has_unimplemented(&parsed),
+            "{name} must parse with zero Unimplemented effects: {parsed:#?}"
+        );
+        assert!(
+            parsed_has_effect(&parsed, pred),
+            "{name} must contain the claimed parse-diff signature: {parsed:#?}"
+        );
+    }
+}
+
+#[test]
 fn spell_temporal_phase_line_builds_delayed_trigger() {
     // CR 603.7b: Full Throttle's second line. A *phase-based* inline delayed
     // trigger on a sorcery ("At the beginning of each combat this turn, ...")
