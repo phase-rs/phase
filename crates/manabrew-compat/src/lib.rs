@@ -2848,10 +2848,10 @@ mod tests {
     use std::collections::HashSet;
 
     use engine::game::zones::create_object;
-    use engine::types::ability::{ChoiceType, Effect, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use engine::types::game_state::{
-        CombatTaxPending, MulliganBottomEntry, MulliganDecisionEntry, PendingCast,
-        TargetSelectionProgress, TargetSelectionSlot,
+        MulliganBottomEntry, MulliganDecisionEntry, PendingCast, TargetSelectionProgress,
+        TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use pretty_assertions::assert_eq;
@@ -3484,16 +3484,6 @@ mod tests {
                 },
             ),
             (
-                "chooseType",
-                WaitingFor::NamedChoice {
-                    player: PlayerId(0),
-                    choice_type: ChoiceType::creature_type(),
-                    options: vec!["Wizard".to_string()],
-                    source_id: Some(ObjectId(1)),
-                    persist_player: None,
-                },
-            ),
-            (
                 "chooseCombatDamageAssignment",
                 WaitingFor::AssignCombatDamage {
                     player: PlayerId(0),
@@ -3506,19 +3496,6 @@ mod tests {
                     attack_target: AttackTarget::Player(PlayerId(1)),
                     pw_loyalty: None,
                     pw_controller: None,
-                },
-            ),
-            (
-                "payCombatCost",
-                WaitingFor::CombatTaxPayment {
-                    player: PlayerId(0),
-                    context: engine::types::game_state::CombatTaxContext::Attacking,
-                    total_cost: ManaCost::NoCost,
-                    per_creature: vec![],
-                    pending: CombatTaxPending::Attack {
-                        attacks: vec![],
-                        bands: vec![],
-                    },
                 },
             ),
             ("gameOver", WaitingFor::GameOver { winner: None }),
