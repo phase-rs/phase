@@ -2166,6 +2166,38 @@ fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
     Ok((rest, ()))
 }
 
+/// CR 122.1 + CR 608.2c + CR 109.5: a bare "gets a/an/N <kind> counter[s]"
+/// conjunct joined by " and " is an independent player-counter instruction whose
+/// subject carries over from the prior conjunct — Vraska's Fall: "Each opponent
+/// sacrifices a creature or planeswalker of their choice and gets a poison
+/// counter." Without this split the counter clause stays glued to the sacrifice
+/// as an unscoped `try_split_targeted_compound` sub-ability, so the carried
+/// "each opponent" `player_scope` never reaches it and the counter is given to
+/// the source's controller instead of each opponent. Splitting it off routes it
+/// through the chunk loop's scope-carry (mirroring "... and loses 2 life").
+///
+/// The discriminator is a `counter` token within THIS conjunct's segment
+/// (bounded at the next " and ") whose slash-free head excludes the P/T-counter
+/// form ("a +1/+1 counter" — an object-counter continuation on the prior
+/// conjunct's target, left un-split). Player counters (poison/energy/experience/
+/// ticket/…) are word-named and slash-free. Mirrors the trailing `.or()` arm
+/// `starts_remove_counter_clause_lower`.
+fn starts_gets_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("gets ").parse(s)?;
+    let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(rest) {
+        Ok((_, seg)) => seg,
+        Err(_) => rest,
+    };
+    // Head up to "counter"; require it slash-free so "+1/+1 counter" (object P/T)
+    // stays un-split while "poison counter" (player) matches.
+    let (_, head) = take_until::<_, _, OracleError<'_>>("counter").parse(segment)?;
+    let _ = all_consuming(opt(nom::bytes::complete::is_not::<_, _, OracleError<'_>>(
+        "/",
+    )))
+    .parse(head)?;
+    Ok((rest, ()))
+}
+
 /// CR 601.2c + CR 508.1d + CR 509.1c: A second `"[up to] <n> target <filter>"`
 /// conjunct joined by a bare `" and "` opens its OWN target (each instance of
 /// the word "target" is a distinct target — CR 601.2c) and applies its own
@@ -2506,6 +2538,10 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `.or()` arm (mirroring `starts_target_continuous_clause_lower`) so the
     // verb-prefix `alt(...)` cluster stays under nom's 21-arm limit.
     .or(value((), starts_remove_counter_clause_lower))
+    // CR 122.1 + CR 109.5: a bare "gets a/an/N <kind> counter[s]" conjunct is a
+    // carried-subject player-counter clause (Vraska's Fall). Trailing `.or()` arm
+    // mirroring `starts_remove_counter_clause_lower`.
+    .or(value((), starts_gets_counter_clause_lower))
     // CR 205.1a + CR 613.1d + CR 702.171b: a bare "becomes <descriptor>"
     // conjunct joined by " and " is a second animation/designation predicate whose
     // subject is carried over (anaphorically) from the prior conjunct — the same
@@ -10303,6 +10339,59 @@ mod tests {
         assert!(starts_bare_and_clause(
             "remove a number of +1/+1 counters from this creature equal to the result"
         ));
+    }
+
+    /// CR 122.1 + CR 109.5 (issue #4733): a bare "gets a/an/N <kind> counter[s]"
+    /// conjunct is a carried-subject player-counter clause that must split so it
+    /// inherits the prior conjunct's `player_scope` (Vraska's Fall: "Each opponent
+    /// sacrifices … and gets a poison counter"). The P/T-counter form
+    /// ("gets a +1/+1 counter") carries a '/' and stays un-split (object
+    /// continuation), and a bare pump ("gets +2/+0") has no counter token.
+    #[test]
+    fn gets_player_counter_clause_splits() {
+        assert!(starts_bare_and_clause("gets a poison counter"));
+        assert!(starts_bare_and_clause("gets an energy counter"));
+        assert!(starts_bare_and_clause("gets three experience counters"));
+        // P/T counter → object continuation, not a player-counter clause.
+        assert!(!starts_bare_and_clause("gets a +1/+1 counter"));
+        // Bare pump → no counter token at all.
+        assert!(!starts_bare_and_clause("gets +2/+0 until end of turn"));
+    }
+
+    /// CR 122.1 + CR 109.5 (issue #4733): end-to-end — Vraska's Fall's "and gets a
+    /// poison counter" conjunct must carry the "each opponent" `player_scope`, so
+    /// the counter is given to each opponent (not the source's controller).
+    #[test]
+    fn vraska_fall_poison_scoped_to_each_opponent() {
+        use crate::types::ability::{Effect, PlayerFilter};
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each opponent sacrifices a creature or planeswalker of their choice and gets a poison counter.",
+            "Vraska's Fall",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let root = &parsed.abilities[0];
+        assert!(
+            matches!(*root.effect, Effect::Sacrifice { .. }),
+            "root should be the sacrifice, got {:?}",
+            root.effect
+        );
+        assert_eq!(root.player_scope, Some(PlayerFilter::Opponent));
+        let sub = root
+            .sub_ability
+            .as_ref()
+            .expect("poison counter must be a sub_ability of the sacrifice");
+        assert!(
+            matches!(*sub.effect, Effect::GivePlayerCounter { .. }),
+            "sub should give a player counter, got {:?}",
+            sub.effect
+        );
+        assert_eq!(
+            sub.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the poison sub must carry player_scope: Opponent so each opponent (not the controller) gets the counter"
+        );
     }
 
     /// CR 102.2 + CR 608.2c: end-to-end chunk split. The "you draw ... and each
