@@ -116,17 +116,6 @@ pub fn resolve(
 }
 
 /// CR 608.2e: Resolve the guessing player from a `ControllerRef`.
-///
-/// DEFERRED (multi-opponent selection, §8): in games with two or more
-/// opponents, an untargeted "an opponent guesses" reference should let the
-/// controller choose which opponent guesses (mirror the clash flow's
-/// `WaitingFor::ClashChooseOpponent`). That selection step is not yet wired, so
-/// the first opponent in turn order is used as a documented, flagged stopgap —
-/// correct for the two-player primary mode (the only one these cards ship in
-/// here). No CR is cited for this stopgap: CR 800.4g governs a player who has
-/// LEFT the game being unable to make a required choice, which is a different
-/// situation and would be an inapt citation here. This does NOT silently claim
-/// full multiplayer support.
 fn resolve_guesser(
     state: &GameState,
     guesser: ControllerRef,
@@ -136,9 +125,15 @@ fn resolve_guesser(
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, ability.source_id)
         }
-        _ => crate::game::players::opponents(state, ability.controller)
-            .into_iter()
-            .next(),
+        ControllerRef::ChosenPlayer { index } => {
+            ability.chosen_players.get(index as usize).copied()
+        }
+        ControllerRef::SourceChosenPlayer => ability.chosen_players.first().copied(),
+        ControllerRef::Opponent => {
+            let mut opponents = crate::game::players::opponents(state, ability.controller);
+            (opponents.len() == 1).then(|| opponents.remove(0))
+        }
+        _ => None,
     }
 }
 

@@ -21,12 +21,15 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::ChosenAttribute;
+use engine::types::ability::{ChoiceType, ChosenAttribute};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+const P2: PlayerId = PlayerId(2);
 
 const TOYMAKER_ORACLE: &str =
     "At the beginning of your upkeep, secretly choose a number between 1 and 5 \
@@ -63,7 +66,18 @@ fn drive_to_wait(runner: &mut GameRunner, want: &str) {
 /// upkeep, and advance until its trigger is on the stack. Returns the runner and
 /// the enchantment's id.
 fn toymaker_at_upkeep(seeded_numbers: &[u8]) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new();
+    toymaker_at_upkeep_with_player_count(2, seeded_numbers)
+}
+
+fn toymaker_at_upkeep_with_player_count(
+    player_count: u8,
+    seeded_numbers: &[u8],
+) -> (GameRunner, ObjectId) {
+    let mut scenario = if player_count == 2 {
+        GameScenario::new()
+    } else {
+        GameScenario::new_n_player(player_count, 42)
+    };
     scenario.with_life(P0, 20);
     scenario.with_life(P1, 20);
     // P0 library so the "you draw a card" rider has a card to draw.
@@ -98,6 +112,37 @@ fn toymaker_at_upkeep(seeded_numbers: &[u8]) -> (GameRunner, ObjectId) {
     (runner, trap)
 }
 
+fn choose_guessing_opponent(runner: &mut GameRunner, opponent: PlayerId) {
+    drive_to_wait(runner, "NamedChoice");
+    match &runner.state().waiting_for {
+        WaitingFor::NamedChoice {
+            player,
+            choice_type,
+            options,
+            ..
+        } => {
+            assert_eq!(
+                *player, P0,
+                "the controller chooses which opponent makes the guess"
+            );
+            assert!(
+                matches!(choice_type, ChoiceType::Opponent { restriction: None }),
+                "expected opponent choice before the guess, got {choice_type:?}"
+            );
+            assert!(
+                options.contains(&opponent.0.to_string()),
+                "chosen opponent must be offered in {options:?}"
+            );
+        }
+        other => panic!("expected opponent NamedChoice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseOption {
+            choice: opponent.0.to_string(),
+        })
+        .expect("choosing the guessing opponent must succeed");
+}
+
 /// CR 608.2d + CR 609.3: P0 secretly commits a number; the opponent guesses
 /// WRONG, so they lose life equal to the number they guessed and P0 draws. The
 /// enchantment survives (the sacrifice branch is gated on a right guess).
@@ -121,7 +166,8 @@ fn toymakers_trap_wrong_guess_drains_guesser_and_draws() {
         })
         .expect("committing the number must succeed");
 
-    // The defending opponent (P1) now guesses the committed number.
+    // The controller chooses the opponent who guesses; P1 then guesses.
+    choose_guessing_opponent(&mut runner, P1);
     drive_to_wait(&mut runner, "OpponentGuess");
     match &runner.state().waiting_for {
         WaitingFor::OpponentGuess {
@@ -191,6 +237,7 @@ fn toymakers_trap_right_guess_sacrifices_enchantment() {
         })
         .expect("committing the number must succeed");
 
+    choose_guessing_opponent(&mut runner, P1);
     drive_to_wait(&mut runner, "OpponentGuess");
     let p1_life_before = runner.life(P1);
     let p0_hand_before = runner.state().players[0].hand.len();
@@ -216,6 +263,58 @@ fn toymakers_trap_right_guess_sacrifices_enchantment() {
         runner.state().players[0].hand.len(),
         p0_hand_before,
         "a right guess does not draw a card"
+    );
+}
+
+/// CR 608.2d + CR 102.3: in multiplayer, "an opponent guesses" is not a fan-out
+/// and must not silently pick the first opponent. The controller chooses one
+/// eligible opponent, then only that player receives `OpponentGuess`.
+#[test]
+fn toymakers_trap_three_player_controller_chooses_guessing_opponent() {
+    let (mut runner, _trap) = toymaker_at_upkeep_with_player_count(3, &[]);
+
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "3".to_string(),
+        })
+        .expect("committing the number must succeed");
+
+    choose_guessing_opponent(&mut runner, P2);
+    drive_to_wait(&mut runner, "OpponentGuess");
+    match &runner.state().waiting_for {
+        WaitingFor::OpponentGuess {
+            player,
+            options,
+            proposition_truth,
+            ..
+        } => {
+            assert_eq!(*player, P2, "the chosen opponent makes the guess");
+            assert_eq!(
+                *proposition_truth, None,
+                "a committed-number guess carries no proposition truth"
+            );
+            assert_eq!(options.len(), 5, "the guesser may name any printed value");
+        }
+        other => panic!("expected chosen opponent's OpponentGuess, got {other:?}"),
+    }
+
+    let p1_life_before = runner.life(P1);
+    let p2_life_before = runner.life(P2);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "1".to_string(),
+        })
+        .expect("answering the guess must succeed");
+
+    assert_eq!(
+        runner.life(P1),
+        p1_life_before,
+        "the unchosen opponent must not be treated as the guesser"
+    );
+    assert_eq!(
+        runner.life(P2),
+        p2_life_before - 1,
+        "the chosen opponent loses life equal to their wrong guess"
     );
 }
 

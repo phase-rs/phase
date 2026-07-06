@@ -384,42 +384,106 @@ fn apply_outer_condition_to_clause(outer: &AbilityCondition, clause: &mut Clause
 /// "If you do" chunk boundary, so this post-pass is the guarantee. Runs after
 /// the full definition is lowered.
 pub(super) fn propagate_committed_choice_type_to_guesses(ability: &mut AbilityDefinition) {
-    if let Some(choice_type) = find_head_choose_choice_type(ability) {
-        overwrite_committed_guess_choice_types(ability, &choice_type);
+    if let Some(choice_type) = find_head_committed_guess_choice_type(ability) {
+        finalize_committed_guess_choice_types(ability, Some(&choice_type));
+    } else {
+        finalize_committed_guess_choice_types(ability, None);
     }
 }
 
-fn find_head_choose_choice_type(ability: &AbilityDefinition) -> Option<ChoiceType> {
+fn find_head_committed_guess_choice_type(ability: &AbilityDefinition) -> Option<ChoiceType> {
     if let Effect::Choose { choice_type, .. } = ability.effect.as_ref() {
-        return Some(choice_type.clone());
+        if choice_type_is_committed_guess_domain(choice_type) {
+            return Some(choice_type.clone());
+        }
     }
     if let Some(ct) = ability
         .sub_ability
         .as_ref()
-        .and_then(|sub| find_head_choose_choice_type(sub))
+        .and_then(|sub| find_head_committed_guess_choice_type(sub))
     {
         return Some(ct);
     }
     ability
         .else_ability
         .as_ref()
-        .and_then(|els| find_head_choose_choice_type(els))
+        .and_then(|els| find_head_committed_guess_choice_type(els))
 }
 
-fn overwrite_committed_guess_choice_types(
+fn choice_type_is_committed_guess_domain(choice_type: &ChoiceType) -> bool {
+    matches!(choice_type, ChoiceType::NumberRange { .. })
+}
+
+fn finalize_committed_guess_choice_types(
     ability: &mut AbilityDefinition,
-    choice_type: &ChoiceType,
+    choice_type: Option<&ChoiceType>,
 ) {
     if let Effect::OpponentGuess { subject, .. } = ability.effect.as_mut() {
         if let GuessSubject::CommittedChoice { choice_type: ct } = subject.as_mut() {
-            *ct = choice_type.clone();
+            if is_placeholder_committed_guess_choice(ct) {
+                match choice_type {
+                    Some(choice_type) => *ct = choice_type.clone(),
+                    None => {
+                        ability.effect = Box::new(Effect::unimplemented(
+                            "opponent_guess",
+                            "opponent guess without committed choice domain",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if matches!(
+        ability.effect.as_ref(),
+        Effect::OpponentGuess {
+            guesser: ControllerRef::Opponent,
+            subject
+        } if matches!(subject.as_ref(), GuessSubject::CommittedChoice { .. })
+    ) {
+        let old_sub = ability.sub_ability.take();
+        let subject = match ability.effect.as_ref() {
+            Effect::OpponentGuess { subject, .. } => subject.as_ref().clone(),
+            _ => unreachable!("matched above"),
+        };
+        ability.effect = Box::new(Effect::Choose {
+            choice_type: ChoiceType::Opponent { restriction: None },
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        });
+        let mut guess = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::OpponentGuess {
+                guesser: ControllerRef::ChosenPlayer { index: 0 },
+                subject: Box::new(subject),
+            },
+        );
+        guess.sub_ability = old_sub;
+        ability.sub_ability = Some(Box::new(guess));
+    }
+
+    if let Effect::Choose {
+        choice_type: ChoiceType::Opponent { .. },
+        ..
+    } = ability.effect.as_ref()
+    {
+        if ability.sub_ability.as_ref().is_some_and(|sub| {
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Unimplemented { name, .. } if name == "opponent_guess"
+            )
+        }) {
+            ability.effect = Box::new(Effect::unimplemented(
+                "opponent_guess",
+                "opponent guess without committed choice domain",
+            ));
         }
     }
     if let Some(sub) = ability.sub_ability.as_mut() {
-        overwrite_committed_guess_choice_types(sub, choice_type);
+        finalize_committed_guess_choice_types(sub, choice_type);
     }
     if let Some(els) = ability.else_ability.as_mut() {
-        overwrite_committed_guess_choice_types(els, choice_type);
+        finalize_committed_guess_choice_types(els, choice_type);
     }
 }
 
@@ -19339,12 +19403,11 @@ fn try_parse_guess_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffect
     }
 
     // CR 608.2c: "guesses which [value] you chose" — committed-choice guess. The
-    // committed domain comes from `ctx.pending_choice_type` when the chunk
-    // threading carried it forward; otherwise a placeholder is emitted and the
-    // post-construction pass `propagate_committed_choice_type_to_guesses` fills
-    // it from the chain's head `Effect::Choose` (the in-resolution authority per
-    // CR 608.2c, instructions in order within one ability — not a CR 607.2d link
-    // between two distinct printed abilities).
+    // committed domain must come from a preceding `Effect::Choose` in the same
+    // resolution. When the chunk-local context cannot see it yet ("If you do"
+    // sentence boundary), emit a private placeholder that
+    // `propagate_committed_choice_type_to_guesses` must either replace with the
+    // real domain or downgrade to `Unimplemented` before runtime.
     if let Ok((_, ())) = value((), tag::<_, _, OracleError<'_>>("which ")).parse(rest) {
         let choice_type = ctx
             .pending_choice_type
@@ -19354,22 +19417,59 @@ fn try_parse_guess_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffect
                 max: 0,
                 distinctness: NumberDistinctness::Repeatable,
             });
-        return Some(parsed_clause(Effect::OpponentGuess {
-            guesser,
-            subject: Box::new(GuessSubject::CommittedChoice { choice_type }),
-        }));
+        let subject = GuessSubject::CommittedChoice { choice_type };
+        if matches!(
+            subject,
+            GuessSubject::CommittedChoice {
+                choice_type: ChoiceType::NumberRange {
+                    min: 0,
+                    max: 0,
+                    distinctness: NumberDistinctness::Repeatable
+                }
+            }
+        ) {
+            return Some(parsed_clause(Effect::OpponentGuess {
+                guesser,
+                subject: Box::new(subject),
+            }));
+        }
+        return Some(opponent_guess_clause(guesser, subject));
     }
 
     // CR 608.2d: "guesses whether [proposition]" — yes/no proposition guess.
     if let Ok((body, ())) = value((), tag::<_, _, OracleError<'_>>("whether ")).parse(rest) {
         let subject = parse_guess_proposition(body)?;
-        return Some(parsed_clause(Effect::OpponentGuess {
-            guesser,
-            subject: Box::new(subject),
-        }));
+        return Some(opponent_guess_clause(guesser, subject));
     }
 
     None
+}
+
+fn opponent_guess_clause(guesser: ControllerRef, subject: GuessSubject) -> ParsedEffectClause {
+    if guesser != ControllerRef::Opponent {
+        return parsed_clause(Effect::OpponentGuess {
+            guesser,
+            subject: Box::new(subject),
+        });
+    }
+
+    // CR 608.2d + CR 102.3: "an opponent" requires the controller to choose one
+    // eligible opponent in multiplayer. Reuse the existing named-choice pipeline
+    // so the chosen player is threaded to the dependent guess as a
+    // same-resolution `ChosenPlayer`.
+    let mut clause = parsed_clause(Effect::Choose {
+        choice_type: ChoiceType::Opponent { restriction: None },
+        persist: false,
+        selection: TargetSelectionMode::Chosen,
+    });
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::OpponentGuess {
+            guesser: ControllerRef::ChosenPlayer { index: 0 },
+            subject: Box::new(subject),
+        },
+    )));
+    clause
 }
 
 /// CR 608.2d: Parse the proposition body of a "guesses whether ..." clause into

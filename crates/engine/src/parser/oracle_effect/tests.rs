@@ -20763,6 +20763,77 @@ fn non_card_predicate_guess_result_does_not_reuse_gollum_condition() {
             .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
         "unsupported number-guess wording should remain visible as unsupported: {def:#?}"
     );
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::OpponentGuess { .. })),
+        "unsupported number-guess wording must not emit a placeholder live OpponentGuess: {def:#?}"
+    );
+}
+
+#[test]
+fn committed_choice_guess_chooses_single_opponent_before_guess() {
+    let def = parse_effect_chain(
+        "secretly choose a number between 1 and 5 that hasn't been chosen. \
+         If you do, an opponent guesses which number you chose.",
+        AbilityKind::Spell,
+    );
+
+    let choose_number = &def;
+    assert!(
+        matches!(
+            choose_number.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange {
+                    min: 1,
+                    max: 5,
+                    distinctness: NumberDistinctness::DistinctFromSourceHistory
+                },
+                ..
+            }
+        ),
+        "the committed number choice must keep its printed domain: {def:#?}"
+    );
+
+    let choose_opponent = choose_number
+        .sub_ability
+        .as_deref()
+        .expect("the controller should choose which opponent guesses");
+    assert!(
+        matches!(
+            choose_opponent.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { restriction: None },
+                persist: false,
+                ..
+            }
+        ),
+        "an opponent guesses must be preceded by an opponent choice: {def:#?}"
+    );
+
+    let guess = choose_opponent
+        .sub_ability
+        .as_deref()
+        .expect("the chosen opponent should then guess");
+    assert!(
+        matches!(
+            guess.effect.as_ref(),
+            Effect::OpponentGuess {
+                guesser: ControllerRef::ChosenPlayer { index: 0 },
+                subject
+            } if matches!(
+                subject.as_ref(),
+                GuessSubject::CommittedChoice {
+                    choice_type: ChoiceType::NumberRange {
+                        min: 1,
+                        max: 5,
+                        distinctness: NumberDistinctness::DistinctFromSourceHistory
+                    }
+                }
+            )
+        ),
+        "the guess must read the chosen opponent and the real committed domain: {def:#?}"
+    );
 }
 
 #[test]
