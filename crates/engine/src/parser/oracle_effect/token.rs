@@ -6,7 +6,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, rest, value};
 use nom::Parser;
 
-use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
@@ -671,7 +671,15 @@ fn parse_token_description_with_context(
 
     let is_creature = types.iter().any(|token_type| token_type == "Creature");
     if is_creature && (power.is_none() || toughness.is_none()) {
-        return None;
+        if matches!(
+            ctx.token_pt_followup,
+            Some(TokenPtFollowup::SourcePowerToughness)
+        ) {
+            power = Some(super::sequence::source_token_power_value());
+            toughness = Some(super::sequence::source_token_toughness_value());
+        } else {
+            return None;
+        }
     }
 
     // Extract quoted static abilities: `and "This token can't block."` / `"~ can't block."`

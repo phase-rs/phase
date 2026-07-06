@@ -22,9 +22,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    LibraryPosition, MultiTargetSpec, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -4016,6 +4016,21 @@ pub(super) fn apply_clause_continuation(
                 enter_with_counters.push((counter_type, count));
             }
         }
+        ContinuationAst::TokenSourcePowerToughness => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // CR 608.2h + CR 111.3: source-defined token P/T is locked in as
+            // the token is created, using the resolving ability source's
+            // characteristics.
+            if let Effect::Token {
+                power, toughness, ..
+            } = &mut *previous.effect
+            {
+                *power = source_token_power_value();
+                *toughness = source_token_toughness_value();
+            }
+        }
         ContinuationAst::RevealUntilKept {
             destination,
             enter_tapped: tapped,
@@ -4320,6 +4335,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking { .. } => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
+        ContinuationAst::TokenSourcePowerToughness => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::FaceDownProfileSpec { .. } => true,
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
@@ -6352,7 +6368,9 @@ pub(super) fn parse_followup_continuation_ast(
         // so counters apply as the token enters (CR 614.1c replacement)
         // rather than as a post-ETB PutCounter effect that would mistakenly
         // target the source ability via `SelfRef`/`ParentTarget`.
-        Effect::Token { .. } => try_parse_token_enters_with_counters(&lower)
+        Effect::Token { .. } => parse_token_source_power_toughness_followup(&lower)
+            .map(|()| ContinuationAst::TokenSourcePowerToughness)
+            .or_else(|| try_parse_token_enters_with_counters(&lower))
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
         _ => None,
     }
@@ -6465,6 +6483,64 @@ fn try_parse_tokens_goaded_continuation(lower: &str) -> Option<ContinuationAst> 
         return None;
     }
     Some(ContinuationAst::GoadLastCreated { duration })
+}
+
+pub(super) fn source_token_power_value() -> PtValue {
+    PtValue::Quantity(QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Source,
+        },
+    })
+}
+
+pub(super) fn source_token_toughness_value() -> PtValue {
+    PtValue::Quantity(QuantityExpr::Ref {
+        qty: QuantityRef::Toughness {
+            scope: ObjectScope::Source,
+        },
+    })
+}
+
+pub(super) fn parse_token_source_power_toughness_followup(text: &str) -> Option<()> {
+    let lower = text.trim().to_ascii_lowercase();
+    let mut parser = all_consuming(terminated(
+        parse_token_source_power_toughness_clause,
+        opt(tag(".")),
+    ));
+    parser.parse(lower.as_str()).is_ok().then_some(())
+}
+
+fn parse_token_source_power_toughness_clause(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("its power is equal to ").parse(input)?;
+    let (input, _) = parse_source_power_ref(input)?;
+    let (input, _) = tag(" and its toughness is equal to ").parse(input)?;
+    let (input, _) = parse_source_toughness_ref(input)?;
+    Ok((input, ()))
+}
+
+fn parse_source_power_ref(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (input, _) = parse_source_possessive(input)?;
+    let (input, _) = tag("power").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_source_toughness_ref(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (input, _) = parse_source_possessive(input)?;
+    let (input, _) = tag("toughness").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_source_possessive(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("this creature's "),
+            tag("~'s "),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
@@ -10090,6 +10166,139 @@ mod tests {
         // Other verbs that happen to mention counters must not match.
         let result = try_parse_put_counters_on_token_followup("remove a +1/+1 counter on it");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn source_power_toughness_token_followup_recognizes_source_refs() {
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "Its power is equal to this creature's power and its toughness is equal to this creature's toughness."
+            ),
+            Some(())
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to ~'s power and its toughness is equal to ~'s toughness"
+            ),
+            Some(())
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to target creature's power and its toughness is equal to target creature's toughness"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn gemini_engine_construct_token_uses_source_power_toughness_followup() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{
+            AbilityKind, DelayedTriggerCondition, Effect, ObjectScope, PtValue, QuantityExpr,
+            QuantityRef, TargetFilter,
+        };
+        use crate::types::phase::Phase;
+
+        let def = parse_effect_chain(
+            "create a colorless Construct artifact creature token named Twin that's attacking. \
+             Its power is equal to this creature's power and its toughness is equal to this \
+             creature's toughness. Sacrifice the token at end of combat.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            enters_attacking,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected Gemini token effect, got {:?}", def.effect);
+        };
+        assert_eq!(name, "Twin");
+        assert!(types.iter().any(|ty| ty == "Construct"));
+        assert!(*enters_attacking);
+        assert_eq!(
+            power,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source
+                }
+            })
+        );
+        assert_eq!(
+            toughness,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Source
+                }
+            })
+        );
+
+        let Some(sub) = def.sub_ability.as_ref() else {
+            panic!("expected end-of-combat sacrifice sub-ability");
+        };
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*sub.effect
+        else {
+            panic!("expected delayed sacrifice, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            condition,
+            &DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        );
+        assert!(
+            matches!(
+                &*effect.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    ..
+                }
+            ),
+            "expected delayed sacrifice to target LastCreated, got {:?}",
+            effect.effect
+        );
+    }
+
+    #[test]
+    fn source_power_toughness_token_requires_immediate_followup() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, Effect};
+
+        let def = parse_effect_chain(
+            "create a colorless Construct artifact creature token named Twin that's attacking.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "missing token P/T without the followup must remain unsupported, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn source_power_toughness_followup_does_not_license_multi_token_sequence() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, Effect};
+
+        let def = parse_effect_chain(
+            "create a colorless Construct artifact creature token named Twin and a colorless \
+             Construct artifact creature token named Echo. Its power is equal to this creature's \
+             power and its toughness is equal to this creature's toughness.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "a singular source-P/T followup must not fill multiple missing-P/T tokens, got {:?}",
+            def.effect
+        );
     }
 
     /// CR 122.1 + CR 614.1c + CR 607.2a: Oversimplify's third-person

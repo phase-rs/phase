@@ -146,7 +146,7 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
-pub(crate) use crate::parser::oracle_ir::context::ParseContext;
+pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::mana::ManaExpiry;
 
@@ -4309,6 +4309,21 @@ fn try_parse_create_token_sequence(
     let mut clause = parsed_clause(head_effect);
     clause.sub_ability = chain;
     Some(clause)
+}
+
+fn token_source_pt_followup_can_apply_to_chunk(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let Some(((), after_create_original)) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("create ")).parse(i)
+    }) else {
+        return false;
+    };
+    let consumed = tp.original.len() - after_create_original.len();
+    let after_create = TextPair::new(after_create_original, &tp.lower[consumed..]);
+    split_create_token_sequence(after_create).is_none()
+        && !split_choice_list_items(after_create.original.trim().trim_end_matches('.'))
+            .is_some_and(|items| items.len() >= 2)
 }
 
 /// Split a conjunctive create-ALL token list into its item slices `(orig, lower)`.
@@ -24989,6 +25004,14 @@ pub(crate) fn parse_effect_chain_ir(
                 Some(ControllerRef::ParentTargetController)
             )
             && chain_parent_target_controller_scope.is_some();
+        let token_pt_followup = chunks
+            .get(chunk_idx + 1)
+            .filter(|_| token_source_pt_followup_can_apply_to_chunk(normalized_text))
+            .and_then(|next| {
+                let next_text = strip_leading_sequence_connector(&next.text).trim();
+                sequence::parse_token_source_power_toughness_followup(next_text)
+            })
+            .map(|()| TokenPtFollowup::SourcePowerToughness);
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -25064,6 +25087,7 @@ pub(crate) fn parse_effect_chain_ir(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            token_pt_followup,
             // CR 603.1 + CR 608.2c: trigger-body chunk parsing must preserve
             // trigger context so non-target event anaphors ("that permanent or
             // player" on Ghyrson) bind to the triggering event instead of being
