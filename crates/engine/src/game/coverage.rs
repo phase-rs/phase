@@ -417,6 +417,8 @@ pub struct CoverageSummary {
     pub coverage_pct: f64,
     pub keyword_count: usize,
     #[serde(default)]
+    pub token_coverage: TokenCoverageSummary,
+    #[serde(default)]
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     /// Per-set coverage rollup. Each card counts toward every set it was
     /// printed in (via `CardCoverageResult::printings`). Consumers that
@@ -435,6 +437,41 @@ pub struct CoverageSummary {
     /// Per-category diagnostic counts for regression ratcheting (D-08).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub diagnostics: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TokenCoverageSummary {
+    pub total_tokens: usize,
+    pub supported_tokens: usize,
+    pub coverage_pct: f64,
+    pub full_fidelity_tokens: usize,
+    pub partial_fidelity_tokens: usize,
+    pub rules_text_tokens: usize,
+    pub parsed_rules_text_tokens: usize,
+    pub unparsed_rules_text_tokens: usize,
+    pub source_card_refs: usize,
+    #[serde(default)]
+    pub by_category: BTreeMap<String, TokenCoverageBucket>,
+    #[serde(default)]
+    pub by_payload_source: BTreeMap<String, TokenCoverageBucket>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_gaps: Vec<TokenGapFrequency>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TokenCoverageBucket {
+    pub total_tokens: usize,
+    pub supported_tokens: usize,
+    pub coverage_pct: f64,
+    pub source_card_refs: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenGapFrequency {
+    pub handler: String,
+    pub total_count: usize,
+    pub source_card_refs: usize,
+    pub example_tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4665,6 +4702,164 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     missing
 }
 
+fn analyze_token_coverage() -> TokenCoverageSummary {
+    use crate::game::effects::token::{materialize_token_ability_payload, TokenAbilitySource};
+    use crate::game::token_presets::{known_token_presets, PresetFidelity};
+
+    let mut summary = TokenCoverageSummary::default();
+    let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
+
+    for preset in known_token_presets() {
+        let materialized = materialize_token_ability_payload(
+            &preset.body.display_name,
+            &preset.body.subtypes,
+            Some(preset),
+        );
+        let source_refs = preset.source_card_refs.len();
+        let has_rules_text = preset
+            .rules_text
+            .as_deref()
+            .is_some_and(|text| !text.is_empty());
+        let supported = materialized.unparsed_rules_text_lines.is_empty()
+            && (matches!(preset.fidelity, PresetFidelity::Full)
+                || (has_rules_text && materialized.has_functional_payload()));
+
+        summary.total_tokens += 1;
+        summary.source_card_refs += source_refs;
+        if supported {
+            summary.supported_tokens += 1;
+        }
+        match preset.fidelity {
+            PresetFidelity::Full => summary.full_fidelity_tokens += 1,
+            PresetFidelity::PartialMissingAbilities if !supported => {
+                summary.partial_fidelity_tokens += 1;
+                push_token_gap(
+                    &mut gap_accumulators,
+                    "TokenFidelity:PartialMissingAbilities",
+                    &preset.body.display_name,
+                    source_refs,
+                );
+            }
+            PresetFidelity::PartialMissingAbilities => summary.partial_fidelity_tokens += 1,
+        }
+        if has_rules_text {
+            summary.rules_text_tokens += 1;
+            if materialized.unparsed_rules_text_lines.is_empty() {
+                summary.parsed_rules_text_tokens += 1;
+            } else {
+                summary.unparsed_rules_text_tokens += 1;
+                for line in &materialized.unparsed_rules_text_lines {
+                    let handler = format!("TokenRulesText:{}", normalize_oracle_pattern(line));
+                    push_token_gap(
+                        &mut gap_accumulators,
+                        &handler,
+                        &preset.body.display_name,
+                        source_refs,
+                    );
+                }
+            }
+        }
+
+        let category = token_category_label(&preset.category);
+        push_token_bucket(
+            summary.by_category.entry(category).or_default(),
+            supported,
+            source_refs,
+        );
+        let payload_source = match materialized.source {
+            TokenAbilitySource::Predefined => "predefined",
+            TokenAbilitySource::CatalogRulesText => "catalog_rules_text",
+            TokenAbilitySource::None => "none",
+        };
+        push_token_bucket(
+            summary
+                .by_payload_source
+                .entry(payload_source.to_string())
+                .or_default(),
+            supported,
+            source_refs,
+        );
+    }
+
+    summary.coverage_pct = percent(summary.supported_tokens, summary.total_tokens);
+    for bucket in summary.by_category.values_mut() {
+        bucket.coverage_pct = percent(bucket.supported_tokens, bucket.total_tokens);
+    }
+    for bucket in summary.by_payload_source.values_mut() {
+        bucket.coverage_pct = percent(bucket.supported_tokens, bucket.total_tokens);
+    }
+
+    let mut top_gaps: Vec<_> = gap_accumulators
+        .into_iter()
+        .map(
+            |(handler, (total_count, source_card_refs, example_tokens))| TokenGapFrequency {
+                handler,
+                total_count,
+                source_card_refs,
+                example_tokens,
+            },
+        )
+        .collect();
+    top_gaps.sort_by(|left, right| {
+        right
+            .source_card_refs
+            .cmp(&left.source_card_refs)
+            .then_with(|| right.total_count.cmp(&left.total_count))
+            .then_with(|| left.handler.cmp(&right.handler))
+    });
+    top_gaps.truncate(50);
+    summary.top_gaps = top_gaps;
+
+    summary
+}
+
+fn push_token_bucket(bucket: &mut TokenCoverageBucket, supported: bool, source_refs: usize) {
+    bucket.total_tokens += 1;
+    bucket.source_card_refs += source_refs;
+    if supported {
+        bucket.supported_tokens += 1;
+    }
+}
+
+fn push_token_gap(
+    gaps: &mut BTreeMap<String, (usize, usize, Vec<String>)>,
+    handler: &str,
+    token_name: &str,
+    source_refs: usize,
+) {
+    let entry = gaps.entry(handler.to_string()).or_default();
+    entry.0 += 1;
+    entry.1 += source_refs;
+    if entry.2.len() < 3 && !entry.2.iter().any(|name| name == token_name) {
+        entry.2.push(token_name.to_string());
+    }
+}
+
+fn token_category_label(category: &crate::game::token_presets::TokenCategory) -> String {
+    use crate::game::token_presets::TokenCategory;
+
+    match category {
+        TokenCategory::PredefinedArtifact { kind } => {
+            format!("predefined_artifact:{}", kind.subtype_str())
+        }
+        TokenCategory::Creature => "creature".to_string(),
+        TokenCategory::Aura => "aura".to_string(),
+        TokenCategory::Equipment => "equipment".to_string(),
+        TokenCategory::Vehicle => "vehicle".to_string(),
+        TokenCategory::Enchantment => "enchantment".to_string(),
+        TokenCategory::Land => "land".to_string(),
+        TokenCategory::Artifact => "artifact".to_string(),
+    }
+}
+
+fn percent(supported: usize, total: usize) -> f64 {
+    if total > 0 {
+        (supported as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    }
+}
+
 /// Analyze card coverage by checking which cards have all their abilities,
 /// triggers, keywords, and static abilities supported by the engine's registries.
 pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
@@ -5090,6 +5285,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
+        token_coverage: analyze_token_coverage(),
         coverage_by_format,
         coverage_by_set,
         cards,

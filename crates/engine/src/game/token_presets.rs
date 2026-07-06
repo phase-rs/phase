@@ -4,10 +4,9 @@
 //! `tokens-gen` bin).
 //!
 //! The catalog is a fixed engine resource — versioned with code, embedded via
-//! `include_str!`. Frontend reads it through a single WASM export and renders
-//! a debug-create dropdown grouped by `TokenCategory`. No game logic
-//! consumes presets; the catalog exists purely to give the debug UI a
-//! discoverable, engine-typed list of bodies.
+//! `include_str!`. Runtime token-art resolution, named-token parsing, token
+//! ability materialization, and the debug-create UI all consume this single
+//! engine-typed list of bodies.
 
 use std::sync::LazyLock;
 
