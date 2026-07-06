@@ -11695,10 +11695,20 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     //
     // The base may carry a subject ("You create a Treasure token …" — You've Been
     // Caught Stealing). Try the raw base first (preserves subject-bearing forms
-    // like "each player creates …" that `try_parse_token` handles directly), then
-    // fall back to the subject-stripped imperative, mirroring the numeric arm
-    // above, so a leading "you " no longer strands the for-each quantity.
-    let token_stripped_storage = subject::strip_subject_clause(base_no_duration);
+    // like "each player creates …" that `try_parse_token` handles directly with
+    // the correct owner), then fall back to the subject-stripped imperative so a
+    // leading "you " no longer strands the for-each quantity.
+    //
+    // CR 109.5 + CR 111.11: the stripped fallback is CONTROLLER-only. This arm
+    // early-returns from `try_parse_for_each_effect` and so never runs the
+    // subject→owner rebinding used by the numeric/targeted arms, and
+    // `try_parse_token` defaults `Effect::Token.owner` to
+    // `TargetFilter::Controller`. Stripping a non-controller subject here
+    // ("each player", "target opponent", "its controller", …) would silently
+    // create the token under the SOURCE controller instead of the named player
+    // (maintainer CHANGES_REQUESTED on #5144). Such forms must fall through to
+    // unsupported rather than be mis-owned; only "you"/"you may" is safe to strip.
+    let token_stripped_storage = subject::strip_controller_subject_clause(base_no_duration);
     let token_effect =
         if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original, ctx) {
             Some(effect)
