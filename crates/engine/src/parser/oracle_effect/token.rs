@@ -1551,6 +1551,63 @@ mod tests {
     }
 
     #[test]
+    fn where_x_token_pt_covers_known_ooze_source_expressions() {
+        let cases = [
+            (
+                "Create an X/X green Ooze creature token, where X is that spell's mana value.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is the number of +1/+1 counters removed this way.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is the sacrificed creature's power.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is this card's power.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            ),
+        ];
+
+        for (txt, expected) in cases {
+            let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("expected Token effect for {txt:?}"));
+            let Effect::Token {
+                power, toughness, ..
+            } = effect
+            else {
+                panic!("expected Effect::Token, got {effect:?}");
+            };
+            let expected_pt = PtValue::Quantity(expected);
+            assert_eq!(
+                power,
+                expected_pt.clone(),
+                "where-X power must bind for {txt:?}"
+            );
+            assert_eq!(
+                toughness, expected_pt,
+                "where-X toughness must bind for {txt:?}"
+            );
+        }
+    }
+
+    #[test]
     fn occult_epiphany_token_counts_distinct_types_of_discarded() {
         // Occult Epiphany #3307: the token count must be DISTINCT CARD TYPES
         // among the DISCARDED chain members (cause-filtered), NOT TrackedSetSize.
