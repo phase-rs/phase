@@ -2863,6 +2863,7 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::PutChosenCounter { target, count } => {
             legacy_quantity_expr(count) || legacy_target_filter(target)
         }
+        Effect::ChooseCounterAdjustment { count, .. } => legacy_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             legacy_effect(replacement_effect)
         }
@@ -3883,6 +3884,15 @@ fn rw_effect(
             p.reads_member_bound = true;
             p.merge(rw_quantity_expr(count));
             (p, sc)
+        }
+        // CR 122.1 + CR 608.2d: slot-less counter adjustment reads/writes the
+        // propagated parent target at resolution, then delegates through a
+        // runtime-built ChooseOneOf. Until this profiler can recover that parent
+        // target scope, model it conservatively.
+        Effect::ChooseCounterAdjustment { count, .. } => {
+            let mut p = RwProfile::conservative();
+            p.merge(rw_quantity_expr(count));
+            (p, None)
         }
         // CR 614.1a + CR 611.2c + CR 603.7 (PR-6.75): a floating planeswalk
         // replacement is a deferred body — descend reads, drop writes (resolves in a
