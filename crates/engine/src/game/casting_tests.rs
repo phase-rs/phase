@@ -12707,6 +12707,107 @@ fn granted_self_cost_encore_surfaces_graveyard_ability_at_card_mana_cost() {
     );
 }
 
+/// CR 702.97a: Varolz-class grant, but *filter-scoped* rather than
+/// `SpecificObject` — the shape a real continuous static ability actually
+/// uses ("Each creature card in your graveyard has scavenge"), which no
+/// existing test exercised through to activation. Two graveyard creatures
+/// with different mana costs must each surface their OWN scavenge cost from
+/// the SAME granting effect, proving the off-zone grant pipeline resolves
+/// `SelfManaCost` per-recipient rather than once for the whole filter.
+#[test]
+fn filter_scoped_scavenge_grant_resolves_per_object_cost_for_every_match() {
+    let mut state = setup_game_at_main_phase();
+
+    let grantor = create_object(
+        &mut state,
+        CardId(9600),
+        PlayerId(0),
+        "Varolz, the Scar-Striped".to_string(),
+        Zone::Battlefield,
+    );
+    let cheap_cost = ManaCost::Cost {
+        generic: 1,
+        shards: vec![],
+    };
+    let expensive_cost = ManaCost::Cost {
+        generic: 3,
+        shards: vec![ManaCostShard::Green],
+    };
+    let cheap_creature = create_object(
+        &mut state,
+        CardId(9601),
+        PlayerId(0),
+        "Cheap Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let expensive_creature = create_object(
+        &mut state,
+        CardId(9602),
+        PlayerId(0),
+        "Expensive Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    for (id, cost) in [
+        (cheap_creature, cheap_cost.clone()),
+        (expensive_creature, expensive_cost.clone()),
+    ] {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = cost;
+    }
+
+    state.add_transient_continuous_effect(
+        grantor,
+        PlayerId(0),
+        crate::types::ability::Duration::UntilEndOfTurn,
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+        ),
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Scavenge(ManaCost::SelfManaCost),
+        }],
+        None,
+    );
+
+    for (id, expected_cost) in [
+        (cheap_creature, cheap_cost),
+        (expensive_creature, expensive_cost),
+    ] {
+        let abilities = activated_ability_definitions(&state, id);
+        // CR 702.97a: identify the scavenge ability by its distinctive
+        // Composite{Mana, Exile(SelfRef, Graveyard)} cost shape (there is no
+        // dedicated `Effect::Scavenge` marker — it lowers to `Effect::PutCounter`,
+        // shared with every other +1/+1-counter effect).
+        let (_, scavenge) = abilities
+            .iter()
+            .find(|(_, a)| {
+                a.activation_zone == Some(Zone::Graveyard)
+                    && matches!(
+                        &a.cost,
+                        Some(AbilityCost::Composite { costs })
+                            if costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. }))
+                    )
+            })
+            .unwrap_or_else(|| {
+                panic!("{id:?}: filter-scoped grant must surface scavenge, got {abilities:?}")
+            });
+        let Some(AbilityCost::Composite { costs }) = &scavenge.cost else {
+            unreachable!("filtered above");
+        };
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Mana { cost } if *cost == expected_cost)),
+            "{id:?}: scavenge mana sub-cost must equal THIS card's own mana cost, got {costs:?}"
+        );
+    }
+}
+
 /// CR 702.74a + CR 604.1: End-to-end composition of the two evoke work items.
 /// Ashling grants evoke {4} to an Elemental permanent spell in hand; casting
 /// it for the granted evoke cost (only {4} available, printed {6} unaffordable)

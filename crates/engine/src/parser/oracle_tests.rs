@@ -13766,6 +13766,49 @@ fn top_level_static_scavenge_and_encore_grants_stay_on_graveyard_cards() {
         }
 }
 
+/// CR 702.128a: Naktamun grants Embalm to every creature card in the
+/// controller's graveyard, with the embalm cost equal to that card's own
+/// mana cost — the same continuation-sentence shape as Scavenge/Encore, but
+/// for a keyword that was previously absent from `GrantedCastKeywordKind`
+/// even though the runtime resolver already supported it.
+#[test]
+fn top_level_static_embalm_grant_stays_on_graveyard_cards() {
+    let result = parse(
+        "Each creature card in your graveyard has embalm. Its embalm cost is equal to its mana cost.",
+        "Naktamun",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(result.statics.len(), 1, "{:?}", result.statics);
+    let static_def = &result.statics[0];
+    let TargetFilter::Typed(tf) = static_def
+        .affected
+        .as_ref()
+        .expect("expected affected filter")
+    else {
+        panic!("expected typed affected filter");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "missing graveyard filter: {:?}",
+        tf.properties
+    );
+    assert!(
+        static_def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                    ManaCost::SelfManaCost
+                )),
+            }),
+        "missing embalm grant: {:?}",
+        static_def.modifications
+    );
+}
+
 #[test]
 fn green_goblin_full_face_parses_mayhem_and_graveyard_cost_reduction() {
     // CR 702.187b + CR 601.2f: The full Green Goblin face — flying/menace,

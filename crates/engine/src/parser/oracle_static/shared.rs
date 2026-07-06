@@ -579,6 +579,12 @@ pub(crate) enum GrantedCastKeywordKind {
     Foretell,
     /// CR 702.94a: Miracle functions from hand (Aminatou, Veil Piercer grant).
     Miracle,
+    /// CR 702.128a: Naktamun ("Each creature card in your graveyard has
+    /// embalm. Its embalm cost is equal to its mana cost.") — the runtime
+    /// resolver (`resolve_self_cost_graveyard_activated_keyword`) already
+    /// concretizes `Keyword::Embalm(EmbalmCost::Mana(SelfManaCost))`; this was
+    /// a pure parser-recognition gap.
+    Embalm,
 }
 
 impl GrantedCastKeywordKind {
@@ -594,10 +600,12 @@ impl GrantedCastKeywordKind {
             GrantedCastKeywordKind::Mayhem => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
-            // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
-            // keywords share `KeywordKind::Unknown`, so match the variant directly.
+            // CR 702.97 (Scavenge) / CR 702.141 (Encore) / CR 702.128 (Embalm):
+            // activated graveyard keywords share `KeywordKind::Unknown`, so
+            // match the variant directly.
             GrantedCastKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
             GrantedCastKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            GrantedCastKeywordKind::Embalm => matches!(keyword, Keyword::Embalm(_)),
             // CR 702.143a / CR 702.94a: hand-zone cast keywords.
             GrantedCastKeywordKind::Foretell => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Foretell
@@ -617,7 +625,8 @@ impl GrantedCastKeywordKind {
             | GrantedCastKeywordKind::Escape
             | GrantedCastKeywordKind::Mayhem
             | GrantedCastKeywordKind::Scavenge
-            | GrantedCastKeywordKind::Encore => Zone::Graveyard,
+            | GrantedCastKeywordKind::Encore
+            | GrantedCastKeywordKind::Embalm => Zone::Graveyard,
             GrantedCastKeywordKind::Foretell | GrantedCastKeywordKind::Miracle => Zone::Hand,
         }
     }
