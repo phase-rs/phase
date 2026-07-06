@@ -1437,6 +1437,7 @@ export type WaitingFor =
       source_id: ObjectId;
       source_controller: PlayerId;
       remaining_players: PlayerId[];
+      all_choices: { player: PlayerId; chosen: ObjectId[] }[];
       scoped_players: PlayerId[];
       trigger_event?: GameEvent;
     } }

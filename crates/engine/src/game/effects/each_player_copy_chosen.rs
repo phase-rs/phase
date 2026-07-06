@@ -30,7 +30,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CopyChosenStage, GameState, PendingEachPlayerCopyChosen, WaitingFor,
+    CopyChosenSelection, CopyChosenStage, GameState, PendingEachPlayerCopyChosen, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -119,9 +119,9 @@ pub fn resolve(
         trigger_event: state.current_trigger_event.clone(),
     };
 
-    // Walk the whole ordered set; `advance_to_next_player` skips creatureless
-    // players and auto-resolves forced-single choices.
-    advance_to_next_player(state, player_order, &params, events)
+    // Walk the whole ordered set; `advance_to_next_player` collects choices first
+    // and defers all copy/counter actions until the choice set is complete.
+    advance_to_next_player(state, player_order, Vec::new(), &params, events)
 }
 
 /// CR 101.3: Advance to the next player in APNAP order. Skips players with no
@@ -132,17 +132,15 @@ pub fn resolve(
 pub(crate) fn advance_to_next_player(
     state: &mut GameState,
     players_left: Vec<PlayerId>,
+    all_choices: Vec<CopyChosenSelection>,
     params: &CopyChosenParams,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let mut players_left = players_left;
+    let mut all_choices = all_choices;
     loop {
         if players_left.is_empty() {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::EachPlayerCopyChosen,
-                source_id: params.source_id,
-            });
-            return Ok(());
+            return drive_choices(state, all_choices, params, events);
         }
         let player = players_left[0];
         let rest: Vec<PlayerId> = players_left[1..].to_vec();
@@ -158,10 +156,16 @@ pub(crate) fn advance_to_next_player(
         }
 
         // A forced single (exactly one eligible object and `min == 1`) has only
-        // one legal selection — auto-resolve without prompting. This is an engine
-        // UX optimization, not a CR-specified rule.
+        // one legal selection — record it without prompting. This is an engine UX
+        // optimization, not a CR-specified rule; the action still waits until all
+        // CR 101.4 APNAP choices have been collected.
         if eligible.len() == 1 && params.min <= 1 {
-            return drive_from_copy(state, player, vec![eligible[0]], rest, params, events);
+            all_choices.push(CopyChosenSelection {
+                player,
+                chosen: vec![eligible[0]],
+            });
+            players_left = rest;
+            continue;
         }
 
         state.waiting_for = WaitingFor::EachPlayerCopyChosenSelection {
@@ -175,11 +179,37 @@ pub(crate) fn advance_to_next_player(
             source_id: params.source_id,
             source_controller: params.source_controller,
             remaining_players: rest,
+            all_choices,
             scoped_players: params.scoped_players.clone(),
             trigger_event: params.trigger_event.clone(),
         };
         return Ok(());
     }
+}
+
+/// CR 101.4 + CR 707.2: Once every player has made their APNAP choice, perform
+/// the copy/counter actions from the completed choice set.
+pub(crate) fn drive_choices(
+    state: &mut GameState,
+    choices: Vec<CopyChosenSelection>,
+    params: &CopyChosenParams,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Some((current, rest)) = choices.split_first() else {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::EachPlayerCopyChosen,
+            source_id: params.source_id,
+        });
+        return Ok(());
+    };
+    drive_from_copy(
+        state,
+        current.player,
+        current.chosen.clone(),
+        rest.to_vec(),
+        params,
+        events,
+    )
 }
 
 /// CR 707.2 + CR 616.1: Copy the first chosen object for `player`, then drive the
@@ -191,7 +221,7 @@ pub(crate) fn drive_from_copy(
     state: &mut GameState,
     player: PlayerId,
     chosen: Vec<ObjectId>,
-    remaining_players: Vec<PlayerId>,
+    remaining_choices: Vec<CopyChosenSelection>,
     params: &CopyChosenParams,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -199,7 +229,7 @@ pub(crate) fn drive_from_copy(
     // control, with the "except …" modifications applied.
     let copy_source = match chosen.first() {
         Some(id) => *id,
-        None => return advance_to_next_player(state, remaining_players, params, events),
+        None => return drive_choices(state, remaining_choices, params, events),
     };
     let copy_ability = ResolvedAbility::new(
         Effect::CopyTokenOf {
@@ -228,13 +258,13 @@ pub(crate) fn drive_from_copy(
             CopyChosenStage::AwaitingCopy,
             player,
             chosen,
-            remaining_players,
+            remaining_choices,
             params,
         ));
         return Ok(());
     }
 
-    perform_counter_step_then_advance(state, player, chosen, remaining_players, params, events)
+    perform_counter_step_then_advance(state, player, chosen, remaining_choices, params, events)
 }
 
 /// CR 122.1 + CR 208.1: Place the scaling counters (if any) on the created
@@ -245,7 +275,7 @@ pub(crate) fn perform_counter_step_then_advance(
     state: &mut GameState,
     player: PlayerId,
     chosen: Vec<ObjectId>,
-    remaining_players: Vec<PlayerId>,
+    remaining_choices: Vec<CopyChosenSelection>,
     params: &CopyChosenParams,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -284,7 +314,7 @@ pub(crate) fn perform_counter_step_then_advance(
                         CopyChosenStage::AwaitingCounters,
                         player,
                         chosen,
-                        remaining_players,
+                        remaining_choices,
                         params,
                     ));
                     return Ok(());
@@ -292,7 +322,7 @@ pub(crate) fn perform_counter_step_then_advance(
             }
         }
     }
-    advance_to_next_player(state, remaining_players, params, events)
+    drive_choices(state, remaining_choices, params, events)
 }
 
 /// CR 616.1: Resume the walk after a copy or counter pause. Invoked from both
@@ -316,13 +346,13 @@ pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) 
             state,
             pending.player,
             pending.chosen,
-            pending.remaining_players,
+            pending.remaining_choices,
             &params,
             events,
         ),
-        // The counter placement finished draining — advance to the next player.
+        // The counter placement finished draining — continue the collected action walk.
         CopyChosenStage::AwaitingCounters => {
-            advance_to_next_player(state, pending.remaining_players, &params, events)
+            drive_choices(state, pending.remaining_choices, &params, events)
         }
     };
     // The walk is infallible in practice (copy/counter no-ops on impossible
@@ -355,18 +385,37 @@ fn compute_eligible(
         .collect()
 }
 
+/// CR 608.2c: A submitted choice must still be legal when the response resolves;
+/// prompt snapshots are not authority if the board changed before submission.
+pub(crate) fn is_live_eligible_choice(
+    state: &GameState,
+    player: PlayerId,
+    id: ObjectId,
+    choose_filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) -> bool {
+    let ctx = FilterContext::from_source_with_controller(source_id, source_controller);
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.controller == player
+            && !obj.is_emblem
+            && state.battlefield.contains(&id)
+            && matches_target_filter(state, id, choose_filter, &ctx)
+    })
+}
+
 fn make_pending(
     stage: CopyChosenStage,
     player: PlayerId,
     chosen: Vec<ObjectId>,
-    remaining_players: Vec<PlayerId>,
+    remaining_choices: Vec<CopyChosenSelection>,
     params: &CopyChosenParams,
 ) -> PendingEachPlayerCopyChosen {
     PendingEachPlayerCopyChosen {
         stage,
         player,
         chosen,
-        remaining_players,
+        remaining_choices,
         choose_filter: params.choose_filter.clone(),
         min: params.min,
         max: params.max,
@@ -444,6 +493,14 @@ mod tests {
             ObjectId(500),
             PlayerId(0),
         )
+    }
+
+    fn token_count(state: &GameState) -> usize {
+        state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects.get(id).is_some_and(|o| o.is_token))
+            .count()
     }
 
     #[test]
@@ -606,6 +663,89 @@ mod tests {
             matches!(state.waiting_for, WaitingFor::Priority { .. }),
             "two-player walk completes after the only chooser resolves"
         );
+    }
+
+    #[test]
+    fn collects_all_player_choices_before_creating_tokens() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let mut state = setup();
+        let p0_only = add_creature(&mut state, CardId(1), PlayerId(0), "P0 Bear", 2, false);
+        let p1_first = add_creature(&mut state, CardId(2), PlayerId(1), "P1 Big", 4, false);
+        let p1_second = add_creature(&mut state, CardId(3), PlayerId(1), "P1 Small", 1, false);
+        let ab = ability(1, 2, vec![], None);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ab, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EachPlayerCopyChosenSelection {
+                player,
+                all_choices,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1), "P0 forced choice is collected first");
+                assert_eq!(
+                    all_choices.as_slice(),
+                    &[CopyChosenSelection {
+                        player: PlayerId(0),
+                        chosen: vec![p0_only],
+                    }]
+                );
+            }
+            other => panic!("expected P1 EachPlayerCopyChosenSelection, got {other:?}"),
+        }
+        assert_eq!(
+            token_count(&state),
+            0,
+            "no copy is created until all APNAP choices are complete"
+        );
+
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(p1_first), TargetRef::Object(p1_second)],
+            },
+        )
+        .expect("P1 selection applies");
+
+        assert_eq!(
+            token_count(&state),
+            2,
+            "both players' copies are created after the final choice"
+        );
+    }
+
+    #[test]
+    fn select_targets_revalidates_live_eligibility() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let mut state = setup();
+        let c1 = add_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, false);
+        let c2 = add_creature(&mut state, CardId(2), PlayerId(0), "Lion", 3, false);
+        let ab = ability(1, 2, vec![], None);
+        let mut events = Vec::new();
+        resolve(&mut state, &ab, &mut events).unwrap();
+
+        state.objects.get_mut(&c2).unwrap().controller = PlayerId(1);
+        let err = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(c1), TargetRef::Object(c2)],
+            },
+        )
+        .expect_err("stale prompt selection must be rejected");
+        let err = format!("{err:?}");
+
+        assert!(
+            err.contains("selected object no longer eligible"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(token_count(&state), 0);
     }
 
     #[test]

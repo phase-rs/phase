@@ -1237,18 +1237,28 @@ pub enum CopyChosenStage {
     AwaitingCounters,
 }
 
+/// CR 101.4: One player's completed ordered choice for
+/// [`Effect::EachPlayerCopyChosen`]. `chosen[0]` is copied and `chosen[1]`, when
+/// present, scales the copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyChosenSelection {
+    pub player: PlayerId,
+    pub chosen: Vec<ObjectId>,
+}
+
 /// CR 101.4 + CR 616.1: Resume state for a single player's copy+counter step of
 /// `EachPlayerCopyChosen` that paused on a CR 616.1 replacement choice. `stage`
 /// disambiguates which primitive paused; `chosen[0]` was copied and `chosen[1]`
-/// (if present) scales the copy; `remaining_players` + the effect params
-/// continue the APNAP walk after this player's step completes.
+/// (if present) scales the copy; `remaining_choices` + the effect params
+/// continue the already-collected action walk after this player's step completes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEachPlayerCopyChosen {
     pub stage: CopyChosenStage,
     pub player: PlayerId,
     /// `[0]` copied, `[1]` (optional) scales the copy.
     pub chosen: Vec<ObjectId>,
-    pub remaining_players: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining_choices: Vec<CopyChosenSelection>,
     // Effect params for the remainder of the walk.
     pub choose_filter: TargetFilter,
     pub min: u32,
@@ -4557,6 +4567,10 @@ pub enum WaitingFor {
         source_controller: PlayerId,
         /// Players still to choose after the current one (APNAP order).
         remaining_players: Vec<PlayerId>,
+        /// CR 101.4: choices already made by earlier players. Actions are not
+        /// performed until this contains the complete APNAP choice set.
+        #[serde(default)]
+        all_choices: Vec<CopyChosenSelection>,
         /// CR 101.4: the APNAP-ordered scoped player set. Empty only on a
         /// mid-resolution save/reload (`#[serde(default)]`).
         #[serde(default)]

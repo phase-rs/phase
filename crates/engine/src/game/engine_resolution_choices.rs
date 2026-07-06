@@ -7,8 +7,8 @@ use crate::types::ability::{
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, ChosenDamageSource, GameState, OutsideGameChoiceSource,
-    PayableResource, PendingContinuation, WaitingFor,
+    ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
+    OutsideGameChoiceSource, PayableResource, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -4264,8 +4264,8 @@ pub(super) fn handle_resolution_choice(
             }
         }
         // CR 101.4 + CR 707.2 + CR 122.1: One player submitted their ordered
-        // 1..=max selection for `EachPlayerCopyChosen`. Drive this player's
-        // copy+counter step, then continue the APNAP walk.
+        // 1..=max selection for `EachPlayerCopyChosen`. Collect APNAP choices
+        // first; copy/counter actions run only after the complete set is known.
         (
             WaitingFor::EachPlayerCopyChosenSelection {
                 player,
@@ -4278,6 +4278,7 @@ pub(super) fn handle_resolution_choice(
                 source_id,
                 source_controller,
                 remaining_players,
+                mut all_choices,
                 scoped_players,
                 trigger_event,
             },
@@ -4309,8 +4310,21 @@ pub(super) fn handle_resolution_choice(
                         "EachPlayerCopyChosen: duplicate object in selection".to_string(),
                     ));
                 }
+                if !effects::each_player_copy_chosen::is_live_eligible_choice(
+                    state,
+                    player,
+                    *id,
+                    &choose_filter,
+                    source_id,
+                    source_controller,
+                ) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selected object no longer eligible".to_string(),
+                    ));
+                }
                 chosen.push(*id);
             }
+            all_choices.push(CopyChosenSelection { player, chosen });
             let params = effects::each_player_copy_chosen::CopyChosenParams {
                 choose_filter,
                 min,
@@ -4322,18 +4336,18 @@ pub(super) fn handle_resolution_choice(
                 scoped_players,
                 trigger_event: trigger_event.clone(),
             };
-            // Priority sentinel — `drive_from_copy` writes `waiting_for` only when
-            // it pauses (replacement choice) or seeds the next player's selection.
+            // Priority sentinel — `advance_to_next_player` writes `waiting_for`
+            // only when it prompts the next chooser or the action phase pauses.
             let events_before = events.len();
             set_priority(state, player);
-            // CR 608.2: restore the phenomenon trigger event across the drive.
+            // CR 608.2: restore the phenomenon trigger event across the
+            // collection/action continuation.
             let previous_trigger_event = state.current_trigger_event.clone();
             state.current_trigger_event = trigger_event;
-            let drive_result = effects::each_player_copy_chosen::drive_from_copy(
+            let drive_result = effects::each_player_copy_chosen::advance_to_next_player(
                 state,
-                player,
-                chosen,
                 remaining_players,
+                all_choices,
                 &params,
                 events,
             );
