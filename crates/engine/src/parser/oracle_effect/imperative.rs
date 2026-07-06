@@ -5778,6 +5778,19 @@ pub(super) fn parse_put_ast(
         }
     }
 
+    // CR 401.4 + CR 608.2c: "put the cards {in|from} <possessive> hand on the
+    // bottom/top [of <possessive> library] [in any order]" — whole-hand library
+    // reposition (Teferi's Puzzle Box). The "the cards {in|from} <possessive>
+    // hand" guard keeps single-card "put that card on the bottom" and "put the
+    // rest on the bottom" out of this branch (they lack the hand-origin phrase),
+    // so those still route to the positional `BottomOfLibrary`/`TopOfLibrary`
+    // forms below.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("put ").parse(lower) {
+        if let Some(position) = parse_hand_to_library_position(rest) {
+            return Some(PutImperativeAst::HandToLibraryPosition { position });
+        }
+    }
+
     let has_mass_zone_origin = (nom_primitives::scan_contains(lower, "all")
         || nom_primitives::scan_contains(lower, "each"))
         && nom_primitives::scan_contains(lower, "from");
@@ -6108,6 +6121,26 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             profile,
             enters_under,
         },
+        // CR 401.4 + CR 608.2c: "put the cards in their hand on the bottom of
+        // their library in any order" (Teferi's Puzzle Box) moves the mover's
+        // whole hand to the named library position at once. Mirrors the
+        // hand→library field set of `change_zone_all_to_library_effect`, but
+        // pins `library_position` and OMITS that helper's trailing `Shuffle`
+        // sub-ability — a shuffle would scatter the cards the effect just placed
+        // on the bottom/top. `target: Controller` is rebound to the acting
+        // player ("that player") by `inject_subject_target` when the enclosing
+        // subject-predicate clause carries a player subject.
+        PutImperativeAst::HandToLibraryPosition { position } => Effect::ChangeZoneAll {
+            origin: Some(Zone::Hand),
+            destination: Zone::Library,
+            target: TargetFilter::Controller,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: Some(position),
+            random_order: false,
+        },
     }
 }
 
@@ -6344,6 +6377,54 @@ fn parse_mass_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
     let (rest, _) = parse_possessive_determiner(rest).ok()?;
     let (_rest, _) = tag::<_, _, OracleError<'_>>(" library").parse(rest).ok()?;
     Some(origins)
+}
+
+/// Parse "the cards {in|from} {possessive} hand on the bottom/top [of
+/// {possessive} library] [in any order]" and return the target library position.
+///
+/// CR 401.4 + CR 608.2c: The whole-hand reposition of Teferi's Puzzle Box —
+/// "that player puts the cards in their hand on the bottom of their library in
+/// any order". Modeled on `parse_mass_zones_to_library`'s combinator style; the
+/// optional " of {possessive} library" and "in any order" tail is matched to be
+/// consumed but the trailing remainder is discarded (the position is the whole
+/// payload). The leading "the cards {in|from} {possessive} hand" guard is what
+/// keeps single-card "put that card on the bottom" and "put the rest on the
+/// bottom" from routing here.
+fn parse_hand_to_library_position(rest: &str) -> Option<LibraryPosition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the cards ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("in "),
+        tag::<_, _, OracleError<'_>>("from "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = parse_possessive_determiner(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" hand").parse(rest).ok()?;
+    let (rest, position) = alt((
+        value(
+            LibraryPosition::Bottom,
+            tag::<_, _, OracleError<'_>>(" on the bottom"),
+        ),
+        value(LibraryPosition::Top, tag(" on top")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // Optional " of {possessive} library" and "in any order" tail — matched to
+    // consume when present, but not required. Only "in any order" appears in this
+    // class (CR 401.4 owner arrangement); bottom-of-library order is gameplay-inert
+    // so it is not modeled as an interactive choice.
+    let (rest, _) = opt(preceded(
+        tag::<_, _, OracleError<'_>>(" of "),
+        (parse_possessive_determiner, tag(" library")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_rest, _) = opt(tag::<_, _, OracleError<'_>>(" in any order"))
+        .parse(rest)
+        .ok()?;
+    Some(position)
 }
 
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
@@ -12545,6 +12626,78 @@ mod tests {
                 .iter()
                 .any(|ability| matches!(&*ability.effect, Effect::CastFromZone { .. })),
             "Wish must not parse to a permanent-targeting CastFromZone"
+        );
+    }
+
+    /// SHAPE (issue #4241): Teferi's Puzzle Box's verbatim Oracle text parses to
+    /// a per-player draw-step trigger whose execute effect is a whole-hand
+    /// `ChangeZoneAll { origin: Hand, destination: Library, library_position:
+    /// Some(Bottom) }` with a `Draw` sub-ability ("then draws that many cards"),
+    /// NOT a no-op `PutAtLibraryPosition`/`Unimplemented`. The zero-Unimplemented
+    /// sweep is the positive reach-guard that keeps the shape assertion from
+    /// passing vacuously (card-test foot-gun #6).
+    #[test]
+    fn puzzle_box_hand_to_bottom_then_draw_shape() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of each player's draw step, that player puts the cards \
+             in their hand on the bottom of their library in any order, then draws \
+             that many cards.",
+            "Teferi's Puzzle Box",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+
+        // Positive reach-guard: nothing anywhere fell to Unimplemented.
+        fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&ability.effect);
+            if let Some(sub) = &ability.sub_ability {
+                walk(sub, out);
+            }
+        }
+        let mut effects: Vec<&Effect> = Vec::new();
+        for ability in &parsed.abilities {
+            walk(ability, &mut effects);
+        }
+        for trigger in &parsed.triggers {
+            if let Some(exec) = &trigger.execute {
+                walk(exec, &mut effects);
+            }
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "no clause may fall to Unimplemented; got {effects:?}"
+        );
+
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("Puzzle Box yields a triggered ability");
+        let exec = trigger.execute.as_ref().unwrap();
+
+        match &*exec.effect {
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                library_position: Some(LibraryPosition::Bottom),
+                ..
+            } => {}
+            other => panic!(
+                "execute must be a hand->library ChangeZoneAll placed on the bottom, got {other:?}"
+            ),
+        }
+
+        let draw_sub = exec
+            .sub_ability
+            .as_ref()
+            .expect("the hand-cycle must chain a 'draw that many' sub-ability");
+        assert!(
+            matches!(&*draw_sub.effect, Effect::Draw { .. }),
+            "the sub-ability must be a Draw, got {:?}",
+            draw_sub.effect
         );
     }
 

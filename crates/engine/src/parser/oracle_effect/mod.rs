@@ -16837,11 +16837,15 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
         Effect::ChangeZoneAll { target, .. } if *target == TargetFilter::Controller => {
             *target = anchor.clone();
         }
-        // CR 608.2c + CR 121.1: "That player shuffles, then draws a card for
-        // each card exiled from their hand this way" (The End, Deadly Cover-Up,
-        // Test of Talents) — the trailing Draw defaults its target to the caster
-        // (`Controller`) but must draw for the SEARCHED player carried on the
-        // anchor. Mirrors the `Shuffle` arm above (same caster-default set).
+        // CR 608.2c: a trailing "…, then draws …" continuation is a separate
+        // chunk with no subject of its own, so it defaults its target to the
+        // caster (`Controller`); inherit the earlier player anchor so the acting
+        // player — not the source's controller — draws. Covers "That player
+        // shuffles, then draws a card for each card exiled from their hand this
+        // way" (The End, Deadly Cover-Up, Test of Talents; CR 121.1) and "that
+        // player puts the cards in their hand on the bottom of their library …,
+        // then draws that many cards" (Teferi's Puzzle Box, #4241; CR 102.1).
+        // Mirrors the `Shuffle` arm above (same caster-default set).
         Effect::Draw { target, .. }
             if matches!(
                 *target,

@@ -1344,6 +1344,17 @@ pub(crate) enum PutImperativeAst {
         profile: Option<FaceDownProfile>,
         enters_under: Option<ControllerRef>,
     },
+    /// CR 401.4 + CR 608.2c: "put the cards {in|from} <possessive> hand on the
+    /// bottom/top of <possessive> library [in any order]" — the whole-hand
+    /// reposition (Teferi's Puzzle Box). The mover's entire hand moves to the
+    /// named library `position` at once; CR 401.4 lets the owner arrange the
+    /// simultaneously-placed cards in any order. Lowered to
+    /// `Effect::ChangeZoneAll { origin: Hand, destination: Library,
+    /// library_position: Some(position) }` with NO trailing shuffle — a shuffle
+    /// would scatter the cards the effect just placed on the bottom/top.
+    HandToLibraryPosition {
+        position: LibraryPosition,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

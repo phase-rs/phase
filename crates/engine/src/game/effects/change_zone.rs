@@ -1194,6 +1194,17 @@ pub fn resolve_all(
             ability,
             &TargetFilter::ParentTargetOwner,
         ),
+        // CR 603.2b + CR 102.1: "At the beginning of each player's draw step,
+        // that player puts the cards in their hand on the bottom of their
+        // library" (Teferi's Puzzle Box). The per-player trigger binds "that
+        // player" to `ScopedPlayer` (the active player whose step it is), so the
+        // whole-hand move must scan that player's hand, not the source
+        // controller's.
+        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ScopedPlayer,
+        ),
         _ => None,
     };
 
