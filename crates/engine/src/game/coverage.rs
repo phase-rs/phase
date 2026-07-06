@@ -465,6 +465,8 @@ pub struct TokenCoverageSummary {
     pub by_payload_source: BTreeMap<String, TokenCoverageBucket>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_gaps: Vec<TokenGapFrequency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_gap_token_makeup: Vec<TokenGapTokenMakeup>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -481,6 +483,15 @@ pub struct TokenGapFrequency {
     pub total_count: usize,
     pub source_card_refs: usize,
     pub example_tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenGapTokenMakeup {
+    pub handler: String,
+    pub token_name: String,
+    pub total_count: usize,
+    pub source_card_refs: usize,
+    pub example_source_cards: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4731,6 +4742,8 @@ fn unsupported_partial_token_gap_label(
 fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
+    let mut gap_token_accumulators: BTreeMap<(String, String), (usize, usize, Vec<String>)> =
+        BTreeMap::new();
 
     for preset in known_token_presets() {
         let materialized = materialize_token_ability_payload(
@@ -4762,6 +4775,14 @@ fn analyze_token_coverage() -> TokenCoverageSummary {
                     handler,
                     &preset.body.display_name,
                     source_refs,
+                );
+                push_token_gap_makeup(
+                    &mut gap_token_accumulators,
+                    handler,
+                    &preset.body.display_name,
+                    source_refs,
+                    &preset.source_card_refs,
+                    &preset.source_card_names,
                 );
             }
             PresetFidelity::PartialMissingAbilities => summary.partial_fidelity_tokens += 1,
@@ -4834,6 +4855,31 @@ fn analyze_token_coverage() -> TokenCoverageSummary {
     top_gaps.truncate(50);
     summary.top_gaps = top_gaps;
 
+    let mut top_gap_token_makeup: Vec<_> = gap_token_accumulators
+        .into_iter()
+        .map(
+            |((handler, token_name), (total_count, source_card_refs, example_source_cards))| {
+                TokenGapTokenMakeup {
+                    handler,
+                    token_name,
+                    total_count,
+                    source_card_refs,
+                    example_source_cards,
+                }
+            },
+        )
+        .collect();
+    top_gap_token_makeup.sort_by(|left, right| {
+        right
+            .source_card_refs
+            .cmp(&left.source_card_refs)
+            .then_with(|| right.total_count.cmp(&left.total_count))
+            .then_with(|| left.handler.cmp(&right.handler))
+            .then_with(|| left.token_name.cmp(&right.token_name))
+    });
+    top_gap_token_makeup.truncate(50);
+    summary.top_gap_token_makeup = top_gap_token_makeup;
+
     summary
 }
 
@@ -4856,6 +4902,33 @@ fn push_token_gap(
     entry.1 += source_refs;
     if entry.2.len() < 3 && !entry.2.iter().any(|name| name == token_name) {
         entry.2.push(token_name.to_string());
+    }
+}
+
+fn push_token_gap_makeup(
+    gaps: &mut BTreeMap<(String, String), (usize, usize, Vec<String>)>,
+    handler: &str,
+    token_name: &str,
+    source_refs: usize,
+    source_card_refs: &[crate::game::token_presets::TokenSourceRef],
+    source_card_names: &[String],
+) {
+    let entry = gaps
+        .entry((handler.to_string(), token_name.to_string()))
+        .or_default();
+    entry.0 += 1;
+    entry.1 += source_refs;
+    for name in source_card_refs
+        .iter()
+        .map(|source_ref| source_ref.card_name.as_str())
+        .chain(source_card_names.iter().map(String::as_str))
+    {
+        if entry.2.len() >= 5 {
+            break;
+        }
+        if !entry.2.iter().any(|existing| existing == name) {
+            entry.2.push(name.to_string());
+        }
     }
 }
 
@@ -10205,6 +10278,18 @@ mod tests {
         );
         assert_eq!(top_gap.total_count, 68);
         assert_eq!(top_gap.source_card_refs, 126);
+        let top_makeup = summary.top_gap_token_makeup.first().unwrap();
+        assert_eq!(
+            top_makeup.handler,
+            TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+        );
+        assert_eq!(top_makeup.token_name, "Ooze");
+        assert_eq!(top_makeup.total_count, 9);
+        assert_eq!(top_makeup.source_card_refs, 17);
+        assert!(top_makeup
+            .example_source_cards
+            .iter()
+            .any(|name| name == "Mystic Genesis"));
     }
 
     #[test]
