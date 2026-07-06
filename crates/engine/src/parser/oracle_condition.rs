@@ -438,9 +438,6 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     if let Some(subtypes) = parse_you_control_land_subtypes(text) {
         return Some(ParsedCondition::YouControlLandSubtypeAny { subtypes });
     }
-    if let Some((count, subtype)) = parse_you_control_subtype_count(text) {
-        return Some(ParsedCondition::YouControlSubtypeCountAtLeast { subtype, count });
-    }
     if let Some(count) = parse_numeric_threshold(
         text,
         "creatures you control have total power ",
@@ -464,6 +461,16 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     }
     if let Some(count) = parse_numeric_threshold(text, "you control ", " or more snow permanents") {
         return Some(ParsedCondition::YouControlSnowPermanentCountAtLeast { count });
+    }
+    // The generic bare-subtype catch-all must run AFTER the specific "creatures with
+    // different powers" / "lands with the same name" / "snow permanents" suffix arms
+    // above. Otherwise it greedily consumes those qualifier phrases via its bare
+    // `" or more "` split and dumps the whole phrase into a stringly-typed subtype
+    // (e.g. subtype "creatures with different power"), shadowing the dedicated
+    // YouControlDifferentPowerCreatureCountAtLeast / YouControlLandsWithSameNameAtLeast
+    // variants so those cards never reach the correct parse.
+    if let Some((count, subtype)) = parse_you_control_subtype_count(text) {
+        return Some(ParsedCondition::YouControlSubtypeCountAtLeast { subtype, count });
     }
     // "you control N or more [color] permanents" / "you control N or more [core type]s"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control ").parse(text) {
@@ -1353,6 +1360,46 @@ mod tests {
                 filter: None,
             }),
             "numeric attacker threshold must stay filter: None"
+        );
+    }
+
+    /// CR 207.2c: The "creatures with different powers" (Coven) and "lands with the
+    /// same name" qualifier phrases have dedicated typed condition variants. The
+    /// generic bare-subtype count catch-all must not shadow them by swallowing the
+    /// whole phrase into a stringly-typed subtype. This is a fail-on-revert guard:
+    /// reordering the generic arm back above the specific arms makes these produce
+    /// `YouControlSubtypeCountAtLeast { subtype: "creatures with different power"/… }`.
+    #[test]
+    fn qualifier_phrase_conditions_beat_generic_subtype_count() {
+        // Coven activation/cast restriction (Dawnhart Mentor, Ambitious Farmhand,
+        // Candletrap, Sungold Sentinel).
+        assert_eq!(
+            parse_restriction_condition(
+                "you control three or more creatures with different powers"
+            ),
+            Some(ParsedCondition::YouControlDifferentPowerCreatureCountAtLeast { count: 3 }),
+            "Coven 'different powers' must map to the dedicated variant, not a subtype dump"
+        );
+        // Endless Atlas / Sceptre of Eternal Glory.
+        assert_eq!(
+            parse_restriction_condition("you control three or more lands with the same name"),
+            Some(ParsedCondition::YouControlLandsWithSameNameAtLeast { count: 3 }),
+            "'lands with the same name' must map to the dedicated variant"
+        );
+        // Regression guard: a genuine bare subtype still flows to the generic arm.
+        assert_eq!(
+            parse_restriction_condition("you control five or more vampires"),
+            Some(ParsedCondition::YouControlSubtypeCountAtLeast {
+                subtype: "vampire".to_string(),
+                count: 5,
+            }),
+            "bare subtype threshold must still reach the generic subtype-count arm"
+        );
+        // Regression guard: snow permanents keep their own variant.
+        assert_eq!(
+            parse_restriction_condition("you control two or more snow permanents"),
+            Some(ParsedCondition::YouControlSnowPermanentCountAtLeast { count: 2 }),
+            "snow-permanent threshold must keep its dedicated variant"
         );
     }
 
