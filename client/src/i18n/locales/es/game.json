@@ -1029,6 +1029,13 @@
     }
   },
   "cardChoice": {
+    "eachPlayerCopyChosen": {
+      "title": "Choose creatures to copy",
+      "prompt": "The first creature you choose is copied; if you choose a second, its power becomes +1/+1 counters on the copy.",
+      "confirm": "Confirmar",
+      "copied": "copied",
+      "scaler": "scaler"
+    },
     "badges": {
       "choose": "Elegir",
       "selected": "Seleccionada",

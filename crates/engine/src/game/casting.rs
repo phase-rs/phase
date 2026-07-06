@@ -5269,6 +5269,7 @@ pub(super) fn apply_target_dependent_cost_modifiers(
 /// X is concrete here, so both floor channels apply (they do not self-gate on
 /// X — only the prepare-path callers gate). Selected targets come from the
 /// cloned pending `ability`; the unselected-targets case no-ops safely.
+#[cfg(test)]
 pub(super) fn concrete_cost_for_x(
     state: &GameState,
     player: PlayerId,
@@ -5286,6 +5287,68 @@ pub(super) fn concrete_cost_for_x(
     cost
 }
 
+/// CR 601.2f: Recompute a pending spell's total mana component from the
+/// announcement-time base plus declared mana additions. This is the spell-cast
+/// authority after optional/additional costs are declared: base or alternative
+/// cost, plus additional mana costs, then increases/reductions, then floors.
+pub(super) fn recompute_pending_mana_total(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    x: Option<u32>,
+) -> ManaCost {
+    let Some(base) = pending.base_cost.as_ref() else {
+        let mut cost = pending.cost.clone();
+        if let Some(x) = x {
+            cost.concretize_x(x);
+        }
+        if !casting_costs::cost_has_x(&cost) {
+            apply_cost_floor(state, player, pending.object_id, &mut cost);
+            apply_cost_floor_with_selected_targets(
+                state,
+                player,
+                pending.object_id,
+                &pending.ability,
+                &mut cost,
+            );
+        }
+        return cost;
+    };
+
+    let mut cost = base.clone();
+    if let Some(x) = x {
+        cost.concretize_x(x);
+    }
+    for addition in &pending.declared_mana_additions {
+        cost = super::restrictions::add_mana_cost(&cost, addition);
+    }
+    apply_non_floor_cost_modifiers(
+        state,
+        player,
+        pending.object_id,
+        &mut cost,
+        Some(pending.casting_variant),
+    );
+    apply_target_dependent_cost_modifiers(
+        state,
+        player,
+        pending.object_id,
+        &pending.ability,
+        &mut cost,
+    );
+    if !casting_costs::cost_has_x(&cost) {
+        apply_cost_floor(state, player, pending.object_id, &mut cost);
+        apply_cost_floor_with_selected_targets(
+            state,
+            player,
+            pending.object_id,
+            &pending.ability,
+            &mut cost,
+        );
+    }
+    cost
+}
+
 /// CR 601.2f + CR 702.41a: Build per-X total cost previews for the Choose-X UI.
 /// Each entry is `(x, concrete_cost)` after Affinity/reductions/floors. Empty
 /// when `base_cost` is unavailable or the legal range exceeds 100 values.
@@ -5296,9 +5359,9 @@ pub(super) fn build_choose_x_cost_previews(
     min: u32,
     max: u32,
 ) -> Vec<(u32, ManaCost)> {
-    let Some(base) = pending.base_cost.as_ref() else {
+    if pending.base_cost.is_none() {
         return Vec::new();
-    };
+    }
     if min > max || max.saturating_sub(min) > 100 {
         return Vec::new();
     }
@@ -5306,7 +5369,7 @@ pub(super) fn build_choose_x_cost_previews(
         .map(|x| {
             (
                 x,
-                concrete_cost_for_x(state, player, pending.object_id, &pending.ability, base, x),
+                recompute_pending_mana_total(state, player, pending, Some(x)),
             )
         })
         .collect()
@@ -5334,15 +5397,21 @@ pub(super) fn apply_post_x_cost_modifiers(
     let Some(x) = pending.ability.chosen_x else {
         return;
     };
-    let ability = pending.ability.clone();
     let new_cost = match pending.base_cost.clone() {
-        Some(base) => concrete_cost_for_x(state, caster, object_id, &ability, &base, x),
+        Some(_) => recompute_pending_mana_total(state, caster, pending, Some(x)),
         None => {
             // Legacy / in-flight saved game without a captured base: behavior
             // identical to the pre-change floor-only post-X pass.
             let mut cost = pending.cost.clone();
+            cost.concretize_x(x);
             apply_cost_floor(state, caster, object_id, &mut cost);
-            apply_cost_floor_with_selected_targets(state, caster, object_id, &ability, &mut cost);
+            apply_cost_floor_with_selected_targets(
+                state,
+                caster,
+                object_id,
+                &pending.ability,
+                &mut cost,
+            );
             cost
         }
     };
@@ -5406,8 +5475,16 @@ pub(super) fn recompute_pending_cast_cost(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<ManaCost> {
-    let obj = state.objects.get(&object_id)?;
-    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+    let pending = state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == object_id)?;
+    Some(recompute_pending_mana_total(
+        state,
+        player,
+        pending,
+        pending.ability.chosen_x,
+    ))
 }
 
 /// CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
@@ -11107,8 +11184,14 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
         cost,
         ctx,
         excluded_sources,
-        None,
+        AutoTapProbeOptions::default(),
     )
+}
+
+#[derive(Default)]
+struct AutoTapProbeOptions<'a> {
+    source_cache: Option<&'a casting_costs::AutoTapSourceCache>,
+    explicit_tap_payment_mode: Option<ConvokeMode>,
 }
 
 fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
@@ -11118,7 +11201,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     excluded_sources: &HashSet<ObjectId>,
-    source_cache: Option<&casting_costs::AutoTapSourceCache>,
+    options: AutoTapProbeOptions<'_>,
 ) -> bool {
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources_with_context_excluding_cached(
@@ -11129,7 +11212,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
         source_id,
         ctx,
         excluded_sources,
-        source_cache,
+        options.source_cache,
     );
 
     // CR 605.4a: A `TapsForMana` triggered mana ability (Leyline of Abundance /
@@ -11164,6 +11247,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
                                 cost,
                                 Some(ctx),
                                 permissions,
+                                options.explicit_tap_payment_mode,
                             )
                         })
                 })
@@ -11215,10 +11299,23 @@ fn can_pay_with_spell_tap_payments(
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     permissions: crate::types::mana::CostPermissionContext,
+    explicit_mode: Option<ConvokeMode>,
 ) -> bool {
-    let Some(mode) = spell_tap_payment_mode(state, player, source_id) else {
+    let Some(mode) = explicit_mode.or_else(|| spell_tap_payment_mode(state, player, source_id))
+    else {
         return false;
     };
+    can_pay_with_tap_payment_mode(state, player, mode, cost, ctx, permissions)
+}
+
+fn can_pay_with_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    mode: ConvokeMode,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+    permissions: crate::types::mana::CostPermissionContext,
+) -> bool {
     let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
         return false;
     };
@@ -11395,7 +11492,66 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
         cost,
         spell_ctx.as_ref(),
         &HashSet::new(),
-        source_cache,
+        AutoTapProbeOptions {
+            source_cache,
+            explicit_tap_payment_mode: None,
+        },
+    )
+}
+
+pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    tap_payment_mode: ConvokeMode,
+) -> bool {
+    if super::casting_costs::cost_has_x(cost) {
+        let mut concrete = cost.clone();
+        concrete.concretize_x(0);
+        return can_feasibly_pay_mana_cost_with_tap_payment_mode(
+            state,
+            player,
+            source_id,
+            &concrete,
+            tap_payment_mode,
+        );
+    }
+
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    let spell_meta = build_spell_meta(&simulated, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    if can_pay_mana_cost_after_auto_tap_with_context_and_cache(
+        simulated.clone(),
+        player,
+        Some(source_id),
+        cost,
+        spell_ctx.as_ref(),
+        &HashSet::new(),
+        AutoTapProbeOptions {
+            source_cache: None,
+            explicit_tap_payment_mode: Some(tap_payment_mode),
+        },
+    ) {
+        return true;
+    }
+
+    let any_color = player_can_spend_as_any_color_for_payment(
+        &simulated,
+        player,
+        Some(source_id),
+        spell_ctx.as_ref(),
+    );
+    let permissions =
+        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
+    can_pay_with_tap_payment_mode(
+        &simulated,
+        player,
+        tap_payment_mode,
+        cost,
+        spell_ctx.as_ref(),
+        permissions,
     )
 }
 
@@ -13875,7 +14031,11 @@ pub fn handle_activate_ability(
             pending.activation_cost = Some(cost.clone());
             pending.activation_ability_index = Some(ability_index);
             return super::effects::collect_evidence::begin_cost_payment(
-                state, player, amount, pending,
+                state,
+                player,
+                amount,
+                pending,
+                SpellCostSource::Other,
             );
         }
 

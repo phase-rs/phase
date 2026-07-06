@@ -2524,6 +2524,27 @@ pub(crate) fn inject_catalog_token_abilities(
         return;
     }
 
+    // CR 111.3: A token's abilities are defined by the effect that creates it, so
+    // when the creating effect already granted this token abilities via a
+    // `with "..."` clause (parsed into `static_definitions` at creation, before
+    // this fallback runs), those are authoritative and complete. The catalog
+    // preset's `rules_text` is then only a display/art mirror and MUST NOT inject
+    // functional abilities — critically, the matched art preset can be a
+    // different printing whose text lists extra keyword actions (a Kamigawa
+    // "crews Vehicles as though its power were 2 greater" Pilot token rendered
+    // with the Aetherdrift "saddles Mounts and crews Vehicles …" art), so
+    // injecting it grants a second crew static and doubles the contribution (a
+    // 1/1 Pilot crews for 5 instead of 3). Skip functional injection whenever the
+    // token already carries granted statics; still record the display rules text.
+    // Tokens created by name with no explicit ability clause (Treasure, Pest,
+    // Equipment presets) reach here with no prior statics and inject normally.
+    if !obj.static_definitions.is_empty() {
+        if obj.token_rules_text.is_none() {
+            obj.token_rules_text = Some(rules_text.to_string());
+        }
+        return;
+    }
+
     if !static_definitions.is_empty() {
         Arc::make_mut(&mut obj.base_static_definitions).extend(static_definitions.iter().cloned());
         for static_def in static_definitions {
@@ -5427,6 +5448,73 @@ mod tests {
             ),
             3,
             "1/1 Shorikai Pilot must contribute 3 power toward crew"
+        );
+    }
+
+    /// CR 111.3: A Kamigawa Shorikai/Kotori Pilot token ("crews Vehicles as
+    /// though its power were 2 greater", a `[Crew]`-only contribution) whose body
+    /// matches — and is rendered with — the Aetherdrift Pilot art preset ("saddles
+    /// Mounts and crews Vehicles …", a `[Saddle, Crew]` contribution) must NOT
+    /// pick up the art preset's static on top of its own. The creating effect's
+    /// `with "..."` grant is authoritative; the catalog is display-only here.
+    /// Regression: the token was crewing for 5 (1 + 2 + 2) instead of 3 because
+    /// the two statics have different `actions` and slipped past an exact-match
+    /// de-dupe.
+    #[test]
+    fn catalog_skips_functional_injection_when_effect_already_granted_crew_static() {
+        use crate::types::statics::{CrewAction, CrewContributionKind, StaticMode};
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pilot".to_string(),
+            Zone::Battlefield,
+        );
+        // Aetherdrift Pilot preset — a *different* printing than the creating
+        // card, carrying a `[Saddle, Crew]` contribution in its rules_text.
+        let aetherdrift_pilot = crate::game::token_presets::known_token_preset_by_id(
+            "648bee61-604f-58a2-8beb-11faa77a89af",
+        )
+        .expect("Aetherdrift Pilot preset must exist");
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.token_image_ref = aetherdrift_pilot.token_image_ref.clone();
+            // The creating effect (Shorikai/Kotori) already granted the crew-only
+            // static via its `with "..."` clause.
+            let with_clause = StaticDefinition::new(StaticMode::CrewContribution {
+                kind: CrewContributionKind::PowerDelta { delta: 2 },
+                actions: vec![CrewAction::Crew],
+            })
+            .affected(TargetFilter::SelfRef);
+            Arc::make_mut(&mut obj.base_static_definitions).push(with_clause.clone());
+            obj.static_definitions.push(with_clause);
+        }
+
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let crew_statics = state.objects[&obj_id]
+            .static_definitions
+            .iter_all()
+            .filter(|def| matches!(def.mode, StaticMode::CrewContribution { .. }))
+            .count();
+        assert_eq!(
+            crew_statics, 1,
+            "the art preset's crew static must not stack on the effect's own grant"
+        );
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                obj_id,
+                CrewAction::Crew,
+            ),
+            3,
+            "1/1 Pilot with a single +2 crew delta must contribute 3, not 5"
         );
     }
 

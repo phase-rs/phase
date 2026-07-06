@@ -7,8 +7,8 @@ use crate::types::ability::{
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, ChosenDamageSource, GameState, OutsideGameChoiceSource,
-    PayableResource, PendingContinuation, WaitingFor,
+    ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
+    OutsideGameChoiceSource, PayableResource, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -137,6 +137,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
             | WaitingFor::KeepWithinTotalPowerChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
@@ -4261,6 +4262,118 @@ pub(super) fn handle_resolution_choice(
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
+        }
+        // CR 101.4 + CR 707.2 + CR 122.1: One player submitted their ordered
+        // 1..=max selection for `EachPlayerCopyChosen`. Collect APNAP choices
+        // first; copy/counter actions run only after the complete set is known.
+        (
+            WaitingFor::EachPlayerCopyChosenSelection {
+                player,
+                eligible,
+                min,
+                max,
+                choose_filter,
+                copy_modifications,
+                scale,
+                source_id,
+                source_controller,
+                remaining_players,
+                mut all_choices,
+                scoped_players,
+                trigger_event,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            // CR 707.2: validate an ordered, distinct, in-eligible selection of
+            // size `min..=max`. Order is load-bearing (index 0 copied, index 1
+            // scales).
+            if targets.len() < min as usize || targets.len() > max as usize {
+                return Err(EngineError::InvalidAction(format!(
+                    "EachPlayerCopyChosen: must choose between {min} and {max} objects, got {}",
+                    targets.len()
+                )));
+            }
+            let mut chosen: Vec<ObjectId> = Vec::with_capacity(targets.len());
+            for t in &targets {
+                if !eligible.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selected object not eligible".to_string(),
+                    ));
+                }
+                let TargetRef::Object(id) = t else {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selection must be objects".to_string(),
+                    ));
+                };
+                if chosen.contains(id) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: duplicate object in selection".to_string(),
+                    ));
+                }
+                if !effects::each_player_copy_chosen::is_live_eligible_choice(
+                    state,
+                    player,
+                    *id,
+                    &choose_filter,
+                    source_id,
+                    source_controller,
+                ) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selected object no longer eligible".to_string(),
+                    ));
+                }
+                chosen.push(*id);
+            }
+            all_choices.push(CopyChosenSelection { player, chosen });
+            let params = effects::each_player_copy_chosen::CopyChosenParams {
+                choose_filter,
+                min,
+                max,
+                copy_modifications,
+                scale,
+                source_id,
+                source_controller,
+                scoped_players,
+                trigger_event: trigger_event.clone(),
+            };
+            // Priority sentinel — `advance_to_next_player` writes `waiting_for`
+            // only when it prompts the next chooser or the action phase pauses.
+            let events_before = events.len();
+            set_priority(state, player);
+            // CR 608.2: restore the phenomenon trigger event across the
+            // collection/action continuation.
+            let previous_trigger_event = state.current_trigger_event.clone();
+            state.current_trigger_event = trigger_event;
+            let drive_result = effects::each_player_copy_chosen::advance_to_next_player(
+                state,
+                remaining_players,
+                all_choices,
+                &params,
+                events,
+            );
+            state.current_trigger_event = previous_trigger_event;
+            if let Err(e) = drive_result {
+                return Err(EngineError::InvalidAction(format!("{e:?}")));
+            }
+            // CR 603.2 + CR 603.3b: trigger bookkeeping across the paused walk,
+            // mirroring the `CategoryChoice` arm. If the walk settled back to
+            // Priority, drain any triggers deferred by earlier paused rounds;
+            // otherwise (a later player's selection or a replacement choice is
+            // now pending) batch this action's events for a later drain so the
+            // created tokens' ETB observers are not dropped.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+            } else {
+                let trigger_events: Vec<GameEvent> = events[events_before..]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         // CR 107.1c + CR 701.21a (Slaughter the Strong): player kept a subset of
         // their creatures within the total-power cap; sacrifice the rest.

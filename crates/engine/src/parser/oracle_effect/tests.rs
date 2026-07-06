@@ -9601,6 +9601,81 @@ fn effect_put_top_onto_battlefield_face_down_lowers_to_manifest() {
 }
 
 #[test]
+fn effect_direct_manifest_top_library_parses_controller_override_only_for_imperative() {
+    let singular = parse_effect("Manifest the top card of your library.");
+    assert!(
+        matches!(
+            &singular,
+            Effect::Manifest {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "direct singular manifest should default enters_under to You, got: {singular:?}"
+    );
+
+    let plural = parse_effect("Manifest the top two cards of your library under your control.");
+    assert!(
+        matches!(
+            &plural,
+            Effect::Manifest {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 2 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "direct plural manifest with explicit control clause should parse, got: {plural:?}"
+    );
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::TargetPlayer),
+        ..ParseContext::default()
+    };
+    let that_player = parse_effect_chain_with_context(
+        "Manifest the top card of that player's library under your control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    assert!(
+        matches!(
+            *that_player.effect,
+            Effect::Manifest {
+                target: TargetFilter::TriggeringPlayer,
+                count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "that player's library should bind through context and enter under source controller, got: {:?}",
+        that_player.effect
+    );
+
+    let attach_continuation =
+        parse_effect("Manifest the top card of your library and attach Lightform to it.");
+    assert!(
+        matches!(
+            &attach_continuation,
+            Effect::Manifest {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "direct manifest should accept bounded attach-to-it continuation, got: {attach_continuation:?}"
+    );
+
+    let invalid_tail = parse_effect("Manifest the top card of your library with haste.");
+    assert!(
+        !matches!(invalid_tail, Effect::Manifest { .. }),
+        "direct manifest grammar must be all-consuming; invalid tail got: {invalid_tail:?}"
+    );
+}
+
+#[test]
 fn effect_its_controller_manifests_top_card() {
     // CR 701.40a + CR 608.2c: Reality Shift — subject-shifted manifest binds
     // the acting player to ParentTargetController (the exiled creature's
@@ -9625,10 +9700,11 @@ fn effect_its_controller_manifests_top_card() {
             Effect::Manifest {
                 target: TargetFilter::ParentTargetController,
                 count: QuantityExpr::Fixed { value: 1 },
+                enters_under: None,
                 ..
             }
         ),
-        "expected Manifest {{ ParentTargetController, count: 1 }}, got: {:?}",
+        "expected subject-predicate Manifest {{ ParentTargetController, count: 1, enters_under: None }}, got: {:?}",
         sub.effect
     );
 }
@@ -40056,6 +40132,130 @@ fn resolution_unless_anaphoric_payers_unchanged() {
         TargetFilter::Controller,
         "\"you pay\" must stay Controller"
     );
+}
+
+/// CR 101.4 + CR 707.2 + CR 122.1: the real WHO phenomenon Human—Time Lord
+/// Meta-Crisis lowers its whole `PlaneswalkedTo` body to a single
+/// `EachPlayerCopyChosen` (min:1, max:2, RemoveSupertype(Legendary), scale by the
+/// second creature's power) — NOT a `CopyTokenOf` chain with a trailing
+/// `Unimplemented`.
+#[test]
+fn each_player_copy_chosen_human_time_lord_trigger() {
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    let def = parse_trigger_line(
+        "When you encounter Human—Time Lord Meta-Crisis, each player chooses one or two creatures they control. Each player creates a token that's a copy of the first creature they chose, except it isn't legendary. Then each player who chose a second creature puts a number of +1/+1 counters on the token they created equal to the power of the second creature they chose. (Then planeswalk away from this phenomenon.)",
+        "Human—Time Lord Meta-Crisis",
+    );
+    assert_eq!(
+        def.mode,
+        crate::types::triggers::TriggerMode::PlaneswalkedTo,
+        "phenomenon encounter trigger"
+    );
+    let execute = def.execute.expect("planeswalked-to execute");
+    // Whole body collapses into one self-contained effect (no chained tail).
+    assert!(
+        execute.sub_ability.is_none(),
+        "the body must collapse into a single EachPlayerCopyChosen, got sub {:?}",
+        execute.sub_ability
+    );
+    assert_eq!(
+        execute.player_scope,
+        Some(PlayerFilter::All),
+        "\"each player\" → player_scope All"
+    );
+    match &*execute.effect {
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min,
+            max,
+            copy_modifications,
+            scale,
+        } => {
+            assert_eq!((*min, *max), (1, 2), "chooses one or two");
+            assert!(
+                matches!(choose_filter, TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&crate::types::ability::TypeFilter::Creature)),
+                "choose_filter must be a creature filter, got {choose_filter:?}"
+            );
+            assert_eq!(
+                copy_modifications,
+                &vec![ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }],
+                "except it isn't legendary → RemoveSupertype(Legendary)"
+            );
+            assert_eq!(
+                scale,
+                &Some(CopyScale {
+                    counter_type: CounterType::Plus1Plus1,
+                    scale_property: ObjectProperty::Power,
+                }),
+                "scale by the second creature's power in +1/+1 counters"
+            );
+        }
+        other => panic!("expected EachPlayerCopyChosen, got {other:?}"),
+    }
+}
+
+/// CR 707.2 + CR 205.4: the no-scale sibling shape (single choice, keyword grant,
+/// no counter sentence) parses to `scale: None` with `AddKeyword(Menace)`.
+#[test]
+fn each_player_copy_chosen_no_scale_menace_sibling() {
+    let def = parse_effect_chain(
+        "Each player chooses a creature they control. Each player creates a token that's a copy of the creature they chose, except it has menace.",
+        AbilityKind::Spell,
+    );
+    assert!(def.sub_ability.is_none(), "single self-contained effect");
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    match &*def.effect {
+        Effect::EachPlayerCopyChosen {
+            min,
+            max,
+            copy_modifications,
+            scale,
+            ..
+        } => {
+            assert_eq!((*min, *max), (1, 1), "chooses a (single) creature");
+            assert_eq!(
+                copy_modifications,
+                &vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Menace
+                }],
+                "except it has menace → AddKeyword(Menace)"
+            );
+            assert_eq!(scale, &None, "no scaling sentence → scale None");
+        }
+        other => panic!("expected EachPlayerCopyChosen, got {other:?}"),
+    }
+}
+
+/// Cross-axis synthetic: the parser parameterizes the object class (artifact) and
+/// the scale property (mana value) independently of the counter kind.
+#[test]
+fn each_player_copy_chosen_cross_axis_artifact_mana_value() {
+    let def = parse_effect_chain(
+        "Each player chooses one or two artifacts they control. Each player creates a token that's a copy of the first artifact they chose, except it isn't legendary. Then each player who chose a second artifact puts a number of +1/+1 counters on the token they created equal to the mana value of the second artifact they chose.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            scale,
+            ..
+        } => {
+            assert!(
+                matches!(choose_filter, TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&crate::types::ability::TypeFilter::Artifact)),
+                "choose_filter must be an artifact filter, got {choose_filter:?}"
+            );
+            assert_eq!(
+                scale.as_ref().map(|s| s.scale_property),
+                Some(ObjectProperty::ManaValue),
+                "scale property must parameterize to mana value"
+            );
+        }
+        other => panic!("expected EachPlayerCopyChosen, got {other:?}"),
+    }
 }
 
 /// CR 115.1 + CR 608.2c + CR 702.185a: Full Bore parses to a `Pump` (+3/+2
