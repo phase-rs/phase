@@ -1331,6 +1331,7 @@ fn oracle_face_for(
             scryfall_id: Some(format!("{}-face", name.to_lowercase())),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     };
     crate::database::synthesis::build_oracle_face(&card, None)
 }
@@ -1844,6 +1845,7 @@ fn pupu_ufo_full_card_supported_dynamic_base_power() {
                 scryfall_id: Some("pupu-ufo-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
@@ -1894,6 +1896,7 @@ fn sita_varma_full_card_supported_inverted_genitive_base_pt() {
                 scryfall_id: Some("sita-varma-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
