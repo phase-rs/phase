@@ -3740,6 +3740,7 @@ fn apply_action(
                 vehicle_id,
                 crew_power,
                 eligible_creatures,
+                ..
             },
             GameAction::CrewVehicle {
                 vehicle_id: _vid,
@@ -3796,6 +3797,7 @@ fn apply_action(
                 mount_id,
                 saddle_power,
                 eligible_creatures,
+                ..
             },
             GameAction::SaddleMount {
                 mount_id: _mid,
@@ -6344,8 +6346,11 @@ fn handle_crew_activation(
 
     // Validate total power of all eligible creatures can meet the threshold.
     // CR 702.122a: a creature's contribution may be modified ("as though its
-    // power were N greater" / "using its toughness rather than its power").
-    let total_power: i32 = eligible_creatures
+    // power were N greater" / "using its toughness rather than its power"). The
+    // per-creature contributions travel with the choice so the UI gates the
+    // selection on the same adjusted values the engine validates against, rather
+    // than re-deriving from raw power.
+    let contributions: Vec<i32> = eligible_creatures
         .iter()
         .map(|&id| {
             super::static_abilities::object_crew_power_contribution(
@@ -6354,7 +6359,8 @@ fn handle_crew_activation(
                 crate::types::statics::CrewAction::Crew,
             )
         })
-        .sum();
+        .collect();
+    let total_power: i32 = contributions.iter().sum();
 
     if total_power < crew_power as i32 {
         return Err(EngineError::ActionNotAllowed(
@@ -6369,6 +6375,7 @@ fn handle_crew_activation(
         vehicle_id,
         crew_power,
         eligible_creatures,
+        contributions,
     })
 }
 
@@ -6731,7 +6738,7 @@ fn handle_saddle_activation(
         .collect();
 
     // CR 702.171a: a creature's saddle contribution may be modified.
-    let total_power: i32 = eligible_creatures
+    let contributions: Vec<i32> = eligible_creatures
         .iter()
         .map(|&id| {
             super::static_abilities::object_crew_power_contribution(
@@ -6740,7 +6747,8 @@ fn handle_saddle_activation(
                 crate::types::statics::CrewAction::Saddle,
             )
         })
-        .sum();
+        .collect();
+    let total_power: i32 = contributions.iter().sum();
 
     if total_power < saddle_power as i32 {
         return Err(EngineError::ActionNotAllowed(
@@ -6755,6 +6763,7 @@ fn handle_saddle_activation(
         mount_id,
         saddle_power,
         eligible_creatures,
+        contributions,
     })
 }
 
