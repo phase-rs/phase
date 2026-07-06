@@ -11950,7 +11950,7 @@ fn witherbloom_recomputes_affinity_after_declared_additional_mana() {
         };
     }
 
-    let base = effective_spell_cost(&state, PlayerId(0), spell_id).expect("base cost computes");
+    let base = state.objects.get(&spell_id).unwrap().mana_cost.clone();
     let ability = ResolvedAbility::new(Effect::NoOp, vec![], spell_id, PlayerId(0));
     let mut pending = PendingCast::new(spell_id, CardId(2500), ability, base.clone());
     pending.base_cost = Some(base);
