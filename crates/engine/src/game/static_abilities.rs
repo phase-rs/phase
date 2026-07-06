@@ -1762,6 +1762,15 @@ pub(crate) fn static_filter_matches(
             // fails open and locks every player whenever any creature carries a
             // granted `CantGainLife`.
             TargetFilter::SpecificObject { .. } | TargetFilter::SelfRef => return false,
+            // CR 607.2d / CR 607.2m (by analogy): a player-scoped static restricted
+            // to "players who last chose <anchor>" (Two Streams Facility's
+            // land-drop grant) admits ONLY the players whose durable per-player
+            // choice records that label. This explicit arm MUST precede the
+            // fail-open `_ => return true` below — otherwise the grant would leak
+            // to every player regardless of their anchor.
+            TargetFilter::PlayerWhoChoseLabel { label } => {
+                return crate::game::players::player_last_chose_label(state, player_id, label)
+            }
             _ => return true,
         }
     }
@@ -1782,10 +1791,13 @@ pub fn additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
 
     let mut total: u8 = 0;
 
-    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out
-    // / command-zone / condition gate, so Azusa phased out correctly stops
-    // granting land drops.
-    for (obj, def) in battlefield_active_statics(state) {
+    // CR 702.26b + CR 604.1 + CR 311.2 / CR 312.2: `game_active_statics` chains
+    // command-zone sources through `active_static_definitions`, whose command
+    // gate admits an active plane's opt-in land-drop static (Two Streams
+    // Facility) alongside battlefield permanents — while still owning the
+    // phased-out (Azusa) and per-static condition gates, so a phased-out or
+    // condition-failing land-drop grant still stops correctly.
+    for (obj, def) in game_active_statics(state) {
         // CR 305.2: Determine the additional land count from the variant.
         let count = match def.mode {
             StaticMode::MayPlayAdditionalLand => 1,

@@ -3696,6 +3696,7 @@ pub(super) fn handle_resolution_choice(
                 options,
                 choice_type,
                 source_id,
+                persist_player,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -3723,7 +3724,13 @@ pub(super) fn handle_resolution_choice(
             // protection, Sewer Nemesis CDA, …), recompute layers for the
             // layer-affecting choice kinds, and record `last_named_choice`.
             // Single authority shared with the random `Effect::Choose` resolver.
-            effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
+            effects::choose::bind_named_choice(
+                state,
+                &choice_type,
+                &choice,
+                source_id,
+                persist_player,
+            );
             if choice_type.is_card_predicate_guess() {
                 events.push(GameEvent::CardPredicateGuessMade {
                     player_id: player,
@@ -3867,7 +3874,7 @@ pub(super) fn handle_resolution_choice(
             // last-committed read) guesser-free. Only meaningful for a committed
             // number guess; propositions carry no downstream guessed-value read.
             if proposition_truth.is_none() {
-                effects::choose::bind_named_choice(state, &choice_type, &choice, None);
+                effects::choose::bind_named_choice(state, &choice_type, &choice, None, None);
             }
 
             // (d) Stamp the outcome across the stashed continuation chain so each
@@ -4889,6 +4896,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut events = Vec::new();
 
@@ -4939,6 +4947,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut events = Vec::new();
 

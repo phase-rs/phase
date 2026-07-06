@@ -3795,6 +3795,7 @@ mod tests {
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],
             source_id: None,
+            persist_player: None,
         };
 
         // Precondition: this state really has no legal action for P0.

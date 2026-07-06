@@ -665,6 +665,42 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
     assert!(def.execute.is_some());
 }
 
+/// CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
+/// names the one unique step that occurs exactly once per game (the starting
+/// player's first upkeep), so the trigger must carry `OncePerGame` — NOT fire
+/// every upkeep. Regression guard for the anchor-choice trigger on planes like
+/// Two Streams Facility, whose once-per-game restriction was previously dropped.
+#[test]
+fn phase_trigger_first_upkeep_of_the_game_is_once_per_game() {
+    let def = parse_trigger_line(
+        "At the beginning of the first upkeep of the game, each player draws a card.",
+        "Two Streams Facility",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::OncePerGame),
+    );
+}
+
+/// Contrast guard: "the first upkeep ... each turn" is a distinct phrasing that
+/// stays `MaxTimesPerTurn { max: 1 }` (CR 603.4) — the new "of the game" arm
+/// must not swallow it.
+#[test]
+fn phase_trigger_first_upkeep_each_turn_stays_max_times_per_turn() {
+    let def = parse_trigger_line(
+        "At the beginning of the first upkeep each turn, you gain 1 life.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::MaxTimesPerTurn { max: 1 }),
+    );
+}
+
 /// CR 608.2c + CR 712.2 (issue #4543): Tamiyo, Inquisitive Student —
 /// "When you draw your third card in a turn, exile Tamiyo, then return her
 /// to the battlefield transformed under her owner's control." The exile

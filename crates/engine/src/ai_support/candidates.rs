@@ -1351,6 +1351,7 @@ pub fn candidate_actions_broad_with_probe(
             options,
             choice_type,
             source_id,
+            ..
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
         // CR 608.2d: every printed guess is a legal candidate. Enumerated
         // uniformly here for legality + server validation; the AI's actual pick
@@ -5629,6 +5630,7 @@ mod tests {
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
             source_id: Some(source),
+            persist_player: None,
         };
 
         let actions = candidate_actions(&state);

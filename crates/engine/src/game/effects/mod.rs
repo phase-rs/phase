@@ -205,6 +205,7 @@ pub mod turn_face_up;
 mod spellbook_tests;
 pub mod surveil;
 pub mod suspect;
+pub mod swap_chosen_labels;
 pub mod switch_pt;
 pub mod tap_untap;
 pub mod time_travel;
@@ -3179,6 +3180,7 @@ pub fn resolve_effect(
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
         Effect::OpponentGuess { .. } => opponent_guess::resolve(state, ability, events),
+        Effect::SwapChosenLabels { .. } => swap_chosen_labels::resolve(state, ability, events),
         Effect::ChooseCounterKind { .. } => choose_counter_kind::resolve(state, ability, events),
         Effect::PutChosenCounter { .. } => put_chosen_counter::resolve(state, ability, events),
         Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),

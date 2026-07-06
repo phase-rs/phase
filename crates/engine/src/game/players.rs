@@ -14,6 +14,23 @@ pub fn is_alive(state: &GameState, player: PlayerId) -> bool {
         .any(|p| p.id == player && !p.is_eliminated)
 }
 
+/// CR 607.2d / CR 607.2m (by analogy): true iff `player`'s durable per-player
+/// `chosen_attributes` records a `ChosenAttribute::Label` equal to `label`
+/// (case-insensitive). Single authority consulted by every "player who last
+/// chose <anchor>" read site — `TargetFilter::PlayerWhoChoseLabel` (land-drop
+/// static), `FilterProp::ControllerChoseLabel` (creature anthem), and the
+/// `SwapChosenLabels` chaos effect — so the anchor-label predicate is defined
+/// exactly once. Case-insensitive so parser canonicalization never desyncs.
+pub fn player_last_chose_label(state: &GameState, player: PlayerId, label: &str) -> bool {
+    state.players.iter().any(|p| {
+        p.id == player
+            && p.chosen_attributes.iter().any(|a| {
+                matches!(a, crate::types::ability::ChosenAttribute::Label(l)
+                    if l.eq_ignore_ascii_case(label))
+            })
+    })
+}
+
 /// CR 102.1 / CR 500.1: Next living player in seat (turn) order.
 ///
 /// Returns the next living player in seat order after `current`, wrapping around.

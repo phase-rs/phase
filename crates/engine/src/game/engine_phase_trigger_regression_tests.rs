@@ -1529,6 +1529,7 @@ fn card_name_choice_validates_against_all_card_names() {
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
         source_id: None,
+        persist_player: None,
     };
 
     // Valid card name succeeds
@@ -1546,6 +1547,7 @@ fn card_name_choice_validates_against_all_card_names() {
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
         source_id: None,
+        persist_player: None,
     };
 
     // Invalid card name fails
@@ -1567,6 +1569,7 @@ fn card_name_choice_is_case_insensitive() {
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
         source_id: None,
+        persist_player: None,
     };
 
     let result = apply_as_current(
@@ -3020,6 +3023,7 @@ fn choose_option_with_source_id_stores_chosen_attribute() {
             "Green".to_string(),
         ],
         source_id: Some(obj_id),
+        persist_player: None,
     };
 
     let result = apply_as_current(
@@ -3116,6 +3120,7 @@ fn restricted_color_choice_rejects_excluded_color() {
             "Green".to_string(),
         ],
         source_id: None,
+        persist_player: None,
     };
 
     let result = apply_as_current(

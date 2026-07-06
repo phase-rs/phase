@@ -3226,6 +3226,17 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 607.2d / CR 607.2m (by analogy) + CR 611.2c: matches objects whose
+    /// CONTROLLER's durable per-player choice records the anchor `label`
+    /// ("creatures controlled by players who last chose red waterfall …", Two
+    /// Streams Facility). Evaluated via `game::players::player_last_chose_label`
+    /// against `obj.controller`. Because the affected set is recomputed each layer
+    /// pass (CR 611.2c), a creature entering under a red-waterfall controller
+    /// joins the buff and one leaving drops it. Object-axis mirror of the
+    /// player-axis `TargetFilter::PlayerWhoChoseLabel`.
+    ControllerChoseLabel {
+        label: String,
+    },
     /// CR 305.1 + CR 601.2a: Matches objects entering from being played
     /// (land play) or cast (spell), excluding tokens put directly onto the
     /// battlefield without a prior zone.
@@ -4199,6 +4210,16 @@ pub enum TargetFilter {
     /// static's `affected` resolves to the ability's controller.
     SpecificPlayer {
         id: PlayerId,
+    },
+    /// CR 607.2d / CR 607.2m (by analogy): matches every player whose durable
+    /// per-player choice (`Player.chosen_attributes`) records the anchor `label`
+    /// ("each player who last chose green anchor …", Two Streams Facility).
+    /// Evaluated against `game::players::player_last_chose_label`. The player-axis
+    /// mirror of the object-scoped anchor gate `StaticCondition::ChosenLabelIs`;
+    /// the split (player vs object subject) mirrors the engine's existing
+    /// `SpecificPlayer` vs `SpecificObject` separation.
+    PlayerWhoChoseLabel {
+        label: String,
     },
     /// CR 102.1 + CR 103.1: living player seated immediately to controller's
     /// left/right; clockwise turn order, right = previous seat; resolved
@@ -10424,6 +10445,17 @@ pub enum Effect {
         guesser: ControllerRef,
         subject: Box<GuessSubject>,
     },
+    /// CR 311.7 + CR 607.2d / CR 607.2m (by analogy): symmetric per-player anchor
+    /// swap — "each player who last chose `first` chooses `second`, and vice
+    /// versa" (Two Streams Facility's chaos ability). Iterates every
+    /// non-eliminated player: a `first`-anchor player's label becomes `second`
+    /// and a `second`-anchor player's label becomes `first` (other players
+    /// untouched), then re-runs layers. The effect fans internally, so it carries
+    /// no `player_scope`.
+    SwapChosenLabels {
+        first: String,
+        second: String,
+    },
     /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
     /// source-object filter. This is object/source selection, not a named
     /// string choice, because the chosen source is an ObjectId and prevention
@@ -13160,6 +13192,8 @@ impl Effect {
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
+            // CR 311.7: the chaos anchor swap is a non-targeting per-player effect.
+            | Effect::SwapChosenLabels { .. }
             // CR 109.4: owner/type_filter are non-targeting resolution-time
             // filters; the copy source is chosen from the format pool, not
             // declared as a target.
@@ -13571,6 +13605,7 @@ impl Effect {
             | Effect::BlightEffect { .. }
             | Effect::Cascade
             | Effect::Choose { .. }
+            | Effect::SwapChosenLabels { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -13820,6 +13855,7 @@ impl Effect {
             | Effect::BlightEffect { .. }
             | Effect::Cascade
             | Effect::Choose { .. }
+            | Effect::SwapChosenLabels { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -14010,6 +14046,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
         Effect::OpponentGuess { .. } => "OpponentGuess",
+        Effect::SwapChosenLabels { .. } => "SwapChosenLabels",
         Effect::ChooseDamageSource { .. } => "ChooseDamageSource",
         Effect::Suspect { .. } => "Suspect",
         Effect::Unsuspect { .. } => "Unsuspect",
@@ -14502,6 +14539,9 @@ impl From<&Effect> for EffectKind {
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
             Effect::OpponentGuess { .. } => EffectKind::OpponentGuess,
+            // CR 311.7: The chaos swap re-chooses each player's anchor, so it
+            // reports as a `Choose`-kind resolution for event/AI purposes.
+            Effect::SwapChosenLabels { .. } => EffectKind::Choose,
             Effect::ChooseDamageSource { .. } => EffectKind::ChooseDamageSource,
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::Unsuspect { .. } => EffectKind::Unsuspect,
@@ -18477,6 +18517,31 @@ pub struct CopiableValues {
     pub static_definitions: Arc<Vec<StaticDefinition>>,
 }
 
+/// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
+/// granted cost-bearing keyword's cost is DERIVED from each recipient. Extensible
+/// axis (build-for-the-class): today only the reduced-mana-cost form is printed;
+/// `ManaValue` ("cost equal to its mana value") and `Fixed` ("its foretell cost
+/// is {2}{U}") are the next natural leaves when a card needs them — each is a new
+/// leaf here, never a new `ContinuousModification` variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CostDerivation {
+    /// "Its foretell cost is equal to its mana cost reduced by {N}." The
+    /// recipient's printed mana cost with its generic component reduced by this
+    /// amount (floored at 0), colored pips preserved (CR 702.143's foretell-cost
+    /// reduction applies only to generic mana).
+    ManaCostReducedBy(ManaCost),
+}
+
+impl CostDerivation {
+    /// Derive the concrete cost from a recipient's base mana cost.
+    pub fn derive(&self, base_mana_cost: &ManaCost) -> ManaCost {
+        match self {
+            Self::ManaCostReducedBy(reduction) => base_mana_cost.reduced_generic_by(reduction),
+        }
+    }
+}
+
 /// What modification a continuous effect applies to an object.
 /// Each variant knows its own layer implicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18647,6 +18712,22 @@ pub enum ContinuousModification {
     AddDynamicKeyword {
         kind: crate::types::keywords::DynamicKeywordKind,
         value: QuantityExpr,
+    },
+    /// CR 702.143d (and the CR 702 cast-from-off-zone-for-alternative-cost
+    /// family): a continuous static that grants a cost-bearing keyword whose cost
+    /// is DERIVED from each recipient's characteristics. Parameterized over the
+    /// keyword family (`kind`) and the cost-derivation rule (`derivation`) so one
+    /// variant covers Foretell/Madness/Disturb/Mayhem/Dash/Unearth grants — no
+    /// per-keyword `ContinuousModification` leaf. The derived-cost analogue of
+    /// `AddDynamicKeyword` (which parameterizes a numeric keyword value). Applied
+    /// exclusively through the off-zone keyword path
+    /// (`off_zone_characteristics::apply_keyword_modification`), which reads each
+    /// recipient's mana cost and upserts the derived keyword; the battlefield
+    /// layers characteristic pass is a no-op for it (Singing Towers of Darillium
+    /// grants foretell to nonland hand cards).
+    AddKeywordWithDerivedCost {
+        kind: crate::types::keywords::CostBearingKeywordKind,
+        derivation: CostDerivation,
     },
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.

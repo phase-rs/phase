@@ -371,6 +371,10 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_guess_subject(subject));
             acc
         }
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => Axes::CONSERVATIVE,
         Effect::EachSourceDealsDamage {
             sources,
             amount,
@@ -2480,6 +2484,7 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             projected: false,
         },
         TargetFilter::SourceChosenPlayer => Axes::NONE,
+        TargetFilter::PlayerWhoChoseLabel { label: _ } => Axes::NONE,
         TargetFilter::OriginalController => Axes::NONE,
         TargetFilter::PostReplacementSourceController => Axes {
             event: true,
@@ -3437,6 +3442,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }

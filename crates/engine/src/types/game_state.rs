@@ -3759,6 +3759,15 @@ pub enum WaitingFor {
         /// their value there; transient prompts use this as source context.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
+        /// CR 607.2d / CR 607.2m (by analogy): when set, this choice's answer is a
+        /// PER-PLAYER persistent anchor label — the answer binds
+        /// `ChosenAttribute::Label` onto `state.players[persist_player]`
+        /// (`chosen_attributes`) instead of onto `source_id`'s object. Set during
+        /// a `player_scope: All` fan-out of a persisting `Effect::Choose` to the
+        /// fanned per-player value (`ability.scoped_player`). `None` preserves the
+        /// object-scoped binding used by Khans Sieges and every other named choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persist_player: Option<PlayerId>,
     },
     /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
     /// the defending player) guesses a committed value or proposition during

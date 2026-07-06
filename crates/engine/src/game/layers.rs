@@ -2974,12 +2974,15 @@ fn for_each_static_effect_source(
         }
         // CR 114.3: command-zone emblems have static abilities that affect the
         // game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
-        // function from the command zone too.
+        // function from the command zone too. CR 311.2 / CR 312.2: an active
+        // plane / phenomenon functions from the command zone via any static that
+        // opts in through `active_zones.contains(Command)`. All admitted through
+        // the single `object_sources_static_from_command_zone` authority.
         for &id in &state.command_zone {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
+            if crate::game::functioning_abilities::object_sources_static_from_command_zone(obj) {
                 visit(state, obj);
             }
         }
@@ -2999,14 +3002,16 @@ fn for_each_static_effect_source(
         }
         // CR 114.3: Emblems in the command zone have static abilities that affect
         // the game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
-        // function from the command zone too. The index already filtered to these
-        // command-zone generators; the gate is re-asserted here for parity with
-        // the fallback path.
+        // function from the command zone too. CR 311.2 / CR 312.2: an active plane
+        // / phenomenon functions from the command zone via any opt-in static. The
+        // index already filtered to these command-zone generators; the gate is
+        // re-asserted here (through the single admission authority) for parity
+        // with the fallback path.
         for &id in &index.command_sources {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
+            if crate::game::functioning_abilities::object_sources_static_from_command_zone(obj) {
                 visit(state, obj);
             }
         }
@@ -3021,8 +3026,10 @@ fn for_each_static_effect_source(
     // safe: battlefield-default statics filter themselves out.
     for obj in state.objects.values() {
         // Battlefield objects were already processed above (phased-out gate
-        // included). Command-zone emblems were handled above; non-emblem
-        // command-zone objects never function (CR 114.4).
+        // included). Command-zone sources (emblems, face-up conspiracies, and
+        // active planes/phenomena that opt in) were fully handled by the two
+        // command loops above via `object_sources_static_from_command_zone`, so
+        // the `Command` arm skips here to avoid double-visiting (CR 114.4).
         match obj.zone {
             crate::types::zones::Zone::Battlefield | crate::types::zones::Zone::Command => continue,
             _ => {}
@@ -4031,6 +4038,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
@@ -5023,6 +5031,16 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
+            // CR 702.143a: derived-cost cast-from-off-zone keywords function only
+            // in a non-battlefield zone (foretell in hand, etc.). Their grant is
+            // realized exclusively through the off-zone keyword path
+            // (`off_zone_characteristics::apply_keyword_modification`, reading
+            // `base_keywords`), which is the single authority for a hand/graveyard
+            // card's effective keywords. The battlefield layers characteristic
+            // pass (this function, rebuilding `obj.keywords`) therefore makes no
+            // change — `foretell_cost` reads `effective_off_zone_keywords`, not
+            // `obj.keywords`.
+            ContinuousModification::AddKeywordWithDerivedCost { .. } => {}
             // CR 613.1f: Layer 6 ability-granting effects are applied fresh
             // each layer pass (obj.abilities was reset to base_abilities at the
             // start of the pass). Within a single pass, a duplicate

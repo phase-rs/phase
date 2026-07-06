@@ -1665,6 +1665,14 @@ fn detect_dynamic_qty(
         // `SelfManaCost` precedent for Flashback/Scavenge "cost equal to its mana
         // cost" (Fblthp, Lost on the Range).
         "TopOfLibraryHasPlot",
+        // CR 702.143d: "Its foretell cost is equal to its mana cost reduced by
+        // {N}" — the derived cost is intrinsic to the granted keyword and is
+        // computed per recipient by `CostDerivation` (no stored `QuantityExpr`),
+        // so the `AddKeywordWithDerivedCost` continuous-modification variant is
+        // itself the coverage marker. Mirrors the `SelfManaCost` /
+        // `TopOfLibraryHasPlot` "cost equal to its mana cost" precedents.
+        // Singing Towers of Darillium class.
+        "AddKeywordWithDerivedCost",
         // CR 702.20a: "assigns combat damage equal to its toughness
         // rather than its power" — Brontodon class. Encoded as a typed
         // continuous-modification variant, not a quantity expression.
@@ -5703,6 +5711,29 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
              You may plot nonland cards from the top of your library.",
             "Fblthp, Lost on the Range",
             &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.143d: Singing Towers of Darillium grants foretell whose cost is
+    /// "equal to its mana cost reduced by {2}". That derived cost is intrinsic to
+    /// the `AddKeywordWithDerivedCost` continuous modification (computed per
+    /// recipient via `CostDerivation`, no stored `QuantityExpr`), so the
+    /// " equal to " marker must NOT raise a DynamicQty swallow warning — the
+    /// modification's presence is the carrier (mirrors the `SelfManaCost` /
+    /// `TopOfLibraryHasPlot` precedents). Reverting the marker re-reds this card.
+    #[test]
+    fn dynamic_qty_accepts_foretell_cost_equal_to_mana_cost_reduced() {
+        let parsed = parse_named(
+            "Each nonland card in your hand without foretell has foretell. \
+             Its foretell cost is equal to its mana cost reduced by {2}. \
+             (During your turn, you may pay {2} and exile it from your hand \
+             face down. Cast it on a later turn for its foretell cost.)\n\
+             Whenever chaos ensues, you may cast a foretold card you own from \
+             exile without paying its mana cost this turn.",
+            "Singing Towers of Darillium",
+            &["Plane"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));

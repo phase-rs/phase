@@ -461,6 +461,7 @@ fn redundancy_delta(
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
