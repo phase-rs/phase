@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{info, warn};
 
-use server_core::guard_p2p_backup;
+use server_core::{
+    guard_p2p_backup, guard_p2p_backup_overwrite, redact_p2p_backup_snapshot_secrets,
+};
 
 use crate::AppState;
 
@@ -109,9 +111,18 @@ pub async fn p2p_backup_store(
     if let Err(reason) = guard_p2p_backup(&req.host_peer_id, &req.snapshot_json) {
         return (StatusCode::BAD_REQUEST, reason).into_response();
     }
+    if let Ok(Some((existing_peer, _, _))) = app_state.game_db.load_p2p_backup(&req.draft_code) {
+        if let Err(reason) = guard_p2p_backup_overwrite(&existing_peer, &req.host_peer_id) {
+            return (StatusCode::FORBIDDEN, reason).into_response();
+        }
+    }
+    let snapshot_json = match redact_p2p_backup_snapshot_secrets(&req.snapshot_json) {
+        Ok(json) => json,
+        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+    };
     match app_state
         .game_db
-        .save_p2p_backup(&req.draft_code, &req.host_peer_id, &req.snapshot_json)
+        .save_p2p_backup(&req.draft_code, &req.host_peer_id, &snapshot_json)
     {
         Ok(_) => (StatusCode::OK, "Stored").into_response(),
         Err(e) => {
@@ -130,12 +141,18 @@ pub async fn p2p_backup_get(
         return (StatusCode::BAD_REQUEST, "Invalid draft code").into_response();
     }
     match app_state.game_db.load_p2p_backup(&code) {
-        Ok(Some((host_peer_id, snapshot_json, updated_at))) => Json(serde_json::json!({
-            "host_peer_id": host_peer_id,
-            "snapshot_json": snapshot_json,
-            "updated_at": updated_at,
-        }))
-        .into_response(),
+        Ok(Some((host_peer_id, snapshot_json, updated_at))) => {
+            let snapshot_json = match redact_p2p_backup_snapshot_secrets(&snapshot_json) {
+                Ok(json) => json,
+                Err(reason) => return (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response(),
+            };
+            Json(serde_json::json!({
+                "host_peer_id": host_peer_id,
+                "snapshot_json": snapshot_json,
+                "updated_at": updated_at,
+            }))
+            .into_response()
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "No backup found").into_response(),
         Err(e) => {
             warn!(error = %e, "P2P backup load failed");

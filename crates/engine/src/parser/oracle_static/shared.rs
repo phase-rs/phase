@@ -713,6 +713,16 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
             rest.original,
         ));
     }
+    // An Equipment that can attach to a non-creature permanent (e.g. Luxior,
+    // Giada's Gift equips a planeswalker) addresses the "equipped permanent" —
+    // the widest attached-Equipment subject. Mirrors the "enchanted permanent"
+    // arm above with `EquippedBy`.
+    if let Some(rest) = nom_tag_tp(tp, "equipped permanent ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EquippedBy])),
+            rest.original,
+        ));
+    }
     None
 }
 
@@ -2699,6 +2709,76 @@ fn parse_shared_controller_compound_subject_filter(subject: &TextPair<'_>) -> Op
     Some(TargetFilter::Or { filters })
 }
 
+/// True when `filter` is a typed filter carrying a creature subtype constraint.
+/// The gate for the bare tribal compound below, so a generic
+/// "creatures and <X>" compound is left to the type-phrase fallback.
+fn filter_carries_subtype(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(_)))
+    )
+}
+
+/// CR 205.3m: True when the branch text explicitly names creatures. This gate
+/// keeps the bare tribal compound to CREATURE anthems (Verdeloth's "Saproling
+/// creatures" / "Treefolk creatures") and off subjects whose subtype belongs to
+/// a different set — Life and Limb's "All Forests and all Saprolings", where
+/// "Forests" is a LAND subtype that this creature-tribal helper must not
+/// reinterpret as a creature (#5147). `filter_carries_subtype` alone accepts any
+/// subtype (including land/artifact), so the explicit head noun is required.
+fn branch_names_creatures(original: &str) -> bool {
+    original
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("creature") || w.eq_ignore_ascii_case("creatures"))
+}
+
+/// CR 611.3a: A bare (battlefield-wide, no-controller) compound tribal anthem
+/// subject where each branch carries its own creature subtype and the second may
+/// take a per-branch "other" source exclusion — "<subtype> creatures and [other]
+/// <subtype> creatures" (Verdeloth the Ancient: "Saproling creatures and other
+/// Treefolk creatures get +1/+1"). The controller-scoped compound is handled by
+/// [`parse_shared_controller_compound_subject_filter`]; this is the tribal
+/// battlefield form. Each branch delegates to [`parse_continuous_subject_filter`]
+/// (so "other Treefolk creatures" picks up the `Another` source exclusion via the
+/// existing "other " arm), and the branches are OR'd. Both branches MUST resolve
+/// to subtype-scoped typed filters, so a generic "creatures and <X>" compound is
+/// left for the fallback rather than over-claimed.
+fn parse_bare_compound_subtype_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    // Controller-scoped compounds belong to the sibling handler above.
+    if parse_subject_suffix(subject, " you control").is_some()
+        || parse_subject_suffix(subject, " your opponents control").is_some()
+    {
+        return None;
+    }
+    let (left_lower, _, right_lower) = nom_primitives::scan_preceded(subject.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("and ")).parse(input)
+    })?;
+    let right_start = subject.lower.len() - right_lower.len();
+    let left_original = subject.original[..left_lower.len()].trim();
+    let right_original = subject.original[right_start..].trim();
+    if left_original.is_empty() || right_original.is_empty() {
+        return None;
+    }
+    // Both branches must explicitly name creatures (CR 205.3m) AND resolve to a
+    // subtype-scoped typed filter. The creature-term gate keeps this off subjects
+    // whose subtype belongs to another set — e.g. Life and Limb's "All Forests
+    // and all Saprolings", whose "Forests" is a LAND subtype that must remain a
+    // land subject, not be reinterpreted here as a creature (#5147).
+    if !branch_names_creatures(left_original) || !branch_names_creatures(right_original) {
+        return None;
+    }
+    let left_filter = parse_continuous_subject_filter(left_original)?;
+    let right_filter = parse_continuous_subject_filter(right_original)?;
+    if !filter_carries_subtype(&left_filter) || !filter_carries_subtype(&right_filter) {
+        return None;
+    }
+    let mut filters = Vec::new();
+    push_or_filter_branch(&mut filters, left_filter);
+    push_or_filter_branch(&mut filters, right_filter);
+    Some(TargetFilter::Or { filters })
+}
+
 pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -2718,6 +2798,12 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     }
 
     if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&tp) {
+        return Some(filter);
+    }
+
+    // CR 611.3a: bare tribal compound "<subtype> creatures and [other] <subtype>
+    // creatures" (Verdeloth the Ancient) — no controller suffix.
+    if let Some(filter) = parse_bare_compound_subtype_subject_filter(&tp) {
         return Some(filter);
     }
 

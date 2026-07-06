@@ -322,6 +322,14 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
             engine_type: "ProhibitionScope",
             needed_variant: "EnchantedPlayer".into(),
         }),
+        // `ProhibitionScope` is a broadcast scope (Controller/Opponents/AllPlayers);
+        // `TargetOpponent` is a single targeted opponent with no broadcast equivalent,
+        // so mapping it here would silently over-broaden the prohibition — strict-fail
+        // (mirrors the other single-/parent-target siblings above).
+        ControllerRef::TargetOpponent => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "TargetOpponent".into(),
+        }),
     }
 }
 

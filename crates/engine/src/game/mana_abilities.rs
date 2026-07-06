@@ -1,8 +1,9 @@
 use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect,
-    ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER,
+    AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, ChosenAttribute,
+    ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
+    REMOVE_COUNTER_COST_ANY_NUMBER,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{GameEvent, ManaTapState};
@@ -128,6 +129,41 @@ fn chain_has_any_targets(ability: &ResolvedAbility) -> bool {
     visit_links_any(ability, &|link| {
         !link.targets.is_empty() || link.multi_target.is_some()
     })
+}
+
+/// CR 105.3 + CR 106.1a: True iff any reachable link of this mana ability sets a
+/// permanent's color to the mana produced earlier in the same activation — i.e.
+/// carries a `ContinuousModification::AddChosenColor` ("… becomes that color",
+/// Foraging Wickermaw). Gates the `ChosenAttribute::Color` record in
+/// `produce_mana_from_ability` so ordinary producers (basics, City of Brass,
+/// painlands, filter lands) never touch `chosen_attributes` — zero blast radius.
+/// Built fresh per activation and walks only the activated ability's own chain.
+fn chain_references_chosen_color(ability: &ResolvedAbility) -> bool {
+    visit_links_any(ability, &|link| match &link.effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(|s| {
+            s.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddChosenColor))
+        }),
+        _ => false,
+    })
+}
+
+/// CR 106.1a: The single `ManaColor` this activation produced, or `None` if the
+/// produced mana is empty, colorless, or spans more than one color. Reuses the
+/// honest `mana_type_to_color` converter (Colorless → `None`). Used to bind
+/// "that color" to the color of the mana the ability just made.
+fn sole_produced_color(produced: &[ManaType]) -> Option<ManaColor> {
+    let mut iter = produced.iter();
+    let first = mana_type_to_color(*iter.next()?)?;
+    for &mana_type in iter {
+        if mana_type_to_color(mana_type)? != first {
+            return None;
+        }
+    }
+    Some(first)
 }
 
 /// Visit every reachable link of `ability` — head + `sub_ability` chain +
@@ -372,6 +408,27 @@ fn produce_mana_from_ability(
         );
     }
 
+    // CR 105.3 + CR 106.1a + CR 605.3b: If a later clause in THIS mana ability
+    // sets a permanent's color to the mana just produced ("… becomes that
+    // color", Foraging Wickermaw), record the produced color on the source so
+    // the downstream `AddChosenColor` (Layer 5, CR 613.1e) reads it live. Gated
+    // on the chain actually carrying an `AddChosenColor`, so ordinary producers
+    // are untouched. Placed above the `TappedForMana` push below, which MOVES
+    // `produced_mana`.
+    if chain_references_chosen_color(&resolved_for_quantity) {
+        if let Some(color) = sole_produced_color(&produced_mana) {
+            if let Some(obj) = state.objects.get_mut(&source_id) {
+                // CR 400.7: `chosen_attributes` persist on the permanent until it
+                // changes zones, and `chosen_color()` returns the FIRST match, so
+                // a re-activation on a later turn must OVERWRITE — retain-drop any
+                // prior `Color`, then push the current one (not accumulate).
+                obj.chosen_attributes
+                    .retain(|a| !matches!(a, ChosenAttribute::Color(_)));
+                obj.chosen_attributes.push(ChosenAttribute::Color(color));
+            }
+        }
+    }
+
     // CR 106.12a: an "is tapped for mana" trigger fires once per resolution of
     // a `{T}`-cost mana ability that produces mana — not once per mana unit.
     // Emit a single `TappedForMana` here so the `TapsForMana` matcher fires
@@ -528,6 +585,7 @@ pub fn activate_mana_ability(
             player,
             source_id,
             ability_index,
+            ability_snapshot: Some(ability_def.clone()),
             color_override,
             resume,
             chosen_tappers: Vec::new(),
@@ -788,6 +846,7 @@ pub fn handle_choose_mana_color(
         .get(&pending.source_id)
         .and_then(|obj| obj.abilities.get(pending.ability_index))
         .cloned()
+        .or_else(|| pending.ability_snapshot.clone())
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
 
     produce_mana_from_ability(
@@ -4970,6 +5029,60 @@ mod tests {
         id
     }
 
+    #[test]
+    fn token_treasure_choose_color_uses_activation_snapshot_after_self_sacrifice() {
+        let mut state = GameState::new_two_player(42);
+        let treasure =
+            make_any_color_treasure(&mut state, 9000, PlayerId(0), ManaColor::ALL.to_vec());
+        {
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.is_token = true;
+            let ability = Arc::make_mut(&mut obj.abilities).get_mut(0).unwrap();
+            let Effect::Mana {
+                produced: ManaProduction::AnyOneColor { count, .. },
+                ..
+            } = ability.effect.as_mut()
+            else {
+                panic!("test treasure must have AnyOneColor mana production");
+            };
+            *count = QuantityExpr::Fixed { value: 2 };
+        }
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: treasure,
+                ability_index: 0,
+            },
+        )
+        .expect("token Treasure should activate into a color prompt");
+        assert!(
+            matches!(result.waiting_for, WaitingFor::ChooseManaColor { .. }),
+            "Goldspan-style Treasure should wait for a color choice"
+        );
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+        assert!(
+            !state.objects.contains_key(&treasure),
+            "a sacrificed token Treasure has ceased to exist before the color choice"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            },
+        )
+        .expect("color choice must resolve from the activation-time ability snapshot");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            2,
+            "Goldspan-style Treasure adds two mana of the chosen color"
+        );
+    }
+
     /// CR 605.3a: One color choice with `count = N` activates the tapped source
     /// plus `N - 1` identical, choice-free twins — `N` mana of the chosen color,
     /// `N` sources sacrificed, and a per-source tap each twin (the events a
@@ -6632,6 +6745,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -6675,6 +6789,250 @@ mod tests {
         );
     }
 
+    // --- Foraging Wickermaw: "Add one mana of any color. This creature becomes
+    // that color until end of turn." (parser arm + mana-producer color record) ---
+
+    /// Parse Foraging Wickermaw's verbatim activated line into its single mana
+    /// ability. The `{1}` cost, `AnyOneColor` head, `becomes that color` sub-chain
+    /// (now `AddChosenColor`), UEOT duration, and once-each-turn restriction all
+    /// come from the real parser pipeline.
+    fn foraging_wickermaw_mana_ability() -> AbilityDefinition {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{1}: Add one mana of any color. This creature becomes that color until end of turn. Activate only once each turn.",
+            "Foraging Wickermaw",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "expected exactly one activated mana ability"
+        );
+        parsed.abilities.into_iter().next().unwrap()
+    }
+
+    fn foraging_wickermaw_setup() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Foraging Wickermaw".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = foraging_wickermaw_mana_ability();
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        (state, source)
+    }
+
+    fn wubrg_single_color_prompt() -> ManaChoicePrompt {
+        ManaChoicePrompt::SingleColor {
+            options: vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+        }
+    }
+
+    fn pending_for(source: ObjectId) -> PendingManaAbility {
+        PendingManaAbility {
+            player: PlayerId(0),
+            source_id: source,
+            ability_snapshot: None,
+            ability_index: 0,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
+        }
+    }
+
+    /// Drive the real color-choice completion handler (the entry point the engine
+    /// dispatches a `ChooseManaColor` answer to), then recompute layers.
+    fn activate_and_choose(state: &mut GameState, source: ObjectId, color: ManaType) {
+        let pending = pending_for(source);
+        let mut events = Vec::new();
+        handle_choose_mana_color(
+            state,
+            &pending,
+            &wubrg_single_color_prompt(),
+            ManaChoice::SingleColor(color),
+            &mut events,
+        )
+        .unwrap();
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+    }
+
+    /// The load-bearing discriminating test: the creature's color is a FUNCTION of
+    /// the mana choice (Red -> Red, Blue -> Blue), impossible to pass with any
+    /// baked/first-color constant. Reverting EITHER half fails:
+    ///  - parser arm removed -> become stays `Effect::Unimplemented` -> no color change;
+    ///  - mana-producer record removed -> `AddChosenColor` reads `chosen_color()==None`.
+    #[test]
+    fn foraging_wickermaw_becomes_the_produced_color() {
+        for (chosen, expected) in [
+            (ManaType::Red, ManaColor::Red),
+            (ManaType::Blue, ManaColor::Blue),
+        ] {
+            let (mut state, source) = foraging_wickermaw_setup();
+            activate_and_choose(&mut state, source, chosen);
+            assert_eq!(
+                state.objects[&source].color,
+                vec![expected],
+                "creature must become the color of the mana it produced ({chosen:?})"
+            );
+            assert_eq!(
+                state.players[0].mana_pool.count_color(chosen),
+                1,
+                "the produced mana also lands in the pool"
+            );
+        }
+    }
+
+    /// CR 400.7: `chosen_attributes` persist on the permanent across turns (cleared
+    /// only on zone change). A later activation must OVERWRITE the stored `Color`,
+    /// not accumulate — `chosen_color()` is first-match. Reverting the retain-drop
+    /// to a plain push leaves `[Color(Red), Color(Green)]` and reads stale Red.
+    #[test]
+    fn foraging_wickermaw_reactivation_replaces_color_not_accumulates() {
+        let (mut state, source) = foraging_wickermaw_setup();
+
+        // Turn N: choose Red.
+        activate_and_choose(&mut state, source, ManaType::Red);
+        assert_eq!(state.objects[&source].color, vec![ManaColor::Red]);
+
+        // Cross the turn boundary: the turn-N UEOT color effect expires, but the
+        // stored `ChosenAttribute::Color(Red)` persists on the permanent (CR 400.7).
+        crate::game::layers::prune_end_of_turn_effects(&mut state);
+        state.turn_number += 1;
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+
+        // Turn N+1: choose Green.
+        activate_and_choose(&mut state, source, ManaType::Green);
+
+        assert_eq!(
+            state.objects[&source].color,
+            vec![ManaColor::Green],
+            "re-activation replaces the stored color (not stale Red, not [Red, Green])"
+        );
+        let color_attrs = state.objects[&source]
+            .chosen_attributes
+            .iter()
+            .filter(|a| matches!(a, ChosenAttribute::Color(_)))
+            .count();
+        assert_eq!(
+            color_attrs, 1,
+            "exactly one stored Color attribute after re-activation"
+        );
+    }
+
+    /// Gate airtightness: a bare `Add one mana of any color` ability with NO
+    /// `becomes that color` clause must NOT record `ChosenAttribute::Color` — zero
+    /// blast radius for basics / City of Brass / painlands / filter lands.
+    /// Reverting the gate (unconditional write) makes this producer gain a spurious
+    /// `Color` attribute. The pool assertion is a positive reach-guard proving the
+    /// write site was reached and merely gated, not skipped upstream.
+    #[test]
+    fn plain_any_color_producer_records_no_chosen_color() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+
+        let pending = pending_for(source);
+        let mut events = Vec::new();
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &wubrg_single_color_prompt(),
+            ManaChoice::SingleColor(ManaType::Red),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.objects[&source]
+                .chosen_attributes
+                .iter()
+                .all(|a| !matches!(a, ChosenAttribute::Color(_))),
+            "a plain any-color producer must not record a chosen color (gate must suppress the write)"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            1,
+            "reach-guard: the ability really did produce mana"
+        );
+    }
+
+    /// Parser-shape (reach-guard): the verbatim become clause lowers to a
+    /// `GenericEffect` carrying `AddChosenColor` with UEOT duration, and NOTHING in
+    /// the chain is `Effect::Unimplemented` (proving it parsed past the old
+    /// fallthrough, not vacuously).
+    #[test]
+    fn foraging_wickermaw_become_clause_parses_to_add_chosen_color() {
+        let ability = foraging_wickermaw_mana_ability();
+        assert!(
+            matches!(&*ability.effect, Effect::Mana { .. }),
+            "head is the mana production"
+        );
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("become sub-ability present");
+        match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert!(
+                    static_abilities.iter().any(|s| s
+                        .modifications
+                        .iter()
+                        .any(|m| matches!(m, ContinuousModification::AddChosenColor))),
+                    "become clause maps to AddChosenColor"
+                );
+                assert!(
+                    *duration == Some(Duration::UntilEndOfTurn)
+                        || sub.duration == Some(Duration::UntilEndOfTurn),
+                    "color change lasts until end of turn"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+        assert!(
+            !matches!(&*sub.effect, Effect::Unimplemented { .. }),
+            "become did not fall through to Unimplemented"
+        );
+        assert!(!matches!(&*ability.effect, Effect::Unimplemented { .. }));
+    }
+
     #[test]
     fn handle_choose_mana_color_resolves_pain_land_damage_for_each_color() {
         for chosen in [ManaType::Green, ManaType::White] {
@@ -6696,6 +7054,7 @@ mod tests {
                 player: PlayerId(0),
                 source_id: source,
                 ability_index: 0,
+                ability_snapshot: None,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 chosen_tappers: Vec::new(),
@@ -6926,6 +7285,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -7029,6 +7389,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -7930,6 +8291,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -8299,6 +8661,7 @@ mod tests {
             player: PlayerId(1),
             source_id: brushland,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -8861,6 +9224,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -8931,6 +9295,7 @@ mod tests {
             player: PlayerId(0),
             source_id: altar,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -9056,6 +9421,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -9119,6 +9485,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -9273,6 +9640,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),

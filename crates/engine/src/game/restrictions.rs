@@ -2024,11 +2024,17 @@ pub(crate) fn is_source_blocked(
     state: &crate::types::game_state::GameState,
     source_id: ObjectId,
 ) -> bool {
-    state
-        .combat
-        .as_ref()
-        .and_then(|combat| combat.blocker_assignments.get(&source_id))
-        .is_some_and(|blockers| !blockers.is_empty())
+    // CR 509.1h: "blocked" is the attacker's `blocked` flag, not the presence of
+    // blocker assignments — a creature made blocked by an effect (no blockers) is
+    // still blocked, and a creature stays blocked even if all its blockers are
+    // removed. Mirrors `unblocked_attackers` / `FilterProp::Unblocked`, which read
+    // the same flag.
+    state.combat.as_ref().is_some_and(|combat| {
+        combat
+            .attackers
+            .iter()
+            .any(|a| a.object_id == source_id && a.blocked)
+    })
 }
 
 /// CR 508.1d + CR 508.1h: Whether a declared `AttackTarget` falls within a
@@ -3804,5 +3810,65 @@ mod tests {
         for opponent in crate::game::players::opponents(&state, state.active_player) {
             assert!(!is_sorcery_speed_window(&state, opponent));
         }
+    }
+
+    #[test]
+    fn is_source_blocked_reads_blocked_flag_not_assignments() {
+        // CR 509.1h: `is_source_blocked` must read the attacker's `blocked` flag,
+        // so a creature made blocked by an effect (with NO blocker_assignments)
+        // reads true. This assertion fails if the body is reverted to the old
+        // `blocker_assignments`-non-empty check.
+        use crate::game::combat::{
+            mark_attacker_blocked, place_blocking, AttackTarget, AttackerInfo, CombatState,
+        };
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+
+        let effect_blocked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Effect Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let normally_blocked = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Declared Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&blocker).unwrap().controller = PlayerId(1);
+
+        let mut combat = CombatState::default();
+        combat.attackers.push(AttackerInfo::new(
+            effect_blocked,
+            AttackTarget::Player(PlayerId(1)),
+            PlayerId(1),
+        ));
+        combat.attackers.push(AttackerInfo::new(
+            normally_blocked,
+            AttackTarget::Player(PlayerId(1)),
+            PlayerId(1),
+        ));
+        state.combat = Some(combat);
+
+        // Effect-block: no blocker assigned, only the flag set.
+        assert!(mark_attacker_blocked(&mut state, effect_blocked));
+        assert!(
+            is_source_blocked(&state, effect_blocked),
+            "an effect-blocked attacker (no assignments) must read as blocked (CR 509.1h)"
+        );
+
+        // Reach-guard: a normally place_blocking-blocked attacker also reads true,
+        // proving the assertion above is not vacuous.
+        assert!(place_blocking(&mut state, blocker, normally_blocked));
+        assert!(is_source_blocked(&state, normally_blocked));
     }
 }

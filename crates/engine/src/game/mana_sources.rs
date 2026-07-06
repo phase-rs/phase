@@ -990,6 +990,54 @@ pub(crate) fn feasible_mana_capacity(
     }
 }
 
+/// CR 117.1d + CR 601.2g: True when cost payment can involve a currently
+/// activatable non-tap mana ability that auto-tap cannot choose for the player
+/// (Treasure/Spawn/KCI-style sacrifice mana, Lion's Eye Diamond discard mana,
+/// pay-life mana abilities, etc.).
+pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
+    state: &GameState,
+    controller: PlayerId,
+    exclude: Option<ObjectId>,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> bool {
+    state.battlefield.iter().any(|&object_id| {
+        if Some(object_id) == exclude {
+            return false;
+        }
+        let Some(obj) = state.objects.get(&object_id) else {
+            return false;
+        };
+        if obj.zone != Zone::Battlefield || obj.controller != controller {
+            return false;
+        }
+        obj.abilities.iter().enumerate().any(|(idx, ability)| {
+            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+                return false;
+            }
+            if has_tap_component(&ability.cost) {
+                return false;
+            }
+            if !mana_abilities::can_activate_mana_ability_now(
+                state, controller, object_id, idx, ability,
+            ) {
+                return false;
+            }
+            if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
+                return false;
+            }
+            match &*ability.effect {
+                Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+                    restrictions,
+                    state,
+                    object_id,
+                    payment_context,
+                ),
+                _ => false,
+            }
+        })
+    })
+}
+
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the
 /// castability gate's colored-shard coverage check (issue #583 / #1234).
 #[derive(Debug, Clone)]

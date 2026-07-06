@@ -44,6 +44,8 @@ import subprocess
 import sys
 import time
 import tomllib
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -129,6 +131,8 @@ DEFECT_SIGNAL_WEIGHTS = {
     "no-repro": 6,
     "value-bar": 6,
     "careful-watch": 4,
+    "ai-template-gap": 4,
+    "unchecked-engine-implementer": 4,
 }
 # Praise signals add to the contributor score (credit, capped below). They never
 # affect recurrence, scrutiny, or the derived-trusted gate — praise softens the
@@ -182,9 +186,28 @@ PROGRESS_STATES = {"held", "held_ci", "deferred", "review", "pending"}
 # GitHub read retry policy (see run_json).
 RUN_JSON_ATTEMPTS = 3
 RUN_JSON_BACKOFF_SECONDS = (2, 5)
+# Keep the repo-wide sweep query comfortably below GitHub's per-request execution
+# timeout. Single-PR inspect/recommend still fetch full detail when needed.
+SCAN_PAGE_SIZE = 25
 # Sticky-comment marker posted by .github/workflows/coverage-parse-diff-comment.yml
 # as the first (HTML-comment) line of the parse-detail diff body.
 PARSE_DIFF_MARKER = "<!-- coverage-parse-diff -->"
+DEFAULT_GITTENSOR_API_URL = "https://api.gittensor.io/prs"
+GITTENSOR_CLOSED_ATTENTION_MIN = 20
+GITTENSOR_CLOSED_ATTENTION_RATIO = 0.6
+AI_CONTRIBUTOR_TEMPLATE_HEADINGS = ("summary", "files changed", "track", "llm", "verification")
+PROOF_REQUIRED_RISK_FLAGS = {
+    "verification-skipped-or-delegated",
+    "agent-coauthored-all-commits",
+    "gittensor-closed-heavy",
+}
+PROOF_SKIP_PHRASES = (
+    "local verification skipped",
+    "no rust toolchain",
+    "no local toolchain",
+    "see ci status checks",
+)
+AI_AGENT_COAUTHOR_LOGINS = {"cursoragent"}
 # Sweep-priority order for scan output buckets (lower sorts first).
 CANDIDATE_ACTION_ORDER = {
     "dequeue_stale_for_handler": 0,
@@ -348,10 +371,9 @@ def run_json(command: list[str]) -> Any:
     """Run a read-only gh query, retrying transient failures with backoff.
 
     Every caller is a GitHub read (scan pagination, PR view, refresh chunk,
-    identity), so retries are idempotent. The expensive scan GraphQL query
-    (100 comments/reviews/files per PR node) intermittently times out
-    server-side ("Something went wrong" / HTTP 5xx), which `gh` reports as a
-    non-zero exit — one such blip must not kill a whole sweep.
+    identity), so retries are idempotent. GitHub can still return transient
+    "Something went wrong" / HTTP 5xx errors for GraphQL reads, which `gh`
+    reports as a non-zero exit — one such blip must not kill a whole sweep.
     """
     last_error: subprocess.CalledProcessError | None = None
     for attempt in range(RUN_JSON_ATTEMPTS):
@@ -1481,6 +1503,7 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
         "assignees": [assignee.get("login") for assignee in pr.get("assignees", [])],
         "body_hash": text_hash(pr.get("body")),
         "body_excerpt": excerpt(pr.get("body"), 800),
+        "commit_author_logins": commit_author_logins(pr.get("commits") or []),
         "comments": [
             {
                 "author": comment.get("author", {}).get("login"),
@@ -1502,6 +1525,214 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
             for review in pr.get("reviews", [])
         ],
     }
+
+
+def markdown_headings(body: str | None) -> set[str]:
+    headings = set()
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        heading = stripped.lstrip("#").strip().lower()
+        if heading:
+            headings.add(heading)
+    return headings
+
+
+def unchecked_markdown_items(body: str | None) -> list[str]:
+    return [
+        line.strip()
+        for line in (body or "").splitlines()
+        if line.lstrip().startswith("- [ ]")
+    ]
+
+
+def checked_markdown_items(body: str | None) -> list[str]:
+    return [
+        line.strip()
+        for line in (body or "").splitlines()
+        if line.lstrip().lower().startswith("- [x]")
+    ]
+
+
+def checked_test_evidence(body: str | None) -> list[str]:
+    evidence_terms = ("test", "cargo ", "pnpm ", "./scripts/", "tilt", "ci ")
+    return [
+        item
+        for item in checked_markdown_items(body)
+        if item.startswith("- [x] `") or any(term in item.lower() for term in evidence_terms)
+    ]
+
+
+def commit_author_logins(commits: list[dict[str, Any]]) -> list[str]:
+    logins = {
+        str(author.get("login"))
+        for commit in commits
+        for author in commit.get("authors", [])
+        if author.get("login")
+    }
+    return sorted(logins, key=str.casefold)
+
+
+def every_commit_has_agent_coauthor(commits: list[dict[str, Any]]) -> bool:
+    if not commits:
+        return False
+    for commit in commits:
+        logins = {
+            fold_login(str(author.get("login")))
+            for author in commit.get("authors", [])
+            if author.get("login")
+        }
+        if not logins & AI_AGENT_COAUTHOR_LOGINS:
+            return False
+    return True
+
+
+def proof_profile(
+    pr: dict[str, Any],
+    contributor: dict[str, Any] | None,
+    gittensor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body = pr.get("body") or ""
+    headings = markdown_headings(body)
+    missing_template_sections = [
+        heading for heading in AI_CONTRIBUTOR_TEMPLATE_HEADINGS if heading not in headings
+    ]
+    unchecked_items = unchecked_markdown_items(body)
+    checked_evidence = checked_test_evidence(body)
+    lower_body = body.lower()
+    skipped_phrases = [phrase for phrase in PROOF_SKIP_PHRASES if phrase in lower_body]
+    agent_coauthored = every_commit_has_agent_coauthor(pr.get("commits") or [])
+    scrutiny = (contributor or {}).get("scrutiny")
+
+    risk_flags = []
+    tracking_signals = []
+    if missing_template_sections:
+        risk_flags.append("missing-ai-contributor-template")
+        tracking_signals.append("ai-template-gap")
+    if unchecked_items:
+        risk_flags.append("unchecked-verification-items")
+        if any("engine-implementer" in item for item in unchecked_items):
+            tracking_signals.append("unchecked-engine-implementer")
+    if skipped_phrases:
+        risk_flags.append("verification-skipped-or-delegated")
+    if agent_coauthored:
+        risk_flags.append("agent-coauthored-all-commits")
+    if scrutiny in {"elevated", "maintainer_attention"}:
+        risk_flags.append(f"contributor-scrutiny-{scrutiny}")
+    if (gittensor or {}).get("risk_flag"):
+        risk_flags.append(str((gittensor or {})["risk_flag"]))
+
+    # Template/checklist hygiene and prior scrutiny are tracking context for the
+    # reviewer. They should not by themselves block an otherwise passing review;
+    # only hard proof risks require concrete verification before queue handoff.
+    proof_required = any(flag in PROOF_REQUIRED_RISK_FLAGS for flag in risk_flags)
+    template_verification_complete = bool(body.strip()) and not (
+        missing_template_sections or skipped_phrases
+    )
+    proof_satisfied = template_verification_complete or bool(checked_evidence)
+    return {
+        "proof_required": proof_required,
+        "proof_satisfied": proof_satisfied,
+        "proof_gap": proof_required and not proof_satisfied,
+        "risk_flags": risk_flags,
+        "missing_template_sections": missing_template_sections,
+        "unchecked_items": unchecked_items[:5],
+        "checked_test_evidence": checked_evidence[:5],
+        "skipped_phrases": skipped_phrases,
+        "agent_coauthored_all_commits": agent_coauthored,
+        "tracking_signals": tracking_signals,
+    }
+
+
+def proof_tracking_signals(packet: dict[str, Any]) -> list[str]:
+    proof = packet.get("proof") or {}
+    return list(proof.get("tracking_signals") or [])
+
+
+def fetch_gittensor_records(api_url: str | None) -> tuple[list[dict[str, Any]], str | None]:
+    if not api_url:
+        return [], None
+    try:
+        request = urllib.request.Request(
+            api_url,
+            headers={"User-Agent": "phase-rs-pr-review/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            records = json.load(response)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return [], f"Gittensor API unavailable ({exc})"
+    if not isinstance(records, list):
+        return [], "Gittensor API returned a non-list payload"
+    return [record for record in records if isinstance(record, dict)], None
+
+
+def build_gittensor_index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for record in records:
+        author = record.get("author")
+        if not author:
+            continue
+        login = fold_login(str(author))
+        row = index.setdefault(
+            login,
+            {
+                "login": str(author),
+                "total_prs": 0,
+                "states": {},
+                "repositories": {},
+                "hotkeys": set(),
+            },
+        )
+        state = str(record.get("prState") or "").upper()
+        if not state:
+            state = "MERGED" if record.get("mergedAt") else "UNKNOWN"
+        repo = str(record.get("repository") or "unknown").lower()
+        row["total_prs"] += 1
+        row["states"][state] = row["states"].get(state, 0) + 1
+        row["repositories"][repo] = row["repositories"].get(repo, 0) + 1
+        if record.get("hotkey"):
+            row["hotkeys"].add(str(record["hotkey"]))
+
+    for row in index.values():
+        total = row["total_prs"]
+        closed = row["states"].get("CLOSED", 0)
+        row["closed_ratio"] = closed / total if total else 0.0
+        row["repository_count"] = len(row["repositories"])
+        row["hotkey_count"] = len(row["hotkeys"])
+        row["hotkeys"] = sorted(row["hotkeys"])
+        row["top_repositories"] = [
+            {"repository": repo, "prs": count}
+            for repo, count in sorted(
+                row["repositories"].items(), key=lambda item: (-item[1], item[0])
+            )[:5]
+        ]
+        row.pop("repositories", None)
+        if (
+            closed >= GITTENSOR_CLOSED_ATTENTION_MIN
+            and row["closed_ratio"] >= GITTENSOR_CLOSED_ATTENTION_RATIO
+        ):
+            row["risk_flag"] = "gittensor-closed-heavy"
+        else:
+            row["risk_flag"] = None
+    return index
+
+
+def gittensor_summary(
+    author_login: str | None, index: dict[str, dict[str, Any]], warning: str | None
+) -> dict[str, Any] | None:
+    if not author_login:
+        return None
+    row = index.get(fold_login(author_login))
+    if row is None:
+        if warning:
+            return {"present": False, "warning": warning}
+        return {"present": False}
+    summary = dict(row)
+    summary["present"] = True
+    if warning:
+        summary["warning"] = warning
+    return summary
 
 
 # ─── Advisory recommendation (ordered precedence ladder) ─────────────────────
@@ -1526,6 +1757,10 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         and timestamp_after(comment.get("createdAt"), local_event_timestamp)
         for comment in pr.get("comments", [])
     )
+    parse_diff = packet.get("parse_diff") or {}
+    parse_diff_after_local_event = timestamp_after(
+        parse_diff.get("updated_at"), local_event_timestamp
+    )
     author_policy = packet.get("author_policy", {})
     local_block_event = local_outcome != "ci_failed" and local_event_type in {
         "review_blocked",
@@ -1537,6 +1772,8 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         "reviewed_request_changes",
         "blocked",
     }
+    local_hold = local_event_type == "held" or local_outcome in HOLD_STATES
+    local_block = local_block_event or local_block_outcome
 
     if pr.get("state") == "MERGED":
         action = "merged_prune"
@@ -1564,15 +1801,24 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif (local_outcome or "").lower() == "defer-fe":
         action = "defer"
         reason = "local_defer_fe_current_head"
-    elif (local_event_type == "held" or local_outcome in HOLD_STATES) and author_followup_after_local_event:
+    elif local_hold and author_followup_after_local_event:
         action = "review"
         reason = "author_followup_after_local_hold"
-    elif local_event_type == "held" or local_outcome in HOLD_STATES:
+    elif local_hold and (packet.get("ci") or {}).get("state") != "green":
         action = "hold_ci"
         reason = "local_hold_current_head"
-    elif local_block_event or local_block_outcome:
+    elif local_block and author_followup_after_local_event:
+        action = "review"
+        reason = "author_followup_after_local_block"
+    elif local_block and parse_diff_after_local_event:
+        action = "review"
+        reason = "parse_diff_after_local_block"
+    elif local_block:
         action = "blocked"
         reason = "local_block_current_head"
+    elif (packet.get("proof") or {}).get("proof_gap"):
+        action = "request_changes" if review_decision == "APPROVED" or queue else "review"
+        reason = "proof_required_missing"
     elif latest_commit and latest_commit != head and review_decision == "APPROVED":
         action = "dequeue_stale_for_handler" if queue else "review"
         reason = "stale_approval"
@@ -1611,7 +1857,6 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     # a stale merge-base whose R2 baseline aged out shows "Baseline pending" forever, so
     # flag engine-surface review candidates to consider update-branch first. The
     # files_truncated safety reason from make_packet is preserved — it must not be masked.
-    parse_diff = packet.get("parse_diff") or {}
     if (
         action == "review"
         and reason != "files_truncated_needs_manual_classification"
@@ -1630,6 +1875,8 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         # The `recommend` command prints only this dict, so the advisory contributor
         # block (standing/scrutiny/recurrence) must ride along for skill consumers.
         "contributor": packet.get("contributor"),
+        "gittensor": packet.get("gittensor"),
+        "proof": packet.get("proof"),
     }
     if action == "defer" and reason == "frontend_policy":
         label = packet.get("policy", {}).get("labels", {}).get("frontend_deferred")
@@ -1639,7 +1886,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_diff_comment_state(
-    comments: list[dict[str, Any]], trusted_authors: set[str]
+    comments: list[dict[str, Any]], trusted_authors: set[str] | None = None
 ) -> dict[str, Any]:
     """Classify the parse-diff sticky comment from FULL comment bodies.
 
@@ -1647,6 +1894,7 @@ def parse_diff_comment_state(
     300 chars, which can drop the "signature(s)"/"Baseline pending" markers. The
     comment is edited in place on re-push, so updatedAt (not createdAt) is freshness.
     """
+    trusted_authors = trusted_authors or {"github-actions"}
     for comment in comments:
         author_login = (comment.get("author") or {}).get("login")
         if author_login not in trusted_authors:
@@ -1672,6 +1920,7 @@ def make_packet(
     private_overrides: dict[str, Any],
     local_event: dict[str, Any] | None = None,
     contributor_summary: dict[str, Any] | None = None,
+    gittensor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     files = pr_files_from_view(pr)
     classification = classify_files(files, policy)
@@ -1694,6 +1943,17 @@ def make_packet(
             compact_pr.get("author_login"), private_overrides
         )
     }
+    proof = proof_profile(pr, contributor_summary, gittensor)
+    if (
+        files
+        and classification.get("surface") == "unknown"
+        and all(path.startswith("docs/") for path in files)
+    ):
+        # Docs-only maintenance has no runtime or parser boundary to prove. Keep
+        # the risk flags visible for reviewer context, but do not turn contributor
+        # scrutiny into a queue-safety proof blocker.
+        proof["proof_required"] = False
+        proof["proof_gap"] = False
     packet = {
         "schema_version": 1,
         "completeness": "complete" if mode == "full" else "triage",
@@ -1712,6 +1972,8 @@ def make_packet(
         },
         "author_policy": author_policy,
         "contributor": contributor_summary,
+        "gittensor": gittensor,
+        "proof": proof,
         "policy_trace": policy_trace(
             classification, (contributor_summary or {}).get("standing")
         ),
@@ -1740,31 +2002,59 @@ def policy_trace(classification: dict[str, Any], standing: str | None = None) ->
 # ─── GraphQL queries and PR-node normalization ───────────────────────────────
 
 
-def pr_node_fields(*, comments_last: int, include_full_reviews: bool) -> str:
+def pr_node_fields(
+    *,
+    comments_last: int,
+    include_full_reviews: bool,
+    include_pr_body: bool,
+    include_review_body: bool,
+    include_comment_body: bool,
+    status_contexts_first: int | None,
+) -> str:
     """GraphQL selection set for a PR node, shared by the scan and single-PR queries.
 
-    Only static field names are interpolated (comment count, whether to fetch the
-    full review history) — never user input, which travels as GraphQL variables.
+    Only static field names are interpolated (counts and field toggles) — never
+    user input, which travels as GraphQL variables.
     """
+    pr_body = "body " if include_pr_body else ""
+    review_body = " body" if include_review_body else ""
+    comment_body = " body" if include_comment_body else ""
     full_reviews = (
-        "reviews(first:50){nodes{author{login} state submittedAt commit{oid} body}} "
+        f"reviews(first:50){{nodes{{author{{login}} state submittedAt commit{{oid}}{review_body}}}}} "
         if include_full_reviews
         else ""
     )
+    status_rollup = (
+        "commits(last:20){nodes{commit{oid authors(first:10){nodes{name email user{login}}} "
+        "statusCheckRollup{state contexts(first:"
+        f"{status_contexts_first}"
+        "){nodes{__typename "
+        "... on CheckRun{name status conclusion} "
+        "... on StatusContext{context state}}}}}}}"
+        if status_contexts_first is not None
+        else (
+            "commits(last:20){nodes{commit{oid authors(first:10){nodes{name email user{login}}} "
+            "statusCheckRollup{state}}}}"
+        )
+    )
+    comments = (
+        f"comments(last:{comments_last})"
+        + "{nodes{author{login} createdAt updatedAt"
+        + comment_body
+        + "}} "
+    )
     return (
-        "number title body state isDraft url createdAt updatedAt headRefName headRefOid "
+        f"number title {pr_body}state isDraft url createdAt updatedAt headRefName headRefOid "
         "baseRefName mergeStateStatus reviewDecision changedFiles "
         "author{login} "
         "labels(first:20){nodes{name}} "
         "assignees(first:10){nodes{login}} "
         "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt} "
         "files(first:100){nodes{path}} "
-        "latestReviews(first:20){nodes{author{login} state submittedAt commit{oid} body}} "
+        f"latestReviews(first:20){{nodes{{author{{login}} state submittedAt commit{{oid}}{review_body}}}}} "
         f"{full_reviews}"
-        f"comments(last:{comments_last}){{nodes{{author{{login}} createdAt updatedAt body}}}} "
-        "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:80){nodes{__typename "
-        "... on CheckRun{name status conclusion} "
-        "... on StatusContext{context state}}}}}}}"
+        f"{comments}"
+        f"{status_rollup}"
     )
 
 
@@ -1774,14 +2064,28 @@ SCAN_PR_QUERY = (
     "pullRequests(states:[OPEN], first:$first, after:$after,"
     " orderBy:{field:CREATED_AT, direction:DESC}){"
     "pageInfo{hasNextPage endCursor}"
-    f"nodes{{{pr_node_fields(comments_last=15, include_full_reviews=False)}}}"
+    f"nodes{{{pr_node_fields(
+        comments_last=15,
+        include_full_reviews=False,
+        include_pr_body=True,
+        include_review_body=False,
+        include_comment_body=True,
+        status_contexts_first=None,
+    )}}}"
     "}}}"
 )
 
 SINGLE_PR_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){"
     "repository(owner:$owner,name:$name){"
-    f"pullRequest(number:$number){{{pr_node_fields(comments_last=30, include_full_reviews=True)}}}"
+    f"pullRequest(number:$number){{{pr_node_fields(
+        comments_last=30,
+        include_full_reviews=True,
+        include_pr_body=True,
+        include_review_body=True,
+        include_comment_body=True,
+        status_contexts_first=80,
+    )}}}"
     "}}"
 )
 
@@ -1796,8 +2100,29 @@ def graphql_rollup_contexts(node: dict[str, Any]) -> list[dict[str, Any]]:
     commits = graphql_nodes(node.get("commits"))
     if not commits:
         return []
-    rollup = (commits[0].get("commit") or {}).get("statusCheckRollup")
+    rollup = (commits[-1].get("commit") or {}).get("statusCheckRollup")
     if not isinstance(rollup, dict):
+        return []
+    state = (rollup.get("state") or "").upper()
+    if "contexts" not in rollup:
+        if state in {"SUCCESS"}:
+            return [
+                {
+                    "name": "statusCheckRollup",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ]
+        if state in {"FAILURE", "ERROR"}:
+            return [
+                {
+                    "name": "statusCheckRollup",
+                    "status": "COMPLETED",
+                    "conclusion": state,
+                }
+            ]
+        if state:
+            return [{"name": "statusCheckRollup", "status": "IN_PROGRESS", "conclusion": None}]
         return []
     checks = []
     for ctx in graphql_nodes(rollup.get("contexts")):
@@ -1821,6 +2146,26 @@ def graphql_rollup_contexts(node: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return checks
+
+
+def graphql_commit_authors(node: dict[str, Any]) -> list[dict[str, Any]]:
+    commits = []
+    for item in graphql_nodes(node.get("commits")):
+        commit = item.get("commit") or {}
+        commits.append(
+            {
+                "oid": commit.get("oid"),
+                "authors": [
+                    {
+                        "login": ((author.get("user") or {}).get("login")),
+                        "name": author.get("name"),
+                        "email": author.get("email"),
+                    }
+                    for author in graphql_nodes(commit.get("authors"))
+                ],
+            }
+        )
+    return commits
 
 
 def graphql_reviews(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1873,6 +2218,7 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
         ],
         "latestReviews": latest_reviews,
         "reviews": graphql_reviews(full_reviews) if full_reviews else latest_reviews,
+        "commits": graphql_commit_authors(node),
         "statusCheckRollup": graphql_rollup_contexts(node),
     }
 
@@ -1882,7 +2228,7 @@ def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     cursor: str | None = None
     while len(nodes) < limit:
-        page_size = min(limit - len(nodes), 100)
+        page_size = min(limit - len(nodes), SCAN_PAGE_SIZE)
         variables = [
             "-f",
             f"owner={owner}",
@@ -1942,10 +2288,15 @@ class ReviewContext:
     local_events: dict[tuple[int, str], dict[str, Any]]
     analytics_model: dict[str, Any]
     signal_occurrences: dict[str, list[dict[str, Any]]]
+    gittensor_index: dict[str, dict[str, Any]]
+    gittensor_warning: str | None
 
 
 def load_review_context(args: argparse.Namespace) -> ReviewContext:
     events = all_events(args.state_dir)
+    gittensor_records, gittensor_warning = fetch_gittensor_records(
+        getattr(args, "gittensor_api_url", DEFAULT_GITTENSOR_API_URL)
+    )
     return ReviewContext(
         policy=load_policy(args.config),
         private_overrides=load_private_overrides(args.state_dir),
@@ -1959,6 +2310,8 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
             include_open=True,
         ),
         signal_occurrences=collect_signal_occurrences(events),
+        gittensor_index=build_gittensor_index(gittensor_records),
+        gittensor_warning=gittensor_warning,
     )
 
 
@@ -1973,6 +2326,11 @@ def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict
         context.signal_occurrences,
         context.private_overrides,
     )
+    gittensor = gittensor_summary(
+        (pr.get("author") or {}).get("login"),
+        context.gittensor_index,
+        context.gittensor_warning,
+    )
     return make_packet(
         pr,
         context.policy,
@@ -1981,6 +2339,7 @@ def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict
         context.private_overrides,
         local_event,
         contributor_summary,
+        gittensor,
     )
 
 
@@ -2023,14 +2382,16 @@ def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]
         "standing": contributor.get("standing"),
         "scrutiny": contributor.get("scrutiny"),
         "first_contribution": contributor.get("first_contribution"),
+        "gittensor": packet.get("gittensor"),
+        "proof": packet.get("proof"),
     }
 
 
 def command_scan(args: argparse.Namespace) -> int:
     context = load_review_context(args)
-    # One paginated GraphQL query returns every field a full packet needs (files,
-    # comments, reviews, queue state, CI), so there is no light/full escalation:
-    # each packet is built once, mode "full".
+    # The repo-wide scan uses a deliberately light GraphQL selection set and
+    # small pages; single-PR inspect/recommend fetch full review/comment/check
+    # details when the sweep needs to act on a candidate.
     nodes = fetch_open_prs(args.repo, args.limit)
     candidates = []
     for node in nodes:
@@ -2078,6 +2439,9 @@ def command_inspect(args: argparse.Namespace) -> int:
     packet = packet_for_pr(context, pr, args.mode)
     if args.emit_event:
         packet["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
+        signals = proof_tracking_signals(packet)
+        if signals:
+            packet["event_skeleton"]["signals"] = signals
     print(json_dumps(packet))
     return 0
 
@@ -2100,6 +2464,9 @@ def command_recommend(args: argparse.Namespace) -> int:
     if args.emit_event:
         recommendation = dict(recommendation)
         recommendation["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
+        signals = proof_tracking_signals(packet)
+        if signals:
+            recommendation["event_skeleton"]["signals"] = signals
     print(json_dumps(recommendation))
     return 0
 
@@ -2335,6 +2702,11 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, default=DEFAULT_POLICY)
     parser.add_argument("--state-dir", type=Path, default=None)
     parser.add_argument("--acting-login", default=None)
+    parser.add_argument(
+        "--gittensor-api-url",
+        default=DEFAULT_GITTENSOR_API_URL,
+        help="Set empty to disable public Gittensor PR-history enrichment.",
+    )
 
 
 def add_state(parser: argparse.ArgumentParser) -> None:

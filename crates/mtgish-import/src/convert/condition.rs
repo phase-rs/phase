@@ -1064,6 +1064,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::OriginalController => "OriginalController",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
         TargetFilter::SelfRef => "SelfRef",
+        TargetFilter::GrantingObject => "GrantingObject",
         TargetFilter::SourceOrPaired => "SourceOrPaired",
         TargetFilter::Typed(_) => "Typed",
         TargetFilter::Not { .. } => "Not",
@@ -1170,6 +1171,13 @@ pub struct TriggerCondExt {
 /// engine variants in a separate round).
 pub fn convert_trigger_with_etb_filter(c: &Condition) -> ConvResult<TriggerCondExt> {
     match c {
+        // CR 603.4 + CR 701.9a: "if the discarded card [passes predicate]" on a
+        // discard trigger — lower onto `valid_card` so `match_discarded` gates
+        // the event object (Anje Falkenrath's madness rider).
+        Condition::DiscardedCardPassesFilter(cards) => Ok(TriggerCondExt {
+            condition: None,
+            valid_card: Some(crate::convert::filter::cards_to_filter(cards)?),
+        }),
         Condition::EnteringPermanentPassesFilter(pred) => {
             // Try the event-object condition path first; fall through to the
             // legacy valid_card route only for predicates that still cannot be

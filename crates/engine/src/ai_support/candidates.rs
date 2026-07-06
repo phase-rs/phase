@@ -15,8 +15,8 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, ConvokeMode, CounterCostChoice, CounterMoveChoice, GameState,
-    PayCostKind, TargetSelectionSlot, WaitingFor,
+    CastOfferKind, CastPaymentMode, ConvokeMode, CounterCostChoice, CounterMoveChoice,
+    CounterRemoveChoice, GameState, PayCostKind, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -283,6 +283,43 @@ fn counter_move_distribution_candidates(
     actions
 }
 
+/// CR 107.1c: Coarse candidates for a `RemoveCountersChoice` prompt — the two
+/// extremal legal answers: "remove none" (empty selection) and "remove all"
+/// (every available counter of every type). The full legal space (any per-type
+/// subset) is combinatorial; the server bypasses its enumeration gate for human
+/// submissions (`accepts_freeform_counter_removal`), so the AI only needs enough
+/// variety to never wedge.
+// ponytail: two extremal candidates; add per-type partials if a policy ever
+// wants finer counter-shedding control.
+fn counter_removal_candidates(
+    player: PlayerId,
+    available: &[(crate::types::counter::CounterType, u32)],
+) -> Vec<CandidateAction> {
+    let mut actions = vec![candidate(
+        GameAction::ChooseCountersToRemove { selections: vec![] },
+        TacticalClass::Selection,
+        Some(player),
+    )];
+    let remove_all: Vec<CounterRemoveChoice> = available
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(counter_type, count)| CounterRemoveChoice {
+            counter_type: counter_type.clone(),
+            count: *count,
+        })
+        .collect();
+    if !remove_all.is_empty() {
+        actions.push(candidate(
+            GameAction::ChooseCountersToRemove {
+                selections: remove_all,
+            },
+            TacticalClass::Selection,
+            Some(player),
+        ));
+    }
+    actions
+}
+
 fn permute_into(
     items: &[usize],
     current: &mut Vec<usize>,
@@ -334,6 +371,9 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             destinations,
             ..
         } => counter_move_distribution_candidates(*player, available, destinations),
+        WaitingFor::RemoveCountersChoice {
+            player, available, ..
+        } => counter_removal_candidates(*player, available),
         // CR 603.3b: Trigger ordering enumeration. Full n! permutations explode
         // (8! = 40320) so cap at n <= 4 (24 perms); larger groups generate only
         // identity + reverse, which is enough variety for search lookahead to
@@ -707,6 +747,9 @@ pub fn candidate_actions_broad_with_probe(
             destinations,
             ..
         } => counter_move_distribution_candidates(*player, available, destinations),
+        WaitingFor::RemoveCountersChoice {
+            player, available, ..
+        } => counter_removal_candidates(*player, available),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -838,6 +881,7 @@ pub fn candidate_actions_broad_with_probe(
             vehicle_id,
             crew_power,
             eligible_creatures,
+            ..
         } => crew_vehicle_candidates(state, *player, *vehicle_id, *crew_power, eligible_creatures),
         // CR 702.184a: Offer each eligible creature as the station cost payer.
         WaitingFor::StationTarget {
@@ -851,6 +895,7 @@ pub fn candidate_actions_broad_with_probe(
             mount_id,
             saddle_power,
             eligible_creatures,
+            ..
         } => saddle_mount_candidates(state, *player, *mount_id, *saddle_power, eligible_creatures),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
@@ -1132,6 +1177,22 @@ pub fn candidate_actions_broad_with_probe(
             })
             .collect()
         }
+        // CR 701.4a: behold picks exactly one beholdable object. Each candidate is
+        // a single-object `SelectCards`. The choice is rational-neutral for the
+        // corpus (the rider fires regardless of which object), but a battlefield
+        // permanent leaks nothing while a hand card is publicly revealed — so a
+        // rational agent prefers the battlefield leg. All picks are legal; policy
+        // scoring orders them.
+        WaitingFor::BeholdChoice { player, choices } => choices
+            .iter()
+            .map(|&id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } => (0..branches.len())
@@ -1202,6 +1263,51 @@ pub fn candidate_actions_broad_with_probe(
                     )
                 })
                 .collect()
+        }
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — enumerate each
+        // single object (copy first only) plus representative first+second pairs
+        // when a second object may be chosen. Ordered: index 0 is copied, index 1
+        // scales the copy.
+        WaitingFor::EachPlayerCopyChosenSelection {
+            player,
+            eligible,
+            min,
+            max,
+            ..
+        } => {
+            let mut actions: Vec<CandidateAction> = Vec::new();
+            if *min <= 1 {
+                for e in eligible {
+                    actions.push(candidate(
+                        GameAction::SelectTargets {
+                            targets: vec![e.clone()],
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    ));
+                }
+            }
+            if *max >= 2 {
+                'outer: for first in eligible {
+                    for second in eligible {
+                        if first == second {
+                            continue;
+                        }
+                        actions.push(candidate(
+                            GameAction::SelectTargets {
+                                targets: vec![first.clone(), second.clone()],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        ));
+                        // Cap to avoid combinatorial explosion on wide boards.
+                        if actions.len() >= 64 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            actions
         }
         WaitingFor::KeepWithinTotalPowerChoice {
             player,

@@ -16,6 +16,8 @@
     "holdCtrlFront": "Tieni premuto Ctrl per il fronte",
     "holdCtrlFlip": "Tieni premuto Ctrl per girare",
     "flip": "Gira",
+    "report": "Segnala un problema",
+    "reported": "Segnalato ✓",
     "altParsedAbilities": "Alt: abilità analizzate",
     "debugId": "ID: {{id}}",
     "engineParse": "Analisi del motore",
@@ -80,7 +82,26 @@
     "autoPassing": "Passaggio automatico fino al passo finale...",
     "resolvingStack": "Risoluzione della pila..."
   },
+  "cardReport": {
+    "title": "Segnala un problema con una carta",
+    "subtitle": "Scegli la carta che non funziona correttamente.",
+    "search": "Cerca carte…",
+    "empty": "Nessuna carta segnalabile in vista.",
+    "zone": {
+      "Stack": "Pila",
+      "Battlefield": "Campo di battaglia",
+      "Hand": "Mano",
+      "Graveyard": "Cimitero",
+      "Exile": "Esilio",
+      "Command": "Zona di comando"
+    },
+    "emblemTag": "Emblema",
+    "allPlayers": "Tutti",
+    "allZones": "Tutte le zone",
+    "cancel": "Annulla"
+  },
   "board": {
+    "reportCard": "Segnala un problema con una carta",
     "regroupCreatures": "Raggruppa i gruppi di creature duplicate",
     "changeBackground": "Cambia sfondo…",
     "customizeLayout": "Personalizza layout…",
@@ -249,6 +270,7 @@
     "confirmDistribute_other": "Dichiara {{count}} attaccanti"
   },
   "fullControl": {
+    "label": "Controllo",
     "on": "Controllo totale attivo",
     "off": "Controllo totale disattivato",
     "tooltip": "Mantieni le finestre di priorità invece di lasciare che i punti tranquilli passino automaticamente. Scorciatoia: F."
@@ -287,6 +309,9 @@
     "cleanupDescription": "Il danno svanisce e si controlla la dimensione massima della mano.",
     "tooltipStopSet": "Stop impostato: clicca per rimuovere questo stop del passaggio automatico.",
     "tooltipNoStop": "Nessuno stop impostato: clicca per mettere in pausa il passaggio automatico qui.",
+    "scopeAllTurns": "Si ferma a ogni turno.",
+    "scopeOwnTurn": "Si ferma solo nei tuoi turni.",
+    "scopeOpponentsTurns": "Si ferma solo nei turni degli avversari.",
     "tooltipCurrentPhase": "Fase corrente.",
     "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -562,6 +587,22 @@
     "paidKickedTimes": "potenziata ×{{count}}",
     "paidAdditionalCost": "costo extra",
     "paidConvoked": "convocata ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Rinunce di priorità",
+    "menuHeader": "Salta automaticamente questo innesco",
+    "menuExplainer": "Salta la pausa in cui il gioco si ferma per chiederti di agire ogni volta che questo innesco va sulla pila. Puoi comunque rispondere ad altre cose.",
+    "yieldThis": "Solo questo",
+    "yieldThisHint": "Solo questo {{source}}, non le altre copie",
+    "yieldAllCopies": "Tutte le copie",
+    "allCopiesHint": "Ogni {{source}}, comprese quelle nuove",
+    "revoke": "Revoca",
+    "revokeHint": "Torna a fermarti per questo innesco",
+    "clearAll": "Cancella tutto",
+    "menuButton": "Salta automaticamente questo innesco",
+    "menuButtonActive": "Salto automatico: modifica o revoca",
+    "menuButtonShort": "Auto-salta",
+    "menuButtonShortActive": "Saltando"
   },
   "targeting": {
     "choosePermanentToCopy": "Scegli un permanente da copiare",
@@ -915,7 +956,8 @@
       "title": "Scegli il costo di attivazione"
     },
     "debug": {
-      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta"
+      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta",
+      "modeButtonOff": "MODALITÀ CLIC DISATTIVATA"
     }
   },
   "gameProvider": {
@@ -987,6 +1029,13 @@
     }
   },
   "cardChoice": {
+    "eachPlayerCopyChosen": {
+      "title": "Choose creatures to copy",
+      "prompt": "The first creature you choose is copied; if you choose a second, its power becomes +1/+1 counters on the copy.",
+      "confirm": "Conferma",
+      "copied": "copied",
+      "scaler": "scaler"
+    },
     "badges": {
       "choose": "Scegli",
       "selected": "Selezionata",
@@ -1586,6 +1635,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
     "variantFallback": "Lancia con {{type}}"
   },
@@ -1698,7 +1748,10 @@
       "twoColors": "Scegli due colori",
       "numberRange": "Scegli un numero",
       "labeled": "Fai una scelta",
+      "cardPredicate": "Scegli un tipo di carta",
+      "cardPredicateGuess": "Indovina un tipo di carta",
       "keyword": "Scegli un'abilità",
+      "counterKind": "Scegli un segnalino",
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
@@ -1875,6 +1928,11 @@
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",
@@ -1957,6 +2015,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

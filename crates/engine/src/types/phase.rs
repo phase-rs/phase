@@ -1,3 +1,4 @@
+use super::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
 /// Represents the phases and steps of a turn (CR 500.1).
@@ -58,6 +59,70 @@ impl Phase {
     }
 }
 
+/// Turn-direction scope for a phase stop (MTGO-style). Determines on whose
+/// turns a stop fires, by comparing the stop's owner against the active player.
+///
+/// CR 102.1: The active player is the player whose turn it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum PhaseStopScope {
+    /// Fire on every turn (legacy behavior; the migration default).
+    #[default]
+    AllTurns,
+    /// Fire only on the stop owner's own turns.
+    OwnTurn,
+    /// Fire only on turns where the stop owner is NOT the active player.
+    OpponentsTurns,
+}
+
+/// A single phase stop: the phase to pause at, plus the turn-direction scope.
+///
+/// Backward compatibility: older persisted/serialized stops were a bare `Phase`
+/// string. `#[serde(from = "PhaseStopCompat")]` accepts both the legacy bare
+/// string (→ `AllTurns`) and the new `{ phase, scope }` object form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "PhaseStopCompat")]
+pub struct PhaseStop {
+    pub phase: Phase,
+    pub scope: PhaseStopScope,
+}
+
+impl PhaseStop {
+    /// CR 102.1: `active_player` is the player whose turn it is. Scope compares
+    /// the stop's `owner` against that to decide whether this stop fires.
+    pub fn applies(&self, owner: PlayerId, active_player: PlayerId) -> bool {
+        match self.scope {
+            PhaseStopScope::AllTurns => true,
+            PhaseStopScope::OwnTurn => owner == active_player,
+            PhaseStopScope::OpponentsTurns => owner != active_player,
+        }
+    }
+}
+
+/// Private serde shim: deserializes either the new scoped object form or the
+/// legacy bare-`Phase` string, mapping the latter to `AllTurns`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PhaseStopCompat {
+    Scoped {
+        phase: Phase,
+        #[serde(default)]
+        scope: PhaseStopScope,
+    },
+    Bare(Phase),
+}
+
+impl From<PhaseStopCompat> for PhaseStop {
+    fn from(compat: PhaseStopCompat) -> Self {
+        match compat {
+            PhaseStopCompat::Scoped { phase, scope } => PhaseStop { phase, scope },
+            PhaseStopCompat::Bare(phase) => PhaseStop {
+                phase,
+                scope: PhaseStopScope::AllTurns,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +164,70 @@ mod tests {
         let serialized = serde_json::to_string(&phase).unwrap();
         let deserialized: Phase = serde_json::from_str(&serialized).unwrap();
         assert_eq!(phase, deserialized);
+    }
+
+    #[test]
+    fn phase_stop_deserializes_bare_string_as_all_turns() {
+        let stop: PhaseStop = serde_json::from_str("\"PreCombatMain\"").unwrap();
+        assert_eq!(
+            stop,
+            PhaseStop {
+                phase: Phase::PreCombatMain,
+                scope: PhaseStopScope::AllTurns,
+            }
+        );
+    }
+
+    #[test]
+    fn phase_stop_scoped_roundtrips() {
+        let stop = PhaseStop {
+            phase: Phase::DeclareBlockers,
+            scope: PhaseStopScope::OpponentsTurns,
+        };
+        let serialized = serde_json::to_string(&stop).unwrap();
+        // Serialize always emits the scoped object form, never a bare string.
+        assert!(serialized.contains("\"scope\""));
+        let deserialized: PhaseStop = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(stop, deserialized);
+    }
+
+    #[test]
+    fn phase_stop_scope_field_missing_defaults_all_turns() {
+        let stop: PhaseStop = serde_json::from_str("{\"phase\":\"Upkeep\"}").unwrap();
+        assert_eq!(
+            stop,
+            PhaseStop {
+                phase: Phase::Upkeep,
+                scope: PhaseStopScope::AllTurns,
+            }
+        );
+    }
+
+    #[test]
+    fn phase_stop_applies_matrix() {
+        let owner = PlayerId(0);
+        let same = PlayerId(0);
+        let other = PlayerId(1);
+
+        let all = PhaseStop {
+            phase: Phase::Upkeep,
+            scope: PhaseStopScope::AllTurns,
+        };
+        assert!(all.applies(owner, same));
+        assert!(all.applies(owner, other));
+
+        let own = PhaseStop {
+            phase: Phase::Upkeep,
+            scope: PhaseStopScope::OwnTurn,
+        };
+        assert!(own.applies(owner, same));
+        assert!(!own.applies(owner, other));
+
+        let opp = PhaseStop {
+            phase: Phase::Upkeep,
+            scope: PhaseStopScope::OpponentsTurns,
+        };
+        assert!(!opp.applies(owner, same));
+        assert!(opp.applies(owner, other));
     }
 }

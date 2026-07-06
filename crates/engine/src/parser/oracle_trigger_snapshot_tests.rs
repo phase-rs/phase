@@ -1,5 +1,6 @@
 use crate::parser::oracle_nom::quantity::parse_quantity_ref;
 use crate::types::ability::AbilityCondition;
+use crate::types::events::ClashResult;
 
 use super::*;
 
@@ -862,6 +863,69 @@ fn trigger_a_player_clashes() {
     let def = parse_trigger_line("Whenever a player clashes, draw a card.", "Clash Watcher");
     assert_eq!(def.mode, TriggerMode::Clashed);
     assert_eq!(def.valid_target, None);
+    assert_eq!(def.clash_result, None, "generic clash is not win-gated");
+}
+
+/// CR 701.30 + CR 701.30d: "Whenever you clash and win" is a clash trigger whose
+/// win requirement is carried into MATCHING via `clash_result = Some(Won)` (an
+/// intervening-if checked when the event occurs, CR 603.4), NOT a resolution-time
+/// gate. So a lost or tied clash never creates a pending trigger, and the "you may
+/// draw a card" effect is a plain OPTIONAL draw with NO `EventOutcomeWon`
+/// condition (Sylvan Echoes). Before support this clause fell through to
+/// `TriggerMode::Unknown`.
+#[test]
+fn trigger_you_clash_and_win_whenever() {
+    let def = parse_trigger_line(
+        "Whenever you clash and win, you may draw a card. (This ability triggers after the clash ends.)",
+        "Sylvan Echoes",
+    );
+    assert_eq!(def.mode, TriggerMode::Clashed);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.clash_result,
+        Some(ClashResult::Won),
+        "the win requirement must live on the trigger's clash_result so MATCHING is gated"
+    );
+    let Some(execute) = def.execute.as_deref() else {
+        panic!("expected trigger body");
+    };
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "expected a draw effect, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.condition, None,
+        "the effect must carry NO resolution-time EventOutcomeWon gate; the win \
+         requirement is enforced in trigger matching via clash_result"
+    );
+    assert!(execute.optional, "the 'you may' draw is optional");
+}
+
+/// Regression: the plain "Whenever you clash" siblings (Entangling Trap) carry no
+/// win requirement, so `clash_result` stays `None` (fires on any clash) — the head
+/// effect stays ungated and only the separate "If you won" sentence gates its own
+/// sub-ability.
+#[test]
+fn trigger_you_clash_head_effect_not_win_gated() {
+    let def = parse_trigger_line(
+        "Whenever you clash, tap target creature an opponent controls. If you won, that creature doesn't untap during its controller's next untap step.",
+        "Entangling Trap",
+    );
+    assert_eq!(def.mode, TriggerMode::Clashed);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.clash_result, None,
+        "a plain 'you clash' trigger fires on any clash outcome"
+    );
+    let Some(execute) = def.execute.as_deref() else {
+        panic!("expected trigger body");
+    };
+    assert_eq!(execute.condition, None, "head effect must not be win-gated");
+    let Some(tail) = execute.sub_ability.as_deref() else {
+        panic!("expected if-you-won tail");
+    };
+    assert_eq!(tail.condition, Some(AbilityCondition::EventOutcomeWon));
 }
 
 /// CR 602.1 + CR 605.1a: Passive form — "whenever an ability of equipped creature

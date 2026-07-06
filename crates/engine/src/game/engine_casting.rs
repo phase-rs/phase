@@ -362,7 +362,7 @@ pub(super) fn handle_collect_evidence_cancel(
     resume: &CollectEvidenceResume,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    if let CollectEvidenceResume::Casting { pending_cast } = resume {
+    if let CollectEvidenceResume::Casting { pending_cast, .. } = resume {
         casting::handle_cancel_cast(state, pending_cast, events);
     }
     WaitingFor::Priority { player }

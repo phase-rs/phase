@@ -2651,6 +2651,7 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         branch_descriptions: vec!["Gain 3 life.".to_string(), "Lose 3 life.".to_string()],
         parent_targets: vec![],
         context: Default::default(),
+        replacement_applied: Default::default(),
         remaining_players: vec![],
     };
 
@@ -2979,6 +2980,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
         Some(source_id),
         None,
         None,
+        Default::default(),
         &mut events,
     );
 

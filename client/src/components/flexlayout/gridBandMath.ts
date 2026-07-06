@@ -26,6 +26,12 @@ export function resizeBand(
   viewportH: number,
   snapToDefault?: CappedTrack,
 ): CappedTrack {
+  // Degenerate viewport (zero / negative / NaN height — window.innerHeight can be
+  // 0 transiently for a collapsed/pre-layout container): no meaningful resize is
+  // possible, and the pct math below would divide by it and yield a NaN (which
+  // persists as null) or a negative pxCap. Return the current track unchanged,
+  // mirroring ratioFromPointerX's degenerate-region guard.
+  if (!(viewportH > 0)) return current;
   const currentPx = Math.min((current.pct / 100) * viewportH, current.pxCap);
   const maxPx = viewportH * MAX_FRACTION;
   const nextPx = clamp(currentPx + deltaPx, MIN_PX, maxPx);

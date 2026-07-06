@@ -45,6 +45,27 @@ pub fn resolve(
             EffectError::MissingParam("ChangeTargets: targeted entry not on stack".to_string())
         })?;
 
+    let Some(stack_ability) = state.stack[stack_entry_index].ability().cloned() else {
+        // Permanent spell with no ability — nothing to retarget.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+    let current_targets = stack_ability.targets.clone();
+    if current_targets.is_empty() {
+        // CR 115.7: Retargeting changes existing targets of the target spell or
+        // ability. A stack entry with no current targets has no retarget choice
+        // to make, so the effect resolves as a no-op rather than opening an
+        // impossible selection state.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     if let Some(filter) = forced_to {
         // CR 115.7: Forced retarget — resolve the new target from the filter,
         // but only apply it if the targeted stack entry could legally target it.
@@ -67,16 +88,6 @@ pub fn resolve(
 
     // Interactive retarget: present choices to the player.
     // CR 115.7a: The current targets of the targeted spell/ability become the starting point.
-    let Some(stack_ability) = state.stack[stack_entry_index].ability().cloned() else {
-        // Permanent spell with no ability — nothing to retarget.
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-        });
-        return Ok(());
-    };
-    let current_targets = stack_ability.targets.clone();
-
     // CR 115.7: Enumerate legal new targets by re-evaluating the stack entry's
     // own targeting restriction against the current game state.
     //
@@ -575,6 +586,67 @@ mod tests {
             .map(|a| a.targets.clone())
             .expect("spell remains on stack with targets");
         assert_eq!(new_targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    /// CR 115.7: Retarget effects operate on the existing targets of the target
+    /// spell or ability. If the chosen stack entry has no targets, Deflecting
+    /// Swat resolves as a no-op instead of opening an impossible
+    /// `RetargetChoice` with zero slots.
+    #[test]
+    fn choose_new_targets_on_targetless_spell_resolves_without_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        let targetless_spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Targetless Spell".into(),
+            Zone::Stack,
+        );
+        let targetless_ability =
+            ResolvedAbility::new(Effect::NoOp, vec![], targetless_spell, PlayerId(1));
+        state.stack.push_back(StackEntry {
+            id: targetless_spell,
+            source_id: targetless_spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(targetless_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let deflecting_swat = ResolvedAbility::new(
+            Effect::ChangeTargets {
+                target: TargetFilter::Any,
+                scope: RetargetScope::All,
+                forced_to: None,
+            },
+            vec![TargetRef::Object(targetless_spell)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &deflecting_swat, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::RetargetChoice { .. }),
+            "targetless spell must not open RetargetChoice"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
+            "targetless retarget should resolve as a no-op"
+        );
+        let targets = state
+            .stack
+            .front()
+            .and_then(|entry| entry.ability())
+            .map(|ability| ability.targets.clone())
+            .expect("targetless spell remains on stack");
+        assert!(targets.is_empty());
     }
 
     /// CR 115.7b: "Change a target ... to this permanent" still has to obey
