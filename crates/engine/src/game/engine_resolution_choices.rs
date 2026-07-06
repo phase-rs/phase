@@ -4707,6 +4707,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut events = Vec::new();
 
@@ -4757,6 +4758,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut events = Vec::new();
 

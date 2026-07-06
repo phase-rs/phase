@@ -991,6 +991,7 @@ mod tests {
                 choice_type,
                 options,
                 source_id,
+                persist_player,
             } => {
                 assert_eq!(*player, PlayerId(1));
                 assert_eq!(
@@ -1006,6 +1007,7 @@ mod tests {
                     )
                 );
                 assert_eq!(*source_id, Some(ObjectId(100)));
+                assert_eq!(*persist_player, None);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
