@@ -3473,6 +3473,12 @@ fn parse_enters_with_counters(
     let (mut count_expr, rest) =
         parse_count_expr(after_prefix).unwrap_or((QuantityExpr::Fixed { value: 1 }, after_prefix));
     rewrite_variable_x_to_cost_x_paid(&mut count_expr);
+    // CR 122.1: "N additional <type> counters" — the count word precedes
+    // "additional", so the leading-`additional` strip above (which only fires
+    // when no count word is present, e.g. "an additional +1/+1 counter") misses
+    // it. Strip it here so "additional" doesn't leak into the counter-type slice
+    // (`Generic("additional +1/+1")` instead of the canonical `Plus1Plus1`).
+    let rest = strip_additional_counter_qualifier(rest);
     // Next word(s) before "counter" are the counter type
     let (_, (counter_type_raw, after_counter)) =
         nom_primitives::split_once_on(rest, "counter").ok()?;
@@ -3751,6 +3757,22 @@ fn parse_for_each_convoked_creature_clause(
     ))
 }
 
+/// CR 122.1 + CR 614.1c: Strip an optional "additional " qualifier that follows
+/// the count word in "N additional <type> counter(s)". The word "additional" is
+/// not part of the counter TYPE — it only signals that the counters stack on top
+/// of any the object already enters with, which the engine models by this being a
+/// distinct `PutCounter` replacement. Callers slice the counter type out of the
+/// text after `parse_count_expr` consumes the count, so the leading-`additional`
+/// strip in `parse_enters_with_counters` (which only fires on the count-less
+/// "an additional +1/+1 counter" form) never reaches this position; without this
+/// strip, "additional" leaks into the type (a bogus `Generic("additional +1/+1")`
+/// instead of the canonical `Plus1Plus1`).
+fn strip_additional_counter_qualifier(input: &str) -> &str {
+    tag::<_, _, OracleError<'_>>("additional ")
+        .parse(input)
+        .map_or(input, |(rest, _)| rest)
+}
+
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let mut remaining = after_with;
     let mut entries = Vec::new();
@@ -3758,6 +3780,9 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, Qu
     loop {
         let (mut count_expr, rest) = parse_count_expr(remaining)?;
         rewrite_variable_x_to_cost_x_paid(&mut count_expr);
+        // CR 122.1: strip the "additional" qualifier that follows the count word
+        // ("two additional +1/+1 counters") so it doesn't leak into the type.
+        let rest = strip_additional_counter_qualifier(rest);
 
         let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
             .parse(rest)

@@ -19054,3 +19054,75 @@ fn curse_of_vitality_rider_clones_gain_life_across_attacking_opponents() {
         "no Unimplemented residual may survive: {execute:#?}"
     );
 }
+
+/// CR 122.1 + CR 614.1c: "enters with N additional +1/+1 counters on it" must
+/// parse the counter TYPE as the canonical `Plus1Plus1`, not leak the "additional"
+/// qualifier into a bogus `Generic("additional +1/+1")`. The qualifier follows the
+/// count word ("two additional …"), so it is stripped after the count is parsed.
+/// Fail-on-revert: before the fix these all produced `Generic("additional +1/+1")`
+/// / `Generic("additional time")`, which matches no real counter at runtime.
+#[test]
+fn enters_with_n_additional_counters_parses_canonical_type() {
+    fn enters_counter(text: &str, name: &str, types: &[&str]) -> (CounterType, QuantityExpr) {
+        let t: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &t, &[]);
+        let rep = parsed
+            .replacements
+            .iter()
+            .find(|r| {
+                r.execute
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.effect.as_ref(), Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| panic!("{name}: no PutCounter replacement: {parsed:?}"));
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = rep.execute.as_ref().unwrap().effect.as_ref()
+        else {
+            unreachable!()
+        };
+        (counter_type.clone(), count.clone())
+    }
+
+    // "that creature enters with two additional +1/+1 counters on it" (Necromantic Summons)
+    let (ct, count) = enters_counter(
+        "Put target creature card from a graveyard onto the battlefield under your control.\n\
+         Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
+         that creature enters with two additional +1/+1 counters on it.",
+        "Necromantic Summons",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Necromantic Summons type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 2 }, "count");
+
+    // "it enters with two additional +1/+1 counters on it" (Heroic Return)
+    let (ct, _) = enters_counter(
+        "Return target creature card from your graveyard to the battlefield. \
+         If a Hero enters this way, it enters with two additional +1/+1 counters on it.",
+        "Heroic Return",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Heroic Return type");
+
+    // "it enters with three additional +1/+1 counters on it" (Turntimber Symbiosis)
+    let (ct, count) = enters_counter(
+        "Look at the top seven cards of your library. You may put a creature card from among them \
+         onto the battlefield. If that card has mana value 3 or less, it enters with three \
+         additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+        "Turntimber Symbiosis",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Turntimber Symbiosis type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
+
+    // Non-P/T counter class: "it enters with three additional time counters on it" (Ravaging Riftwurm)
+    let (ct, count) = enters_counter(
+        "If this creature was kicked, it enters with three additional time counters on it.",
+        "Ravaging Riftwurm",
+        &["Creature"],
+    );
+    assert_eq!(ct, CounterType::Time, "Ravaging Riftwurm type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
+}
