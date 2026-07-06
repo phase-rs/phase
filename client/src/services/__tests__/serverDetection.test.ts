@@ -165,3 +165,19 @@ describe("mixedContentBlockReason", () => {
     expect(mixedContentBlockReason("wss://play.example.com/ws")).toBeNull();
   });
 });
+
+describe("parseJoinCode — bracketed IPv6 host", () => {
+  it("does not corrupt a bracketed IPv6 host that has no port", () => {
+    // `[::1]` ends in `]`; its last colon is inside the address. Splitting there
+    // produced a broken host `[:` and a malformed `wss://[::1/ws`.
+    const r = parseJoinCode("ABC123@[::1]");
+    expect(r.code).toBe("ABC123");
+    expect(r.serverAddress).toBe("wss://[::1]/ws");
+  });
+
+  it("still splits a bracketed IPv6 host that DOES carry a port", () => {
+    expect(parseJoinCode("ABC123@[::1]:9000").serverAddress).toBe(
+      "wss://[::1]:9000/ws",
+    );
+  });
+});

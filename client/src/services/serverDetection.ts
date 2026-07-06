@@ -133,8 +133,15 @@ export function parseJoinCode(input: string): { code: string; serverAddress?: st
   }
 
   // Split host:port on the last colon so a host:port pair splits correctly.
+  // A bracketed IPv6 literal with no port (e.g. `[::1]`) ends in `]`, and its
+  // last colon is INSIDE the address — splitting there yields a broken host like
+  // `[:`. When the host is a bracketed literal with no trailing `:port`, there
+  // is no port to split off.
   const colonIndex = hostPort.lastIndexOf(":");
-  const hasPort = colonIndex !== -1 && colonIndex < hostPort.length - 1;
+  const hasPort =
+    colonIndex !== -1 &&
+    colonIndex < hostPort.length - 1 &&
+    !hostPort.endsWith("]");
   const host = hasPort ? hostPort.slice(0, colonIndex) : hostPort;
 
   const isLocal = host === "localhost" || host === "127.0.0.1";
