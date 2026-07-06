@@ -13,8 +13,20 @@
 //! before the database write, so both transports agree. `draft_code` is
 //! validated separately by the endpoint (the check is shared with the GET/DELETE
 //! routes); this guard bounds the two free-form fields the row stores verbatim.
+//!
+//! P2P host snapshots also carry per-seat session credentials (`seatTokens`,
+//! `kickedTokens`) that authorize WebRTC draft seats. Those secrets must never
+//! be persisted or echoed on the unauthenticated HTTP backup surface — the host
+//! keeps credentials in local IndexedDB; the server backup is for draft progress
+//! recovery only.
+//!
+//! The host also embeds a full `draftSessionJson` blob (exported `DraftSession`).
+//! That nested payload can carry `config.rng_seed` and unopened `packs_by_seat`,
+//! which must be stripped before SQLite persistence or `GET` echo — merged #5053
+//! only removed top-level seat tokens.
 
 use lobby_broker::validation::{validate_token, MAX_TOKEN_LEN};
+use serde_json::{Map, Value};
 
 /// Max byte length of the serialized draft snapshot accepted on the wire. A full
 /// draft session (up to 8 seats × 3 packs plus pools and pairings) serializes to
@@ -44,10 +56,86 @@ pub fn guard_p2p_backup(host_peer_id: &str, snapshot_json: &str) -> Result<(), S
     Ok(())
 }
 
+/// Keys stripped from a P2P host backup snapshot before SQLite persistence or
+/// HTTP response. These are session credentials, not recoverable draft state.
+const P2P_BACKUP_SECRET_KEYS: &[&str] = &["seatTokens", "kickedTokens"];
+
+/// Host snapshot field carrying a serialized [`draft_core::types::DraftSession`].
+const DRAFT_SESSION_JSON_KEY: &str = "draftSessionJson";
+
+/// Nested draft session fields that must not be stored or echoed on the backup API.
+const NESTED_DRAFT_SECRET_KEYS: &[&str] = &["packs_by_seat"];
+
+/// Remove session credentials from a host backup snapshot JSON blob.
+///
+/// The backup row is keyed only by the 6-character draft code and is readable by
+/// any caller of `GET /p2p-draft-backup/{code}`, so stored snapshots must not
+/// contain per-seat tokens or competitive secrets embedded in `draftSessionJson`.
+pub fn redact_p2p_backup_snapshot_secrets(snapshot_json: &str) -> Result<String, String> {
+    let mut value: Value = serde_json::from_str(snapshot_json)
+        .map_err(|_| "snapshot_json must be a JSON object".to_string())?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err("snapshot_json must be a JSON object".to_string());
+    };
+    redact_secret_keys(obj);
+    serde_json::to_string(&value).map_err(|e| format!("snapshot_json serialization failed: {e}"))
+}
+
+fn redact_secret_keys(obj: &mut Map<String, Value>) {
+    for key in P2P_BACKUP_SECRET_KEYS {
+        obj.remove(*key);
+    }
+    redact_nested_draft_session_json(obj);
+}
+
+fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
+    let Some(nested_raw) = obj.get(DRAFT_SESSION_JSON_KEY).and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Ok(mut nested) = serde_json::from_str::<Value>(nested_raw) else {
+        return;
+    };
+    let Some(nested_obj) = nested.as_object_mut() else {
+        return;
+    };
+    redact_draft_session_object(nested_obj);
+    if let Ok(serialized) = serde_json::to_string(&nested) {
+        obj.insert(
+            DRAFT_SESSION_JSON_KEY.to_string(),
+            Value::String(serialized),
+        );
+    }
+}
+
+fn redact_draft_session_object(session: &mut Map<String, Value>) {
+    for key in NESTED_DRAFT_SECRET_KEYS {
+        session.remove(*key);
+    }
+    if let Some(Value::Object(config)) = session.get_mut("config") {
+        config.insert("rng_seed".to_string(), Value::Number(0.into()));
+    }
+}
+
+/// Reject overwrites from a different host peer than the row's owner.
+pub fn guard_p2p_backup_overwrite(
+    existing_host_peer_id: &str,
+    incoming_host_peer_id: &str,
+) -> Result<(), String> {
+    if existing_host_peer_id != incoming_host_peer_id {
+        Err("host_peer_id does not match the existing backup owner".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{guard_p2p_backup, MAX_P2P_SNAPSHOT_LEN};
+    use super::{
+        guard_p2p_backup, guard_p2p_backup_overwrite, redact_p2p_backup_snapshot_secrets,
+        MAX_P2P_SNAPSHOT_LEN,
+    };
     use lobby_broker::validation::MAX_TOKEN_LEN;
+    use serde_json::Value;
 
     #[test]
     fn accepts_valid_backup() {
@@ -96,5 +184,58 @@ mod tests {
         let oversized = "x".repeat(MAX_P2P_SNAPSHOT_LEN + 1);
         let err = guard_p2p_backup("peer", &oversized).unwrap_err();
         assert!(err.contains("snapshot_json"));
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_strips_seat_and_kicked_tokens() {
+        let raw = r#"{
+            "draftCode": "ABC123",
+            "seatTokens": {"0": "host-secret", "1": "guest-secret"},
+            "kickedTokens": ["evicted-secret"],
+            "draftStarted": true
+        }"#;
+        let redacted = redact_p2p_backup_snapshot_secrets(raw).expect("valid snapshot");
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert!(parsed.get("seatTokens").is_none());
+        assert!(parsed.get("kickedTokens").is_none());
+        assert_eq!(parsed["draftCode"], "ABC123");
+        assert_eq!(parsed["draftStarted"], true);
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_strips_nested_draft_session_secrets() {
+        let nested = serde_json::json!({
+            "draft_code": "ABC123",
+            "config": { "rng_seed": 42, "pod_size": 8 },
+            "packs_by_seat": [[{"card_id": "secret-pack"}]],
+            "status": "Drafting"
+        });
+        let raw = serde_json::json!({
+            "draftCode": "ABC123",
+            "draftSessionJson": nested.to_string(),
+            "seatTokens": { "0": "host-secret" },
+            "draftStarted": true
+        });
+        let redacted =
+            redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert!(parsed.get("seatTokens").is_none());
+        let nested_out: Value =
+            serde_json::from_str(parsed["draftSessionJson"].as_str().unwrap()).unwrap();
+        assert_eq!(nested_out["config"]["rng_seed"], 0);
+        assert!(nested_out.get("packs_by_seat").is_none());
+        assert_eq!(nested_out["status"], "Drafting");
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_rejects_non_object() {
+        assert!(redact_p2p_backup_snapshot_secrets("[]").is_err());
+        assert!(redact_p2p_backup_snapshot_secrets("not-json").is_err());
+    }
+
+    #[test]
+    fn guard_p2p_backup_overwrite_rejects_peer_mismatch() {
+        assert!(guard_p2p_backup_overwrite("peer-a", "peer-b").is_err());
+        assert!(guard_p2p_backup_overwrite("peer-a", "peer-a").is_ok());
     }
 }

@@ -1,8 +1,9 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { type GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
 import { RevealOverlay } from "../RevealOverlay.tsx";
 
 // Return a non-null src so each RevealCard renders an <img alt={name}> we can query.
@@ -16,18 +17,17 @@ function setStore(opts: {
   objects: Record<number, string>;
   revealed: number[];
 }) {
-  const objects: Record<string, unknown> = {};
-  for (const [id, name] of Object.entries(opts.objects)) {
-    objects[id] = { id: Number(id), name, zone: "Library" };
-  }
-  const gameState = {
-    players: [
+  const objects = Object.entries(opts.objects).map(([id, name]) =>
+    buildGameObject({ id: Number(id), name, zone: "Library" }),
+  );
+  const gameState = buildGameState({
+    players: buildPlayers([
       { id: 0, library: opts.library ?? [], hand: opts.hand ?? [] },
       { id: 1, library: [], hand: [] },
-    ],
-    objects,
+    ]),
+    objects: buildObjectMap(...objects),
     revealed_cards: opts.revealed,
-  } as unknown as GameState;
+  });
 
   useGameStore.setState({ gameState });
 }

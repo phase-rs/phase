@@ -6,7 +6,6 @@ import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
-import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
@@ -42,7 +41,6 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const disconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
   const designations = usePlayerDesignations(playerId);
-  const { waitingSeatId } = useTurnStatus();
   const player = gameState?.players[playerId];
   const label = getOpponentDisplayName(playerId);
 
@@ -91,19 +89,23 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   if (!player) return null;
 
   const rootChrome = compact
-    ? "min-h-[1.85rem] gap-1 px-1 py-0.5"
-    : "min-h-[2rem] gap-1.5 px-1.5 py-1";
+    ? "h-[var(--game-seat-header-height,1.85rem)] gap-1 px-1 py-0.5"
+    : "h-[var(--game-seat-header-height,2.25rem)] gap-1.5 px-1.5 py-1";
   const avatarSize = compact ? "h-6 w-6 text-[10px]" : "h-7 w-7 text-[11px]";
-  const labelWidth = compact ? "max-w-[5.75rem]" : "max-w-[10rem]";
+  const labelWidth = compact ? "max-w-[5.75rem]" : "max-w-[11rem]";
   const badgeScale = compact ? "[&>*]:scale-[0.62]" : "[&>*]:scale-75";
+  const identityWidth = compact ? "w-[min(72%,18rem)]" : "w-[min(64%,28rem)]";
   const rootTargetChrome = isValidPlayerTarget
     ? "cursor-pointer hover:border-cyan-300/70 hover:bg-cyan-950/45 hover:shadow-[0_0_24px_rgba(34,211,238,0.22)]"
+    : "";
+  const activeTurnChrome = isTheirTurn
+    ? "border-rose-300/70 bg-rose-950/58 shadow-[0_10px_26px_rgba(244,63,94,0.28)] after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-rose-300 after:shadow-[0_0_10px_rgba(251,113,133,0.95)]"
     : "";
 
   return (
     <div
-      className={`relative z-10 flex min-w-0 items-center rounded-sm border border-white/8 bg-slate-950/64 shadow-[0_8px_18px_rgba(0,0,0,0.24)] backdrop-blur-md transition-[background-color,border-color,box-shadow] duration-150 ${rootChrome} ${rootTargetChrome} ${
-        isTheirTurn ? "ring-1 ring-rose-300/50" : isValidPlayerTarget ? "ring-1 ring-cyan-300/55" : ""
+      className={`relative z-10 flex min-w-0 items-center justify-end rounded-sm border border-white/8 bg-slate-950/64 shadow-[0_8px_18px_rgba(0,0,0,0.24)] backdrop-blur-md transition-[background-color,border-color,box-shadow] duration-150 ${rootChrome} ${activeTurnChrome} ${rootTargetChrome} ${
+        isValidPlayerTarget ? "ring-1 ring-cyan-300/55" : ""
       }`}
       data-testid={`opponent-seat-header-${playerId}`}
       data-player-hud={String(playerId)}
@@ -118,82 +120,77 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
           title={t("opponentHud.clickToTarget", { name: label })}
         />
       ) : null}
-      <div
-        className={`relative z-10 flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
-          isValidPlayerTarget ? "ring-2 ring-cyan-300/70" : ""
-        } ${isValidPlayerTarget ? "pointer-events-none" : ""}`}
-        style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
-        title={isValidPlayerTarget ? t("opponentHud.clickToTarget", { name: label }) : label}
-      >
-        {avatarUrl ? (
-          <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
-        ) : (
-          label.charAt(0).toUpperCase()
-        )}
-        {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
-      </div>
-
-      <div className={`pointer-events-none relative z-10 flex min-w-0 flex-1 items-center ${compact ? "gap-1" : "gap-1.5"}`}>
-        <span
-          className={`min-w-0 truncate text-[10px] font-bold uppercase tracking-[0.16em] ${labelWidth}`}
-          style={{ color: seatColor }}
+      <div className={`pointer-events-none absolute right-1.5 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-y-1/2 items-center justify-end ${compact ? "gap-1" : "gap-1.5"}`}>
+        <div
+          className={`flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
+            isValidPlayerTarget ? "ring-2 ring-cyan-300/70" : ""
+          } ${isValidPlayerTarget ? "pointer-events-none" : ""}`}
+          style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
+          title={isValidPlayerTarget ? t("opponentHud.clickToTarget", { name: label }) : label}
         >
-          {label}
-        </span>
-        {waitingSeatId === playerId && (
-          <span
-            aria-hidden
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-300 shadow-[0_0_6px_rgba(251,191,36,0.9)]"
-          />
-        )}
-        {isTheirTurn && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-400" />}
-        {isOnline && (
-          <span
-            className={`h-1.5 w-1.5 shrink-0 rounded-full ${disconnected ? "bg-red-500" : "bg-emerald-400"}`}
-            title={disconnected ? t("opponentHud.disconnected") : t("opponentHud.connected")}
-          />
-        )}
-        <LifeTotal playerId={playerId} size="sm" hideLabel />
-        <div className={`flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden ${badgeScale} [&>*]:origin-left`}>
-          {designations.isMonarch ? <MonarchBadge /> : null}
-          {designations.hasInitiative ? <InitiativeBadge /> : null}
-          {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
-          {designations.activeDungeon ? (
-            <DungeonBadge
-              dungeonName={designations.activeDungeon}
-              roomIndex={designations.currentRoom}
-            />
-          ) : null}
-          {designations.ringLevel > 0 ? (
-            <CounterBadge
-              kind="ring"
-              value={designations.ringLevel}
-              ringBearerName={designations.ringBearerName}
-            />
-          ) : null}
-          {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-          {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
-          {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
-          {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
-          {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
-          {designations.pendingSpellModifiers.length > 0
-          || designations.pendingSpellReductions.length > 0 ? (
-            <PendingSpellBadge
-              modifiers={designations.pendingSpellModifiers}
-              reductions={designations.pendingSpellReductions}
-            />
-          ) : null}
-          {designations.statusConditions.map((condition, i) => (
-            <ConditionBadge
-              key={`${condition.kind.type}-${condition.source ?? "x"}-${i}`}
-              condition={condition}
-            />
-          ))}
-          {[...new Set(designations.unboundedResources.map((resource) => familyOf(resource.axis)))].map(
-            (family) => <UnboundedBadge key={family} family={family} />,
+          {avatarUrl ? (
+            <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
+          ) : (
+            label.charAt(0).toUpperCase()
           )}
-          {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
-          {player.companion ? <StatusBadge label={t("badges.companion")} /> : null}
+          {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
+        </div>
+
+        <div className={`flex min-w-0 shrink items-center justify-end ${compact ? "gap-1" : "gap-1.5"}`}>
+          <span
+            className={`min-w-0 truncate text-right text-[10px] font-bold uppercase tracking-[0.16em] ${labelWidth}`}
+            style={{ color: seatColor }}
+          >
+            {label}
+          </span>
+          {isOnline && (
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${disconnected ? "bg-red-500" : "bg-emerald-400"}`}
+              title={disconnected ? t("opponentHud.disconnected") : t("opponentHud.connected")}
+            />
+          )}
+          <LifeTotal playerId={playerId} size="sm" hideLabel />
+          <div className={`flex min-w-0 max-w-[9rem] shrink items-center justify-end gap-0.5 overflow-hidden ${badgeScale} [&>*]:origin-right`}>
+            {designations.isMonarch ? <MonarchBadge /> : null}
+            {designations.hasInitiative ? <InitiativeBadge /> : null}
+            {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
+            {designations.activeDungeon ? (
+              <DungeonBadge
+                dungeonName={designations.activeDungeon}
+                roomIndex={designations.currentRoom}
+              />
+            ) : null}
+            {designations.ringLevel > 0 ? (
+              <CounterBadge
+                kind="ring"
+                value={designations.ringLevel}
+                ringBearerName={designations.ringBearerName}
+              />
+            ) : null}
+            {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
+            {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
+            {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
+            {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+            {designations.pendingSpellModifiers.length > 0
+            || designations.pendingSpellReductions.length > 0 ? (
+              <PendingSpellBadge
+                modifiers={designations.pendingSpellModifiers}
+                reductions={designations.pendingSpellReductions}
+              />
+            ) : null}
+            {designations.statusConditions.map((condition, i) => (
+              <ConditionBadge
+                key={`${condition.kind.type}-${condition.source ?? "x"}-${i}`}
+                condition={condition}
+              />
+            ))}
+            {[...new Set(designations.unboundedResources.map((resource) => familyOf(resource.axis)))].map(
+              (family) => <UnboundedBadge key={family} family={family} />,
+            )}
+            {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
+            {player.companion ? <StatusBadge label={t("badges.companion")} /> : null}
+          </div>
         </div>
       </div>
 

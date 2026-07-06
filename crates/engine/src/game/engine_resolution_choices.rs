@@ -116,6 +116,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::BeholdChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -291,6 +292,28 @@ fn validate_dig_selection(
 
 /// CR 701.23a + CR 614.1 / CR 110.5b: Apply a cultivate-class search-destination
 /// split. `primary_ids` are routed to `primary_destination` through the full
+/// CR 400.7 + CR 608.2c: True when a search continuation's chain relocates the
+/// found set to exile (a `ChangeZone { destination: Exile }` anywhere in the
+/// chain). Distinguishes name-hate exile searches (whose hand-origin members
+/// feed the `ExiledFromHandThisResolution` draw rider) from tutors that put the
+/// found card into a hand or onto the battlefield.
+fn continuation_exiles_found_set(chain: &ResolvedAbility) -> bool {
+    let mut cursor = Some(chain);
+    while let Some(def) = cursor {
+        if matches!(
+            &def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            return true;
+        }
+        cursor = def.sub_ability.as_deref();
+    }
+    false
+}
+
 /// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
 /// REPLACEMENT effects can intercept — "lands you control enter untapped
 /// instead"); `rest_ids` are routed to `rest_destination` via the shared rest
@@ -1362,6 +1385,37 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
+            WaitingFor::BeholdChoice { player, choices },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // CR 701.4a + CR 608.2d: behold selects exactly ONE object from the
+            // mixed-zone candidate set (battlefield-you-control ∪ hand).
+            if chosen.len() != 1 {
+                return Err(EngineError::InvalidAction(format!(
+                    "Behold requires exactly one object, got {}",
+                    chosen.len()
+                )));
+            }
+            let chosen_id = chosen[0];
+            if !choices.contains(&chosen_id) {
+                return Err(EngineError::InvalidAction(
+                    "Selected object is not a beholdable candidate".to_string(),
+                ));
+            }
+            // CR 701.4a: reveal the beheld card only if it is a hand card (a
+            // controlled battlefield permanent is already public). The non-chosen
+            // candidates are never revealed — they stay hidden.
+            effects::behold::reveal_if_from_hand(state, player, chosen_id, events);
+            // CR 608.2c: the behold was performed → the "if you do, [rider]" gate
+            // fires. On the optional Sarkhan path this re-affirms the accept-time
+            // clobber (`resolve_optional_effect_decision`); for a mandatory
+            // behold-class card it is the sole hook that fires the rider.
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.set_optional_effect_performed_recursive(true);
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
             WaitingFor::ClashChooseOpponent {
                 player,
                 candidates,
@@ -2112,6 +2166,34 @@ pub(super) fn handle_resolution_choice(
             }
 
             set_priority(state, player);
+            // CR 400.7 + CR 608.2c: Count found-set cards exiled from a hand so
+            // the shared "That player ... draws a card for each card exiled from
+            // their hand this way" rider (The End, Deadly Cover-Up, Test of
+            // Talents) resolves. The interactive found-set exile runs through the
+            // pending continuation's single ChangeZone, which bypasses the
+            // mass-move counter at change_zone.rs:1422. Count here, before the
+            // drain runs the Draw, and gate on the continuation actually exiling
+            // the set so a tutor-to-hand never increments it. The count is taken
+            // just before the move (a rare replacement that prevents an exile
+            // would over-count — the plan's completion-site pin).
+            let continuation_exiles_set = state
+                .pending_continuation
+                .as_ref()
+                .is_some_and(|cont| continuation_exiles_found_set(&cont.chain));
+            if continuation_exiles_set {
+                let hand_exiles = chosen
+                    .iter()
+                    .filter(|id| {
+                        state
+                            .objects
+                            .get(id)
+                            .is_some_and(|obj| obj.zone == Zone::Hand)
+                    })
+                    .count() as u32;
+                state.exiled_from_hand_this_resolution = state
+                    .exiled_from_hand_this_resolution
+                    .saturating_add(hand_exiles);
+            }
             if let Some(cont) = state.pending_continuation.as_mut() {
                 let mut continuation_targets: Vec<_> =
                     chosen.iter().map(|&id| TargetRef::Object(id)).collect();
@@ -2493,6 +2575,7 @@ pub(super) fn handle_resolution_choice(
                 branch_descriptions: _,
                 parent_targets,
                 context,
+                replacement_applied,
                 remaining_players,
             },
             GameAction::ChooseBranch { index },
@@ -2507,6 +2590,7 @@ pub(super) fn handle_resolution_choice(
                     branches,
                     parent_targets,
                     context,
+                    replacement_applied,
                     remaining_players,
                     index,
                 },
@@ -3638,6 +3722,13 @@ pub(super) fn handle_resolution_choice(
             // layer-affecting choice kinds, and record `last_named_choice`.
             // Single authority shared with the random `Effect::Choose` resolver.
             effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
+            if choice_type.is_card_predicate_guess() {
+                events.push(GameEvent::CardPredicateGuessMade {
+                    player_id: player,
+                    source_id,
+                    choice: choice.clone(),
+                });
+            }
 
             // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
             // answer binds a resolution-scoped chosen player. Append it to the
@@ -4580,5 +4671,112 @@ fn propagate_targets_through_search_shuffle(ability: &mut ResolvedAbility, targe
             next.targets = targets.to_vec();
         }
         cursor = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    #[test]
+    fn land_nonland_guess_logs_without_persisting_a_source_label() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            Zone::Battlefield,
+        );
+        let waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+        };
+        let mut events = Vec::new();
+
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::ChooseOption {
+                choice: "Nonland".to_string(),
+            },
+            &mut events,
+        )
+        .expect("choice resolves");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardPredicateGuessMade {
+                player_id,
+                source_id: Some(event_source_id),
+                choice,
+            } if *player_id == PlayerId(1)
+                && *event_source_id == source_id
+                && choice == "Nonland"
+        )));
+        let source = state.objects.get(&source_id).expect("source exists");
+        assert!(
+            source.chosen_attributes.is_empty(),
+            "opponent guess labels must not remain rendered on the source card"
+        );
+    }
+
+    #[test]
+    fn land_nonland_kind_choice_does_not_debug_log_or_persist_source_label() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Abundance".to_string(),
+            Zone::Battlefield,
+        );
+        let waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardPredicate {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+        };
+        let mut events = Vec::new();
+
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::ChooseOption {
+                choice: "Land".to_string(),
+            },
+            &mut events,
+        )
+        .expect("choice resolves");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::CardPredicateGuessMade { .. })),
+            "ordinary land/nonland kind choices should not produce debug guess logs"
+        );
+        assert!(
+            state
+                .objects
+                .get(&source_id)
+                .expect("source exists")
+                .chosen_attributes
+                .is_empty(),
+            "transient land/nonland kind choices should not render source labels"
+        );
     }
 }

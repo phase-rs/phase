@@ -13,7 +13,7 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
-    CounterCostChoice, DistributionUnit, GameState, PayCostKind, PendingCast,
+    CounterCostChoice, CounterRemoveChoice, DistributionUnit, GameState, PayCostKind, PendingCast,
     PendingDiscardForCostResume, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
     WaitingFor,
 };
@@ -1814,6 +1814,48 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
             "Counter distribution must total {count}, got {total}",
         )));
     }
+
+    // CR 107.1c: shared single-authority per-type budget invariant. Project the
+    // per-object distribution to per-type totals and validate against the per-type
+    // available budget summed across the eligible permanents, using the same
+    // `validate_counter_selection` the effect-path `RemoveCountersChoice` handler
+    // uses. This keeps one authority for "count <= available per type" across both
+    // counter-removal surfaces. It is a strictly non-regressing guard: the
+    // per-object `removable` checks above are tighter (each choice.count is bounded
+    // by a single object's counters, and choice objects are distinct legal
+    // permanents), so any distribution they accept also satisfies this aggregate.
+    let mut per_type: Vec<CounterRemoveChoice> = Vec::new();
+    for choice in distribution {
+        if let Some(entry) = per_type
+            .iter_mut()
+            .find(|e| e.counter_type == choice.counter_type)
+        {
+            entry.count = entry.count.saturating_add(choice.count);
+        } else {
+            per_type.push(CounterRemoveChoice {
+                counter_type: choice.counter_type.clone(),
+                count: choice.count,
+            });
+        }
+    }
+    let mut available_by_type: Vec<(crate::types::counter::CounterType, u32)> = Vec::new();
+    for &obj_id in legal_permanents {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        for (ct, &n) in &obj.counters {
+            if n == 0 {
+                continue;
+            }
+            if let Some(entry) = available_by_type.iter_mut().find(|(t, _)| t == ct) {
+                entry.1 = entry.1.saturating_add(n);
+            } else {
+                available_by_type.push((ct.clone(), n));
+            }
+        }
+    }
+    super::effects::counters::validate_counter_selection(&available_by_type, &per_type)
+        .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
 
     if pending.activation_ability_index.is_some() {
         if let Some(cost) = pending.activation_cost.take() {
@@ -5583,12 +5625,18 @@ pub(super) fn pay_and_push_adventure(
         })
     });
 
-    // Enter the payment step if cost needs player input (X) or convoke/waterbend is active.
+    // Enter the payment step if cost needs player input (X), convoke/waterbend is active,
+    // or auto-tap cannot pay the locked cost without additional mana-ability choices.
     // `enter_payment_step` diverts to `ChooseXValue` when the cost has an unchosen X,
     // per CR 601.2f (X chosen before mana is paid).
     let has_x = cost_has_x(cost);
     let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
-    if has_x || convoke_mode.is_some() || manual_payment {
+    let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
+        && cost.mana_value() > 0
+        && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
+        && super::casting::has_manual_mana_ability_for_spell_payment(state, player, object_id)
+        && super::casting::can_feasibly_pay_mana_cost(state, player, Some(object_id), cost);
+    if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
@@ -6111,6 +6159,30 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             .push((object_id, counter_type, 1));
     }
 
+    // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
+    // [type] in addition to its other types" (The Tomb of Aclazotz) records the
+    // additive type-changing modifications on the granted `ExileWithAltCost`.
+    // Apply them as a `Duration::Permanent` continuous effect (CR 611.2a: no
+    // stated duration → until end of game) scoped to the one cast object
+    // (CR 611.2c: the affected set is fixed at SpecificObject when the effect
+    // begins). `source_id = object_id` (self-contained; attribution snapshot is
+    // the creature's own name). CR 608.2c: read from the *selected* permission
+    // supporting THIS cast so a sibling permission's rider cannot leak.
+    let cast_this_way_enters_mods =
+        super::casting::selected_exile_alt_cost_permission_enters_with_modifications(
+            state, object_id, player,
+        );
+    if !cast_this_way_enters_mods.is_empty() {
+        state.add_transient_continuous_effect(
+            object_id,
+            player,
+            crate::types::ability::Duration::Permanent,
+            crate::types::ability::TargetFilter::SpecificObject { id: object_id },
+            cast_this_way_enters_mods,
+            None,
+        );
+    }
+
     if casting_variant == CastingVariant::Foretell {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_variant_paid = Some((
@@ -6464,6 +6536,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                         duration: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
+                        enters_with_modifications: Vec::new(),
                         mana_spend_permission: Some(msp),
                     });
             }
@@ -8104,6 +8177,12 @@ pub fn enter_payment_step(
             if pending.payment_mode == CastPaymentMode::Auto
                 && mana_payment::classify_payment(&pending.cost)
                     == mana_payment::PaymentClassification::Unambiguous
+                && super::casting::can_pay_cost_after_auto_tap(
+                    state,
+                    player,
+                    pending.object_id,
+                    &pending.cost,
+                )
             {
                 return finalize_mana_payment(state, player, events);
             }
@@ -8848,8 +8927,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        PtStat, PtValue, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ManaProduction, PtStat, PtValue, PtValueScope, QuantityExpr, ReplacementDefinition,
+        ReplacementMode, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -10102,6 +10181,156 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn auto_payment_falls_back_to_mana_payment_when_manual_mana_source_is_needed() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let spell = create_object(
+            &mut state,
+            CardId(100),
+            caster,
+            "Spawn-Funded Spell".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Instant];
+        for i in 0..4 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Black,
+                ObjectId(900 + i),
+                false,
+                Vec::new(),
+            ));
+        }
+        let forest = create_object(
+            &mut state,
+            CardId(101),
+            caster,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: crate::types::ability::ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+        let spawn = create_object(
+            &mut state,
+            CardId(102),
+            caster,
+            "Eldrazi Spawn".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spawn).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Eldrazi".to_string());
+            obj.card_types.subtypes.push("Spawn".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::SelfRef,
+                    1,
+                ))),
+            );
+        }
+        crate::game::stack::push_to_stack(
+            &mut state,
+            StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: caster,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(100),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut Vec::new(),
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            spell,
+            caster,
+        );
+        let cost = ManaCost::Cost {
+            shards: Vec::new(),
+            generic: 6,
+        };
+        let mut events = Vec::new();
+
+        let waiting = pay_and_push_adventure(
+            &mut state,
+            caster,
+            spell,
+            CardId(100),
+            ability,
+            &cost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("auto payment should fall back to manual mana payment");
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode: None,
+            } if player == caster
+        ));
+        let pending = state
+            .pending_cast
+            .as_ref()
+            .expect("fallback should preserve pending cast");
+        assert_eq!(pending.payment_mode, CastPaymentMode::Auto);
+        assert_eq!(pending.cost, cost);
+        assert_eq!(state.players[0].mana_pool.total(), 4);
+        assert!(
+            state
+                .objects
+                .get(&spawn)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield),
+            "fallback must not sacrifice the manual mana source before the player chooses it"
+        );
     }
 
     #[test]
@@ -13232,6 +13461,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
 
@@ -13335,6 +13565,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
 
@@ -13402,6 +13633,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
 
@@ -13447,6 +13679,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
@@ -13503,6 +13736,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             hit_obj
@@ -13517,6 +13751,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
@@ -13565,6 +13800,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             state.players[0].mana_pool.add(ManaUnit {
@@ -13633,6 +13869,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             hit_obj
@@ -13654,6 +13891,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
@@ -13710,6 +13948,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             hit_obj
@@ -13724,6 +13963,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             push_announcement_stack_entry(&mut state, hit);

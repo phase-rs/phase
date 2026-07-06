@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, PriorityYieldOp};
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
@@ -452,6 +452,7 @@ fn check_actor_authorization(
     if matches!(
         action,
         GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityYield { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
@@ -553,9 +554,11 @@ enum AutoPassDecision {
 /// priority window.
 ///
 /// Interrupts (MTGA-style): `UntilStackEmpty` bails when the stack empties or
-/// grows beyond the baseline (trigger or opponent spell); `UntilEndOfTurn`
+/// grows beyond the baseline (trigger or opponent spell); `UntilTurnBoundary`
 /// bails when an opponent-controlled object is on top of the stack or when the
-/// current phase is in the user-supplied `phase_stops` list.
+/// current phase is in the user-supplied `phase_stops` list. The per-window
+/// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
+/// `MyNextTurnStart` behave identically within a priority window.
 fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassDecision {
     let Some(mode) = state.auto_pass.get(&player) else {
         return AutoPassDecision::Exit;
@@ -568,12 +571,15 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
                 AutoPassDecision::Pass
             }
         }
-        AutoPassMode::UntilEndOfTurn => {
-            let opponent_on_stack = state
-                .stack
-                .last()
-                .is_some_and(|top| top.controller != player);
-            if opponent_on_stack || phase_stop_hit(state, player) {
+        AutoPassMode::UntilTurnBoundary { .. } => {
+            // CR 117.3d: An opponent-controlled top-of-stack normally ends the
+            // session so the player can respond — unless they have pre-committed
+            // to yield priority for that exact triggered ability, in which case
+            // the session keeps auto-passing through it.
+            let opponent_on_stack = state.stack.last().is_some_and(|top| {
+                top.controller != player && !state.is_priority_yielded(player, top)
+            });
+            if opponent_on_stack || state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
             } else {
                 AutoPassDecision::Pass
@@ -582,23 +588,15 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
     }
 }
 
-/// True when `player` has an active `UntilEndOfTurn` auto-pass session.
+/// True when `player` has an active turn-boundary auto-pass session (either
+/// boundary). Both `EndOfCurrentTurn` and `MyNextTurnStart` drive the
+/// DeclareAttackers/DeclareBlockers empty auto-submit arms, since both
+/// auto-submit empty attackers within the current turn.
 fn end_of_turn_active(state: &GameState, player: PlayerId) -> bool {
     matches!(
         state.auto_pass.get(&player),
-        Some(AutoPassMode::UntilEndOfTurn)
+        Some(AutoPassMode::UntilTurnBoundary { .. })
     )
-}
-
-/// True when the current phase appears in `player`'s configured phase-stop list.
-/// Consulted at every engine-driven auto-pass site so the user's preference is
-/// respected whether or not an auto-pass session is active (e.g. suppresses
-/// the empty-blockers auto-submit when the defender wants a Ninjutsu window).
-fn phase_stop_hit(state: &GameState, player: PlayerId) -> bool {
-    state
-        .phase_stops
-        .get(&player)
-        .is_some_and(|stops| stops.contains(&state.phase))
 }
 
 fn pass_priority_once_with_pipeline(
@@ -726,7 +724,7 @@ fn priority_player_has_meaningful_action(state: &GameState) -> bool {
 /// action that ends the loop. The cap-path [`priority_player_has_meaningful_action`]
 /// checks only the CURRENT priority holder; the loop-shortcut WIN designates a
 /// LOSER, so its gate must be stronger — the would-be loop-breaker (a victim whose
-/// priority is auto-passed by a stale `UntilStackEmpty`/`UntilEndOfTurn` session,
+/// priority is auto-passed by a stale `UntilStackEmpty`/`UntilTurnBoundary` session,
 /// which `priority_auto_pass_decision` Passes WITHOUT a meaningful check) need NOT
 /// hold priority at the modulo-match iteration. Probe EVERY living player as the
 /// priority holder (`legal_actions`/`has_meaningful_priority_action` key off
@@ -945,10 +943,10 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 }
             }
 
-            // UntilEndOfTurn: auto-submit empty attackers unless the user flagged
-            // this phase as a stop.
+            // UntilTurnBoundary: auto-submit empty attackers unless the user
+            // flagged this phase as a stop.
             WaitingFor::DeclareAttackers { player, .. }
-                if end_of_turn_active(state, *player) && !phase_stop_hit(state, *player) =>
+                if end_of_turn_active(state, *player) && !state.phase_stop_hit(*player) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {
@@ -973,7 +971,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player)
+            } if !state.phase_stop_hit(*player)
                 && (valid_blocker_ids.is_empty()
                     || !super::combat::has_attackers_in_play(state)) =>
             {
@@ -1141,6 +1139,33 @@ fn apply_action(
             state.phase_stops.remove(&actor);
         } else {
             state.phase_stops.insert(actor, stops.clone());
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // CR 117.3d: SetPriorityYield propagates the actor's standing priority-yield
+    // preference — a pre-committed decision to pass priority while a class of
+    // triggered ability resolves. Pure preference state, routed by `actor`, and
+    // handled BEFORE the loop-ring clear and auto-pass session clearing below so
+    // yields are exempt from that per-session teardown (CR 400.7: an `Add`
+    // snapshots the source's latched identity from the on-stack trigger).
+    if let GameAction::SetPriorityYield { op } = &action {
+        match op {
+            PriorityYieldOp::Add { source_id, scope } => {
+                if let Some(target) = state.resolve_yield_target_from_stack(*source_id, *scope) {
+                    state.add_priority_yield(actor, target);
+                }
+            }
+            PriorityYieldOp::Remove { target } => {
+                state.remove_priority_yield(actor, target);
+            }
+            PriorityYieldOp::ClearAll => {
+                state.clear_priority_yields(actor);
+            }
         }
         return Ok(ActionResult {
             events: vec![],
@@ -4168,6 +4193,29 @@ fn apply_action(
                 return Err(EngineError::NotYourPriority);
             }
             let p = *player;
+            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
+            // a face-down permanent face up is a special action whose morph/disguise/
+            // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
+            // validates the action and derives that cost; payment routes through
+            // `PaymentContext::SpecialAction(TurnFaceUp)` so spend-restricted mana
+            // ("only to turn permanents face up", Overgrown Zealot / Tin Street
+            // Gossip) is eligible here while other-context mana is rejected. Mirrors
+            // the `UnlockDoor` special-action handler.
+            let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
+            let cost = casting::apply_special_action_cost_reduction(
+                state,
+                p,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost,
+            );
+            casting::pay_special_action_mana_cost(
+                state,
+                p,
+                Some(object_id),
+                &cost,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                &mut events,
+            )?;
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
@@ -4324,7 +4372,9 @@ fn apply_action(
                 AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
                     initial_stack_len: state.stack.len(),
                 },
-                AutoPassRequest::UntilEndOfTurn => AutoPassMode::UntilEndOfTurn,
+                AutoPassRequest::UntilTurnBoundary { until } => {
+                    AutoPassMode::UntilTurnBoundary { until }
+                }
             };
             state.auto_pass.insert(*player, stored_mode);
             let wf = pass_priority_once_with_pipeline(state, &mut events, None)?;
@@ -4720,27 +4770,34 @@ fn apply_action(
                 // already on the stack (pushed at distribute-among pause time);
                 // mutate its ability with the distribution and clear
                 // `pending_trigger_entry` so the resolver may now fire it.
-                //
-                // Invariants (panic on violation — no recovery path):
-                // * `pending_trigger_entry` is `Some(_)` (push-first contract).
-                // * Entry id references a `TriggeredAbility` `StackEntry`.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability);
-                priority::clear_priority_passes(state);
-                // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
-                // behind this distribute-among trigger so each independent
-                // instance reaches the stack (issue #416).
-                debug_assert!(
-                    !triggers::is_pending_trigger_construction_active(state),
-                    "deferred-trigger drain entered with construction still active",
-                );
-                if let Some(waiting_for) =
-                    triggers::drain_deferred_trigger_queue(state, &mut events)
-                {
-                    waiting_for
-                } else {
+                if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
+                    // Unexpected dangling cursor: the entry is no longer on the
+                    // stack. Recover per CR 608.2b / CR 800.4a (a stack object
+                    // that has left the stack does not resolve) — record the
+                    // diagnostic, abandon, and return priority instead of
+                    // panicking (re-normalized next pass; CR 117.3b would give
+                    // the active player).
+                    triggers::abandon_ceased_pending_trigger(state, &pending_trigger.ability);
+                    priority::clear_priority_passes(state);
                     WaitingFor::Priority { player: p }
+                } else {
+                    priority::clear_priority_passes(state);
+                    // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
+                    // behind this distribute-among trigger so each independent
+                    // instance reaches the stack (issue #416).
+                    debug_assert!(
+                        !triggers::is_pending_trigger_construction_active(state),
+                        "deferred-trigger drain entered with construction still active",
+                    );
+                    if let Some(waiting_for) =
+                        triggers::drain_deferred_trigger_queue(state, &mut events)
+                    {
+                        waiting_for
+                    } else {
+                        WaitingFor::Priority { player: p }
+                    }
                 }
             } else {
                 // Resolution-time distribution continuation path.
@@ -4774,6 +4831,37 @@ fn apply_action(
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::counters::drain_pending_counter_moves(state, &mut events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                effects::drain_pending_continuation(state, &mut events);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 107.1c + CR 608.2d: Submit the "remove any number of counters"
+        // resolution-time selection (Rhys, the Evermore; Tetravus). ORDERING
+        // INVARIANT: apply removals (stamping `last_effect_count`) BEFORE draining
+        // the continuation, so a chained "create that many" rider reads the count.
+        (
+            WaitingFor::RemoveCountersChoice {
+                player,
+                source_id,
+                available,
+                pending_effect,
+                ..
+            },
+            GameAction::ChooseCountersToRemove { selections },
+        ) => {
+            let p = *player;
+            effects::counters::validate_and_queue_counter_removal(
+                state,
+                &selections,
+                *source_id,
+                available,
+                pending_effect,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            effects::counters::drain_pending_counter_removals(state, &mut events);
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 effects::drain_pending_continuation(state, &mut events);
             }
@@ -5317,6 +5405,18 @@ fn handle_play_land(
         return Err(EngineError::ActionNotAllowed(
             "Player is under a CantPlayLand static (CR 305.2)".to_string(),
         ));
+    }
+    // CR 116.2a + CR 305.1: A `ProhibitPlayFromZone` deny covers the play-land
+    // half of "play" (a land play is a special action, not a cast), so this gate
+    // is the land-side counterpart to the cast-gate check in
+    // `casting::prepare_spell_cast` (Memory Vessel: "can't play cards from their
+    // hand"). The card's current zone is the discriminator.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
+            ));
+        }
     }
     let additional = super::static_abilities::additional_land_drops(state, player);
     let effective_limit = state.max_lands_per_turn.saturating_add(additional);

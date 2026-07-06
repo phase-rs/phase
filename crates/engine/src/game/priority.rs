@@ -73,6 +73,18 @@ pub fn handle_priority_pass_with_limit(
                     .is_some_and(|c| !c.regular_damage_done);
             if combat_damage_incomplete {
                 turns::auto_advance(state, events)
+            } else if state.phase == crate::types::phase::Phase::Cleanup {
+                // CR 514.3a: Triggered abilities that triggered during the
+                // cleanup step (e.g. Stolen Uniform's "when you lose control
+                // of that Equipment this turn") have resolved and the stack is
+                // empty — "another cleanup step begins", repeating the
+                // CR 514.1/514.2 turn-based actions, rather than advancing to
+                // the next turn. Re-enter `auto_advance`, whose Cleanup arm
+                // re-runs `execute_cleanup`; once no further trigger fires it
+                // returns `None` and advances normally (the until-EOT control
+                // TCE is already pruned, so no new loss event re-fires — the
+                // one-shot trigger is gone, guaranteeing termination).
+                turns::auto_advance(state, events)
             } else {
                 // CR 117.4: Empty stack — advance to next phase.
                 turns::advance_phase(state, events);

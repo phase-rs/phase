@@ -1,5 +1,6 @@
 import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
 import { pushUpdateDebug, setUpdateStatus } from "./updateStatus";
+import { flushNow, trackEvent } from "../services/telemetry";
 
 /**
  * Vite fires `vite:preloadError` when a lazy-imported chunk fails to load —
@@ -33,12 +34,20 @@ export function installChunkReloadHandler(): void {
     // the console — we're handling it by reloading (or deferring).
     event.preventDefault();
 
+    const deferred = isMultiplayerGameLive();
+    // The failed chunk identifier lives in the event's `.payload` Error
+    // (its message carries the failing URL). Best-effort; truncated at enqueue.
+    const chunk = (event as { payload?: Error }).payload?.message;
+    trackEvent("chunk_reload", { reason: "preload-error", deferred, chunk });
+
     const doReload = () => {
       pushUpdateDebug("Chunk preload failed; reloading to pick up new bundle.", "warn");
+      // Drain the telemetry queue before navigating away.
+      flushNow();
       window.location.reload();
     };
 
-    if (isMultiplayerGameLive()) {
+    if (deferred) {
       pushUpdateDebug(
         "Chunk preload failed during multiplayer game; deferring reload until game ends.",
         "warn",

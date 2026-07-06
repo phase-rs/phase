@@ -20,6 +20,7 @@ interface CommandDockProps {
   /** The focused-opponent area renders mirrored (anchored to the top of the
    *  screen), so the compact popover must open downward instead of upward. */
   isMirrored: boolean;
+  splitOverview?: boolean;
 }
 
 /** Card-size CSS vars the dock's children read (`CommanderCardZone` → --card-*,
@@ -46,7 +47,7 @@ const POPOVER_SCALE = 0.82;
  *  - **compact**: a collapsed pile (commander thumbnail + emblem/damage badges)
  *    that expands to a popover on hover/click.
  */
-export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
+export function CommandDock({ playerId, isMirrored, splitOverview = false }: CommandDockProps) {
   const { t } = useTranslation("game");
   const mode = useResolvedCommandZoneDisplay();
   const gameState = useGameStore((s) => s.gameState);
@@ -76,12 +77,14 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
   if (!hasContent) return null;
 
   // The full cluster — rendered in exactly one place (inline body OR popover),
-  // never both, so the interactive commander card is never duplicated.
-  const fullContent = (
-    <div className="flex flex-col items-end gap-1">
-      <CommanderCardZone playerId={playerId} />
+  // never both, so the interactive commander card is never duplicated. The
+  // popover always renders at full fidelity (it's the expanded, readable view),
+  // so only the inline body inherits the split-pane compaction.
+  const fullContent = (split: boolean) => (
+    <div className={split ? "flex flex-col items-end gap-0.5" : "flex flex-col items-end gap-1"}>
+      <CommanderCardZone playerId={playerId} splitOverview={split} />
       <CommandZone playerId={playerId} />
-      <CommanderDamage playerId={playerId} />
+      <CommanderDamage playerId={playerId} compact={split} />
     </div>
   );
 
@@ -93,7 +96,7 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
         data-debug-label="Command"
         data-command-dock={isMirrored ? "opponent" : "player"}
       >
-        {fullContent}
+        {fullContent(splitOverview)}
       </div>
     );
   }
@@ -107,7 +110,7 @@ export function CommandDock({ playerId, isMirrored }: CommandDockProps) {
       label={t("zone.commandZone")}
       dockRole={isMirrored ? "opponent" : "player"}
     >
-      {fullContent}
+      {fullContent(false)}
     </CompactCommandDock>
   );
 }

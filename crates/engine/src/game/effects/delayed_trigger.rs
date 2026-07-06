@@ -60,8 +60,14 @@ pub fn resolve(
     // `AtNextPhaseForPlayer.player` because compile-time AST has no access to
     // runtime player ids; rewrite here to the actual controller at resolve
     // time. Mirrors the `bind_contextual_filter_to_condition` pattern above.
-    if let DelayedTriggerCondition::AtNextPhaseForPlayer { player, .. } = &mut condition {
+    if let DelayedTriggerCondition::AtNextPhaseForPlayer { player, gate, .. } = &mut condition {
         *player = ability.controller;
+        // CR 513.2 + CR 603.7a: the "on your next turn" floor only becomes
+        // concrete at creation. Stamp the symbolic parse-time gate to the actual
+        // creation turn so the matcher skips the current turn's matching phase.
+        if matches!(gate, crate::types::ability::TurnGate::AfterCreationTurn) {
+            *gate = crate::types::ability::TurnGate::After(state.turn_number);
+        }
     }
 
     // CR 603.7c: Build the delayed trigger's resolved ability from the full
@@ -1548,6 +1554,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -1565,8 +1572,56 @@ mod tests {
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
                 player: PlayerId(1),
+                gate: crate::types::ability::TurnGate::None,
             },
             "placeholder player must be rewritten to ability.controller"
+        );
+    }
+
+    /// CR 513.2 + CR 603.7a: the parser's symbolic `TurnGate::AfterCreationTurn`
+    /// (Kav Landseeker "the end step on your next turn") must be stamped to
+    /// `TurnGate::After(creation_turn)` at resolve time, so the runtime matcher
+    /// skips the current turn's end step. Revert-to-red: drop the stamp in
+    /// `resolve()` and the stored gate stays `AfterCreationTurn` (which the
+    /// matcher `debug_assert!`s against — a wrong-timing bug).
+    #[test]
+    fn after_creation_turn_gate_stamped_to_concrete_floor() {
+        use crate::types::ability::TurnGate;
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 5;
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: PlayerId(0),
+                    gate: TurnGate::AfterCreationTurn,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: PlayerId(0),
+                gate: TurnGate::After(5),
+            },
+            "AfterCreationTurn must be stamped to After(state.turn_number)"
         );
     }
 
@@ -1587,6 +1642,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -1641,6 +1697,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(inner_def),
                 uses_tracked_set: false,
@@ -1713,6 +1770,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1767,6 +1825,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1824,6 +1883,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1875,6 +1935,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1933,6 +1994,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1980,6 +2042,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -2035,6 +2098,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -2085,6 +2149,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -2145,6 +2210,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,

@@ -14,6 +14,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
+import { ReportCardButton, type CardReportContext } from "./ReportCardButton.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
@@ -127,6 +128,12 @@ function CardPreviewInner({
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
+  // `card_report` context needs a live, participating game: `obj == null` (deck
+  // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
+  // no game at all, and spectators don't report — building no context in these
+  // cases keeps both the event and the button's wrapper elements out entirely.
+  const gameId = useGameStore((s) => s.gameId);
+  const gameMode = useGameStore((s) => s.gameMode);
 
   // Auto-derive back face name from " // " separator when not explicitly provided
   // (e.g., deck builder passes "Delver of Secrets // Insectile Aberration" as cardName)
@@ -318,6 +325,29 @@ function CardPreviewInner({
     viewportWidth,
   ]);
 
+  // Identity + parse counts for the "report this card" button, carrying the
+  // DISPLAYED face (back face under Ctrl) so the report matches what the player
+  // sees. Undefined outside a live game (`obj == null` or `gameId == null`), so
+  // the button never renders in the deck builder. On mobile `showOtherFace` is
+  // always false, so this resolves to the front face there.
+  // No front-face fallback for the counts: if the back face's parse details
+  // haven't loaded, 0/0 ("no parse data") is honest — front-face counts under a
+  // back-face identity would corrupt the misparse-vs-known-gap triage columns.
+  const reportItems = showOtherFace ? backParseDetails : frontParseDetails;
+  const reportContext: CardReportContext | undefined =
+    obj != null && gameId !== null && gameMode !== "spectate"
+      ? {
+          oracleId:
+            (showOtherFace ? obj.back_face?.printed_ref?.oracle_id : obj.printed_ref?.oracle_id) ?? "",
+          faceName:
+            (showOtherFace ? obj.back_face?.printed_ref?.face_name : obj.printed_ref?.face_name) ?? "",
+          name: showOtherFace ? (obj.back_face?.printed_ref?.face_name ?? backFaceName ?? obj.name) : obj.name,
+          zone: obj.zone,
+          supported: (reportItems ?? []).filter((item) => item.supported).length,
+          total: (reportItems ?? []).length,
+        }
+      : undefined;
+
   // Mobile overlay mode: centered with backdrop
   if (isMobile) {
     return (
@@ -329,6 +359,7 @@ function CardPreviewInner({
         onDismiss={onDismiss ?? dismissPreview}
         sourcePrinting={sourcePrinting}
         layout={mobileLayout ?? "modal"}
+        report={reportContext}
       />
     );
   }
@@ -371,6 +402,7 @@ function CardPreviewInner({
           localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
           parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
           maxHeight={viewportHeight - margin * 2}
+          report={reportContext}
         />
       ) : (
         <CardImagePreview
@@ -405,6 +437,7 @@ function MobilePreviewOverlay({
   onDismiss,
   sourcePrinting,
   layout = "modal",
+  report,
 }: {
   cardName: string;
   backFaceName: string | null;
@@ -413,6 +446,9 @@ function MobilePreviewOverlay({
   onDismiss: () => void;
   sourcePrinting?: SourcePrinting;
   layout?: "modal" | "compact";
+  /** In-game report context; absent in the deck builder. Only the full modal
+   *  layout hosts the button — the compact peek dismisses on any tap. */
+  report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
   const { src, isRotated, isFlip } = useCardImage(cardName, {
@@ -509,6 +545,11 @@ function MobilePreviewOverlay({
             >
               ⟳ {t("preview.flip")}
             </button>
+          )}
+          {report && (
+            <div className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
+              <ReportCardButton key={report.oracleId || report.name} {...report} />
+            </div>
           )}
         </div>
       )}
@@ -777,9 +818,12 @@ interface ParsedAbilitiesPanelProps {
   localizedTypeLine?: string | null;
   parseDetails: ParsedItem[] | null;
   maxHeight?: number;
+  /** In-game report context for the displayed face; absent in the deck builder
+   *  (no live game), where the report button is not shown. */
+  report?: CardReportContext;
 }
 
-function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight }: ParsedAbilitiesPanelProps) {
+function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight, report }: ParsedAbilitiesPanelProps) {
   const { t } = useTranslation("game");
   const items = parseDetails ?? [];
   const rulings = useCardRulings(name);
@@ -800,6 +844,11 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
           <div className="text-[10px] text-gray-500 mt-0.5">{typeLine}</div>
         )}
         <SupportSummary items={items} />
+        {report && (
+          <div className="mt-1 flex justify-end">
+            <ReportCardButton key={report.oracleId || report.name} {...report} />
+          </div>
+        )}
       </div>
       <div className="px-2 py-2 space-y-0.5">
         {items.length === 0 && (

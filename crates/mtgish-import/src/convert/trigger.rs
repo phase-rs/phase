@@ -362,16 +362,11 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             });
         }
 
-        // CR 701.9: Discard triggers — "when [players] discards [cards]". Engine
-        // TriggerDefinition::Discarded has no valid_player or discarded-card
-        // filter axis today, so dropping the player/card constraints fires the
-        // trigger on every discard regardless of who/what. Strict-fail until
-        // engine extends.
-        Trigger::WhenAPlayerDiscardsACard(_players, _cards) => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "TriggerDefinition",
-                needed_variant: "Discarded with valid_player + discarded-card filter".into(),
-            });
+        // CR 701.9: Discard triggers — "when [players] discards [cards]".
+        // `valid_target` carries the player axis; `valid_card` optionally
+        // constrains the discarded card (type/keyword predicates).
+        Trigger::WhenAPlayerDiscardsACard(players, cards) => {
+            discard_trigger(players, cards, "Trigger::WhenAPlayerDiscardsACard")?
         }
         // CR 702.29 + CR 603: Cycling triggers — "whenever [a player] cycles a
         // card". Engine `TriggerMode::Cycled` fires per cycle event; the
@@ -845,6 +840,37 @@ fn cycled_trigger(
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "TriggerDefinition",
                 needed_variant: format!("{idiom} with cycled-card filter: CardsInHand::{other:?}"),
+            });
+        }
+    }
+    Ok(def)
+}
+
+/// CR 701.9 + CR 603: Build a `Discarded` trigger with the player axis on
+/// `valid_target` and optional discarded-card predicates on `valid_card`.
+fn discard_trigger(
+    players: &Players,
+    cards: &CardsInHand,
+    idiom: &'static str,
+) -> ConvResult<TriggerDefinition> {
+    let mut def = TriggerDefinition::new(TriggerMode::Discarded);
+    if !matches!(players, Players::AnyPlayer) {
+        let controller = players_to_controller(players)?;
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(controller),
+        ));
+    }
+    match cards {
+        CardsInHand::AnyCard => {}
+        CardsInHand::SingleCardInHand(crate::schema::types::CardInHand::ThisCardInHand) => {
+            def.valid_card = Some(TargetFilter::SelfRef);
+        }
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "TriggerDefinition",
+                needed_variant: format!(
+                    "{idiom} with discarded-card filter: CardsInHand::{other:?}"
+                ),
             });
         }
     }

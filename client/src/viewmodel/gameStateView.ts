@@ -178,6 +178,46 @@ export function isFaceDownExileCardVisibleToViewer(
   );
 }
 
+/**
+ * Whether `viewerId` may see the identity of `obj` for the card-report picker.
+ *
+ * Composes the engine-mirroring reveal-set helpers above; NEVER infers
+ * visibility from `name !== HIDDEN_CARD_NAME`. In single-player the client
+ * renders the raw, unredacted state (the `showAiHand` debug toggle depends on
+ * it), so hidden-zone objects carry their real names and a name check would leak
+ * every opponent card. Conservative: hides on any doubt, never leaks.
+ */
+export function isObjectReportableToViewer(
+  gameState: GameState | null,
+  obj: GameObject,
+  viewerId: PlayerId,
+): boolean {
+  if (!gameState) return false;
+  // CR 701.20b: a publicly revealed card is visible to every player.
+  const revealed = gameState.revealed_cards?.includes(obj.id) ?? false;
+  switch (obj.zone) {
+    case "Stack":
+    case "Battlefield":
+      // Public zones; a face-down (morph/manifest) permanent hides its identity
+      // from non-owners unless it has been publicly revealed.
+      return !obj.face_down || obj.owner === viewerId || revealed;
+    case "Graveyard":
+    case "Command":
+      return true; // public, face-up
+    case "Exile":
+      return !obj.face_down || isFaceDownExileCardVisibleToViewer(gameState, obj, viewerId);
+    case "Hand":
+      // Own hand, or a card revealed to everyone (mirror OpponentHand's gate).
+      return (
+        obj.owner === viewerId ||
+        revealed ||
+        (gameState.public_revealed_cards?.includes(obj.id) ?? false)
+      );
+    case "Library":
+      return false; // hidden; rare face-up-top reveals are out of scope
+  }
+}
+
 export function getWaitingForObjectChoiceIds(
   waitingFor: WaitingFor | null | undefined,
 ): ObjectId[] {
