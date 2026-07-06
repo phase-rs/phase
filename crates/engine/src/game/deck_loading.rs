@@ -20,6 +20,20 @@ pub struct DeckEntry {
     pub count: u32,
 }
 
+impl DeckEntry {
+    /// CR 202.3d + CR 709.4b: This entry's OFF-STACK mana value — the load-time
+    /// combined value of both halves for a split card (cached on
+    /// `card.metadata.off_stack_mana_value_override` by `resolve_names`), else the
+    /// face's own mana value. The single accessor deck-legality / companion checks
+    /// read so they never depend on which half `card` is.
+    pub fn off_stack_mana_value(&self) -> u32 {
+        self.card
+            .metadata
+            .off_stack_mana_value_override
+            .unwrap_or_else(|| self.card.mana_cost.mana_value())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerDeckPayload {
     #[serde(default)]
@@ -124,10 +138,19 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
         if let Some(index) = entries.iter().position(|entry| entry.card.name == *name) {
             entries[index].count += 1;
         } else if let Some(face) = db.get_face_by_name(name) {
-            entries.push(DeckEntry {
-                card: face.clone(),
-                count: 1,
-            });
+            let mut card = face.clone();
+            // CR 202.3d + CR 709.4b: cache the combined off-stack mana value for a
+            // split card (front-half `mana_cost` alone under-counts it) while the
+            // database is in hand, so runtime companion / deck checks that hold only
+            // this face read the rules-correct value. Routes through the shared
+            // `CardDatabase::off_stack_mana_value_for_face` seam; only stored when it
+            // actually differs (i.e. a split card), keeping `metadata` empty
+            // otherwise.
+            let combined = db.off_stack_mana_value_for_face(face);
+            if combined != face.mana_cost.mana_value() {
+                card.metadata.off_stack_mana_value_override = Some(combined);
+            }
+            entries.push(DeckEntry { card, count: 1 });
         }
     }
     entries
