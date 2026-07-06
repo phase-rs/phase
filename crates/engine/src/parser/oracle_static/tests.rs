@@ -99,12 +99,33 @@ fn static_angry_mob_two_clause_turn_window_cda() {
         "on-turn clause must be a CDA"
     );
     assert_eq!(on_turn.condition, Some(StaticCondition::DuringYourTurn));
-    assert!(
-        on_turn
-            .modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::SetDynamicPower { .. })),
-        "on-turn clause must set dynamic power: {:?}",
+    // Prove the full quantity, not just that *some* dynamic power exists: both
+    // power AND toughness must be set to `2 + <opponent Swamp count>`. Asserting
+    // the entire modification vector by value means the test fails if the offset,
+    // the counted subtype, the controller scope, or the toughness clause regress.
+    let opponent_swamps = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Swamp".to_string()))
+                    .controller(ControllerRef::Opponent),
+            ),
+        },
+    };
+    let two_plus_opponent_swamps = QuantityExpr::Offset {
+        inner: Box::new(opponent_swamps),
+        offset: 2,
+    };
+    assert_eq!(
+        on_turn.modifications,
+        vec![
+            ContinuousModification::SetDynamicPower {
+                value: two_plus_opponent_swamps.clone(),
+            },
+            ContinuousModification::SetDynamicToughness {
+                value: two_plus_opponent_swamps,
+            },
+        ],
+        "on-turn CDA must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
         on_turn.modifications
     );
 
