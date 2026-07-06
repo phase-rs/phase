@@ -424,10 +424,10 @@ fn finalize_committed_guess_choice_types(
                 match choice_type {
                     Some(choice_type) => *ct = choice_type.clone(),
                     None => {
-                        ability.effect = Box::new(Effect::unimplemented(
+                        *ability.effect = Effect::unimplemented(
                             "opponent_guess",
                             "opponent guess without committed choice domain",
-                        ));
+                        );
                     }
                 }
             }
@@ -446,11 +446,11 @@ fn finalize_committed_guess_choice_types(
             Effect::OpponentGuess { subject, .. } => subject.as_ref().clone(),
             _ => unreachable!("matched above"),
         };
-        ability.effect = Box::new(Effect::Choose {
+        *ability.effect = Effect::Choose {
             choice_type: ChoiceType::Opponent { restriction: None },
             persist: false,
             selection: TargetSelectionMode::Chosen,
-        });
+        };
         let mut guess = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::OpponentGuess {
@@ -473,10 +473,10 @@ fn finalize_committed_guess_choice_types(
                 Effect::Unimplemented { name, .. } if name == "opponent_guess"
             )
         }) {
-            ability.effect = Box::new(Effect::unimplemented(
+            *ability.effect = Effect::unimplemented(
                 "opponent_guess",
                 "opponent guess without committed choice domain",
-            ));
+            );
         }
     }
     if let Some(sub) = ability.sub_ability.as_mut() {
