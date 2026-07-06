@@ -16949,7 +16949,7 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
     }
 }
 
-fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+pub(crate) fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
     match filter {
         TargetFilter::Typed(tf) => tf.controller.clone(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -16957,6 +16957,27 @@ fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> 
         }
         TargetFilter::Not { filter } => target_filter_controller_ref(filter),
         _ => None,
+    }
+}
+
+/// Mutating sibling of [`target_filter_controller_ref`]: recursively rewrite the
+/// `controller` of every `Typed` node reachable through `And`/`Or`/`Not` to
+/// `controller`. Used by the Siren's Call card-assembly pass to bind the delayed
+/// punisher's "that player controls" anaphor to the active player named by the
+/// sibling coerce clause.
+pub(crate) fn set_target_filter_controller_ref(
+    filter: &mut TargetFilter,
+    controller: ControllerRef,
+) {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller = Some(controller),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                set_target_filter_controller_ref(inner, controller.clone());
+            }
+        }
+        TargetFilter::Not { filter } => set_target_filter_controller_ref(filter, controller),
+        _ => {}
     }
 }
 

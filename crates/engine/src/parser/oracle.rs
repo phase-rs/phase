@@ -15,7 +15,7 @@ use crate::types::ability::{
     DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
     ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
     SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -2347,7 +2347,187 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
     // trigger stays registered as-is (its TrackedSet target gracefully resolves
     // to nothing when the exile link has already returned the card).
     synthesize_etb_exile_ltb_return_pair(&mut result.triggers);
+    bind_active_player_punisher_target(&mut result.abilities);
     result
+}
+
+/// CR 102.1 + CR 603.7c + CR 608.2c: Bind the delayed punisher's "that player
+/// controls" anaphor to the active player named by the sibling mass-attack
+/// coerce clause (Siren's Call). The two lines parse to two abilities: a
+/// mass-`MustAttack` `GenericEffect` over an `ActivePlayer` subject, and a
+/// sibling delayed `DestroyAll` over a non-Wall creature filter carrying
+/// `Not(AttackedThisTurn)` whose controller parsed to the default `You`. When
+/// BOTH siblings co-exist in one card's abilities (frame-local), rewrite the
+/// DestroyAll target's controller to `ActivePlayer`. A standalone "destroy all
+/// creatures you control" with no coerce sibling is untouched.
+fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
+    use crate::parser::oracle_effect::{
+        set_target_filter_controller_ref, target_filter_controller_ref,
+    };
+
+    // Detect the mass-MustAttack coerce clause over an ActivePlayer subject.
+    let ability_has_active_player_coerce = |a: &AbilityDefinition| {
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = a.effect.as_ref()
+        else {
+            return false;
+        };
+        static_abilities.iter().any(|st| {
+            matches!(st.mode, StaticMode::MustAttack)
+                && st.affected.as_ref().and_then(target_filter_controller_ref)
+                    == Some(ControllerRef::ActivePlayer)
+        })
+    };
+    let has_active_player_coerce = abilities.iter().any(ability_has_active_player_coerce);
+    if !has_active_player_coerce {
+        return;
+    }
+
+    for ability in abilities.iter_mut() {
+        // Siren's Call route: the coerce and the delayed DestroyAll are SEPARATE
+        // top-level abilities. Rewrite the delayed punisher whose target carries
+        // `Not(AttackedThisTurn)` and defaulted to `controller: You`.
+        if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_mut() {
+            let inner = effect.as_mut();
+            if let Effect::DestroyAll { target, .. } = inner.effect.as_mut() {
+                if target_filter_has_not_attacked_this_turn(target)
+                    && target_filter_controller_ref(target) == Some(ControllerRef::You)
+                {
+                    set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
+
+                    // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this
+                    // effect for each creature the player didn't control
+                    // continuously since the beginning of the turn." Attach the
+                    // continuity predicate to the destroyed set and CONSUME the
+                    // redundant `Unimplemented{"ignore"}` sibling, so the destroyed
+                    // set = non-Wall ∧ ActivePlayer ∧ Not(AttackedThisTurn) ∧
+                    // ControlledContinuouslySinceTurnBegan.
+                    if sub_ability_is_continuity_exemption(inner.sub_ability.as_deref()) {
+                        add_filter_prop_to_typed(
+                            target,
+                            FilterProp::ControlledContinuouslySinceTurnBegan,
+                        );
+                        inner.sub_ability = None;
+                    }
+                }
+            }
+        }
+
+        // Maddening Imp route: the coerce (`effect`) and the delayed
+        // DestroyAll{TrackedSet(0)} punisher (in the `{T}` sub_ability chain) are
+        // in the SAME activated ability. Frame-local: only when THIS ability is
+        // itself the ActivePlayer coerce. Rebind the dangling `TrackedSet(0)`
+        // (no producer — MustAttack publishes nothing) to the concrete
+        // active-player non-Wall creature filter with the didn't-attack clause.
+        if ability_has_active_player_coerce(ability) {
+            let mut sub = ability.sub_ability.as_deref_mut();
+            while let Some(node) = sub {
+                if let Effect::CreateDelayedTrigger { effect, .. } = node.effect.as_mut() {
+                    if let Effect::DestroyAll { target, .. } = effect.effect.as_mut() {
+                        if matches!(target, TargetFilter::TrackedSet { .. }) {
+                            *target = maddening_active_player_non_wall_filter();
+                        }
+                    }
+                }
+                sub = node.sub_ability.as_deref_mut();
+            }
+        }
+    }
+}
+
+/// CR 608.2c: The concrete filter that "those creatures" (Maddening Imp) names —
+/// the non-Wall creatures the mass-attack clause coerced, that didn't attack this
+/// turn. Live-refiltered at end step (DOCUMENTED DEVIATION from the CR 608.2c
+/// frozen-population semantics — there is no forced-attack snapshot producer, so
+/// `TrackedSet(0)` would be empty and destroy nothing). Three divergence
+/// directions from a frozen "those creatures" set (see Identity/Provenance
+/// Route 3):
+///   1. Late-arrival over-inclusion: a non-Wall creature that entered the active
+///      player's control AFTER the `{T}` ability resolved is destroyed here but
+///      was never in "those creatures".
+///   2. Control-change-out under-inclusion: a creature that WAS the active
+///      player's when `{T}` resolved but changed controller before end step is in
+///      the frozen set but spared by this `controller:ActivePlayer` filter.
+///   3. Left-and-re-entered re-capture (CR 400.7 / 603.7c): a creature that left
+///      and re-entered is a new object; the frozen set would not affect it, but
+///      this live filter re-captures it if it currently matches.
+///
+/// If a `MustAttack`-population snapshot producer is later built for the class,
+/// this construction is the single swap site.
+fn maddening_active_player_non_wall_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Wall".into(),
+            ))))
+            .controller(ControllerRef::ActivePlayer)
+            .properties(vec![FilterProp::Not {
+                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
+            }]),
+    )
+}
+
+/// CR 302.6 + CR 508.1a: Recognize Siren's Call's continuous-control exemption
+/// sibling — an `Unimplemented` node whose text is "ignore this effect for each
+/// creature [the player] didn't control continuously since the beginning of the
+/// turn." Decomposed with nom combinators (prefix + optional subject + tail),
+/// not a verbatim string match, so it covers the phrasing class.
+fn sub_ability_is_continuity_exemption(sub: Option<&AbilityDefinition>) -> bool {
+    let Some(sub) = sub else {
+        return false;
+    };
+    let Effect::Unimplemented { name, description } = sub.effect.as_ref() else {
+        return false;
+    };
+    // The full clause lives in `description` ("Ignore this effect for each
+    // creature …"); `name` is only the leading verb token ("ignore"). Match the
+    // description, falling back to `name` if no description is present.
+    let text = description.as_deref().unwrap_or(name).to_lowercase();
+    parse_continuity_exemption_clause(text.trim()).is_ok_and(|(rest, ())| rest.trim().is_empty())
+}
+
+fn parse_continuity_exemption_clause(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag::<_, _, OracleError<'_>>("ignore this effect for each creature").parse(i)?;
+    // Optional subject anaphor: " the player" / " that player" / "".
+    let (i, _) = opt(alt((tag(" the player"), tag(" that player")))).parse(i)?;
+    let (i, _) = alt((tag(" didn't control"), tag(" doesn't control"))).parse(i)?;
+    let (i, _) = tag(" continuously since the beginning of the turn").parse(i)?;
+    Ok((i, ()))
+}
+
+/// Append `prop` to every `Typed` node reachable through `And`/`Or`/`Not`.
+fn add_filter_prop_to_typed(filter: &mut TargetFilter, prop: FilterProp) {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.push(prop),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                add_filter_prop_to_typed(inner, prop.clone());
+            }
+        }
+        TargetFilter::Not { filter } => add_filter_prop_to_typed(filter, prop),
+        _ => {}
+    }
+}
+
+/// Whether a target filter carries `FilterProp::Not(AttackedThisTurn)` on any
+/// `Typed` node reachable through `And`/`Or`/`Not` — the punisher's
+/// "that didn't attack this turn" clause.
+fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Not { prop }
+                    if matches!(prop.as_ref(), FilterProp::AttackedThisTurn { defender: None })
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_has_not_attacked_this_turn)
+        }
+        TargetFilter::Not { filter } => target_filter_has_not_attacked_this_turn(filter),
+        _ => false,
+    }
 }
 
 /// CR 607.1 + CR 610.3: Detect an (ETB exile, LTB return) trigger pair and
@@ -5358,12 +5538,13 @@ fn find_top_level_colon(line: &str) -> Option<usize> {
 /// but only <phrase>" form (and composable with other timing-suffix handlers).
 /// Returns `None` for phrases without a recognized timing gate so the caller can
 /// decline rather than mis-classify.
-fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRestriction>> {
-    let phrase = phrase.trim().trim_end_matches('.').trim();
-    let lower = phrase.to_lowercase();
-    // Speed / turn / upkeep gates — case-insensitive value matches. "their" is the
-    // activating player's possessive, equivalent to "your" once an activator is fixed.
-    let gate = alt((
+/// The single-gate `during`-role / speed sub-combinator, factored out so it can
+/// be the first half of a compound "X and only Y" / "X, Y" activation-timing
+/// gate. Each arm emits an EXISTING enforced `ActivationRestriction` value —
+/// the opponent-turn arm reuses `opponents_turn_activation_restriction()`
+/// (= `RequiresCondition{Not(IsYourTurn)}`), NOT a new variant.
+fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    alt((
         value(
             ActivationRestriction::AsSorcery,
             tag::<_, _, OracleError<'_>>("as a sorcery"),
@@ -5385,10 +5566,49 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
             alt((tag("during your upkeep"), tag("during their upkeep"))),
         ),
     ))
-    .parse(lower.as_str());
+    .parse(i)
+}
+
+/// CR 508.1 + CR 509.1: the combat-window half of a compound activation-timing
+/// gate — "before combat" / "before attackers are declared" both map to the
+/// EXISTING `BeforeAttackersDeclared` variant (enforced via
+/// `is_before_attackers_declared` = `PreCombatMain | BeginCombat`), so no new
+/// variant is introduced.
+fn parse_activation_before_window_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    value(
+        ActivationRestriction::BeforeAttackersDeclared,
+        alt((tag("before combat"), tag("before attackers are declared"))),
+    )
+    .parse(i)
+}
+
+fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let phrase = phrase.trim().trim_end_matches('.').trim();
+    let lower = phrase.to_lowercase();
+    // Speed / turn / upkeep gates — case-insensitive value matches. "their" is the
+    // activating player's possessive, equivalent to "your" once an activator is fixed.
+    let gate = parse_activation_during_role_gate(lower.as_str());
     if let Ok((rest, restr)) = gate {
         if rest.trim().is_empty() {
             return Some(vec![restr]);
+        }
+        // CR 602.5b + CR 102.1 + CR 509.1: compound
+        // "during <turn-role> [and only | , ] before combat/attackers"
+        // activation-timing gate — turn-role half reuses
+        // RequiresCondition{Not(IsYourTurn)} / DuringYourTurn, combat-window half
+        // reuses BeforeAttackersDeclared. Composed with a trailing
+        // `opt(pair(separator, before-window))`, no permutation enumeration and no
+        // `contains`/`split_once` dispatch. Preserves the single-gate behavior
+        // above (a bare "during an opponent's turn" still returns one restriction).
+        let compound = (
+            alt((tag::<_, _, OracleError<'_>>(" and only "), tag(", "))),
+            parse_activation_before_window_gate,
+        )
+            .parse(rest);
+        if let Ok((tail, (_sep, window))) = compound {
+            if tail.trim().is_empty() {
+                return Some(vec![restr, window]);
+            }
         }
     }
     // CR 602.5: "if <condition>" gate (Lightning Storm "if ~ is on the stack").
@@ -5629,25 +5849,12 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        if let Some(prefix) =
-            lower.strip_suffix("activate only during your turn, before attackers are declared")
-        {
-            let end = remaining.len()
-                - "activate only during your turn, before attackers are declared".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringYourTurn);
-            constraints
-                .restrictions
-                .push(ActivationRestriction::BeforeAttackersDeclared);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
+        // CR 602.5b + CR 102.1 + CR 509.1: The former verbatim-string hack for
+        // "activate only during your turn, before attackers are declared" is
+        // subsumed by the compound `parse_activation_timing_restriction` grammar,
+        // which the `activate only ` routing arm above reaches BEFORE this point
+        // (it emits `[DuringYourTurn, BeforeAttackersDeclared]` via the
+        // during-role + before-window sub-combinators). Pinned by Test 10c.
 
         if let Some(prefix) =
             lower.strip_suffix("activate only during combat before combat damage has been dealt")

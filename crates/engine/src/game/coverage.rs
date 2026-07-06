@@ -801,6 +801,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TriggeringPlayer => "triggering player's",
                     // CR 303.4b: Display label for enchanted-player controller scope.
                     ControllerRef::EnchantedPlayer => "enchanted player's",
+                    // CR 102.1: Display label for active-player controller scope.
+                    ControllerRef::ActivePlayer => "the active player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -864,6 +866,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
+            FilterProp::ControlledContinuouslySinceTurnBegan => {
+                parts.push("controlled continuously since turn began".into())
+            }
             FilterProp::ZoneChangedThisTurn { from, to } => parts.push(format!(
                 "zone changed this turn from {} to {}",
                 from.map_or("any".into(), |zone| format!("{zone:?}")),
@@ -950,6 +955,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TriggeringPlayer => "triggering player",
                 // CR 303.4b: Display label for enchanted-player controller scope.
                 ControllerRef::EnchantedPlayer => "enchanted player",
+                // CR 102.1: Display label for active-player controller scope.
+                ControllerRef::ActivePlayer => "the active player",
             };
             parts.push(label.into());
         } else {
@@ -1023,6 +1030,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TriggeringPlayer => "triggering player controls",
         // CR 303.4b: Display label for enchanted-player controller scope.
         ControllerRef::EnchantedPlayer => "enchanted player controls",
+        // CR 102.1: Display label for active-player controller scope.
+        ControllerRef::ActivePlayer => "the active player controls",
     }
     .into()
 }

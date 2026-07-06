@@ -3161,6 +3161,8 @@ fn resolve_ref(
                             )
                             .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 102.1: attachment controlled by the active player.
+                        Some(ControllerRef::ActivePlayer) => snap.controller == state.active_player,
                     })
                     .count(),
             )
@@ -3233,6 +3235,8 @@ fn damage_source_controller_matches(
             &ControllerRef::EnchantedPlayer,
         )
         .is_some_and(|player| actual == player),
+        // CR 102.1: damage source controlled by the active player (read live).
+        ControllerRef::ActivePlayer => actual == state.active_player,
     }
 }
 

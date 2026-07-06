@@ -3764,6 +3764,13 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
             ControllerRef::Opponent,
             tag::<_, _, OracleError<'_>>("your opponents controlled"),
         ),
+        // CR 102.1 + CR 608.2i: past-tense "the active player controlled"
+        // look-back. Longest-match-first preserved (no prefix collision with
+        // the arms above).
+        value(
+            ControllerRef::ActivePlayer,
+            tag::<_, _, OracleError<'_>>("the active player controlled"),
+        ),
     ))
     .parse(trimmed)
     {
