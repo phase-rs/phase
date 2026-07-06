@@ -1625,6 +1625,174 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
     );
 }
 
+/// Builds a face-down morph({3}) creature on `player`'s battlefield via the real
+/// `play_face_down` zone pipeline, which snapshots the real face — including the
+/// morph keyword and its {3} cost — into `back_face`. Returns its `ObjectId`.
+fn setup_face_down_morph(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(4200),
+        player,
+        "Secret Beast".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Beast".to_string()],
+        };
+        obj.power = Some(4);
+        obj.toughness = Some(5);
+        obj.keywords = vec![crate::types::keywords::Keyword::Morph(ManaCost::Cost {
+            generic: 3,
+            shards: vec![],
+        })];
+    }
+    let mut events = Vec::new();
+    crate::game::morph::play_face_down(state, player, id, &mut events).unwrap();
+    assert!(
+        state.objects[&id].face_down,
+        "setup: the morph creature must be face down before the turn-up test"
+    );
+    id
+}
+
+/// Adds `count` untapped green `ManaUnit`s restricted by `restriction` to
+/// `player`'s pool — the only mana in the game, so payment must draw from exactly
+/// these units.
+fn fund_restricted_pool(
+    state: &mut GameState,
+    player: PlayerId,
+    count: usize,
+    restriction: crate::types::mana::ManaRestriction,
+) {
+    let p = state.players.iter_mut().find(|p| p.id == player).unwrap();
+    for _ in 0..count {
+        p.mana_pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(4200),
+            false,
+            vec![restriction.clone()],
+        ));
+    }
+}
+
+/// R1 — CR 116.2b + CR 702.37e + CR 106.6: turn-face-up-restricted mana funds the
+/// morph turn-up special action. Pool = 3× green restricted to
+/// `OnlyForSpecialAction(TurnFaceUp)` (the sole mana source); the {3} morph cost
+/// is paid through `PaymentContext::SpecialAction(TurnFaceUp)`, the permanent
+/// flips face up, a `TurnedFaceUp` event fires, and the pool empties. This is the
+/// positive reach-guard proving the payment routes through the real
+/// `pay_special_action_mana_cost` site, so R2/R3's negatives aren't vacuous.
+#[test]
+fn turn_face_up_restricted_mana_funds_special_action() {
+    use crate::types::mana::{ManaRestriction, SpecialAction};
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+    fund_restricted_pool(
+        &mut state,
+        PlayerId(0),
+        3,
+        ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
+    );
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph })
+        .expect("turn-face-up-restricted mana must fund the morph turn-up special action");
+
+    assert!(
+        !state.objects[&morph].face_down,
+        "the permanent must be face up after paying the morph cost"
+    );
+    assert!(
+        result.events.iter().any(|e| matches!(
+            e,
+            GameEvent::TurnedFaceUp { object_id } if *object_id == morph
+        )),
+        "a TurnedFaceUp event must fire"
+    );
+    let pool = &state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(0))
+        .unwrap()
+        .mana_pool;
+    assert_eq!(
+        pool.total(),
+        0,
+        "the {{3}} morph cost must consume all 3 restricted units"
+    );
+}
+
+/// R2 (LOAD-BEARING charge proof) — CR 116.2b + CR 702.37e: the turn-up special
+/// action now CHARGES the morph cost. With an EMPTY pool and no mana sources the
+/// {3} cost is unpayable, so `apply(TurnFaceUp)` errors and the permanent STAYS
+/// face down.
+///
+/// Revert direction: reverting Step 2 (the handler payment) makes the turn-up
+/// free — `apply` returns `Ok` and the permanent flips face up. Both assertions
+/// below flip, so this is the discriminating proof the cost is actually charged.
+#[test]
+fn turn_face_up_empty_pool_cannot_pay_and_stays_face_down() {
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    assert!(
+        result.is_err(),
+        "with no mana the {{3}} morph turn-up cost must be unpayable: {result:?}"
+    );
+    assert!(
+        state.objects[&morph].face_down,
+        "an unpaid turn-up must leave the permanent face down"
+    );
+}
+
+/// R3 (context precision, hostile) — CR 106.6 + CR 116.2b: mana restricted to a
+/// DIFFERENT special action (`UnlockDoor`) must NOT pay a turn-face-up. Pool = 3×
+/// green restricted to `OnlyForSpecialAction(UnlockDoor)`; `ManaRestriction::
+/// allows` rejects the `SpecialAction(TurnFaceUp)` context, so the {3} cost is
+/// unpayable, the permanent stays face down, and the wrong-context units are
+/// untouched.
+///
+/// Revert direction: if the turn-up emitted the wrong context (`UnlockDoor`) or
+/// the restriction ignored the action, this would pay and flip — all three
+/// assertions flip.
+#[test]
+fn turn_face_up_rejects_unlock_door_restricted_mana() {
+    use crate::types::mana::{ManaRestriction, SpecialAction};
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+    fund_restricted_pool(
+        &mut state,
+        PlayerId(0),
+        3,
+        ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor),
+    );
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    assert!(
+        result.is_err(),
+        "door-unlock-restricted mana must not pay a turn-face-up: {result:?}"
+    );
+    assert!(
+        state.objects[&morph].face_down,
+        "the permanent must stay face down when only wrong-context mana is available"
+    );
+    let pool = &state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(0))
+        .unwrap()
+        .mana_pool;
+    assert_eq!(
+        pool.total(),
+        3,
+        "unlock-restricted mana must not be consumed by a turn-up"
+    );
+}
+
 /// CR 116.2m + CR 709.5e + CR 118.7a: Inquisitive Glimmer — "Unlock costs
 /// you pay cost {1} less." Reduces the generic component of a Room door's
 /// unlock cost before payment, via the single-authority special-action

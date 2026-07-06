@@ -402,7 +402,7 @@
       "id": 14,
       "type": "table",
       "title": "Top reported cards",
-      "description": "Player 'report this card' clicks grouped by oracle_id + name. avg_supported / avg_total triage misparse-vs-known-gap: a low ratio means the parser is missing clauses the card claims, a full ratio (supported = total) points at a runtime/engine bug on an already-parsed card.",
+      "description": "Player 'report this card' clicks grouped by oracle_id + name. Default-sorted by 'unsupported' (avg_total - avg_supported) so the biggest parser gaps lead. 'support_ratio' is avg_supported / avg_total (1.0 = fully parsed). High unsupported / low ratio = the parser is missing clauses the card claims; unsupported = 0 (support_ratio 1.0) points at a runtime/engine bug on an already-parsed card — click those column headers to re-sort into either triage queue.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -416,7 +416,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "SELECT blob5 AS oracle_id, blob7 AS name, sum(_sample_interval) AS reports, round(avg(double2), 1) AS avg_supported, round(avg(double3), 1) AS avg_total FROM phase_telemetry WHERE $timeFilter AND blob1 = 'card_report' GROUP BY oracle_id, name ORDER BY reports DESC LIMIT 50",
+          "query": "SELECT blob5 AS oracle_id, blob7 AS name, sum(_sample_interval) AS reports, round(avg(double2), 1) AS avg_supported, round(avg(double3), 1) AS avg_total, round(avg(double3) - avg(double2), 1) AS unsupported, if(avg(double3) > 0, round(avg(double2) / avg(double3), 2), 1.0) AS support_ratio FROM phase_telemetry WHERE $timeFilter AND blob1 = 'card_report' GROUP BY oracle_id, name ORDER BY unsupported DESC, reports DESC LIMIT 50",
           "rawQuery": true,
           "format": "table",
           "dateTimeType": "DATETIME",
@@ -626,7 +626,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "SELECT mode, sum(if(event = 'game_start', n, 0)) AS starts, sum(if(event = 'game_end', n, 0)) AS ends FROM (SELECT blob5 AS mode, blob1 AS event, sum(_sample_interval) AS n FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_start' GROUP BY mode, event UNION ALL SELECT blob7 AS mode, blob1 AS event, sum(_sample_interval) AS n FROM phase_telemetry WHERE $timeFilter AND blob1 = 'game_end' GROUP BY mode, event) GROUP BY mode ORDER BY starts DESC",
+          "query": "SELECT if(blob1 = 'game_start', blob5, blob7) AS mode, sum(if(blob1 = 'game_start', _sample_interval, 0)) AS starts, sum(if(blob1 = 'game_end', _sample_interval, 0)) AS ends FROM phase_telemetry WHERE $timeFilter AND blob1 IN ('game_start', 'game_end') GROUP BY mode ORDER BY starts DESC",
           "rawQuery": true,
           "format": "table",
           "dateTimeType": "DATETIME",

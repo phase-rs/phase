@@ -1229,7 +1229,16 @@ impl SessionManager {
                 && session
                     .state
                     .waiting_for
-                    .accepts_freeform_blocker_damage_assignment());
+                    .accepts_freeform_blocker_damage_assignment())
+            // CR 107.1c: "remove any number of counters" has a combinatorial legal
+            // space the coarse AI candidates cannot enumerate; the engine handler
+            // (validate_counter_selection) is the real validation boundary, so the
+            // server bypasses its candidate gate for a human's intermediate submit.
+            || (matches!(action, GameAction::ChooseCountersToRemove { .. })
+                && session
+                    .state
+                    .waiting_for
+                    .accepts_freeform_counter_removal());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {
@@ -2385,6 +2394,84 @@ mod tests {
             err.contains("not permitted") || err.contains("permission"),
             "{err}"
         );
+    }
+
+    // CR 107.1c: "remove any number of counters" — a human's intermediate submit
+    // ("remove 2 of 3") is not one of the coarse AI candidates (remove-none /
+    // remove-all), so the session must bypass its candidate legality gate via
+    // accepts_freeform_counter_removal + the skip_legality arm. Reverting either
+    // (#9 / #10) makes the intermediate submission fail as "Illegal action".
+    #[test]
+    fn remove_counters_intermediate_submit_bypasses_candidate_gate() {
+        use engine::types::ability::{
+            Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        };
+        use engine::types::counter::CounterType;
+        use engine::types::game_state::{CounterRemoveChoice, GameState, WaitingFor};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token) = mgr.create_game(make_deck());
+
+        let mut state = GameState::new_two_player(7);
+        let bearer = engine::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bearer)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 3);
+        let pending = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
+                target: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(bearer)],
+            bearer,
+            PlayerId(0),
+        );
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::RemoveCountersChoice {
+            player: PlayerId(0),
+            source_id: bearer,
+            counter_type: None,
+            available: vec![(CounterType::Plus1Plus1, 3)],
+            pending_effect: Box::new(pending),
+        };
+        mgr.sessions.get_mut(&code).unwrap().state = state;
+
+        // Discriminating: this "remove 2 of 3" submit is absent from the coarse
+        // candidate set ({[], remove-all}); only the accepts_freeform bypass makes
+        // it legal (revert accepts_freeform_counter_removal -> false => rejected).
+        let result = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::ChooseCountersToRemove {
+                selections: vec![CounterRemoveChoice {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 2,
+                }],
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "intermediate removal must be accepted, not rejected as illegal: {result:?}"
+        );
+        let removed_to = mgr.sessions.get(&code).unwrap().state.objects[&bearer]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(removed_to, 1, "exactly 2 of 3 +1/+1 counters removed");
     }
 
     #[test]

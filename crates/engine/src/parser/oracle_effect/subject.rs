@@ -52,6 +52,22 @@ pub(super) fn try_parse_subject_predicate_ast(
         return None;
     }
 
+    // CR 723.1 / CR 723.2: "you control [target] during [possessive] next turn /
+    // next combat phase" (Mindslaver / Secret of Bloodbending) is a
+    // `ControlNextTurn` imperative, not a subject-predicate grant. The imperative
+    // path owns the window axis; without this deferral the subject grammar
+    // mis-parses the trailing "combat phase" into an `Unimplemented` remnant.
+    if matches!(
+        imperative::parse_targeted_action_ast(
+            text,
+            &text.to_lowercase(),
+            &mut ParseContext::default()
+        ),
+        Some(crate::parser::oracle_ir::ast::TargetedImperativeAst::ControlNextTurn { .. })
+    ) {
+        return None;
+    }
+
     // CR 120.1 + CR 115.1d: defer the "up to two target creatures you control each
     // deal damage equal to their power to target creature" shape to the imperative
     // path, which preserves both the targeted source set and the recipient as
@@ -301,6 +317,54 @@ fn try_parse_contracted_subject_additive_type_clause(
     let rest_original = &text[prefix_len..];
     let predicate = format!("is {rest_original}");
     let application = additive_type_subject_application(subject_text, ctx)?;
+
+    // CR 205.1a + CR 205.1b + CR 613.1d + CR 611.2a + CR 400.7 + CR 603.6:
+    // type-REPLACEMENT copula — "It's a Treasure artifact with '<ability>', and it
+    // loses all other card types" (Vraska, the Silencer). The "loses all other card
+    // types" tail (kept attached to the copula by the sequence splitter) routes this
+    // to the shared `SetCardTypes` + subtype + granted-ability builder — the same
+    // modifications the copy path already emits (Shelob) — reused here on the
+    // subject-copula path. Tried BEFORE the additive form because the replacement
+    // tail must win over the type-addition reading (mirrors the copy-path ordering
+    // in `parse_except_body`). Like the animation arm below, this anaphor names the
+    // object the PRECEDING clause returned (a reanimated card), never the source
+    // permanent, so gate on a real prior referent (`ParentTarget`, or the
+    // `TriggeringSource` that was returned by a dies-trigger reanimate) and decline
+    // `SelfRef` so a source-permanent misbind honest-defers instead. Installed as an
+    // indefinite continuous effect that ends when the returned object leaves play
+    // (CR 611.2a: no stated duration; CR 400.7: a new object on re-entry is not the
+    // same object — mirrors `install_aura_continuous_effect`).
+    if let Some((_, modifications)) =
+        super::become_copy_except::parse_its_a_type_loses_others(&lower)
+    {
+        let affected = static_affected_for_application(&application);
+        if matches!(
+            affected,
+            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+        ) {
+            return Some(ClauseAst::SubjectPredicate {
+                subject: Box::new(SubjectPhraseAst {
+                    affected: application.affected.clone(),
+                    target: application.target.clone(),
+                    multi_target: application.multi_target.clone(),
+                    inherits_parent: application.inherits_parent,
+                    is_optional: application.is_optional,
+                }),
+                predicate: Box::new(PredicateAst::Become {
+                    effect: Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(affected)
+                            .modifications(modifications)
+                            .description(predicate.clone())],
+                        duration: Some(Duration::UntilHostLeavesPlay),
+                        target: application.target.clone(),
+                    },
+                    duration: Some(Duration::UntilHostLeavesPlay),
+                    sub_ability: None,
+                }),
+            });
+        }
+    }
 
     // CR 205.1b: additive form first — "it's a [type] in addition to its other
     // types" retains prior types (AddType/AddSubtype only).
@@ -3813,11 +3877,17 @@ fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
 /// - "all colors" / "every color" → `SetColor(WUBRG)` (CR 105.2: a multicolored
 ///   object can be each of the five colors). The new color set replaces all
 ///   previous colors (CR 105.3).
-/// - "the chosen color" → `AddChosenColor`, reading the source's
-///   `ChosenAttribute::Color` bound by a preceding `Effect::Choose` in the same
-///   ability (Puca's Eye: "draw a card, then choose a color. This artifact
-///   becomes the chosen color"). Despite the additive-sounding `Add` prefix,
-///   `AddChosenColor` SETS the color at Layer 5 (CR 105.3) — see its definition.
+/// - "the chosen color" / "that color" → `AddChosenColor`, reading the source's
+///   `ChosenAttribute::Color`. For "the chosen color" the color is bound by a
+///   preceding `Effect::Choose` in the same ability (Puca's Eye: "draw a card,
+///   then choose a color. This artifact becomes the chosen color"). For "that
+///   color" (CR 106.1a + CR 202.2) the color is bound by the mana produced
+///   earlier in the SAME activated mana ability ("Add one mana of any color.
+///   This creature becomes that color", Foraging Wickermaw) — the mana producer
+///   records it as `ChosenAttribute::Color` on the source
+///   (`produce_mana_from_ability`), and this `AddChosenColor` reads it live at
+///   Layer 5. Despite the additive-sounding `Add` prefix, `AddChosenColor` SETS
+///   the color at Layer 5 (CR 105.3 / CR 613.1e) — see its definition.
 ///
 /// Returns `None` for any other predicate so the caller falls through to the
 /// fixed-color animation path (which already handles single named colors) and to
@@ -3838,6 +3908,7 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
     if all_consuming(alt((
         tag::<_, _, OracleError<'_>>("the chosen color"),
         tag("the color chosen this way"),
+        tag("that color"),
     )))
     .parse(lower.as_str())
     .is_ok()
@@ -5345,6 +5416,28 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
+
+    /// CR 105.3 + CR 106.1a: "becomes that color" (Foraging Wickermaw) maps to the
+    /// same `AddChosenColor` reader as "the chosen color" (Puca's Eye) — only the
+    /// upstream writer differs (mana production vs `Effect::Choose`). Regression-
+    /// guards the sibling arms so a future edit can't drop them.
+    #[test]
+    fn become_that_color_maps_to_add_chosen_color() {
+        assert!(matches!(
+            try_parse_become_color_modification("that color"),
+            Some(ContinuousModification::AddChosenColor)
+        ));
+        assert!(matches!(
+            try_parse_become_color_modification("the chosen color"),
+            Some(ContinuousModification::AddChosenColor)
+        ));
+        assert!(matches!(
+            try_parse_become_color_modification("all colors"),
+            Some(ContinuousModification::SetColor { .. })
+        ));
+        // Unrelated predicates still fall through (the animation path handles them).
+        assert!(try_parse_become_color_modification("a giant lizard").is_none());
+    }
 
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
     // (unconditional form — no "that don't have" clause) must produce the

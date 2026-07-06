@@ -1,4 +1,4 @@
-import type { GameAction, GameEvent, GameState, LegalActionsResult, ManaCost } from "../adapter/types";
+import type { GameAction, GameEvent, GameLogEntry, GameState, LegalActionsResult, ManaCost } from "../adapter/types";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 
 /**
@@ -52,8 +52,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   2 — gzip + version-prefixed binary wire format
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
  *   4 — Archenemy derived view and scheme deck payloads
+ *   5 — CardPredicateGuessMade game event shape
  */
-export const WIRE_PROTOCOL_VERSION = 4 as const;
+export const WIRE_PROTOCOL_VERSION = 5 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
@@ -71,6 +72,7 @@ export type P2PMessage =
       type: "state_update";
       state: GameState;
       events: GameEvent[];
+      logEntries?: GameLogEntry[];
     } & LegalActionsWire)
   | { type: "action_rejected"; reason: string }
   | { type: "ping"; timestamp: number }

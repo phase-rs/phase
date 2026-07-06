@@ -97,6 +97,7 @@
     },
     "emblemTag": "Emblem",
     "allPlayers": "All",
+    "allZones": "All zones",
     "cancel": "Cancel"
   },
   "board": {
@@ -301,6 +302,7 @@
     "confirmDistribute_other": "Declare {{count}} Attackers"
   },
   "fullControl": {
+    "label": "Control",
     "on": "Full Control On",
     "off": "Full Control Off",
     "tooltip": "Hold priority windows instead of letting quiet spots auto-pass. Shortcut: F."
@@ -620,11 +622,19 @@
   },
   "priorityYield": {
     "listHeader": "Priority yields",
-    "yieldThis": "Yield this",
-    "yieldAllCopies": "Yield all copies",
+    "menuHeader": "Auto-pass this trigger",
+    "menuExplainer": "Skip the prompt where the game stops to ask you to act each time this trigger is put on the stack. You can still respond to other things.",
+    "yieldThis": "Only this one",
+    "yieldThisHint": "Just this {{source}} — not other copies",
+    "yieldAllCopies": "All copies",
+    "allCopiesHint": "Every {{source}}, including new ones",
     "revoke": "Revoke",
+    "revokeHint": "Go back to stopping for this trigger",
     "clearAll": "Clear all",
-    "allCopiesHint": "Recommended for token triggers"
+    "menuButton": "Auto-pass this trigger",
+    "menuButtonActive": "Auto-passing — change or revoke",
+    "menuButtonShort": "Auto-pass",
+    "menuButtonShortActive": "Auto-passing"
   },
   "targeting": {
     "choosePermanentToCopy": "Choose a permanent to copy",
@@ -1768,6 +1778,8 @@
       "twoColors": "Choose Two Colors",
       "numberRange": "Choose a Number",
       "labeled": "Make a Choice",
+      "cardPredicate": "Choose a card kind",
+      "cardPredicateGuess": "Guess a card kind",
       "keyword": "Choose an Ability",
       "counterKind": "Choose a Counter",
       "fallback": "Make a Choice"
@@ -1945,6 +1957,11 @@
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
+  },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
   },
   "coinFlip": {
     "keep": {

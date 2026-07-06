@@ -1,12 +1,13 @@
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CardTypeSetSource, CastManaSpentMetric,
-    CombatRelationSubject, ControllerRef, CounterMoveSelection, DamageSource, Effect, EffectScope,
-    FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardTypeSetSource,
+    CastManaSpentMetric, CombatRelationSubject, ControllerRef, CounterMoveSelection, DamageSource,
+    Effect, EffectScope, FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -1803,9 +1804,18 @@ fn companion_target_player_legal_targets(
         .source_incarnation
         .and_then(|_| damaged_player_targets_for_companion_slot(state))
         .unwrap_or_else(|| {
+            // CR 109.4 + CR 102.2 / CR 102.3: "target opponent controls" offers only
+            // opponents (self excluded; any one opponent in >2p). Reuses the
+            // Typed{controller:Opponent} legality path bare "target opponent" uses
+            // (targeting.rs → players::is_opponent). Plain "target player" → any player.
+            let slot_filter = if effect_references_target_opponent(&ability.effect) {
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+            } else {
+                TargetFilter::Player
+            };
             targeting::find_legal_targets(
                 state,
-                &TargetFilter::Player,
+                &slot_filter,
                 ability.controller,
                 ability.source_id,
             )
@@ -2467,6 +2477,90 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
     }
 }
 
+fn target_filter_contains_amassed_army_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_contains_amassed_army_ref),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_contains_amassed_army_ref(filter)
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_contains_amassed_army_ref)
+        }
+        _ => false,
+    }
+}
+
+fn filter_prop_contains_amassed_army_ref(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => quantity_expr_contains_amassed_army_ref(value),
+        FilterProp::CanEnchant { target } => target_filter_contains_amassed_army_ref(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => target_filter_contains_amassed_army_ref(filter),
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(target_filter_contains_amassed_army_ref),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_amassed_army_ref),
+        FilterProp::Not { prop } => filter_prop_contains_amassed_army_ref(prop),
+        _ => false,
+    }
+}
+
+fn quantity_expr_contains_amassed_army_ref(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::Power {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::Toughness {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectColorCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectNameWordCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectTypelineComponentCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::AmassedArmy,
+                    ..
+                },
+        } => true,
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_contains_amassed_army_ref(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_contains_amassed_army_ref)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_amassed_army_ref(left)
+                || quantity_expr_contains_amassed_army_ref(right)
+        }
+    }
+}
+
+fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
+    target_filter_contains_chosen_x_ref(filter) || target_filter_contains_amassed_army_ref(filter)
+}
+
 /// CR 601.2c: A negated prop (`FilterProp::Not`) can wrap an X-bearing prop
 /// (e.g. `Not(Cmc { value: X })`), so X resolution must descend into it just
 /// like the `CanEnchant` filter-bearing arm — otherwise an unannounced X in a
@@ -2520,57 +2614,11 @@ fn ability_distribution_pool_needs_chosen_x(
 /// `TargetFilter::Player` target slot. This covers filters that reference
 /// `ControllerRef::TargetPlayer` and restriction effects whose affected player
 /// scope is the declared "target player".
-fn effect_references_target_player(effect: &Effect) -> bool {
-    if let Effect::AddRestriction {
-        restriction:
-            GameRestriction::ProhibitActivity {
-                affected_players: RestrictionPlayerScope::TargetedPlayer,
-                ..
-            },
-    } = effect
-    {
-        return true;
-    }
-
-    if let Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } =
-        effect
-    {
-        return filter_references_target_player(attachment)
-            || filter_references_target_player(target);
-    }
-
-    if let Effect::GenericEffect {
-        static_abilities,
-        target: None,
-        ..
-    } = effect
-    {
-        if static_abilities.iter().any(|static_def| {
-            static_def
-                .affected
-                .as_ref()
-                .is_some_and(filter_references_target_player)
-        }) {
-            return true;
-        }
-    }
-
-    match effect.target_filter() {
-        Some(f) if filter_references_target_player(f) => return true,
-        _ => {}
-    }
-    // Also inspect mass-placement `target` fields that are NOT surfaced as
-    // target slots (PutCounterAll, DestroyAll, PumpAll, DamageAll, etc. —
-    // their `target_filter()` returns None because the field is a mass
-    // filter, not a targeting filter).
-    //
-    // CR 115.1 + CR 404 + CR 406: A mass filter set to `TargetFilter::Player`
-    // (e.g. `ChangeZoneAll { origin: Graveyard, target: Player }` for
-    // "exile target player's graveyard" — Nihil Spellbomb, Bojuka Bog,
-    // Tormod's Crypt class) parameterizes the scan by a player target. Surface
-    // the companion player slot so the resolver's `player_scope` branch
-    // reads the chosen target out of `ability.targets` instead of falling
-    // back to the activator's own graveyard.
+/// Mass-placement `target` field that is NOT surfaced as a normal target slot
+/// (`PutCounterAll`, `DestroyAll`, …). Their `target_filter()` returns `None`
+/// because the field is a resolution-time population scan, not a targeting filter.
+/// Single authority for the mass-target variant list.
+fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
         Effect::PutCounterAll { target, .. }
         | Effect::DestroyAll { target, .. }
@@ -2585,11 +2633,69 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => {
-            matches!(target, TargetFilter::Player) || filter_references_target_player(target)
-        }
-        _ => false,
+        | Effect::DoublePTAll { target, .. } => Some(target),
+        _ => None,
     }
+}
+
+/// Shared walker behind the target-player / target-opponent companion-slot
+/// detectors. Returns true if any filter seam (`Attach` operands, a non-targeted
+/// `GenericEffect`'s static `affected`, the effect's own `target_filter()`, or a
+/// mass-placement `target`) satisfies `pred`.
+fn effect_bound_filter_matches(effect: &Effect, pred: fn(&TargetFilter) -> bool) -> bool {
+    if let Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } =
+        effect
+    {
+        if pred(attachment) || pred(target) {
+            return true;
+        }
+    }
+    if let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    {
+        if static_abilities
+            .iter()
+            .any(|static_def| static_def.affected.as_ref().is_some_and(pred))
+        {
+            return true;
+        }
+    }
+    if effect.target_filter().is_some_and(pred) {
+        return true;
+    }
+    mass_all_target_filter(effect).is_some_and(pred)
+}
+
+fn effect_references_target_player(effect: &Effect) -> bool {
+    if let Effect::AddRestriction {
+        restriction:
+            GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::TargetedPlayer,
+                ..
+            },
+    } = effect
+    {
+        return true;
+    }
+    // CR 115.1 + CR 404 + CR 406: A mass filter set to a bare `TargetFilter::Player`
+    // (e.g. `ChangeZoneAll { origin: Graveyard, target: Player }` for "exile target
+    // player's graveyard" — Nihil Spellbomb class) parameterizes the scan by a player
+    // target and needs a companion slot even though no controller ref is present.
+    if mass_all_target_filter(effect).is_some_and(|t| matches!(t, TargetFilter::Player)) {
+        return true;
+    }
+    effect_bound_filter_matches(effect, filter_references_target_player)
+}
+
+/// CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained sibling of
+/// `effect_references_target_player` — no `AddRestriction` / bare-`Player` branch
+/// (those are opponent-agnostic). Drives the companion-slot legal-target
+/// discriminator only.
+fn effect_references_target_opponent(effect: &Effect) -> bool {
+    effect_bound_filter_matches(effect, filter_references_target_opponent)
 }
 
 fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool {
@@ -2718,31 +2824,47 @@ fn attach_side_needs_target_slot(filter: &TargetFilter, is_attachment: bool) -> 
     }
 }
 
-/// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside
-/// it binds to `ControllerRef::TargetPlayer`.
-pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
+/// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
+/// carries a `controller` (or `Owned` property) satisfying `pred`. Shared walker
+/// behind `filter_references_target_player` / `filter_references_target_opponent`.
+fn filter_binds_controller(filter: &TargetFilter, pred: fn(&ControllerRef) -> bool) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter {
             controller,
             properties,
             ..
         }) => {
-            matches!(controller, Some(ControllerRef::TargetPlayer))
-                || properties.iter().any(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::Owned {
-                            controller: ControllerRef::TargetPlayer,
-                        }
-                    )
-                })
+            controller.as_ref().is_some_and(pred)
+                || properties.iter().any(
+                    |prop| matches!(prop, FilterProp::Owned { controller } if pred(controller)),
+                )
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_references_target_player)
+            filters.iter().any(|f| filter_binds_controller(f, pred))
         }
-        TargetFilter::Not { filter } => filter_references_target_player(filter),
+        TargetFilter::Not { filter } => filter_binds_controller(filter, pred),
         _ => false,
     }
+}
+
+/// CR 109.4 + CR 115.1: Returns true if any `TypedFilter` binds to a
+/// declared-target player scope — `TargetPlayer` (any player) or `TargetOpponent`
+/// (opponent-only). Both surface a companion player slot; they differ only in that
+/// slot's legal targets, so slot *detection* treats them alike.
+pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
+    filter_binds_controller(filter, |c| {
+        matches!(
+            c,
+            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
+        )
+    })
+}
+
+/// CR 109.4 + CR 102.2 / CR 102.3: Opponent-constrained mirror — true only for
+/// `TargetOpponent`. Drives the companion-slot legal-target discriminator
+/// (opponent-only vs. any player).
+fn filter_references_target_opponent(filter: &TargetFilter) -> bool {
+    filter_binds_controller(filter, |c| matches!(c, ControllerRef::TargetOpponent))
 }
 
 /// CR 115.1 + CR 118.12a: True when an `UnlessPayModifier` payer was DECLARED as a
@@ -2810,9 +2932,9 @@ pub(crate) fn collect_player_targets(
                 Some(ControllerRef::ScopedPlayer) => {
                     p.id == ability.scoped_player.unwrap_or(ability.controller)
                 }
-                // CR 109.4: TargetPlayer is ambiguous here (player targets are
-                // resolved from ability.targets directly); fail closed.
-                Some(ControllerRef::TargetPlayer) => false,
+                // CR 109.4: TargetPlayer / TargetOpponent are ambiguous here (player
+                // targets are resolved from ability.targets directly); fail closed.
+                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
@@ -3606,7 +3728,7 @@ fn legal_targets_for_ability_filter_uncapped(
         return targets;
     }
 
-    let needs_ability_context = target_filter_contains_chosen_x_ref(filter);
+    let needs_ability_context = target_filter_needs_ability_context(filter);
     let relative_kind = relative_controller_kind(filter);
     if relative_kind.is_none() {
         if needs_ability_context {
@@ -3635,11 +3757,9 @@ fn legal_targets_for_ability_filter_uncapped(
     // uniformly for both the `You` (per-player iteration) and `TargetPlayer`
     // (Karazikar-style attacked-player) cases.
     let enumeration_filter = match relative_kind {
-        Some(crate::types::ability::ControllerRef::TargetPlayer) => rewrite_relative_controller(
-            filter,
-            crate::types::ability::ControllerRef::TargetPlayer,
-            crate::types::ability::ControllerRef::You,
-        ),
+        Some(crate::types::ability::ControllerRef::TargetPlayer) => {
+            rewrite_declared_target_player(filter, crate::types::ability::ControllerRef::You)
+        }
         _ => filter.clone(),
     };
 
@@ -3682,13 +3802,19 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
     match filter {
         TargetFilter::Typed(tf) => match tf.controller {
             Some(ControllerRef::You) => Some(ControllerRef::You),
-            Some(ControllerRef::TargetPlayer) => Some(ControllerRef::TargetPlayer),
+            // CR 109.4 + CR 102.2 / CR 102.3: normalize the opponent-constrained scope
+            // to TargetPlayer so the per-player re-enumeration guards / rewrite args
+            // (hardcoded on TargetPlayer) fire; the opponent constraint already lives
+            // in the companion slot's legal-target set.
+            Some(ControllerRef::TargetPlayer) | Some(ControllerRef::TargetOpponent) => {
+                Some(ControllerRef::TargetPlayer)
+            }
             _ => tf.properties.iter().find_map(|prop| match prop {
                 FilterProp::Owned {
                     controller: ControllerRef::You,
                 } => Some(ControllerRef::You),
                 FilterProp::Owned {
-                    controller: ControllerRef::TargetPlayer,
+                    controller: ControllerRef::TargetPlayer | ControllerRef::TargetOpponent,
                 } => Some(ControllerRef::TargetPlayer),
                 _ => None,
             }),
@@ -3794,9 +3920,10 @@ fn per_opponent_fanout_constraint_targets(
 }
 
 fn per_opponent_fanout_object_filter(ability: &ResolvedAbility) -> Option<TargetFilter> {
-    ability.effect.target_filter().map(|filter| {
-        rewrite_relative_controller(filter, ControllerRef::TargetPlayer, ControllerRef::You)
-    })
+    ability
+        .effect
+        .target_filter()
+        .map(|filter| rewrite_declared_target_player(filter, ControllerRef::You))
 }
 
 fn per_opponent_fanout_legal_object_targets(
@@ -3970,6 +4097,172 @@ fn rewrite_relative_controller(
     }
 }
 
+/// CR 109.4 + CR 102.2 / CR 102.3: rewrite BOTH declared-target-player scopes
+/// (`TargetPlayer` and `TargetOpponent`) to `to`. `relative_controller_kind`
+/// normalizes `TargetOpponent` → `TargetPlayer`, so a naive single-`TargetPlayer`
+/// rewrite would leave a `TargetOpponent` occurrence behind and the per-player
+/// enumeration would fail closed.
+// ponytail: covers the dependent-object-slot subclass ("destroy target creature
+// target opponent controls"); the mass class (Quick Draw / DamageAll) has
+// target_filter() == None and never reaches these rewrite sites.
+fn rewrite_declared_target_player(
+    filter: &TargetFilter,
+    to: crate::types::ability::ControllerRef,
+) -> TargetFilter {
+    use crate::types::ability::ControllerRef;
+    let rewritten = rewrite_relative_controller(filter, ControllerRef::TargetPlayer, to.clone());
+    rewrite_relative_controller(&rewritten, ControllerRef::TargetOpponent, to)
+}
+
+/// CR 201.5a + CR 613.1f: Concretize `TargetFilter::GrantingObject` → the live
+/// granting object once a granted ability is cloned onto its recipient at a
+/// Layer-6 grant (`game/layers.rs` GrantAbility/GrantTrigger). `granter` is the
+/// granting object's id (`effect.source_id` at the grant site). Walks the
+/// definition's cost, effect, and nested sub/else/mode abilities.
+///
+/// This is the single concretization point: at parse time the granted body's
+/// by-name reference to its granting object is a symbolic `GrantingObject`; here
+/// it becomes a concrete `SpecificObject { id }`, so no new runtime resolution
+/// logic is required. Host self-references (`SelfRef`) and every other filter
+/// are left untouched — the dual binding (granter vs. host) is preserved.
+/// Idempotent and re-minted each layer pass (CR 613.1f: Layer 6 ability-adding
+/// effects are applied fresh each pass).
+///
+/// ZONE-MOVE SCOPING (CR 201.5a second sentence + CR 400.7): the snapshot binds
+/// the granter's CURRENT battlefield id. It is correct only while the granter is
+/// not moved-then-re-referenced within a single resolution. CR 201.5a's second
+/// sentence — "if the second ability also moved the first ability's source to a
+/// different public zone, the name refers to the object the source became in its
+/// new zone" — is not modeled: a granter that leaves the battlefield becomes a
+/// new object (CR 400.7), so a later reference would need the new-zone object.
+/// No R4 card requires this today: Hammer/Bracelet move as a *cost* (paid and
+/// gone before the effect, never re-referenced); Trusty/Razor/Toralf Boomerang
+/// return themselves as their final action. A future card that exiles-or-moves
+/// its granter and then references it again in the same resolution must extend
+/// this to carry the post-move incarnation.
+pub(crate) fn concretize_granting_object(def: &mut AbilityDefinition, granter: ObjectId) {
+    if let Some(cost) = def.cost.as_mut() {
+        concretize_granting_object_in_cost(cost, granter);
+    }
+    concretize_granting_object_in_effect(def.effect.as_mut(), granter);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        concretize_granting_object(sub, granter);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        concretize_granting_object(els, granter);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        concretize_granting_object(mode, granter);
+    }
+}
+
+/// CR 201.5a: Concretize `GrantingObject` inside a granted *trigger's* execute
+/// chain (`game/layers.rs` GrantTrigger — e.g. a "you may sacrifice <granter>"
+/// action). The trigger's condition/metadata filters never carry a granter
+/// by-name self-reference, so only `execute` is walked.
+pub(crate) fn concretize_granting_object_in_trigger(
+    trigger: &mut TriggerDefinition,
+    granter: ObjectId,
+) {
+    if let Some(execute) = trigger.execute.as_mut() {
+        concretize_granting_object(execute, granter);
+    }
+}
+
+fn concretize_granting_object_in_filter(filter: &mut TargetFilter, granter: ObjectId) {
+    match filter {
+        TargetFilter::GrantingObject => *filter = TargetFilter::SpecificObject { id: granter },
+        TargetFilter::Not { filter } => concretize_granting_object_in_filter(filter, granter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for f in filters {
+                concretize_granting_object_in_filter(f, granter);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn concretize_granting_object_in_cost(cost: &mut AbilityCost, granter: ObjectId) {
+    match cost {
+        AbilityCost::Sacrifice(sac) => {
+            concretize_granting_object_in_filter(&mut sac.target, granter)
+        }
+        AbilityCost::Exile {
+            filter: Some(f), ..
+        }
+        | AbilityCost::ReturnToHand {
+            filter: Some(f), ..
+        }
+        | AbilityCost::RemoveCounter {
+            target: Some(f), ..
+        } => concretize_granting_object_in_filter(f, granter),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            for c in costs.iter_mut() {
+                concretize_granting_object_in_cost(c, granter);
+            }
+        }
+        AbilityCost::EffectCost { effect } => concretize_granting_object_in_effect(effect, granter),
+        _ => {}
+    }
+}
+
+/// Mirrors the canonical target-bearing `Effect` list
+/// (`oracle_effect::rewrite_parent_targets_to_tracked_set`). Effects with no
+/// `target` slot cannot carry a `GrantingObject`, so `_ => {}` is complete for
+/// the emitting parser paths; any future target-bearing effect that is missed
+/// degrades fail-safe (runtime resolves an un-concretized `GrantingObject` to
+/// the ability source — the pre-fix host binding), never worse.
+fn concretize_granting_object_in_effect(effect: &mut Effect, granter: ObjectId) {
+    match effect {
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
+        | Effect::Destroy { target, .. }
+        | Effect::GainControl { target }
+        | Effect::Fight { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::DealDamage { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::Counter { target, .. }
+        | Effect::Transform { target, .. }
+        | Effect::Connive { target, .. }
+        | Effect::PhaseOut { target }
+        | Effect::PhaseIn { target }
+        | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
+        | Effect::CastCopyOfCard { target, .. }
+        | Effect::CopyTokenOf { target, .. }
+        | Effect::PutCounter { target, .. }
+        | Effect::RemoveCounter { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::CastFromZone { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. } => {
+            concretize_granting_object_in_filter(target, granter)
+        }
+        // Parity with `rewrite_parent_targets_to_tracked_set`: walk both the
+        // GenericEffect target and any granted static's `affected` filter.
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
+            if let Some(t) = target {
+                concretize_granting_object_in_filter(t, granter);
+            }
+            for static_def in static_abilities.iter_mut() {
+                if let Some(affected) = static_def.affected.as_mut() {
+                    concretize_granting_object_in_filter(affected, granter);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
     let mut specs = Vec::new();
     // CR 601.2c + CR 115.3: instance ids are allocated densely from 0 as specs
@@ -4126,15 +4419,13 @@ fn legal_targets_for_selected_slot(
             ability.controller
         };
         let enumeration_filter = match relative_kind {
-            Some(ControllerRef::TargetPlayer) => rewrite_relative_controller(
-                &spec.filter,
-                ControllerRef::TargetPlayer,
-                ControllerRef::You,
-            ),
+            Some(ControllerRef::TargetPlayer) => {
+                rewrite_declared_target_player(&spec.filter, ControllerRef::You)
+            }
             _ => spec.filter.clone(),
         };
 
-        if target_filter_contains_chosen_x_ref(&enumeration_filter) {
+        if target_filter_needs_ability_context(&enumeration_filter) {
             if controller == ability.controller {
                 targeting::find_legal_targets_for_ability(state, &enumeration_filter, ability)
             } else {

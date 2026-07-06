@@ -581,6 +581,12 @@ export type CounterCostChoice = {
   count: number;
 };
 
+// CR 107.1c: one per-type entry of a "remove any number of counters" selection.
+export type CounterRemoveChoice = {
+  counter_type: CounterType;
+  count: number;
+};
+
 export type PlayerCounterKind =
   | "Poison"
   | "Experience"
@@ -1332,7 +1338,9 @@ export type WaitingFor =
   | { type: "AssignBlockerDamage"; data: { player: PlayerId; blocker_id: ObjectId; total_damage: number; attackers: ObjectId[] } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
+  | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
+  | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
       cards: ObjectId[];
@@ -1755,6 +1763,7 @@ export type GameAction =
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
   | { type: "ChooseRemoveCounterCostDistribution"; data: { distribution: CounterCostChoice[] } }
   | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
+  | { type: "ChooseCountersToRemove"; data: { selections: CounterRemoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
   | { type: "ChooseDungeon"; data: { dungeon: DungeonId } }
@@ -1850,6 +1859,7 @@ export type GameEvent =
   | { type: "TokenCreated"; data: { object_id: ObjectId; name: string; source_id: ObjectId } }
   | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
+  | { type: "ArmyAmassed"; data: { object_id: ObjectId; source_id: ObjectId; controller: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
   | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId; attacks?: [ObjectId, AttackTarget][] } }
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
@@ -1881,6 +1891,7 @@ export type GameEvent =
   | { type: "BecomesPlotted"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
+  | { type: "CardPredicateGuessMade"; data: { player_id: PlayerId; source_id: ObjectId | null; choice: string } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }

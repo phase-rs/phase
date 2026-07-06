@@ -1986,6 +1986,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         if let Effect::Dig {
             reveal: false,
             keep_count: None,
+            keep_count_expr: None,
             filter: TargetFilter::Any,
             destination: None,
             rest_destination: None,
@@ -2160,6 +2161,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     rewire_cross_sentence_token_counter_attach(&mut result);
     rewire_token_attach_sibling(&mut result);
     fold_token_it_has_grants_into_token_statics(&mut result);
+    fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
@@ -2193,6 +2195,15 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         result.optional_for = None;
     }
 
+    // CR 608.2c PRECONDITION (not a card-name suppression): "the card revealed by
+    // the OTHER player" DENOTES a card only when the same assembled chain carries a
+    // multi-player reveal fan-out. `ObjectScope::OtherRevealedCard` is well-formed
+    // only when a sibling `RevealTop` distributes to >=2 players (`multi_target`
+    // present). Applied on the FINAL tree (this chokepoint sees the complete
+    // structure regardless of when `multi_target` was attached), so the presence
+    // check is robustly correct.
+    gate_other_revealed_card_on_multiplayer_reveal(&mut result);
+
     // CR 608.2c + CR 107.1c: A trailing "repeat this process" directive sets a
     // chain-level loop predicate; apply it to the assembled root ability so the
     // resolver re-follows the whole chain.
@@ -2201,6 +2212,192 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     result
+}
+
+/// CR 608.2c: The anaphor `ObjectScope::OtherRevealedCard` ("the card revealed by
+/// the other player") is only well-formed when its host chain contains a
+/// multi-player reveal fan-out — a `RevealTop` whose ability carries a
+/// `multi_target` spec (a >=2-player reveal shape). A single-subject reveal
+/// provides no "other" anchor, so any OtherRevealedCard-bearing effect is rewritten
+/// back to an honest `Effect::Unimplemented` gap. Predicate is `multi_target`
+/// PRESENCE (not `min >= 2`) so a future "any number of target players each …"
+/// host (`Some { max: None }`, `min: 0`) is not false-negatived; the runtime
+/// resolved-to-<2-players case is handled separately by the by-exclusion
+/// fail-closed read (→ 0). Parker Luck (`multi_target` present) keeps its parsed
+/// `LoseLife`; Keen Duelist ("you and target opponent each", lowered to
+/// `RevealTop { player: Any }`, no `multi_target`) stays honest-red until its
+/// compound-subject distribution is built.
+fn gate_other_revealed_card_on_multiplayer_reveal(def: &mut AbilityDefinition) {
+    if chain_has_multiplayer_reveal(def) {
+        return;
+    }
+    rewrite_other_revealed_card_to_unimplemented(def);
+}
+
+/// True when any def in the chain is a `RevealTop` carrying a `multi_target` spec.
+fn chain_has_multiplayer_reveal(def: &AbilityDefinition) -> bool {
+    if matches!(&*def.effect, Effect::RevealTop { .. }) && def.multi_target.is_some() {
+        return true;
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(chain_has_multiplayer_reveal)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_has_multiplayer_reveal)
+        || def.mode_abilities.iter().any(chain_has_multiplayer_reveal)
+}
+
+/// Rewrite every OtherRevealedCard-bearing effect in the chain back to an honest
+/// `Effect::Unimplemented` gap. Coverage keys only on the `Unimplemented`
+/// variant, so the reconstructed fragment is cosmetic; the def carries no source
+/// text on a lowered `LoseLife`, so fall back to the canonical class fragment.
+fn rewrite_other_revealed_card_to_unimplemented(def: &mut AbilityDefinition) {
+    if effect_reads_other_revealed_card(&def.effect) {
+        let fragment = def.description.clone().unwrap_or_else(|| {
+            "lose life equal to the mana value of the card revealed by the other player".to_string()
+        });
+        *def.effect = Effect::unimplemented("lose", fragment);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_other_revealed_card_to_unimplemented(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        rewrite_other_revealed_card_to_unimplemented(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        rewrite_other_revealed_card_to_unimplemented(mode);
+    }
+}
+
+/// CR 608.2c: True when an effect's amount quantity reads
+/// `ObjectScope::OtherRevealedCard`. The whole class today is `LoseLife`/`GainLife`
+/// "… equal to the mana value of the card revealed by the other player"; extend
+/// by adding the hosting effect's amount field here.
+fn effect_reads_other_revealed_card(effect: &Effect) -> bool {
+    match effect {
+        Effect::LoseLife { amount, .. } | Effect::GainLife { amount, .. } => {
+            quantity_expr_reads_other_revealed_card(amount)
+        }
+        _ => false,
+    }
+}
+
+fn quantity_expr_reads_other_revealed_card(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_reads_other_revealed_card(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_reads_other_revealed_card(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_reads_other_revealed_card)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_other_revealed_card(left)
+                || quantity_expr_reads_other_revealed_card(right)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
+fn quantity_ref_reads_other_revealed_card(qty: &QuantityRef) -> bool {
+    let scope = match qty {
+        QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,
+        _ => return false,
+    };
+    matches!(scope, ObjectScope::OtherRevealedCard)
+}
+
+/// CR 707.10f + CR 608.3f: Fold a spell-copy rider "The copy gains haste and
+/// \"<quoted triggered ability>\"" (Choreographed Sparks; Nalfeshnee via its
+/// trigger-execute chain) into the preceding `CopySpell.additional_modifications`.
+///
+/// This is NOT a chained effect: a `CopySpell` puts the copy on the STACK, and
+/// it becomes a token only as it resolves (CR 707.10f / CR 608.3f). A chained
+/// effect running at CopySpell resolution would act on a stack object, not the
+/// resulting permanent. `additional_modifications` is the carrier that rides the
+/// copy through the stack→token transition (as Ob Nixilis's RemoveSupertype
+/// does) — `apply_spell_copy_modifications` stamps AddKeyword/GrantTrigger onto
+/// the copy at creation. Walking the whole assembled tree makes this fire at the
+/// `lower_effect_chain_ir` chokepoint for the trigger-execute form (Nalfeshnee),
+/// which never passes through the activated-ability `parse_effect_chain` wrappers.
+///
+/// CR 611.2c deviation (Nalfeshnee): Nalfeshnee's grant is conditional ("If it's
+/// a permanent spell"); that condition is dropped upstream, so the rider is
+/// appended unconditionally. Practically harmless — Choreographed mode-2 targets
+/// a creature spell (always a permanent); a non-permanent copy's haste is inert
+/// and its granted end-step-sacrifice trigger never fires (a copy of a
+/// non-permanent spell ceases to exist as it resolves, CR 707.10).
+fn fold_copy_spell_gains_haste_and_quoted_grant(def: &mut AbilityDefinition) {
+    if matches!(&*def.effect, Effect::CopySpell { .. }) {
+        if let Some(mut sub) = def.sub_ability.take() {
+            let folded = (sub.sub_link == SubAbilityLink::SequentialSibling)
+                .then(|| match sub.effect.as_ref() {
+                    // allow-noncombinator: destructuring an existing Unimplemented to read its description; not a construction.
+                    Effect::Unimplemented {
+                        description: Some(desc),
+                        ..
+                    } => parse_copy_gains_haste_and_quoted_grant(desc),
+                    _ => None,
+                })
+                .flatten();
+            match folded {
+                Some(mods) => {
+                    if let Effect::CopySpell {
+                        additional_modifications,
+                        ..
+                    } = &mut *def.effect
+                    {
+                        additional_modifications.extend(mods);
+                    }
+                    // Drop the folded Unimplemented, preserving any deeper chain.
+                    def.sub_ability = sub.sub_ability.take();
+                }
+                None => def.sub_ability = Some(sub),
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_copy_spell_gains_haste_and_quoted_grant(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        fold_copy_spell_gains_haste_and_quoted_grant(els);
+    }
+}
+
+/// CR 702.10a + CR 603.1 + CR 701.21a: Decompose "[Tt]he copy gains
+/// <keyword(s)> and \"<quoted triggered ability>\"" into `ContinuousModification`s
+/// (the granted quoted ability here being the CR 701.21a end-step "sacrifice ~"
+/// trigger), reusing the shared keyword-list and quoted-ability classifiers.
+/// Returns `None` unless the text has BOTH a keyword grant and a quoted-ability
+/// grant, so an unrelated "the copy ..." Unimplemented is never mis-folded.
+fn parse_copy_gains_haste_and_quoted_grant(desc: &str) -> Option<Vec<ContinuousModification>> {
+    let lower = desc.to_lowercase();
+    let tp = TextPair::new(desc, &lower);
+    // Strip the "the copy " subject (case-insensitive), leaving "gains <...>" so
+    // the shared keyword-clause extractor still sees the "gains" verb.
+    // allow-noncombinator: TextPair dual-string prefix strip preserving original case; fixed known subject on a pre-classified clause, not parse-branch dispatch.
+    let rest = tp.strip_prefix("the copy ")?.original;
+    let mut mods = crate::parser::oracle_static::parse_continuous_modifications(rest);
+    let quoted = crate::parser::oracle_static::parse_quoted_ability_modifications(rest);
+    if mods.is_empty() || quoted.is_empty() {
+        return None;
+    }
+    mods.extend(quoted);
+    Some(mods)
 }
 
 /// CR 608.2c + CR 613.1f: A standalone "choose a [type] card exiled with ~"
@@ -4937,6 +5134,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
                 player: crate::types::player::PlayerId(0),
+                gate: crate::types::ability::TurnGate::None,
             },
         ),
         // CR 505.1 + CR 603.7a: Symmetric to the prefix form at
@@ -4949,6 +5147,21 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
                 player: crate::types::player::PlayerId(0),
+                gate: crate::types::ability::TurnGate::None,
+            },
+        ),
+        // CR 513.2 + CR 603.7a: reordered "…, sacrifice that token at the
+        // beginning of the end step on your next turn" (Kav Landseeker). Suffix
+        // companion of the prefix arm. Skip-current via `AfterCreationTurn`
+        // (rewritten to `After(creation_turn)` at resolve). Diverges from the
+        // Greasefang "your next end step" suffix above ("the end step on" vs
+        // "your next end step"); neither suffix is a tail of the other.
+        (
+            " at the beginning of the end step on your next turn",
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: crate::types::player::PlayerId(0),
+                gate: crate::types::ability::TurnGate::AfterCreationTurn,
             },
         ),
         // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
@@ -4961,6 +5174,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
                 player: crate::types::player::PlayerId(0),
+                gate: crate::types::ability::TurnGate::None,
             },
         ),
         (
@@ -4968,6 +5182,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::Upkeep,
                 player: crate::types::player::PlayerId(0),
+                gate: crate::types::ability::TurnGate::None,
             },
         ),
         // CR 514.3a + CR 603.7a: "at the beginning of the next cleanup step"
@@ -5011,6 +5226,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::Upkeep,
                     player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 tag("at the beginning of your next upkeep, "),
             ),
@@ -5018,8 +5234,25 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 tag("at the beginning of your next end step, "),
+            ),
+            // CR 513.2 + CR 603.7a: "at the beginning of the end step on your
+            // next turn" — the WotC "skip the current turn's end step" wording
+            // (Kav Landseeker). Distinct from "your next end step" above (which
+            // fires the current end step, CR 513.2 does not back it up): this
+            // arm diverges at "the end step on" vs "your next end step" and must
+            // NOT be shadowed by it. `AfterCreationTurn` is rewritten to
+            // `After(creation_turn)` in effects::delayed_trigger::resolve so the
+            // current turn's end step is skipped.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::AfterCreationTurn,
+                },
+                tag("at the beginning of the end step on your next turn, "),
             ),
             // CR 603.7a + CR 104.3e: "at the beginning of that turn's end step"
             // is the anaphoric form used by the extra-turn-with-a-cost cards
@@ -5034,6 +5267,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 tag("at the beginning of that turn's end step, "),
             ),
@@ -5044,6 +5278,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 tag("at the beginning of your next main phase, "),
             ),
@@ -8763,9 +8998,9 @@ mod tests {
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, AggregateFunction, DelayedTriggerCondition, Duration,
-        Effect, ObjectProperty, ObjectScope, PtValue, QuantityExpr, QuantityRef, TargetFilter,
-        TriggerDefinition,
+        AbilityDefinition, AbilityKind, AggregateFunction, ContinuousModification,
+        DelayedTriggerCondition, Duration, Effect, ObjectProperty, ObjectScope, PtValue,
+        QuantityExpr, QuantityRef, TargetFilter, TriggerDefinition,
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
@@ -8842,6 +9077,121 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 707.10f + CR 702.10a + CR 603.1: Choreographed Sparks' mode-2 "Copy
+    /// target creature spell you control. The copy gains haste and \"At the
+    /// beginning of the end step, sacrifice ~.\"" must fold the grant into the
+    /// `CopySpell.additional_modifications` (AddKeyword(Haste) + GrantTrigger),
+    /// leaving no residual `Unimplemented` sub-ability.
+    #[test]
+    fn choreographed_sparks_folds_copy_gains_haste_and_sac_into_additional_mods() {
+        const TEXT: &str = "This spell can't be copied.\nChoose one or both —\n• Copy target instant or sorcery spell you control. You may choose new targets for the copy.\n• Copy target creature spell you control. The copy gains haste and \"At the beginning of the end step, sacrifice this token.\"";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            TEXT,
+            "Choreographed Sparks",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let mods = parsed
+            .abilities
+            .iter()
+            .filter_map(find_copy_spell_additional_mods)
+            .find(|mods| !mods.is_empty())
+            .expect("mode-2 CopySpell must carry additional_modifications after the fold");
+        assert_copy_gains_haste_and_sac(&mods);
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(ability_chain_has_unimplemented_the),
+            "the 'the copy gains...' clause must no longer be Unimplemented"
+        );
+    }
+
+    /// CR 707.10f + CR 603.1: Nalfeshnee's grant lives in a TRIGGER-execute chain
+    /// ("Whenever you cast a spell from exile, copy it. ... the copy gains haste
+    /// and \"...\""), which bypasses the `parse_effect_chain` wrappers. Folding at
+    /// the `lower_effect_chain_ir` chokepoint (not the wrappers) is what makes
+    /// this byte-identical grant flip supported too — the ≥2-class proof.
+    #[test]
+    fn nalfeshnee_trigger_folds_copy_gains_haste_and_sac_into_additional_mods() {
+        const TEXT: &str = "Flying\nWhenever you cast a spell from exile, copy it. You may choose new targets for the copy. If it's a permanent spell, the copy gains haste and \"At the beginning of the end step, sacrifice this permanent.\" (A copy of a permanent spell becomes a token.)";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            TEXT,
+            "Nalfeshnee",
+            &[],
+            &["Creature".to_string()],
+            &["Beast".to_string(), "Demon".to_string()],
+        );
+        let mods = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .filter_map(find_copy_spell_additional_mods)
+            .find(|mods| !mods.is_empty())
+            .expect("Nalfeshnee's trigger-execute CopySpell must carry additional_modifications");
+        assert_copy_gains_haste_and_sac(&mods);
+        assert!(
+            !parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .any(ability_chain_has_unimplemented_the),
+            "the 'the copy gains...' clause must no longer be Unimplemented"
+        );
+    }
+
+    /// Walk a def chain for a `CopySpell` and return its `additional_modifications`.
+    fn find_copy_spell_additional_mods(
+        def: &AbilityDefinition,
+    ) -> Option<Vec<ContinuousModification>> {
+        let mut cur = Some(def);
+        while let Some(d) = cur {
+            if let Effect::CopySpell {
+                additional_modifications,
+                ..
+            } = d.effect.as_ref()
+            {
+                return Some(additional_modifications.clone());
+            }
+            cur = d.sub_ability.as_deref();
+        }
+        None
+    }
+
+    fn ability_chain_has_unimplemented_the(def: &AbilityDefinition) -> bool {
+        let mut cur = Some(def);
+        while let Some(d) = cur {
+            if matches!(d.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "the") {
+                return true;
+            }
+            cur = d.sub_ability.as_deref();
+        }
+        false
+    }
+
+    fn assert_copy_gains_haste_and_sac(mods: &[ContinuousModification]) {
+        use crate::types::keywords::Keyword;
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste
+                }
+            )),
+            "expected AddKeyword(Haste); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::GrantTrigger { trigger }
+                    if matches!(trigger.execute.as_deref().map(|e| e.effect.as_ref()),
+                        Some(Effect::Sacrifice { .. }))
+            )),
+            "expected GrantTrigger wrapping an end-step Sacrifice; got {mods:?}"
+        );
     }
 
     /// CR 702.62b + CR 122.1 + CR 608.2c: Amy Pond's combat-damage trigger effect
@@ -9397,6 +9747,7 @@ mod tests {
         let expected = DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::End,
             player: crate::types::player::PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
         };
 
         let (rest, cond) =
@@ -9702,7 +10053,9 @@ mod where_x_tests {
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected typed object count filter, got {filter:?}");
         };
-        assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+        // CR 109.4: "target opponent controls" now lowers to the opponent-constrained
+        // ControllerRef::TargetOpponent (was the looser TargetPlayer).
+        assert_eq!(typed.controller, Some(ControllerRef::TargetOpponent));
         assert!(
             typed
                 .type_filters
@@ -9861,6 +10214,7 @@ mod where_x_tests {
                                 count: x_ref(),
                                 destination: Some(Zone::Battlefield),
                                 keep_count: Some(1),
+                                keep_count_expr: None,
                                 up_to: true,
                                 filter: TargetFilter::Typed(
                                     TypedFilter::new(TypeFilter::Permanent).properties(vec![

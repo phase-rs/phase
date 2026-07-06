@@ -219,7 +219,9 @@ fn find_legal_targets_with_context(
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
                     Some(ControllerRef::ScopedPlayer) => false,
-                    Some(ControllerRef::TargetPlayer) => false,
+                    // CR 109.4: TargetOpponent, like TargetPlayer, is what's being
+                    // chosen here — fail closed as a candidate-enumeration scope.
+                    Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     Some(ControllerRef::ParentTargetOwner) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
@@ -635,7 +637,14 @@ pub fn resolved_targets(
     // before the `ability.targets` fallback so chained "Exile ~" sub-abilities
     // don't accidentally inherit the parent's targets via the chain target
     // propagation in `effects::mod.rs::resolve_chain`.
-    if matches!(target_filter, TargetFilter::SelfRef) {
+    // CR 201.5a: `GrantingObject` is always concretized to `SpecificObject` at
+    // grant-clone time and should never reach here; the arm is a fail-safe that
+    // degrades an un-concretized granter ref to the ability source (host) — the
+    // pre-fix binding, never worse.
+    if matches!(
+        target_filter,
+        TargetFilter::SelfRef | TargetFilter::GrantingObject
+    ) {
         // CR 400.7: The self-reference resolves to the source only while it is
         // still the same object. A source that left and re-entered the
         // battlefield (blink/flicker) since the ability was created is a new
@@ -859,7 +868,10 @@ pub(crate) fn resolved_object_ids_for_filter(
     match filter {
         // CR 400.7: self-reference resolves only while the source is the same
         // object; a blinked-and-returned source (higher incarnation) finds nothing.
-        TargetFilter::SelfRef => ability
+        // CR 201.5a: an un-concretized `GrantingObject` degrades to the source
+        // (host) — fail-safe; it is normally rewritten to `SpecificObject` at
+        // grant-clone time.
+        TargetFilter::SelfRef | TargetFilter::GrantingObject => ability
             .source_is_current(state)
             .then_some(ability.source_id)
             .into_iter()

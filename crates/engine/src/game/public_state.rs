@@ -250,6 +250,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *attacker);
                 mark_public_state_object_dirty(state, *tapped);
             }
+            GameEvent::ArmyAmassed { object_id, .. } => {
+                mark_public_state_object_dirty(state, *object_id);
+            }
             GameEvent::ManaAdded { player_id, .. }
             | GameEvent::ManaPoolEmptied { player_id, .. }
             | GameEvent::ManaRecolored { player_id, .. } => {
@@ -468,6 +471,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::VoteResolved { .. }
             | GameEvent::PowerToughnessChanged { .. }
             | GameEvent::CascadeMissed { .. }
+            | GameEvent::CardPredicateGuessMade { .. }
             | GameEvent::DebugActionUsed { .. }
             | GameEvent::DebugPermissionGranted { .. }
             | GameEvent::DebugPermissionRevoked { .. }

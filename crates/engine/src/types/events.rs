@@ -329,6 +329,14 @@ pub enum GameEvent {
         tapped: ObjectId,
         tapped_snapshot: Box<CostPaidObjectSnapshot>,
     },
+    /// CR 701.47c: An amass instruction chose an Army creature. This event is
+    /// observational; the resolving ability carries the authoritative
+    /// `amassed_army_object` snapshot for later CR 701.47c references.
+    ArmyAmassed {
+        object_id: ObjectId,
+        source_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 702.143a: A player foretold a card from their hand.
     Foretold {
         player_id: PlayerId,
@@ -650,6 +658,15 @@ pub enum GameEvent {
     PlayerPerformedAction {
         player_id: PlayerId,
         action: PlayerActionKind,
+    },
+    /// Engine-authored diagnostic for top-card predicate
+    /// guesses. This is intentionally a log/debug event rather than rules input:
+    /// `ChooseOption` remains the authoritative action, while this records
+    /// which predicate AI or a human guessed.
+    CardPredicateGuessMade {
+        player_id: PlayerId,
+        source_id: Option<ObjectId>,
+        choice: String,
     },
     /// CR 701.19a: Regeneration shield — consumed on use, expires at cleanup.
     Regenerated {

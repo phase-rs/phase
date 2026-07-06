@@ -1044,13 +1044,20 @@ fn ochran_assassin_forced_block_is_permanent_static() {
     let lure = r
         .statics
         .iter()
-        .find(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
         .unwrap_or_else(|| {
             panic!(
                 "expected a permanent MustBeBlockedByAll static, got {:?}",
                 r.statics
             )
         });
+    // The unfiltered "All creatures able to block ~" form must lower to the
+    // None (every-creature Lure) shape — proves the slot-A path is preserved.
+    assert!(
+        matches!(lure.mode, StaticMode::MustBeBlockedByAll { blockers: None }),
+        "Ochran Assassin's bare lure must carry blockers == None, got {:?}",
+        lure.mode
+    );
     assert_eq!(
         lure.affected,
         Some(TargetFilter::SelfRef),
@@ -1065,10 +1072,99 @@ fn ochran_assassin_forced_block_is_permanent_static() {
             Effect::GenericEffect { static_abilities, .. }
                 if static_abilities
                     .iter()
-                    .any(|s| s.mode == StaticMode::MustBeBlockedByAll)
+                    .any(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
         )),
         "no one-shot GenericEffect MustBeBlockedByAll ability should remain, got {:?}",
         r.abilities
+    );
+}
+
+/// CR 509.1c: Talruum Piper — "All creatures with flying able to block ~ do so"
+/// is a filtered permanent lure: only fliers are compelled to block, so it must
+/// lower to `MustBeBlockedByAll { blockers: Some(<creatures with flying>) }`
+/// affecting the source. Revert-discriminating: if the parser's slot-B filter is
+/// dropped the mode becomes `blockers: None` (every creature) and the structural
+/// `Some(f)` equality below fails.
+#[test]
+fn talruum_piper_filtered_forced_block_is_permanent_static() {
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    let r = parse(
+        "All creatures with flying able to block Talruum Piper do so.",
+        "Talruum Piper",
+        &[],
+        &["Creature"],
+        &["Minotaur"],
+    );
+
+    let lure = r
+        .statics
+        .iter()
+        .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a permanent MustBeBlockedByAll static, got {:?}",
+                r.statics
+            )
+        });
+    assert_eq!(
+        lure.affected,
+        Some(TargetFilter::SelfRef),
+        "the lure must affect the source creature itself"
+    );
+    let expected =
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::WithKeyword {
+                value: Keyword::Flying,
+            }]),
+        );
+    assert!(
+        matches!(
+            &lure.mode,
+            StaticMode::MustBeBlockedByAll { blockers: Some(f) } if *f == expected
+        ),
+        "Talruum Piper must carry Some(creatures with flying), got {:?}",
+        lure.mode
+    );
+}
+
+/// CR 509.1c + CR 205.3a: Marble Priest — "All Walls able to block ~ do so" is a
+/// subtype-filtered permanent lure: only Walls are compelled. Must lower to
+/// `MustBeBlockedByAll { blockers: Some(<Wall subtype>) }`. Revert-discriminating
+/// on the same slot-B path as Talruum Piper, exercising a subtype (rather than
+/// keyword) filter.
+#[test]
+fn marble_priest_wall_filtered_forced_block_is_permanent_static() {
+    use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+    let r = parse(
+        "All Walls able to block Marble Priest do so.",
+        "Marble Priest",
+        &[],
+        &["Creature"],
+        &["Human", "Cleric"],
+    );
+
+    let lure = r
+        .statics
+        .iter()
+        .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a permanent MustBeBlockedByAll static, got {:?}",
+                r.statics
+            )
+        });
+    let expected = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Subtype("Wall".to_string())],
+        controller: None,
+        properties: vec![],
+    });
+    assert!(
+        matches!(
+            &lure.mode,
+            StaticMode::MustBeBlockedByAll { blockers: Some(f) } if *f == expected
+        ),
+        "Marble Priest must carry Some(Wall subtype), got {:?}",
+        lure.mode
     );
 }
 
@@ -4891,6 +4987,7 @@ fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
         &DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
         }
     );
 
@@ -6706,11 +6803,9 @@ fn smoky_lounge_full_mana_line_no_unimplemented() {
 /// `Any([SpellType("Enchantment"), UnlockDoor, TurnPermanentFaceUp])`. The
 /// whole card parses with no `Effect::Unimplemented`.
 ///
-/// Over-gapping guard: this `Any` mixes two live branches
-/// (`SpellType("Enchantment")`, `UnlockDoor`) with the dead
-/// `TurnPermanentFaceUp`. `has_payable_branch` must short-circuit to `true`
-/// here, so the restriction stays absorbed and supported — the gate must NOT
-/// over-gap a disjunction just because one leaf is dead.
+/// Over-gapping guard: this `Any` is all-live (`SpellType("Enchantment")`,
+/// `UnlockDoor`, and `TurnPermanentFaceUp`). `is_coverage_supported` must return
+/// `true` here, so the restriction stays absorbed and supported.
 #[test]
 fn creeping_peeper_full_mana_line_no_unimplemented() {
     let r = parse(
@@ -6742,21 +6837,21 @@ fn creeping_peeper_full_mana_line_no_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 116.2b + CR 702.37e: Overgrown Zealot's second ability —
-/// "Add two mana of any one color. Spend this mana only to turn permanents
-/// face up" — names ONLY the turn-face-up special action, whose runtime gate
-/// (`OnlyForSpecialAction(TurnFaceUp)`) no production payment site can satisfy
-/// today. `ManaSpendRestriction::has_payable_branch` reports the standalone
-/// `TurnPermanentFaceUp` leaf as dead, so the seam leaves the restriction
-/// unabsorbed and the line lowers to `Effect::Unimplemented` — honest coverage
-/// red rather than false-green "supported".
+/// CR 106.6 + CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: Overgrown
+/// Zealot's second ability — "Add two mana of any one color. Spend this mana
+/// only to turn permanents face up" — names ONLY the turn-face-up special
+/// action, whose runtime gate (`OnlyForSpecialAction(TurnFaceUp)`) the paid
+/// `GameAction::TurnFaceUp` handler now satisfies.
+/// `ManaSpendRestriction::is_coverage_supported` reports the standalone
+/// `TurnPermanentFaceUp` leaf live, so the seam absorbs the restriction into the
+/// `Effect::Mana` line — supported, no `Effect::Unimplemented`.
 ///
-/// Revert direction: if `has_payable_branch` returned `true` for
-/// `TurnPermanentFaceUp`, the seam would absorb the restriction and no
-/// `Effect::Unimplemented` would be produced — the assertion below flips and
-/// fails.
+/// Revert direction: if `is_coverage_supported` returned `false` for
+/// `TurnPermanentFaceUp`, the seam would leave the restriction unabsorbed and the
+/// line would lower to `Effect::Unimplemented` — the `!parsed_has_unimplemented`
+/// assertion below flips and fails.
 #[test]
-fn overgrown_zealot_turn_face_up_only_is_unsupported_gap() {
+fn overgrown_zealot_turn_face_up_only_supported() {
     let r = parse(
         "{T}: Add two mana of any one color. Spend this mana only to turn permanents face up.",
         "Overgrown Zealot",
@@ -6764,33 +6859,52 @@ fn overgrown_zealot_turn_face_up_only_is_unsupported_gap() {
         &["Creature"],
         &["Elf", "Druid"],
     );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
-        parsed_has_unimplemented(&r),
-        "Overgrown Zealot's turn-face-up-only spend restriction has no payable \
-             branch, so the line must lower to Effect::Unimplemented (honest red): \
-             abilities={:?} triggers={:?}",
+        !parsed_has_unimplemented(&r),
+        "Overgrown Zealot's turn-face-up spend restriction is now payable, so the \
+             line must be supported (no Effect::Unimplemented): abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
     );
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert!(
+        matches!(produced, ManaProduction::AnyOneColor { .. }),
+        "expected two-mana-of-any-one-color, got {produced:?}"
+    );
+    assert_eq!(
+        restrictions,
+        &vec![ManaSpendRestriction::TurnPermanentFaceUp],
+        "the turn-face-up restriction must fold into the mana effect"
+    );
+    assert!(
+        crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+        "must stay a mana ability"
+    );
 }
 
-/// CR 106.6 + CR 708.4 + CR 116.2b: Tin Street Gossip's mana ability —
-/// "Add {R}{G}. Spend this mana only to cast face-down spells or to turn
-/// creatures face up" — is a disjunction of two dead branches: `FaceDownSpell`
-/// (gate `meta.is_face_down`, never true at a payment site, CR 708.4) and
-/// `TurnPermanentFaceUp` (`OnlyForSpecialAction(TurnFaceUp)`, never emitted,
-/// CR 116.2b). `has_payable_branch` of `Any([FaceDownSpell,
-/// TurnPermanentFaceUp])` is `false`, so the seam leaves it unabsorbed and the
-/// line lowers to `Effect::Unimplemented` — honest coverage red.
+/// CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e: Tin Street Gossip's mana
+/// ability — "Add {R}{G}. Spend this mana only to cast face-down spells or to
+/// turn creatures face up" — parses the mana head but must remain coverage-red.
+/// The spend restriction is a disjunction `Any([FaceDownSpell,
+/// TurnPermanentFaceUp])`; `FaceDownSpell` is not production-live (gate
+/// `meta.is_face_down`, never true at a payment site, CR 708.4), so
+/// `is_coverage_supported` for the whole disjunction is `false`. The seam leaves
+/// the restriction unabsorbed, producing an explicit `Effect::Unimplemented`
+/// residual instead of partially absorbing the live turn-face-up branch.
 ///
-/// Revert direction: if either leaf were classified payable (or the `Any`
-/// short-circuit were broken to return `true` on an all-dead set), the seam
-/// would absorb the restriction and produce no `Effect::Unimplemented` — the
-/// assertion below flips and fails. This pins the all-dead `Any` arm in the
-/// false direction (the live mixed-`Any` cases are pinned by Creeping Peeper /
-/// Smoky Lounge / the unit test).
+/// Revert direction: if `Any` returns supported when any branch is live, this test
+/// fails because the restriction folds into `Effect::Mana` and the residual
+/// `Unimplemented` disappears.
 #[test]
-fn tin_street_gossip_face_down_or_turn_face_up_is_unsupported_gap() {
+fn tin_street_gossip_face_down_or_turn_face_up_stays_coverage_red() {
     let r = parse(
             "Vigilance\n{T}: Add {R}{G}. Spend this mana only to cast face-down spells or to turn creatures face up.",
             "Tin Street Gossip",
@@ -6798,13 +6912,50 @@ fn tin_street_gossip_face_down_or_turn_face_up_is_unsupported_gap() {
             &["Creature"],
             &["Goblin", "Artificer"],
         );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
         parsed_has_unimplemented(&r),
-        "Tin Street Gossip's face-down/turn-face-up spend restriction has no \
-             payable branch, so the line must lower to Effect::Unimplemented \
-             (honest red): abilities={:?} triggers={:?}",
+        "Tin Street Gossip must remain coverage-red until face-down spell casting exists: abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
+    );
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert!(
+        matches!(produced, ManaProduction::Fixed { colors, .. } if colors == &[ManaColor::Red, ManaColor::Green]),
+        "expected fixed R+G, got {produced:?}"
+    );
+    assert_eq!(
+        restrictions,
+        &Vec::<ManaSpendRestriction>::new(),
+        "unsupported face-down/turn-up disjunction must remain unabsorbed"
+    );
+    let residual = r.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("unsupported spend restriction must remain as a residual gap");
+    let Effect::Unimplemented { name, description } = &*residual.effect else {
+        panic!(
+            "expected residual Effect::Unimplemented, got {:?}",
+            residual.effect
+        );
+    };
+    assert_eq!(name, "spend");
+    assert!(
+        description
+            .as_deref()
+            .is_some_and(|text| text.contains("face-down spells or to turn creatures face up")),
+        "residual gap must be the unsupported spend restriction, got {description:?}"
+    );
+    assert!(
+        crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+        "must stay a mana ability"
     );
 }
 

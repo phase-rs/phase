@@ -1007,7 +1007,11 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
     {
         return Ok((
             anaphor_rest,
-            QuantityRef::TrackedSetAggregate { function, property },
+            QuantityRef::TrackedSetAggregate {
+                function,
+                property,
+                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            },
         ));
     }
     let (filter, remainder) = parse_type_phrase(rest);
@@ -2343,6 +2347,24 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
     .parse(input)
     {
+        // CR 608.2c + CR 701.20b: "the card revealed by the other player" — the
+        // OTHER revealer's revealed card in an exactly-two-target symmetric reveal
+        // (Parker Luck). A post-nominal participle-with-agent that the bare
+        // possessive scope grammar cannot express; each axis is a single tag/alt
+        // (agent phrasing left open for future "the other players" wording).
+        if let Ok((after, _)) = (
+            tag::<_, _, OracleError<'_>>("the card revealed by "),
+            alt((tag("the other player"), tag("the other players"))),
+        )
+            .parse(rest)
+        {
+            return Ok((
+                after,
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::OtherRevealedCard,
+                },
+            ));
+        }
         let (after, filter) = parse_target_with_syntax_target_keyword(rest)?;
         return Ok((
             after,
@@ -2575,6 +2597,31 @@ fn parse_anaphoric_target_card_property_ref(input: &str) -> OracleResult<'_, Qua
     Ok((rest, qty))
 }
 
+fn parse_amassed_army_property_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        tag("the amassed Army"),
+        tag("the amassed army"),
+        tag("the Army you amassed"),
+        tag("the army you amassed"),
+    ))
+    .parse(input)?;
+    alt((
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::AmassedArmy,
+            },
+            tag("'s power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::AmassedArmy,
+            },
+            tag("'s toughness"),
+        ),
+    ))
+    .parse(rest)
+}
+
 /// Parse event-context quantity references.
 ///
 /// CR 603.7c: "that {noun}" in a triggered ability refers to the object or
@@ -2590,6 +2637,9 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         // event. Distinct from "that damage" (different article+verb) and
         // "damage dealt this way" (PreviousEffectAmount).
         value(QuantityRef::EventContextAmount, tag("the damage dealt")),
+        // CR 701.47c: amass-specific definite phrases name the Army chosen by
+        // the current amass instruction, not the generic demonstrative referent.
+        parse_amassed_army_property_ref,
         value(
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -7006,6 +7056,24 @@ mod tests {
             }
         );
         assert_eq!(rest2, "");
+
+        let (rest3, q3) = parse_quantity_ref("the amassed Army's power").unwrap();
+        assert_eq!(
+            q3,
+            QuantityRef::Power {
+                scope: ObjectScope::AmassedArmy,
+            }
+        );
+        assert_eq!(rest3, "");
+
+        let (rest4, q4) = parse_quantity_ref("the Army you amassed's toughness").unwrap();
+        assert_eq!(
+            q4,
+            QuantityRef::Toughness {
+                scope: ObjectScope::AmassedArmy,
+            }
+        );
+        assert_eq!(rest4, "");
     }
 
     #[test]

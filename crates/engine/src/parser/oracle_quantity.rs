@@ -39,8 +39,8 @@ use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
     DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause, TypeFilter,
-    TypedFilter, ZoneRef,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause,
+    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -331,7 +331,47 @@ pub(crate) fn parse_quantity_ref_with_context(
                 return Some(QuantityRef::TrackedSetAggregate {
                     function: func,
                     property: prop,
+                    source: TrackedAnaphorSource::ChainSet,
                 });
+            }
+        }
+        // CR 608.2c + CR 603.2c + CR 603.10a: batched-dies-trigger anaphor. In a
+        // batched "whenever one or more creatures … die" trigger, "those
+        // creatures" references the triggering event batch (its dying subjects),
+        // NOT a live zone filter or a chain-published set. Matched before
+        // `parse_type_phrase_with_ctx` so the anaphor isn't mis-read as a type
+        // phrase (bare "creatures" would otherwise parse as a filter).
+        //
+        // Scoped narrowly because this parser is context-free and cannot see
+        // whether the enclosing ability is a batched *dies* trigger:
+        //   * "those creatures" ONLY (not "those cards"/"those permanents").
+        //     "those cards" is overloaded — it also names a mill set ("you mill
+        //     three cards, then … the total mana value of those cards":
+        //     Combustible Gearhulk, Palantír of Orthanc) or a chosen target set
+        //     (Command the Dreadhorde), where TriggeringBatch resolves to the
+        //     wrong/empty event set.
+        //   * Sum ("the total <prop> OF those creatures") ONLY, never Max/Min
+        //     ("the greatest <prop> AMONG those creatures"). The "greatest …
+        //     among those creatures" idiom is an ATTACK batch (Shriekwood
+        //     Devourer: "whenever you attack with one or more creatures … the
+        //     greatest power among those creatures"), whose multi-attacker
+        //     `AttackersDeclared` fan-out `extract_source_from_event` does not yet
+        //     resolve (it collapses >1 attacker to `None`). Plan §8 defers attack
+        //     batches; mapping it here would silently resolve to 0.
+        // With both gates, the sole card enabled is The Skullspore Nexus (Benthic
+        // Anomaly / Dracoplasm route their "those creatures" through the
+        // copy/"becomes" paths, not this quantity parser) — measured.
+        if matches!(func, AggregateFunction::Sum) {
+            if let Ok((anaphor_rest, _)) =
+                tag::<_, _, OracleError<'_>>("those creatures").parse(rest)
+            {
+                if anaphor_rest.trim().is_empty() {
+                    return Some(QuantityRef::TrackedSetAggregate {
+                        function: func,
+                        property: prop,
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                    });
+                }
             }
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
@@ -4673,10 +4713,11 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: TrackedAnaphorSource::ChainSet,
                     }
                 }
             ),
-            "expected TrackedSetAggregate(Sum, ManaValue), got {qty:?}"
+            "expected TrackedSetAggregate(Sum, ManaValue, ChainSet), got {qty:?}"
         );
 
         // The "the exiled cards" anaphor variant maps to the same set.
@@ -4688,10 +4729,56 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: TrackedAnaphorSource::ChainSet,
                     }
                 }
             ),
-            "expected TrackedSetAggregate(Sum, ManaValue) for 'the exiled cards', got {qty2:?}"
+            "expected TrackedSetAggregate(Sum, ManaValue, ChainSet) for 'the exiled cards', got {qty2:?}"
+        );
+    }
+
+    #[test]
+    fn cda_quantity_total_power_of_those_creatures_is_triggering_batch_aggregate() {
+        // CR 603.2c + CR 603.10a + CR 608.2c: the batched-trigger anaphor "those
+        // creatures" aggregates the total power over the CURRENT triggering event
+        // batch (the nontoken creatures that died this trigger), NOT a live zone
+        // filter or the chain-published tracked set. Baseline was `None` (measured
+        // before this change); this drives The Skullspore Nexus's dies trigger.
+        let qty = parse_cda_quantity("the total power of those creatures")
+            .expect("'the total power of those creatures' must now parse (was None)");
+        assert!(
+            matches!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                    }
+                }
+            ),
+            "expected TrackedSetAggregate(Sum, Power, TriggeringBatch), got {qty:?}"
+        );
+
+        // Scoping guard: the overloaded "those cards" form must NOT map to the
+        // triggering batch. It also names mill sets ("you mill three cards, then
+        // … the total mana value of those cards": Combustible Gearhulk, Palantír
+        // of Orthanc) and chosen target sets (Command the Dreadhorde), where a
+        // context-free TriggeringBatch mapping is a rules-incorrect misparse.
+        // Keep it out of the batch anaphor until a trigger-context-gated pass.
+        let cards = parse_cda_quantity("the total mana value of those cards");
+        assert!(
+            !matches!(
+                cards,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                        ..
+                    }
+                })
+            ),
+            "'those cards' must NOT map to a TriggeringBatch aggregate (overloaded \
+             mill/chosen anaphor), got {cards:?}"
         );
     }
 
