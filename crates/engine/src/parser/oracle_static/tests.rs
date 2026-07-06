@@ -24526,3 +24526,89 @@ fn granted_cast_keyword_zone_gate_declines_mismatches() {
         "miracle functions from hand -- a hand subject must be accepted"
     );
 }
+
+// ── Ood Sphere (WHO Planechase plane): "Noncreature spells have convoke." ──
+// CR 702.51a + CR 113.6b: the NON-possessive, all-players casting-keyword grant
+// must emit `StaticMode::CastWithKeyword` (the only mode the casting-keyword
+// path reads) with a CONTROLLER-AGNOSTIC affected filter — NOT the runtime-inert
+// anthem `AddKeyword` continuous static, and NOT `ControllerRef::You` scoping.
+
+#[test]
+fn noncreature_spells_have_convoke_grants_cast_with_keyword_all_players() {
+    // The ability-word "Song of the Ood — " label is stripped before this parser
+    // runs, so it receives the bare grant sentence.
+    let def = parse_static_line("Noncreature spells have convoke.")
+        .expect("noncreature-spells-have-convoke must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Convoke
+        },
+        "must be a casting-keyword grant, not an anthem AddKeyword: {def:?}"
+    );
+    assert!(
+        def.active_zones.contains(&Zone::Battlefield),
+        "active zones must include Battlefield (Command is appended by planechase synthesis): {:?}",
+        def.active_zones
+    );
+    match def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(
+                tf.controller, None,
+                "all-players grant must NOT scope to ControllerRef::You"
+            );
+            assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)
+                )),
+                "affected filter must be noncreature: {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected a Typed affected filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_spells_have_keyword_all_players_building_block() {
+    // Building block: any "[type] spells have [keyword]" (no possessive) form.
+    let def = parse_static_line("Artifact spells have flash.")
+        .expect("artifact-spells-have-flash must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        },
+        "{def:?}"
+    );
+    match def.affected {
+        Some(TargetFilter::Typed(tf)) => assert_eq!(
+            tf.controller, None,
+            "all-players grant stays controller-agnostic"
+        ),
+        other => panic!("expected Typed affected, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_spells_have_keyword_all_players_building_block() {
+    let def = parse_static_line("Spells have flash.").expect("spells-have-flash must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        },
+        "{def:?}"
+    );
+}
+
+#[test]
+fn creatures_you_control_have_flying_stays_anthem_not_cast_keyword() {
+    // Negative: a battlefield anthem ("creatures you control have flying") must
+    // NOT be claimed by the spell-keyword-grant path — its subject is not spells.
+    assert!(
+        parse_spells_have_keyword_for_test("Creatures you control have flying.").is_none(),
+        "creatures-have-flying is a battlefield anthem, not a casting-keyword grant"
+    );
+}

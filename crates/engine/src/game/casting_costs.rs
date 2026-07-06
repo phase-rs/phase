@@ -2069,15 +2069,10 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
         }
     }
 
-    // Tap each chosen creature
+    // CR 701.26a + CR 508.1f: Tap each chosen creature, routed through the single
+    // authority so a "can't become tapped" creature is refused.
     for &id in chosen {
-        if let Some(obj) = state.objects.get_mut(&id) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: id,
-            caused_by: None,
-        });
+        crate::game::restrictions::tap_permanent_for_cost(state, id, events)?;
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -7054,7 +7049,12 @@ fn collect_sorted_auto_tap_source_options(
         .filter(|oid| !excluded_sources.contains(oid))
         .filter_map(|&oid| {
             let obj = state.objects.get(&oid)?;
-            if obj.controller != player || obj.tapped {
+            // CR 701.26a + CR 508.1f: a "can't become tapped" mana source (e.g. a
+            // goaded mana dork) can't be auto-tapped to pay for a spell.
+            if obj.controller != player
+                || obj.tapped
+                || crate::game::restrictions::object_cant_tap(state, oid)
+            {
                 return None;
             }
             // Use land-specific function for lands (includes basic-subtype

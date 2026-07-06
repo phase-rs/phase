@@ -2802,6 +2802,19 @@ fn detect_condition_unless(
     if json_has_any(ast_json, markers) {
         return;
     }
+    // CR 508.1f + CR 701.26a: "... can't become tapped unless [they're/it's]
+    // being declared as attackers." The attacker-declaration exemption is
+    // inherent to the tap keyword action — CR 508.1f states that tapping a
+    // creature as it's declared an attacker isn't a cost, so a modeled
+    // `StaticMode::CantTap` restriction already permits that tap with no extra
+    // AST slot. The unless clause is therefore fully modeled, not swallowed.
+    // Class-general: recognizes any goad-lock printing of this exemption whose
+    // tap restriction lowered to a `CantTap` static (Ood Sphere's Red-Eye).
+    let declared_as_attacker_exemption = cleaned.contains("declared as an attacker") // allow-noncombinator: swallow detector marker scan on classified text
+        || cleaned.contains("declared as attackers"); // allow-noncombinator: swallow detector marker scan on classified text
+    if declared_as_attacker_exemption && json_has_any(ast_json, &["\"CantTap\""]) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "Condition_Unless".into(),
         description: truncate(original, 140).into(),
@@ -3470,8 +3483,8 @@ fn effect_name(effect: &Effect) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_swallowed_clauses, def_tree_has_optional, def_tree_has_unimplemented,
-        trigger_tree_has_optional,
+        any_ability_has_unimplemented, check_swallowed_clauses, def_tree_has_optional,
+        def_tree_has_unimplemented, trigger_tree_has_optional,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -5282,6 +5295,31 @@ mod tests {
                 "{name} should not swallow unless clause"
             );
         }
+    }
+
+    /// CR 508.1f + CR 701.26a (Ood Sphere Red-Eye): "... can't become tapped
+    /// unless they're being declared as attackers." The attacker-declaration
+    /// exemption is inherent to a modeled `CantTap` static, so the unless clause
+    /// is fully represented and must NOT flag Condition_Unless. Guard against a
+    /// suppression false-positive: the card must have zero Unimplemented so the
+    /// detector actually runs (not skipped via `any_ability_has_unimplemented`).
+    #[test]
+    fn condition_unless_accepts_declared_as_attackers_cant_tap_exemption() {
+        let parsed = parse_named(
+            "Whenever chaos ensues, for each opponent, goad up to one target creature that opponent controls. Until your next turn, those creatures can't become tapped unless they're being declared as attackers.",
+            "Red-Eye",
+            &["Plane"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "Red-Eye must fully parse for the detector to run: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_Unless"),
+            "declared-as-attackers CantTap exemption must not flag Condition_Unless: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     /// CR 701.20a + CR 604.3: Reveal-until chosen-type and shares-a-type filters

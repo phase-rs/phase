@@ -3224,14 +3224,10 @@ fn apply_action(
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
-            // Tap the permanent (no summoning sickness check — CR 702.51a + CR 302.6)
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.tapped = true;
-            }
-            events.push(GameEvent::PermanentTapped {
-                object_id,
-                caused_by: None,
-            });
+            // CR 701.26a + CR 508.1f: route the convoke tap through the single
+            // authority so a "can't become tapped" creature is refused (no
+            // summoning sickness check — CR 702.51a + CR 302.6).
+            crate::game::restrictions::tap_permanent_for_cost(state, object_id, &mut events)?;
             let unit = match mode {
                 ConvokeMode::Convoke => {
                     crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
@@ -6470,15 +6466,11 @@ fn handle_crew_announcement(
         ));
     }
 
-    // CR 701.26a + CR 702.122b: Tap each creature as cost payment — creature "crews" the Vehicle.
+    // CR 701.26a + CR 702.122b + CR 508.1f: Tap each creature as cost payment —
+    // creature "crews" the Vehicle. Routed through the single authority so a
+    // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        if let Some(obj) = state.objects.get_mut(&cid) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: cid,
-            caused_by: None,
-        });
+        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
     }
 
     // CR 602.5b: Record this crew activation so an "Activate only once each turn"
@@ -6639,14 +6631,10 @@ fn handle_station_announcement(
         crate::types::statics::CrewAction::Station,
     );
 
-    // CR 701.26a: Tap the creature as cost payment.
-    if let Some(obj) = state.objects.get_mut(&creature_id) {
-        obj.tapped = true;
-    }
-    events.push(GameEvent::PermanentTapped {
-        object_id: creature_id,
-        caused_by: None,
-    });
+    // CR 701.26a: Tap the creature as cost payment. Routed through the single
+    // authority (CR 508.1f exempts attacker declaration) so a "can't become
+    // tapped" creature is refused.
+    crate::game::restrictions::tap_permanent_for_cost(state, creature_id, events)?;
 
     Ok(push_keyword_action(
         state,
@@ -6819,15 +6807,11 @@ fn handle_saddle_announcement(
         ));
     }
 
-    // CR 701.26a + CR 702.171c: Tap each creature as cost payment — creature "saddles" the Mount.
+    // CR 701.26a + CR 702.171c + CR 508.1f: Tap each creature as cost payment —
+    // creature "saddles" the Mount. Routed through the single authority so a
+    // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        if let Some(obj) = state.objects.get_mut(&cid) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: cid,
-            caused_by: None,
-        });
+        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
     }
 
     Ok(push_keyword_action(

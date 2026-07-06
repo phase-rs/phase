@@ -3418,6 +3418,10 @@ pub(crate) fn priority_actions_with_probe(
                         && !c.tapped
                         && c.card_types.core_types.contains(&CoreType::Creature)
                 })
+                // CR 701.26a + CR 508.1f: crew/saddle/station all tap the chosen
+                // creature, so a "can't become tapped" creature is never eligible
+                // (attacking, CR 508.1f, is the only exemption and is not a cost).
+                && !crate::game::restrictions::object_cant_tap(state, cid)
             })
             .collect();
         // CR 702.122a: Crew additionally excludes creatures with a "can't crew"
@@ -4303,6 +4307,12 @@ fn mana_payment_actions(
                 let Some(obj) = state.objects.get(&obj_id) else {
                     continue;
                 };
+                // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
+                // tapped for convoke/improvise/waterbend (all tap the creature to
+                // pay). Delve (graveyard exile above) never taps, so it's exempt.
+                if crate::game::restrictions::object_cant_tap(state, obj_id) {
+                    continue;
+                }
                 match mode {
                     ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
                         // Waterbend: always colorless
@@ -4982,6 +4992,33 @@ mod tests {
         assert!(
             !has_crew(&priority_actions(&state, PlayerId(0))),
             "a tapped-only board offers no Crew"
+        );
+    }
+
+    /// CR 701.26a + CR 508.1f (Ood Sphere): a creature that "can't become tapped"
+    /// is excluded from the crew/saddle/station eligibility hoist, so the AI/MP
+    /// legal-action set never offers a Crew that would tap it.
+    #[test]
+    fn cant_become_tapped_creature_is_not_crew_eligible() {
+        let mut state = crew_priority_state();
+        add_crew_vehicle(&mut state, 100, PlayerId(0));
+        let creature = add_untapped_creature(&mut state, 200, PlayerId(0));
+        assert!(
+            has_crew(&priority_actions(&state, PlayerId(0))),
+            "baseline: an untapped creature enables the Crew offer"
+        );
+
+        // Grant CantTap (printed onto the creature's own static definitions).
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            let def = StaticDefinition::new(crate::types::statics::StaticMode::CantTap)
+                .affected(TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        assert!(
+            !has_crew(&priority_actions(&state, PlayerId(0))),
+            "a can't-become-tapped creature must not be offered to crew"
         );
     }
 

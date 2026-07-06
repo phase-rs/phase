@@ -16,7 +16,8 @@ use crate::types::zones::Zone;
 use crate::types::SpellCastRecord;
 
 use super::engine::EngineError;
-use crate::game::functioning_abilities::static_kind_present;
+use crate::game::functioning_abilities::{active_static_definitions, static_kind_present};
+use crate::types::events::GameEvent;
 use crate::types::identifiers::ObjectId;
 
 /// CR 602.5b / CR 602.5d: loop-invariant existence gates for rare static modes
@@ -582,6 +583,15 @@ pub(crate) fn check_summoning_sickness_for_cost(
     if !cost_contains_tap_or_untap(cost) {
         return Ok(());
     }
+    // CR 701.26a + CR 508.1f: a permanent with a "can't become tapped" restriction
+    // can't pay a {T} activation cost (the restriction is lifted only by attacker
+    // declaration, which is not an activation cost). A {Q} untap cost is unaffected
+    // — untapping is governed by `StaticMode::CantUntap`, not CantTap.
+    if cost_contains_tap(cost) && object_cant_tap(state, source.id) {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent can't become tapped: its {T} ability can't be activated".to_string(),
+        ));
+    }
     if summoning_sick_for_tap_ability(state, source) {
         return Err(EngineError::ActionNotAllowed(
             "Creature has summoning sickness: activated abilities with {T} or {Q} \
@@ -631,6 +641,82 @@ fn cost_contains_tap_or_untap(cost: &AbilityCost) -> bool {
         }
         _ => false,
     }
+}
+
+/// Recursively inspects an `AbilityCost` for a `Tap` component only ({T}, not
+/// {Q}). A `StaticMode::CantTap` restriction forbids *becoming tapped*, so it
+/// gates a {T} cost but not a {Q} untap cost (that is `StaticMode::CantUntap`).
+fn cost_contains_tap(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Tap => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_tap),
+        AbilityCost::OneOf { costs } => !costs.is_empty() && costs.iter().all(cost_contains_tap),
+        _ => false,
+    }
+}
+
+/// CR 701.26a + CR 508.1f: does `id` currently carry a "can't become tapped"
+/// restriction (`StaticMode::CantTap`)? Single authority for the predicate,
+/// consulted by every tap chokepoint (cost-driven taps via
+/// [`tap_permanent_for_cost`], effect-driven taps via
+/// `effects::tap_untap::process_one_tap`, {T}-ability activation legality, mana
+/// -source readiness, and the AI/MP legal-action offers).
+///
+/// A restricted creature can still tap by attacking: CR 508.1f says tapping a
+/// creature as it's declared an attacker isn't a cost, so the declare-attackers
+/// path deliberately never consults this predicate.
+pub(crate) fn object_cant_tap(state: &crate::types::game_state::GameState, id: ObjectId) -> bool {
+    // Fast path: with no CantTap static anywhere on the board, nothing can be
+    // restricted — skip the per-object layered-static scan entirely. This keeps
+    // every routed tap chokepoint a zero-cost no-op in the common case.
+    if !static_kind_present(state, StaticModeKind::CantTap) {
+        return false;
+    }
+    let Some(obj) = state.objects.get(&id) else {
+        return false;
+    };
+    // Intrinsic path: Ood Sphere's Red-Eye grants CantTap onto the goaded
+    // creature's OWN `static_definitions` (a layer-6 `GrantStaticAbility`, the
+    // same mechanism `AttackOnlyNeighbor` relies on), so
+    // `active_static_definitions` yields it directly. A REMOTE CantTap (an
+    // `affected` filter naming another permanent) is out of scope for every
+    // current card; if one is ever printed, add the `check_static_ability(CantTap,
+    // ctx{ target_id: Some(id) })` OR-branch here exactly as `CantAttack` does —
+    // no call-site changes required.
+    active_static_definitions(state, obj).any(|sd| matches!(sd.mode, StaticMode::CantTap))
+}
+
+/// CR 701.26a: Tap `id` to pay a cost, honoring any `StaticMode::CantTap`
+/// ("can't become tapped") restriction. Single authority for every cost-driven
+/// creature/permanent tap ({T} activation costs, convoke, crew, station, saddle,
+/// harmonize, tap-N additional costs, {T} mana abilities) so the restriction is
+/// enforced in exactly one place instead of being re-checked at each scattered
+/// call site.
+///
+/// CR 508.1f attacker declaration is NOT a cost and never routes here, so a
+/// restricted creature still taps by attacking. The rules-correct PRIMARY gate is
+/// the choice/legal-action layer (a can't-tap creature is never offered to
+/// crew/convoke/tap-for-cost); this error is the defensive backstop, mirroring
+/// how `CantAttack` filters at declaration time yet still errors on an illegal
+/// commit.
+pub(crate) fn tap_permanent_for_cost(
+    state: &mut crate::types::game_state::GameState,
+    id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if object_cant_tap(state, id) {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent can't become tapped".to_string(),
+        ));
+    }
+    if let Some(obj) = state.objects.get_mut(&id) {
+        obj.tapped = true;
+    }
+    events.push(GameEvent::PermanentTapped {
+        object_id: id,
+        caused_by: None,
+    });
+    Ok(())
 }
 
 /// CR 602.5b: If an activated ability has a restriction on its use (e.g., "Activate only once
@@ -3870,5 +3956,127 @@ mod tests {
         // proving the assertion above is not vacuous.
         assert!(place_blocking(&mut state, blocker, normally_blocked));
         assert!(is_source_blocked(&state, normally_blocked));
+    }
+
+    // ── Ood Sphere: "can't become tapped" (StaticMode::CantTap) enforcement ──
+
+    /// Build a battlefield creature carrying a printed `CantTap` static and run a
+    /// layers pass so `static_mode_presence` + `static_definitions` reflect it.
+    fn creature_with_cant_tap(state: &mut crate::types::game_state::GameState) -> ObjectId {
+        use crate::types::statics::StaticMode;
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Goaded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            let def = crate::types::ability::StaticDefinition::new(StaticMode::CantTap)
+                .affected(crate::types::ability::TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        crate::game::layers::evaluate_layers(state);
+        id
+    }
+
+    #[test]
+    fn object_cant_tap_reflects_printed_cant_tap_static() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        assert!(object_cant_tap(&state, restricted));
+
+        // A plain creature (no CantTap) is never restricted.
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(!object_cant_tap(&state, plain));
+    }
+
+    #[test]
+    fn tap_permanent_for_cost_refuses_cant_tap_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let mut events = Vec::new();
+        let result = tap_permanent_for_cost(&mut state, restricted, &mut events);
+        assert!(
+            result.is_err(),
+            "a can't-become-tapped creature can't pay a tap cost"
+        );
+        assert!(
+            !state.objects.get(&restricted).unwrap().tapped,
+            "the creature must remain untapped after a refused cost tap"
+        );
+        assert!(
+            events.is_empty(),
+            "no PermanentTapped event on a refused tap"
+        );
+    }
+
+    #[test]
+    fn tap_permanent_for_cost_taps_unrestricted_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let plain = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut events = Vec::new();
+        assert!(tap_permanent_for_cost(&mut state, plain, &mut events).is_ok());
+        assert!(state.objects.get(&plain).unwrap().tapped);
+        assert_eq!(events.len(), 1, "unrestricted tap emits PermanentTapped");
+    }
+
+    #[test]
+    fn effect_tap_is_a_no_op_on_cant_tap_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let mut events = Vec::new();
+        // CR 701.26a: an effect can't tap the creature — process_one_tap no-ops.
+        crate::game::effects::tap_untap::process_one_tap(
+            &mut state,
+            restricted,
+            restricted,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.objects.get(&restricted).unwrap().tapped,
+            "an effect-driven tap must not tap a can't-become-tapped creature"
+        );
+    }
+
+    #[test]
+    fn tap_ability_activation_refused_but_untap_ability_allowed() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let source = state.objects.get(&restricted).unwrap();
+        // {T} cost → refused (would become tapped).
+        assert!(
+            check_summoning_sickness_for_cost(&state, source, &AbilityCost::Tap).is_err(),
+            "a {{T}} ability of a can't-become-tapped creature can't be activated"
+        );
+        // {Q} untap cost → NOT gated by CantTap (that is CantUntap's domain).
+        assert!(
+            check_summoning_sickness_for_cost(&state, source, &AbilityCost::Untap).is_ok(),
+            "a {{Q}} untap ability is unaffected by CantTap"
+        );
     }
 }

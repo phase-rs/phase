@@ -2984,6 +2984,73 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
     })
 }
 
+/// CR 611.2a + CR 611.2c + CR 701.26a + CR 508.1f: "Until your next turn, those
+/// creatures can't become tapped unless they're being declared as attackers."
+/// (Ood Sphere's Red-Eye chaos trigger, second sentence.) A duration-bound
+/// "can't become tapped" continuous effect over the parent ability's chosen
+/// objects (the goaded creatures — `ParentTarget`), lifted only by attacker
+/// declaration (CR 508.1f: tapping a creature as it's declared an attacker isn't
+/// a cost). Modeled exactly like `try_parse_temporary_attack_only_neighbor` (a
+/// `GenericEffect` that grants a `StaticMode` static until the controller's next
+/// turn), except the subject is `ParentTarget` (the inherited goad targets) and
+/// the granted static is `StaticMode::CantTap`.
+///
+/// The subject phrase and the declared-as-attackers exemption are hand-rolled
+/// here rather than delegated to `parse_static_line`: "those creatures" →
+/// `ParentTarget` is a chained-effect anaphor with no standalone static-line
+/// meaning, and "unless they're being declared as attackers" is not a standard
+/// static condition. FAILS CLOSED — any other "unless" rider returns `None`,
+/// leaving the existing unless-suffix fallback to emit a strict-failure
+/// `Unimplemented` rather than silently dropping an unmodeled exemption.
+fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("until your next turn, ").parse(input)?;
+        // "those creatures" / "those permanents" → the goaded set (ParentTarget).
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("those creatures"),
+            tag("those permanents"),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" can't become tapped unless ").parse(input)?;
+        // CR 508.1f exemption ONLY. Compose the plural/singular variants as a
+        // single `alt` axis; any non-attacker rider drops out via `?`.
+        let (input, _) = alt((
+            tag("they're being declared as attackers"),
+            tag("theyre being declared as attackers"),
+            tag("it's being declared as an attacker"),
+            tag("its being declared as an attacker"),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, ()))
+    })?;
+
+    let duration = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(
+                        StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef),
+                    ),
+                }])],
+            duration: Some(duration.clone()),
+            target: Some(TargetFilter::ParentTarget),
+        },
+        distribute: None,
+        multi_target: None,
+        duration: Some(duration),
+        sub_ability: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
 /// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
@@ -5471,6 +5538,20 @@ fn attach_unless_slots(
 
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 611.2a + CR 611.2c + CR 701.26a + CR 508.1f: "Until your next turn, those
+    // creatures can't become tapped unless they're being declared as attackers."
+    // Must run BEFORE the unless-suffix stripper below, which would otherwise
+    // divert the declared-as-attackers rider to `parsed_unless_unsupported_clause`
+    // (a strict-failure `Unimplemented`). The combinator matches the whole clause
+    // (including the exemption) and fails closed for any other rider.
+    {
+        let cant_tap_lower = text.to_lowercase();
+        if let Some(clause) =
+            try_parse_temporary_cant_become_tapped(TextPair::new(text, &cant_tap_lower))
+        {
+            return clause;
+        }
+    }
     // CR 608.2c: "do X unless [game state]" — strip trailing unless suffix and
     // attach the negated gate before body parsing (payment-unless uses
     // `unless_pay` / `extract_resolution_unless_pay_modifier` instead).
