@@ -714,7 +714,7 @@ fn parse_before_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, Or
 
 /// Sub-dispatch for "after [rest]" — blockers declared, combat. Mirror of
 /// `parse_before_phrase`: `after blockers are declared` opens the post-blockers
-/// combat window (CR 509.1/510.1/511.1), while `after combat` (folded in from
+/// combat window (CR 509.1, CR 510.1, and CR 511.1), while `after combat` (folded in from
 /// the former standalone leaf) is the post-combat-phase window. Backs the class
 /// printing "Cast this spell only during combat after blockers are declared."
 /// (Aleatory, Chaotic Strike, Curtain of Light, Flash Foliage) alongside the
