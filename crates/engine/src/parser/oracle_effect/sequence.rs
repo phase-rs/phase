@@ -496,6 +496,10 @@ fn ability_uses_chosen_card_predicate(def: &AbilityDefinition) -> bool {
 
 fn effect_uses_chosen_card_predicate(effect: &Effect) -> bool {
     match effect {
+        Effect::Choose {
+            choice_type: ChoiceType::CardPredicateGuess { .. },
+            ..
+        } => true,
         Effect::Dig { filter, .. }
         | Effect::RevealUntil { filter, .. }
         | Effect::SearchLibrary { filter, .. }

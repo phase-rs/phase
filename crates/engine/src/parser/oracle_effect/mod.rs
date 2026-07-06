@@ -6218,12 +6218,40 @@ fn chain_has_card_predicate_guess(clauses: &[ClauseIr]) -> bool {
         .any(|clause| parsed_clause_has_card_predicate_guess(&clause.parsed))
 }
 
+fn chain_has_guess_outcome_authority(clauses: &[ClauseIr]) -> bool {
+    let has_choice = clauses
+        .iter()
+        .any(|clause| parsed_clause_has_choice_effect(&clause.parsed));
+    clauses
+        .iter()
+        .any(|clause| parsed_clause_has_guess_outcome_authority(&clause.parsed, has_choice))
+}
+
 fn parsed_clause_has_card_predicate_guess(clause: &ParsedEffectClause) -> bool {
     effect_is_card_predicate_guess(&clause.effect)
         || clause
             .sub_ability
             .as_deref()
             .is_some_and(ability_has_card_predicate_guess)
+}
+
+fn parsed_clause_has_guess_outcome_authority(
+    clause: &ParsedEffectClause,
+    has_choice: bool,
+) -> bool {
+    effect_has_guess_outcome_authority(&clause.effect, has_choice)
+        || clause
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| ability_has_guess_outcome_authority(sub, has_choice))
+}
+
+fn parsed_clause_has_choice_effect(clause: &ParsedEffectClause) -> bool {
+    matches!(clause.effect, Effect::Choose { .. })
+        || clause
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_choice_effect)
 }
 
 fn ability_has_card_predicate_guess(def: &AbilityDefinition) -> bool {
@@ -6236,6 +6264,53 @@ fn ability_has_card_predicate_guess(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(ability_has_card_predicate_guess)
+}
+
+fn ability_has_guess_outcome_authority(def: &AbilityDefinition, has_choice: bool) -> bool {
+    effect_has_guess_outcome_authority(def.effect.as_ref(), has_choice)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| ability_has_guess_outcome_authority(sub, has_choice))
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(|els| ability_has_guess_outcome_authority(els, has_choice))
+}
+
+fn ability_has_choice_effect(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::Choose { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_choice_effect)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_has_choice_effect)
+}
+
+fn effect_has_guess_outcome_authority(effect: &Effect, has_choice: bool) -> bool {
+    match effect {
+        Effect::OpponentGuess { subject, .. } => match subject.as_ref() {
+            GuessSubject::Proposition { .. } => true,
+            GuessSubject::CommittedChoice { choice_type } => {
+                has_choice || !is_placeholder_committed_guess_choice(choice_type)
+            }
+        },
+        _ => false,
+    }
+}
+
+fn is_placeholder_committed_guess_choice(choice_type: &ChoiceType) -> bool {
+    matches!(
+        choice_type,
+        ChoiceType::NumberRange {
+            min: 0,
+            max: 0,
+            distinctness: NumberDistinctness::Repeatable,
+        }
+    )
 }
 
 fn effect_is_card_predicate_guess(effect: &Effect) -> bool {
@@ -19190,6 +19265,13 @@ fn try_parse_guess_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffect
     .parse(lower.as_str())
     .ok()?;
 
+    if all_consuming(parse_top_card_predicate_guess)
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return None;
+    }
+
     // CR 608.2c: "guesses which [value] you chose" — committed-choice guess. The
     // committed domain comes from `ctx.pending_choice_type` when the chunk
     // threading carried it forward; otherwise a placeholder is emitted and the
@@ -23848,15 +23930,34 @@ pub(crate) fn parse_effect_chain_ir(
             continue;
         }
 
+        let has_guess_outcome_authority = chain_has_guess_outcome_authority(&clauses);
+        if predicate_guess_cond.is_none()
+            && !has_guess_outcome_authority
+            && matches!(
+                strip_guess_outcome_conditional(normalized_text),
+                (Some(_), _)
+            )
+        {
+            clauses.push(unimplemented_clause_ir(
+                "guess_result_condition",
+                normalized_text,
+                chunk.boundary_after,
+            ));
+            continue;
+        }
         // CR 608.2d: "if they guessed wrong/right, ..." — the OpponentGuess
         // outcome branch. Card-predicate guesses use the revealed-card condition
-        // above; other guess classes use the generic outcome signal here.
+        // above; other guess classes use the generic outcome signal here only
+        // after a supported `OpponentGuess` clause has been parsed.
         let (condition, text) = match predicate_guess_cond {
             Some(cond) => (Some(cond), predicate_guess_text),
-            None => match strip_guess_outcome_conditional(normalized_text) {
-                (Some(guess_cond), body) => (Some(guess_cond), body),
-                (None, _) => strip_additional_cost_conditional(normalized_text),
-            },
+            None if has_guess_outcome_authority => {
+                match strip_guess_outcome_conditional(normalized_text) {
+                    (Some(guess_cond), body) => (Some(guess_cond), body),
+                    (None, _) => strip_additional_cost_conditional(normalized_text),
+                }
+            }
+            None => strip_additional_cost_conditional(normalized_text),
         };
         // CR 205.3m + CR 607.2d + CR 608.2h: target-declaring leading-if that
         // gates the ability's target on the source's chosen creature type
