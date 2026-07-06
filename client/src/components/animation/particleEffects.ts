@@ -44,7 +44,13 @@ export function lerpColor(a: RGB, b: RGB, t: number): RGB {
 }
 
 export function hexToRgb(hex: string): RGB {
-  const h = hex.replace("#", "");
+  let h = hex.replace("#", "");
+  // Expand CSS shorthand hex (#fff -> #ffffff). Without this, `substring(4, 6)`
+  // is "" for a 3-digit value and `parseInt("", 16)` is NaN, so the blue channel
+  // comes back NaN and the color renders as `rgb(255, 255, NaN)` (nothing).
+  if (h.length === 3) {
+    h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  }
   return {
     r: parseInt(h.substring(0, 2), 16),
     g: parseInt(h.substring(2, 4), 16),

@@ -5,7 +5,11 @@ import {
   DAMAGE_FLURRY_TRAIL_PARTICLE_MAX,
 } from "../../../animation/types";
 import type { ActiveEffect, ParticleSystem } from "../particleSystem";
-import { damageFlurryProjectileCount, emitDamageFlurry } from "../particleEffects";
+import {
+  damageFlurryProjectileCount,
+  emitDamageFlurry,
+  hexToRgb,
+} from "../particleEffects";
 
 describe("particleEffects", () => {
   it("caps damage flurry projectile count for huge combat batches", () => {
@@ -59,5 +63,19 @@ describe("particleEffects", () => {
 
     expect(lastProjectile.startTime + lastProjectile.duration).toBe(impactEffect.startTime);
     expect(impactEffect.startTime).toBe(projectileEffects[0].startTime + impactDelay);
+  });
+
+  describe("hexToRgb", () => {
+    it("expands CSS shorthand hex without producing a NaN channel", () => {
+      // #fff must expand to #ffffff; otherwise substring(4,6) is "" and the
+      // blue channel is parseInt("", 16) === NaN.
+      expect(hexToRgb("#fff")).toEqual({ r: 255, g: 255, b: 255 });
+      expect(hexToRgb("#f00")).toEqual({ r: 255, g: 0, b: 0 });
+    });
+
+    it("parses full 6-digit hex", () => {
+      expect(hexToRgb("#ff8000")).toEqual({ r: 255, g: 128, b: 0 });
+      expect(hexToRgb("3498db")).toEqual({ r: 52, g: 152, b: 219 });
+    });
   });
 });
