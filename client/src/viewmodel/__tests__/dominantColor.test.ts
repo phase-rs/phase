@@ -134,6 +134,50 @@ describe("getDominantManaColor", () => {
 
     expect(result).toBe("Blue");
   });
+
+  it("counts wire-format shard variant names emitted by the adapter", () => {
+    // The engine sends full variant names ("White", "WhiteBlue", …), not the
+    // abbreviated forms ("W", "W/U"). These must still be counted.
+    const objects: Record<string, GameObject> = {
+      "1": makeGameObject({
+        id: 1,
+        name: "Serra Angel",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Angel"] },
+        mana_cost: { type: "Cost", shards: ["White", "White"], generic: 3 },
+      }),
+      "2": makeGameObject({
+        id: 2,
+        name: "Lightning Bolt",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
+      }),
+    };
+
+    const result = getDominantManaColor([1, 2], objects, 0);
+
+    expect(result).toBe("White");
+  });
+
+  it("counts both halves of a hybrid shard variant name", () => {
+    const objects: Record<string, GameObject> = {
+      "1": makeGameObject({
+        id: 1,
+        name: "Hybrid Spell",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["WhiteBlue"], generic: 0 },
+      }),
+      "2": makeGameObject({
+        id: 2,
+        name: "Blue Spell",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["Blue"], generic: 0 },
+      }),
+    };
+
+    const result = getDominantManaColor([1, 2], objects, 0);
+
+    expect(result).toBe("Blue");
+  });
 });
 
 describe("getDeckDominantColor", () => {

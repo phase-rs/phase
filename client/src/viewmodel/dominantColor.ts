@@ -1,4 +1,5 @@
 import type { GameObject, ManaColor, PlayerId } from "../adapter/types";
+import { SHARD_ABBREVIATION } from "./costLabel";
 
 const LAND_SUBTYPE_TO_COLOR: Record<string, ManaColor> = {
   Plains: "White",
@@ -35,10 +36,15 @@ function countColors(
         if (color) colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
       }
     } else if (obj.mana_cost.type === "Cost") {
-      // Non-land permanents: count colored mana shards
+      // Non-land permanents: count colored mana shards. `shards` holds the
+      // wire-format variant names ("White", "WhiteBlue", …); normalize them to
+      // the abbreviated form ("W", "W/U", …) before splitting hybrids so each
+      // colored half is counted. The `?? shard` fallback keeps already-abbreviated
+      // inputs working.
       for (const shard of obj.mana_cost.shards) {
+        const abbreviation = SHARD_ABBREVIATION[shard] ?? shard;
         // Handle hybrid shards like "W/U" — count both halves
-        for (const part of shard.split("/")) {
+        for (const part of abbreviation.split("/")) {
           const color = SHARD_TO_COLOR[part];
           if (color) colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
         }
