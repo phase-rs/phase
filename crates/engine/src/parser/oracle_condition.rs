@@ -10,6 +10,7 @@ use nom::Parser;
 
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::target as nom_target;
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::{
     Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, PlayerScope,
@@ -558,6 +559,32 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     ))
     .parse(text)
     {
+        // CR 205.4a: A supertype adjective ("snow", "basic", "legendary", "world")
+        // in "you control a <supertype> <type>" must decompose into a
+        // `HasSupertype` filter property plus the core type / subtype — it must NOT
+        // be dumped whole into a stringly-typed `subtype`. No permanent has the
+        // subtype "snow land" or "snow mountain", so the bare-subtype parse below
+        // makes the restriction permanently unsatisfiable (Blizzard could never be
+        // cast; Goblin Ski Patrol's ability could never activate). Reuse
+        // `parse_type_phrase` — the same combinator that decomposes "basic land
+        // card" into `Land` + `HasSupertype Basic` — and count matching permanents
+        // you control via the generic `ObjectCount >= 1` presence check.
+        if nom_target::parse_supertype_prefix(rest).is_ok() {
+            let (filter, remainder) = parse_type_phrase(rest);
+            if remainder.trim().is_empty() {
+                if let TargetFilter::Typed(typed) = filter {
+                    return Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed.controller(ControllerRef::You)),
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    });
+                }
+            }
+        }
         if let Some(core_type) = parse_core_type_word(rest) {
             return Some(ParsedCondition::YouControlCoreTypeCountAtLeast {
                 core_type,
@@ -1449,6 +1476,67 @@ mod tests {
             ),
             other => panic!("expected QuantityComparison(ObjectCount >= 3), got {other:?}"),
         }
+    }
+
+    /// CR 205.4a + CR 205.4g: A supertype adjective in a "you control a
+    /// <supertype> <type>" restriction (Blizzard — "Cast this spell only if you
+    /// control a snow land"; Goblin Ski Patrol — "only if you control a snow
+    /// Mountain") must decompose into a `HasSupertype` filter property plus the
+    /// core type / subtype and count via `ObjectCount >= 1`. It must NOT dump
+    /// "snow land" / "snow mountain" into a stringly-typed
+    /// `YouControlSubtypeCountAtLeast` — no permanent has such a subtype, so that
+    /// parse leaves the restriction permanently unsatisfiable.
+    #[test]
+    fn you_control_supertype_permanent_decomposes_to_filter() {
+        use crate::types::card_type::Supertype;
+
+        fn assert_snow_filter(text: &str, expect_type: TypeFilter) {
+            match parse_restriction_condition(text) {
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }) => match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(
+                            tf.controller,
+                            Some(ControllerRef::You),
+                            "{text}: must be scoped to permanents you control"
+                        );
+                        assert!(
+                            tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::HasSupertype {
+                                    value: Supertype::Snow
+                                }
+                            )),
+                            "{text}: must carry HasSupertype(Snow), got {:?}",
+                            tf.properties
+                        );
+                        assert!(
+                            tf.type_filters.contains(&expect_type),
+                            "{text}: type_filters {:?} must contain {expect_type:?}",
+                            tf.type_filters
+                        );
+                    }
+                    other => panic!("{text}: expected a Typed filter, got {other:?}"),
+                },
+                other => {
+                    panic!("{text}: expected QuantityComparison(ObjectCount >= 1), got {other:?}")
+                }
+            }
+        }
+
+        // Blizzard: supertype Snow + core type Land.
+        assert_snow_filter("you control a snow land", TypeFilter::Land);
+        // Goblin Ski Patrol: supertype Snow + subtype Mountain (basic land type).
+        assert_snow_filter(
+            "you control a snow mountain",
+            TypeFilter::Subtype("Mountain".to_string()),
+        );
     }
 
     #[test]
