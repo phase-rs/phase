@@ -122,6 +122,10 @@ pub(crate) fn rule_static_affected_is_player_scope(affected: &TargetFilter) -> b
             | TargetFilter::OriginalController
             | TargetFilter::ScopedPlayer
             | TargetFilter::SpecificPlayer { .. }
+            // CR 607.2d / CR 607.2m (by analogy): "players who last chose <anchor>"
+            // is a player-scope subject for rule statics (Two Streams Facility's
+            // land-drop grant).
+            | TargetFilter::PlayerWhoChoseLabel { .. }
             | TargetFilter::SourceChosenPlayer
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner

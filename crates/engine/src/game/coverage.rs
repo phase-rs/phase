@@ -552,6 +552,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
+        TargetFilter::PlayerWhoChoseLabel { label } => format!("player who last chose {label}"),
         TargetFilter::Neighbor { direction } => match direction {
             SeatDirection::Left => "player to your left".into(),
             SeatDirection::Right => "player to your right".into(),
@@ -586,6 +587,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
+            FilterProp::ControllerChoseLabel { label } => {
+                parts.push(format!("controlled by a player who last chose {label}"))
+            }
             FilterProp::WasPlayed => parts.push("was played".into()),
             FilterProp::Attacking { defender } => match defender {
                 None => parts.push("attacking".into()),
@@ -2560,6 +2564,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("persist".into(), "yes".into()));
             }
         }
+        Effect::SwapChosenLabels { first, second } => {
+            d.push(("swap".into(), format!("{first} <-> {second}")));
+        }
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
         }
@@ -3813,6 +3820,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddDynamicToughness { .. } => "add dynamic toughness".into(),
         ContinuousModification::AddDynamicKeyword { kind, .. } => {
             format!("dynamic keyword {kind:?}")
+        }
+        ContinuousModification::AddKeywordWithDerivedCost { kind, .. } => {
+            format!("derived-cost keyword {kind:?}")
         }
         ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),

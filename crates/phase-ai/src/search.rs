@@ -238,6 +238,7 @@ fn random_card_predicate_guess(
         choice_type,
         options,
         source_id: Some(source_id),
+        persist_player: _,
     } = &state.waiting_for
     else {
         return None;
@@ -4584,6 +4585,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let mut saw_land = false;
@@ -4625,6 +4627,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut rng = SmallRng::seed_from_u64(1);
 

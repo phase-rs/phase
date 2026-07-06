@@ -269,6 +269,7 @@ pub(crate) fn begin_variable_speed_payment(
         options: (min..=max).map(|value| value.to_string()).collect(),
         choice_type: ChoiceType::NumberRange { min, max },
         source_id: None,
+        persist_player: None,
     }
 }
 
@@ -1063,15 +1064,22 @@ fn prowl_damage_ledger_satisfied(state: &GameState, player: PlayerId, object_id:
         })
 }
 
-/// CR 702.143d: the single authority for "any foretell cost it has" — reads
-/// the printed `Keyword::Foretell` cost off an object. Shared between the
-/// foretell special action (`handle_foretell`) and the effect-driven "becomes
-/// foretold" grant (`effects::grant_permission`).
-pub(crate) fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
-    obj.keywords.iter().find_map(|keyword| match keyword {
-        Keyword::Foretell(cost) => Some(cost.clone()),
-        _ => None,
-    })
+/// CR 702.143a + CR 702.143d: the single authority for "any foretell cost it
+/// has" — reads the effective `Keyword::Foretell` cost of a card via
+/// `effective_off_zone_keywords`, which returns `obj.keywords` on the battlefield
+/// and `base_keywords` + off-zone grants elsewhere. This surfaces a foretell that
+/// is GRANTED to a hand card by a static (Singing Towers of Darillium — with its
+/// derived cost) as well as a printed foretell, so both the special action and
+/// AI legal-actions see the grant. Shared between the foretell special action
+/// (`handle_foretell`) and the effect-driven "becomes foretold" grant
+/// (`effects::grant_permission`).
+pub(crate) fn foretell_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Foretell(cost) => Some(cost),
+            _ => None,
+        })
 }
 
 fn can_pay_special_action_cost_after_auto_tap(

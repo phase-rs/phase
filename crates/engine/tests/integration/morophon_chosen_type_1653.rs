@@ -114,6 +114,7 @@ fn morophon_creature_type_choice_marks_layers_dirty() {
         choice_type: ChoiceType::creature_type(),
         options: vec!["Human".to_string(), "Elf".to_string()],
         source_id: Some(morophon),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {
@@ -157,6 +158,7 @@ fn card_name_choice_marks_layers_dirty_for_chosen_name_static() {
         choice_type: ChoiceType::CardName,
         options: Vec::new(),
         source_id: Some(source),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {

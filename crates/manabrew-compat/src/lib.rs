@@ -3483,6 +3483,21 @@ mod tests {
                     x_cost_previews: vec![],
                 },
             ),
+            (
+                "chooseCombatDamageAssignment",
+                WaitingFor::AssignCombatDamage {
+                    player: PlayerId(0),
+                    attacker_id: ObjectId(1),
+                    total_damage: 1,
+                    blockers: vec![],
+                    assignment_modes: vec![],
+                    trample: None,
+                    defending_player: PlayerId(1),
+                    attack_target: AttackTarget::Player(PlayerId(1)),
+                    pw_loyalty: None,
+                    pw_controller: None,
+                },
+            ),
             ("gameOver", WaitingFor::GameOver { winner: None }),
         ];
 

@@ -68,6 +68,7 @@ fn place_and_choose(
         },
         options: labels.iter().map(|s| s.to_string()).collect(),
         source_id: Some(obj),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {

@@ -6355,6 +6355,64 @@ fn try_parse_player_draws_and_gains_control(
 }
 
 #[tracing::instrument(level = "debug")]
+/// CR 311.7 + CR 607.2d / CR 607.2m (by analogy): parse "each player who last
+/// chose <A> chooses <B>, and vice versa" into a symmetric
+/// `Effect::SwapChosenLabels`. Combinator dispatch (no `contains`/`find`): the
+/// "each player who last chose " head, the "<A> chooses <B>" body split on
+/// " chooses ", and the "[, ]and vice versa" tail. Anchor labels are
+/// canonicalized to `ChoiceType::Labeled`'s option casing via the shared
+/// `canonicalize_anchor_label` authority. Operates on lowercase because the
+/// labels are canonicalized regardless of source casing.
+fn parse_swap_chosen_labels(text: &str) -> Option<Effect> {
+    fn body(i: &str) -> OracleResult<'_, (&str, &str)> {
+        let (i, _) = tag("each player who last chose ").parse(i)?;
+        let (i, first) = take_until(" chooses ").parse(i)?;
+        let (i, _) = tag(" chooses ").parse(i)?;
+        let (i, second) = alt((
+            take_until(", and vice versa"),
+            take_until(" and vice versa"),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((tag(", and vice versa"), tag(" and vice versa"))).parse(i)?;
+        Ok((i, (first, second)))
+    }
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    let (_, (first, second)) = body(lower.as_str()).ok()?;
+    let first = crate::parser::oracle_static::canonicalize_anchor_label(first);
+    let second = crate::parser::oracle_static::canonicalize_anchor_label(second);
+    if first.is_empty() || second.is_empty() {
+        return None;
+    }
+    Some(Effect::SwapChosenLabels { first, second })
+}
+
+#[cfg(test)]
+mod swap_chosen_labels_parser_tests {
+    use super::*;
+
+    #[test]
+    fn parses_vice_versa_swap_with_canonical_labels() {
+        // CR 311.7: Two Streams Facility's chaos body (after "each player " would
+        // normally strip) — the whole clause survives and lowers to a symmetric
+        // SwapChosenLabels with canonicalized labels.
+        let effect = parse_swap_chosen_labels(
+            "each player who last chose green anchor chooses red waterfall, and vice versa",
+        );
+        assert_eq!(
+            effect,
+            Some(Effect::SwapChosenLabels {
+                first: "Green anchor".to_string(),
+                second: "Red waterfall".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_non_swap_clause() {
+        assert_eq!(parse_swap_chosen_labels("each player draws a card"), None);
+    }
+}
+
 fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
@@ -6416,6 +6474,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
             "multi_source_compound_each_power_damage",
             text,
         ));
+    }
+    // CR 311.7 + CR 607.2d / CR 607.2m (by analogy): "each player who last chose
+    // <A> chooses <B>, and vice versa" (Two Streams Facility's chaos swap). The
+    // effect fans internally, so it lands with no `player_scope`. Matched here,
+    // before the generic imperative dispatch, so the leading "each player who
+    // last chose …" subject is not misread.
+    if let Some(effect) = parse_swap_chosen_labels(text) {
+        return parsed_clause(effect);
     }
     if let Some(clause) = try_parse_player_draws_and_gains_control(text, ctx) {
         return clause;

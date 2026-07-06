@@ -40,10 +40,12 @@ pub(crate) fn parse_graveyard_granted_keyword_kind(
         value(GrantedCastKeywordKind::Flashback, tag("flashback")),
         value(GrantedCastKeywordKind::Escape, tag("escape")),
         value(GrantedCastKeywordKind::Mayhem, tag("mayhem")),
-        // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
-        // Wire Surgeons (encore) grant activated graveyard keywords.
+        // CR 702.97 / CR 702.141 / CR 702.128: Varolz, Young Deathclaws
+        // (scavenge); Wire Surgeons (encore); Naktamun (embalm) grant
+        // activated graveyard keywords.
         value(GrantedCastKeywordKind::Scavenge, tag("scavenge")),
         value(GrantedCastKeywordKind::Encore, tag("encore")),
+        value(GrantedCastKeywordKind::Embalm, tag("embalm")),
         // CR 702.143a / CR 702.94a: Dream Devourer grants foretell, Aminatou
         // grants miracle — hand-zone cast keywords (gated by `grant_zone`).
         value(GrantedCastKeywordKind::Foretell, tag("foretell")),
@@ -119,6 +121,7 @@ fn graveyard_granted_kind_for_keyword(keyword: &Keyword) -> Option<GrantedCastKe
         GrantedCastKeywordKind::Mayhem,
         GrantedCastKeywordKind::Scavenge,
         GrantedCastKeywordKind::Encore,
+        GrantedCastKeywordKind::Embalm,
         GrantedCastKeywordKind::Foretell,
         GrantedCastKeywordKind::Miracle,
     ]
