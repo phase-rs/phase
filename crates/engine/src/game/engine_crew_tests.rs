@@ -103,12 +103,16 @@ fn test_crew_activation_enters_crew_vehicle_state() {
             vehicle_id: vid,
             crew_power,
             eligible_creatures,
+            contributions,
         } => {
             assert_eq!(player, PlayerId(0));
             assert_eq!(vid, vehicle_id);
             assert_eq!(crew_power, 3);
             assert!(eligible_creatures.contains(&creature_a));
             assert!(eligible_creatures.contains(&creature_b));
+            // CR 702.122a: the choice carries one contribution per eligible
+            // creature so the UI gates on adjusted power, not printed power.
+            assert_eq!(contributions.len(), eligible_creatures.len());
         }
         other => panic!("Expected CrewVehicle, got {:?}", other),
     }

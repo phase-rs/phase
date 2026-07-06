@@ -1245,6 +1245,21 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — an empty pick is
+        // illegal (min >= 1), so pick the first `min` eligible objects.
+        WaitingFor::EachPlayerCopyChosenSelection { eligible, min, .. } => {
+            let targets: Vec<_> = eligible
+                .iter()
+                .take((*min).max(1) as usize)
+                .cloned()
+                .collect();
+            if targets.is_empty() {
+                None
+            } else {
+                Some(GameAction::SelectTargets { targets })
+            }
+        }
+
         // Copy retarget: keep copied targets when all slots already have a
         // current value; freshly cast prepare/paradigm copies start empty, so
         // choose the first legal target for the current slot.

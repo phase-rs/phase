@@ -514,6 +514,17 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_player_filter(player_filter));
             acc
         }
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min: _,
+            max: _,
+            copy_modifications: _,
+            scale: _,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(choose_filter));
+            acc
+        }
         Effect::DestroyAll {
             target,
             cant_regenerate: _,
@@ -3423,6 +3434,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::PumpAll { .. }
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::DestroyAll { .. }
         | Effect::ChangeZone { .. }
         | Effect::ChangeZoneAll { .. }

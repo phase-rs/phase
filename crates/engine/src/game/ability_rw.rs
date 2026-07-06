@@ -2949,6 +2949,18 @@ fn legacy_effect(x: &Effect) -> bool {
                 || legacy_target_filter(sacrifice_filter)
                 || oqe(total_power_cap)
         }
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min: _,
+            max: _,
+            copy_modifications,
+            scale: _,
+        } => {
+            legacy_target_filter(choose_filter)
+                || copy_modifications
+                    .iter()
+                    .any(legacy_continuous_modification)
+        }
         Effect::ChangeSpeed {
             player_scope,
             amount,
@@ -5202,6 +5214,10 @@ fn rw_effect(
         | Effect::SetClassLevel { .. }
         | Effect::FreeCastFromZones { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        // CR 101.4 + CR 707.2 + CR 122.1: this APNAP walk creates token copies
+        // and may add counters from a live property read. Fail closed until the
+        // copy/counter sub-steps have a precise profile.
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }

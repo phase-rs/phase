@@ -92,7 +92,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
-    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission,
+    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DoubleTarget, Duration, Effect, EffectScope, FilterProp, GameRestriction, IntensityScope,
     IterationKindBinding, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
@@ -21349,6 +21349,159 @@ fn try_parse_conditional_protection_grant_ability(
     Some(def)
 }
 
+/// CR 101.4 + CR 707.2 + CR 122.1: Whole-body detector for the WHO phenomena
+/// idiom "each player chooses one or two creatures they control. Each player
+/// creates a token that's a copy of the first creature they chose, except <…>.
+/// [Then each player who chose a second creature puts a number of +1/+1 counters
+/// on the token they created equal to the power of the second creature they
+/// chose.]" — lowered to a single [`Effect::EachPlayerCopyChosen`] with
+/// `player_scope = All`.
+///
+/// Fail-closed: composed nom combinators only (no `contains`/`starts_with`);
+/// declines (returns `None`) unless the full multi-sentence shape parses, so an
+/// unrecognized variant stays an honest `Unimplemented` rather than misparsing.
+/// The scale sentence is optional (`scale: None` for the single-choice shape
+/// that never selects a second object). Note: Caught in a Parallel Universe is
+/// NOT covered by this path — it selects "a creature controlled by the player to
+/// their left" (a chooser-relative eligibility scope), so its choose clause does
+/// not match the `<type> they control` shape below and it stays `Unimplemented`.
+pub(crate) fn try_parse_each_player_copy_chosen(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_ascii_lowercase();
+    let i = lower.as_str();
+
+    // Segment 1: "each player chooses <cardinality> <type> they control."
+    let (i, _) = tag::<_, _, OracleError<'_>>("each player chooses ")
+        .parse(i)
+        .ok()?;
+    let (i, (min, max)) = alt((
+        value((1u32, 2u32), tag::<_, _, OracleError<'_>>("one or two ")),
+        value((1u32, 1u32), alt((tag("a "), tag("an ")))),
+    ))
+    .parse(i)
+    .ok()?;
+    // The type noun runs up to the controller clause; feed it to the shared
+    // type-phrase parser so any object class (not just "creature") is supported.
+    let (i, noun) = take_until::<_, _, OracleError<'_>>(" they control")
+        .parse(i)
+        .ok()?;
+    let (choose_filter, noun_rest) = parse_type_phrase(noun);
+    if !noun_rest.trim().is_empty() {
+        return None;
+    }
+    let (i, _) = tag::<_, _, OracleError<'_>>(" they control")
+        .parse(i)
+        .ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i).ok()?;
+    let i = i.trim_start();
+
+    // Segment 2: "each player creates a token that's a copy of the [first] <noun>
+    // they chose[, except <body>]." The "first" ordinal is present only when a
+    // second object may be chosen (Human—Time Lord); the single-choice shape
+    // omits it.
+    let (i, _) = tag::<_, _, OracleError<'_>>("each player creates a token that's a copy of the ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>("first ")).parse(i).ok()?;
+    let (i, _) = take_until::<_, _, OracleError<'_>>(" they chose")
+        .parse(i)
+        .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(" they chose").parse(i).ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(i).ok()?;
+    let i = i.trim_start();
+    let (i, copy_modifications) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("except ").parse(i) {
+            become_copy_except::parse_except_body(rest, "", &ParseContext::default())?
+        } else {
+            (i, Vec::new())
+        };
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i).ok()?;
+    let i = i.trim_start();
+
+    // Segment 3 (optional): the scaling sentence.
+    let (scale, i) = if i.is_empty() {
+        (None, i)
+    } else {
+        match parse_copy_scale_segment(i) {
+            Some((cs, rest)) => (Some(cs), rest),
+            // Trailing text present but not the recognized scale clause — decline
+            // so the generic pipeline attempts it (fail-closed).
+            None => return None,
+        }
+    };
+    if !i.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = AbilityDefinition::new(
+        kind,
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min,
+            max,
+            copy_modifications,
+            scale,
+        },
+    );
+    // CR 101.4: "each player" → scope over all players; the self-iterating
+    // resolver reads this and walks the scoped set itself.
+    def.player_scope = Some(PlayerFilter::All);
+    Some(def)
+}
+
+/// CR 122.1 + CR 208.1: Parse the optional scaling sentence of
+/// [`try_parse_each_player_copy_chosen`] — "then each player who chose a second
+/// <noun> puts a number of <counter> counters on the token they created equal to
+/// the <property> of the second <noun> they chose." Returns the `CopyScale` and
+/// the remaining text.
+fn parse_copy_scale_segment(i: &str) -> Option<(CopyScale, &str)> {
+    let (i, _) = tag::<_, _, OracleError<'_>>("then each player who chose a second ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = take_until::<_, _, OracleError<'_>>(" puts a number of ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(" puts a number of ")
+        .parse(i)
+        .ok()?;
+    let (i, counter_type) = alt((
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1"),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1")),
+    ))
+    .parse(i)
+    .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(" counters on the token they created equal to the ")
+        .parse(i)
+        .ok()?;
+    let (i, scale_property) = alt((
+        value(ObjectProperty::Power, tag::<_, _, OracleError<'_>>("power")),
+        value(ObjectProperty::Toughness, tag("toughness")),
+        value(ObjectProperty::ManaValue, tag("mana value")),
+    ))
+    .parse(i)
+    .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(" of the second ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = take_until::<_, _, OracleError<'_>>(" they chose")
+        .parse(i)
+        .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(" they chose").parse(i).ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i).ok()?;
+    Some((
+        CopyScale {
+            counter_type,
+            scale_property,
+        },
+        i.trim_start(),
+    ))
+}
+
 /// CR 608.2c: After a "Choose up to N X" head that publishes the chosen objects
 /// into the resolution chain's tracked set, a following "affect all OTHER X"
 /// clause means "X not among those chosen this way" — not "X other than the
@@ -21541,6 +21694,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {
+        return def;
+    }
     if let Some(def) = try_parse_catch_up_draw(text, kind) {
         return def;
     }
@@ -21574,6 +21730,9 @@ pub(crate) fn parse_effect_chain_with_context(
         return def;
     }
     if let Some(def) = try_parse_balance_equalization(text, kind) {
+        return def;
+    }
+    if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {
         return def;
     }
     if let Some(def) = try_parse_catch_up_draw(text, kind) {

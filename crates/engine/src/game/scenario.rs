@@ -1648,6 +1648,7 @@ impl GameRunner {
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",

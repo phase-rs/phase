@@ -3261,6 +3261,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::ChooseOneOf { .. }
         | Effect::ChooseCounterAdjustment { .. }
         | Effect::ReturnAsAura { .. }

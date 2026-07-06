@@ -1692,6 +1692,13 @@ fn detect_dynamic_qty(
         // bodies are captured by `PlayerFilter::VotedFor`, which resolves
         // against the vote ballot ledger rather than a QuantityExpr.
         "VotedFor",
+        // CR 122.1 + CR 208.1: "puts a number of +1/+1 counters ... equal to the
+        // power of the second creature they chose" (Human—Time Lord Meta-Crisis)
+        // is captured whole by `Effect::EachPlayerCopyChosen`'s `scale` clause
+        // (`scale_property` read live at placement), not a stored `QuantityExpr`.
+        // The variant name is the coverage marker, mirroring
+        // `EachDealsDamageEqualToPower`.
+        "EachPlayerCopyChosen",
     ];
     if json_has_any(ast_json, dynamic_markers) {
         return;

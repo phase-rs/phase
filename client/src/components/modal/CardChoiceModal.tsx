@@ -52,6 +52,7 @@ import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.t
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
+import { EachPlayerCopyChosenModal } from "./EachPlayerCopyChosenModal.tsx";
 import {
   CoinFlipKeepModal,
   DigModal,
@@ -333,6 +334,9 @@ export function CardChoiceModal() {
     case "CategoryChoice":
       if (!canActForWaitingState) return null;
       return <CategoryChoiceModal data={waitingFor.data} />;
+    case "EachPlayerCopyChosenSelection":
+      if (!canActForWaitingState) return null;
+      return <EachPlayerCopyChosenModal data={waitingFor.data} />;
     case "ManifestDreadChoice":
       if (!canActForWaitingState) return null;
       return <ManifestDreadModal data={waitingFor.data} />;

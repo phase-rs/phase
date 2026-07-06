@@ -269,6 +269,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Double { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Encore
         | Effect::EndCombatPhase

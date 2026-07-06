@@ -500,6 +500,7 @@ fn redundancy_delta(
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }

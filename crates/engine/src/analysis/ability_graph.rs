@@ -957,6 +957,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GivePlayerCounter { .. }
         | Effect::LoseAllPlayerCounters { .. }

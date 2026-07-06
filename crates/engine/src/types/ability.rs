@@ -8787,6 +8787,23 @@ impl DigSource {
     }
 }
 
+/// CR 122.1 + CR 208.1: the scaling clause of [`Effect::EachPlayerCopyChosen`]
+/// — put `counter_type` counters on the created copy equal to `scale_property`
+/// of the second chosen object. Absent (`scale: None`) when the effect never
+/// scales — the single-choice (`max: 1`) shape that never selects a second
+/// object. The both-or-neither invariant
+/// (a scale clause exists iff a second object may be chosen) lives in the type:
+/// the counter type and the read property travel together so no call site can
+/// place counters without knowing what to read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyScale {
+    /// CR 122.1: which counter kind to place on the created copy (Plus1Plus1).
+    pub counter_type: CounterType,
+    /// CR 208.1: the property of the second chosen object read live at
+    /// placement to determine the counter count (Power).
+    pub scale_property: ObjectProperty,
+}
+
 /// CR 723.1 / CR 723.2: the duration window of a control-another-player effect.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlWindow {
@@ -11103,6 +11120,50 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_power_cap: Option<QuantityExpr>,
     },
+    /// CR 101.4 + CR 707.2 + CR 122.1: Each player, in APNAP order, chooses an
+    /// ordered `min..=max` selection of objects they control matching
+    /// `choose_filter`; creates a token that's a copy of the FIRST chosen (with
+    /// `copy_modifications` applied, e.g. "except it isn't legendary" →
+    /// `RemoveSupertype(Legendary)`); then, if `scale` is set AND a second was
+    /// chosen, puts `scale.counter_type` counters on that created token equal to
+    /// `scale.scale_property` of the second chosen object (read live at
+    /// placement, CR 122.1).
+    ///
+    /// Self-iterating (excluded from `player_scope` fan-out in
+    /// `resolve_ability_chain`, mirroring `ChooseAndSacrificeRest`): the resolver
+    /// walks the scoped player set itself and seeds
+    /// `WaitingFor::EachPlayerCopyChosenSelection` per player. The inner copy and
+    /// counter steps may pause on a CR 616.1 replacement choice; resumption is
+    /// threaded through `GameState::pending_each_player_copy_chosen` (see
+    /// `game/effects/each_player_copy_chosen.rs`).
+    ///
+    /// Real consumer (WHO phenomena): Human—Time Lord Meta-Crisis
+    /// (`min:1, max:2`, `[RemoveSupertype(Legendary)]`, scale by 2nd creature's
+    /// power).
+    ///
+    /// NOT yet covered: Caught in a Parallel Universe (`min:1, max:1`,
+    /// `[AddKeyword(Menace)]`, `scale: None`). It selects "a creature controlled
+    /// by the player to their left", a chooser-relative eligibility scope this
+    /// effect cannot represent — `choose_filter` resolves against each chooser's
+    /// own battlefield only. Covering it needs a chooser-relative scope on the
+    /// choose step; the single-choice `scale: None` shape here is forward-looking
+    /// infrastructure, not exercised by a covered card yet.
+    EachPlayerCopyChosen {
+        /// Objects eligible to be chosen from each player's own battlefield.
+        choose_filter: TargetFilter,
+        /// Minimum number of objects each player must choose (1).
+        min: u32,
+        /// Maximum number of objects each player may choose (1 or 2).
+        max: u32,
+        /// CR 707.9 + CR 205.4: "except …" modifications applied to the created
+        /// copy (supertype removal, keyword grant).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        copy_modifications: Vec<ContinuousModification>,
+        /// CR 122.1: optional scaling clause; `None` when no second object is
+        /// ever chosen (the effect never places counters).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<CopyScale>,
+    },
     /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
     /// The controller may sacrifice any creature they control, including the exploiter itself.
     Exploit {
@@ -13077,6 +13138,7 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
             | Effect::GainEnergy { .. }
             | Effect::HeistExile
             | Effect::Cascade
@@ -13420,6 +13482,7 @@ impl Effect {
             | Effect::Cascade
             | Effect::Choose { .. }
             | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
@@ -13667,6 +13730,7 @@ impl Effect {
             | Effect::Cascade
             | Effect::Choose { .. }
             | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
@@ -13912,6 +13976,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ForEachCategoryExile { .. } => "ForEachCategoryExile",
         Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
+        Effect::EachPlayerCopyChosen { .. } => "EachPlayerCopyChosen",
         Effect::Exploit { .. } => "Exploit",
         Effect::GainEnergy { .. } => "GainEnergy",
         Effect::GivePlayerCounter { .. } => "GivePlayerCounter",
@@ -14150,6 +14215,7 @@ pub enum EffectKind {
     ChooseCounterKind,
     PutChosenCounter,
     ChooseAndSacrificeRest,
+    EachPlayerCopyChosen,
     Exploit,
     GainEnergy,
     GivePlayerCounter,
@@ -14412,6 +14478,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChooseCounterKind { .. } => EffectKind::ChooseCounterKind,
             Effect::PutChosenCounter { .. } => EffectKind::PutChosenCounter,
             Effect::ChooseAndSacrificeRest { .. } => EffectKind::ChooseAndSacrificeRest,
+            Effect::EachPlayerCopyChosen { .. } => EffectKind::EachPlayerCopyChosen,
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,
             Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
