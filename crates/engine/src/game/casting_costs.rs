@@ -139,6 +139,16 @@ fn residual_from_parts(mut residuals: Vec<AbilityCost>) -> Option<AbilityCost> {
     }
 }
 
+fn split_first_residual_payment(residual: AbilityCost) -> (AbilityCost, Option<AbilityCost>) {
+    match residual {
+        AbilityCost::Composite { mut costs } if costs.len() > 1 => {
+            let first = costs.remove(0);
+            (first, residual_from_parts(costs))
+        }
+        residual => (residual, None),
+    }
+}
+
 pub(crate) fn split_declared_mana_addition_and_residual(
     state: &GameState,
     pending: &PendingCast,
@@ -269,7 +279,12 @@ fn continue_after_declared_mana_split(
         pending.additional_cost_payment_mode = split.payment_mode;
     }
     if let Some(residual) = split.residual {
-        return pay_additional_cost(state, player, residual, pending, events);
+        let (current, remaining) = split_first_residual_payment(residual);
+        if let Some(remaining) = remaining {
+            let remaining = prepend_deferred_required_cost(remaining, &mut pending);
+            pending.additional_cost_flow = Some(AdditionalCost::Required(remaining));
+        }
+        return pay_additional_cost(state, player, current, pending, events);
     }
     if let Some(payment_mode) = pending.additional_cost_payment_mode.take() {
         state.pending_cast = Some(Box::new(pending));
