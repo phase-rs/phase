@@ -10,6 +10,7 @@ import {
   copyGameStateDebugSnapshot,
   exportGameStateDebugZip,
 } from "../services/gameStateExport";
+import { advanceTripleTap, initialTripleTapState } from "./tripleTap";
 
 /**
  * Registers global keyboard shortcuts for the game.
@@ -34,24 +35,16 @@ export function useKeyboardShortcuts(): void {
 
   // Triple-tap gesture for debug panel on touch devices (no keyboard)
   useEffect(() => {
-    let tapCount = 0;
-    let lastTap = 0;
-    const TAP_WINDOW = 500; // ms between taps
-    const REQUIRED_FINGERS = 3;
+    let tapState = initialTripleTapState();
 
     const handler = (e: TouchEvent) => {
-      if (e.touches.length !== REQUIRED_FINGERS) {
-        tapCount = 0;
-        return;
-      }
-      const now = Date.now();
-      if (now - lastTap > TAP_WINDOW) tapCount = 0;
-      tapCount++;
-      lastTap = now;
-      if (tapCount >= 2) {
-        tapCount = 0;
-        useUiStore.getState().toggleDebugPanel();
-      }
+      const { state, triggered } = advanceTripleTap(
+        tapState,
+        e.touches.length,
+        Date.now(),
+      );
+      tapState = state;
+      if (triggered) useUiStore.getState().toggleDebugPanel();
     };
 
     window.addEventListener("touchstart", handler);
