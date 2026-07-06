@@ -1714,6 +1714,31 @@ fn parse_named_filter_origin_zone_terminator(
     Ok((&input[consumed..], ()))
 }
 
+/// CR 201.2 + CR 400.1: A locative zone constraint ("in your graveyard", "in
+/// all graveyards", "on the battlefield") scopes *where the named objects are
+/// counted/filtered*; it is outside the literal card name. Unlike the
+/// "from <zone>" move-origin suffix (`parse_named_filter_origin_zone_terminator`,
+/// which the caller consumes as a move source and leaves in the remainder), an
+/// "in"/"on" locative both terminates the name and is re-attached as an
+/// `InZone`/`InAnyZone` filter prop by the caller. Requires a real zone after
+/// the "in"/"on" preposition so a name-internal "in"/"on" stays whole. Covers
+/// the "cards named X in your graveyard / in all graveyards" count class
+/// (Frantic Inventory, Accumulated Knowledge, Take Inventory, Undead Servant,
+/// Goblin Gathering, Galvanic Bombardment, Ancestral Anger) and "creatures
+/// named X on the battlefield" (Plague Rats).
+fn parse_named_filter_locative_zone_terminator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((tag::<_, _, OracleError<'_>>(" in "), tag(" on "))).parse(input)?;
+    let Some((_, _, consumed)) = parse_zone_suffix(input) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((&input[consumed..], ()))
+}
+
 fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     alt((
         // Controller-scope suffixes (CR 109.4). Longest-match-first.
@@ -1730,6 +1755,10 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         // card name ("card named X from your graveyard"). Require a real zone
         // suffix after "from" so names like "Extract from Darkness" stay whole.
         parse_named_filter_origin_zone_terminator,
+        // CR 201.2 + CR 400.1: locative "in <zone>"/"on the battlefield" count
+        // scope ("cards named X in your graveyard") — reattached as InZone by
+        // the caller. Requires a real zone so name-internal "in"/"on" is kept.
+        parse_named_filter_locative_zone_terminator,
         // Copular / state predicates opening a relative clause.
         value((), tag(" is ")),
         value((), tag(" are ")),
@@ -2934,6 +2963,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 name: orig_name.to_string(),
             });
             pos += named_offset + "named ".len() + name_end;
+
+            // CR 201.2 + CR 400.1: Re-run the zone-suffix pass now that the name
+            // is consumed, so a trailing locative constraint ("named X in your
+            // graveyard", "named X in all graveyards", "named X on the
+            // battlefield") attaches as an `InZone`/`InAnyZone` filter prop —
+            // parity with the non-named "creature card in your graveyard" path.
+            // The primary `parse_zone_suffix` pass above ran before the name was
+            // consumed and could not see it. Scoped to "in"/"on" locatives so
+            // "from <zone>" move-origins stay in the remainder for the caller
+            // (CR 115.2 target zones, return-from-graveyard move sources).
+            let after_named = lower[pos..].trim_start();
+            let is_locative =
+                alt((tag::<_, _, OracleError<'_>>("in "), tag("on "))).parse(after_named);
+            if is_locative.is_ok() {
+                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+                    properties.extend(zone_props);
+                    pos += consumed;
+                    if controller.is_none() {
+                        controller = zone_ctrl;
+                    }
+                }
+            }
         }
     }
 
@@ -7001,6 +7052,87 @@ mod tests {
         // Period still ends the name.
         let (name, _) = named_of("a creature named Storm Crow.");
         assert_eq!(name, "Storm Crow");
+    }
+
+    /// CR 201.2 + CR 400.1: A locative "in <zone>" / "on the battlefield" count
+    /// scope is NOT part of the card name — it must terminate the name and
+    /// re-attach as an `InZone`/`InAnyZone` filter prop. Regression guard for
+    /// the "cards named X in your graveyard" misparse (Frantic Inventory,
+    /// Accumulated Knowledge, Plague Rats, Undead Servant, ...), where the zone
+    /// was swallowed into the name — producing `Named { name: "Frantic
+    /// Inventory in your graveyard" }`, a name no card ever has, so the count
+    /// always resolved to 0.
+    #[test]
+    fn named_filter_terminates_at_locative_zone() {
+        fn named_and_props(text: &str) -> (String, Vec<FilterProp>, Option<ControllerRef>, String) {
+            let (filter, rest) = parse_type_phrase(text);
+            let tf = typed_leg(&filter)
+                .unwrap_or_else(|| panic!("expected a Typed filter in {filter:?}"));
+            let name = tf
+                .properties
+                .iter()
+                .find_map(|p| match p {
+                    FilterProp::Named { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a Named property in {filter:?}"));
+            (
+                name,
+                tf.properties.clone(),
+                tf.controller.clone(),
+                rest.to_string(),
+            )
+        }
+
+        // "in your graveyard": name terminates, InZone Graveyard + You attached,
+        // remainder fully consumed.
+        let (name, props, ctrl, rest) =
+            named_and_props("cards named Frantic Inventory in your graveyard");
+        assert_eq!(name, "Frantic Inventory");
+        assert!(
+            props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Graveyard)),
+            "expected InZone Graveyard, got {props:?}"
+        );
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(rest, "");
+
+        // "in all graveyards": name terminates, InZone Graveyard, no controller
+        // restriction (counts every player's graveyard).
+        let (name, props, ctrl, rest) =
+            named_and_props("cards named Accumulated Knowledge in all graveyards");
+        assert_eq!(name, "Accumulated Knowledge");
+        assert!(
+            props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Graveyard)),
+            "expected InZone Graveyard, got {props:?}"
+        );
+        assert_eq!(ctrl, None);
+        assert_eq!(rest, "");
+
+        // "on the battlefield": name terminates, remainder consumed.
+        let (name, _props, _ctrl, rest) =
+            named_and_props("creatures named Plague Rats on the battlefield");
+        assert_eq!(name, "Plague Rats");
+        assert_eq!(rest, "");
+
+        // "from <zone>" move-origin is unchanged: the name still terminates at
+        // "Deathpact Angel" but the "from" suffix stays in the remainder for the
+        // caller (no InZone attached here).
+        let (name, props, _ctrl, rest) =
+            named_and_props("card named Deathpact Angel from your graveyard");
+        assert_eq!(name, "Deathpact Angel");
+        assert!(
+            !props.iter().any(|p| matches!(p, FilterProp::InZone { .. })),
+            "'from' origin-zone must not attach InZone here, got {props:?}"
+        );
+        assert_eq!(rest, " from your graveyard");
+
+        // A "from" inside a real card name is still preserved.
+        let (name, _props, _ctrl, _rest) = named_and_props("a card named Extract from Darkness");
+        assert_eq!(name, "Extract from Darkness");
     }
 
     fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
