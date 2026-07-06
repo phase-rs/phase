@@ -513,14 +513,20 @@ export function additionalCostChoices(
           { id: "decline", label: "Cancel" },
         ],
       };
-    case "Choice":
+    case "Choice": {
+      // `data` is typed as a 2-tuple, but it is deserialized from the engine, so
+      // a malformed/short payload leaves an element `undefined`. formatAbilityCost
+      // switches on `cost.type`, so passing `undefined` throws — guard each option
+      // (mirroring the `Kicker` branch's `first ? … : …` defense).
+      const [pay, decline] = cost.data;
       return {
         title: "Choose additional cost",
         options: [
-          { id: "pay", label: formatAbilityCost(cost.data[0]) },
-          { id: "decline", label: formatAbilityCost(cost.data[1]) },
+          { id: "pay", label: pay ? formatAbilityCost(pay) : "Pay" },
+          { id: "decline", label: decline ? formatAbilityCost(decline) : "Decline" },
         ],
       };
+    }
   }
 }
 

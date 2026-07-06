@@ -275,3 +275,28 @@ describe("formatAbilityCost", () => {
     })).toBe("{1} or Pay 2 life");
   });
 });
+
+describe("additionalCostChoices — Choice with a malformed (short) engine payload", () => {
+  const manaCost = {
+    type: "Mana",
+    cost: { type: "Cost", shards: [], generic: 2 },
+  };
+
+  it("labels both options for a well-formed two-cost Choice", () => {
+    const cost = { type: "Choice", data: [manaCost, manaCost] } as AdditionalCost;
+    const { options } = additionalCostChoices(cost);
+    expect(options.find((o) => o.id === "pay")!.label).toBeTruthy();
+    expect(options.find((o) => o.id === "decline")!.label).toBeTruthy();
+  });
+
+  it("does not throw when a Choice payload is missing its second cost", () => {
+    // The tuple type promises two costs, but `data` is deserialized from the
+    // engine — a short array must degrade to a fallback label, not crash.
+    const cost = { type: "Choice", data: [manaCost] } as unknown as AdditionalCost;
+    expect(() => additionalCostChoices(cost)).not.toThrow();
+    const decline = additionalCostChoices(cost).options.find(
+      (o) => o.id === "decline",
+    )!;
+    expect(decline.label).toBe("Decline");
+  });
+});
