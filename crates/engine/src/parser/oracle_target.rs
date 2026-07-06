@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{not, opt, peek, success, value};
+use nom::combinator::{eof, not, opt, peek, success, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -26,7 +26,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
-use super::oracle_nom::error::OracleError;
+use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -840,6 +840,47 @@ pub fn parse_target_with_syntax<'a>(
                     filters: vec![
                         typed(TypeFilter::Permanent, None, vec![], vec![]),
                         TargetFilter::Player,
+                    ],
+                },
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
+        }
+        // CR 122.1 + CR 702.62b: "target permanent or suspended card" — a
+        // battlefield∪exile target pool (Clockspinning). A suspended card is in
+        // exile, has suspend, and bears ≥1 time counter. Matched before the bare
+        // "permanent" type phrase (longest-match-first) so the "or suspended card"
+        // half is not dropped.
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("permanent or suspended card").parse(after_target)
+        {
+            return (
+                TargetFilter::Or {
+                    filters: vec![
+                        // Battlefield permanent. The explicit `InZone{Battlefield}`
+                        // is required so `targeting::extract_explicit_zones` unions
+                        // Battlefield with Exile across this `Or` (otherwise only
+                        // Exile would be searched for legal targets).
+                        typed(
+                            TypeFilter::Permanent,
+                            None,
+                            vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                            vec![],
+                        ),
+                        // CR 702.62b: a suspended card.
+                        TargetFilter::Typed(TypedFilter::card().properties(vec![
+                            FilterProp::InZone { zone: Zone::Exile },
+                            FilterProp::HasKeywordKind {
+                                value: KeywordKind::Suspend,
+                            },
+                            FilterProp::Counters {
+                                counters: CounterMatch::OfType(CounterType::Time),
+                                comparator: Comparator::GE,
+                                count: QuantityExpr::Fixed { value: 1 },
+                            },
+                        ])),
                     ],
                 },
                 &text[lower.len() - rest.len()..],
@@ -3964,6 +4005,11 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
     .parse(trimmed_outer)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed_outer);
+
+    if let Ok((rest, prop)) = parse_attacking_alone_suffix_status(trimmed) {
+        return Some((prop, text.len() - rest.len()));
+    }
+
     for (pattern, defender) in [
         (
             "attacking you or a planeswalker you control",
@@ -4018,6 +4064,34 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
         }
     }
     None
+}
+
+/// CR 506.5: "attacking alone" is a combat status distinct from merely
+/// attacking a particular defender; runtime evaluation already lives on
+/// FilterProp::AttackingAlone.
+fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterProp> {
+    let (input, _) = (tag("attacking"), space1, tag("alone")).parse(input)?;
+    let (_, _) = parse_attacking_status_clause_boundary(input)?;
+    Ok((input, FilterProp::AttackingAlone))
+}
+
+fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
+    let trimmed = input.trim_start();
+    let (_, _) = not(alt((
+        tag::<_, _, OracleError<'_>>("if "),
+        tag("unless "),
+        tag("and/or "),
+        tag("or "),
+    )))
+    .parse(trimmed)?;
+
+    alt((
+        value((), eof),
+        value((), peek(tag::<_, _, OracleError<'_>>("."))),
+        value((), peek(tag(","))),
+        value((), (space1, eof)),
+    ))
+    .parse(input)
 }
 
 /// Parse "with power [or toughness] N or less/greater", "with toughness N or
@@ -6769,6 +6843,55 @@ mod tests {
         }
     }
 
+    /// CR 122.1 + CR 702.62b (Clockspinning): "target permanent or suspended
+    /// card" is a battlefield∪exile target pool. The permanent leg must carry an
+    /// explicit `InZone{Battlefield}` (so `extract_explicit_zones` unions both
+    /// zones) and the card leg must encode the suspended-card definition.
+    #[test]
+    fn parse_target_permanent_or_suspended_card() {
+        let (filter, rest) = parse_target("target permanent or suspended card");
+        assert_eq!(rest, "");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or pool, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let permanent_leg = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Permanent] => {
+                    Some(tf)
+                }
+                _ => None,
+            })
+            .expect("battlefield permanent leg");
+        assert!(permanent_leg.properties.contains(&FilterProp::InZone {
+            zone: Zone::Battlefield
+        }));
+
+        let card_leg = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Card] => Some(tf),
+                _ => None,
+            })
+            .expect("suspended card leg");
+        assert!(card_leg
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }));
+        assert!(card_leg.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Suspend
+        }));
+        assert!(card_leg.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                comparator: Comparator::GE,
+                ..
+            }
+        )));
+    }
+
     /// Issue #3677 (Flare of Denial): "sacrifice a nontoken blue creature" must
     /// capture the color AND the creature type, not just the NonToken negation.
     /// Before the fix, the color-prefix scan ran only BEFORE the `non-` negation
@@ -7390,6 +7513,34 @@ mod tests {
         assert!(typed.properties.contains(&FilterProp::Attacking {
             defender: Some(ControllerRef::You),
         }));
+    }
+
+    /// CR 506.5: "attacking alone" is a targetable combat-status predicate on
+    /// the candidate creature, including relative-clause wording.
+    #[test]
+    fn parse_target_creature_attacking_alone() {
+        let (filter, remainder) = parse_target("target creature that's attacking alone");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::AttackingAlone));
+    }
+
+    /// CR 506.5 + CR 109.4: controller suffixes compose with the attacking-alone
+    /// relative clause instead of dropping the combat-status predicate.
+    #[test]
+    fn parse_target_creature_you_control_attacking_alone() {
+        let (filter, remainder) =
+            parse_target("target creature you control that's attacking alone");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::AttackingAlone));
     }
 
     /// Stalking Leonin: "attacking you if it's controlled by..." must not treat

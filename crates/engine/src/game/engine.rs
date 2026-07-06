@@ -3224,14 +3224,10 @@ fn apply_action(
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
-            // Tap the permanent (no summoning sickness check — CR 702.51a + CR 302.6)
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.tapped = true;
-            }
-            events.push(GameEvent::PermanentTapped {
-                object_id,
-                caused_by: None,
-            });
+            // CR 701.26a + CR 508.1f: route the convoke tap through the single
+            // authority so a "can't become tapped" creature is refused (no
+            // summoning sickness check — CR 702.51a + CR 302.6).
+            crate::game::restrictions::tap_permanent_for_cost(state, object_id, &mut events)?;
             let unit = match mode {
                 ConvokeMode::Convoke => {
                     crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
@@ -3740,6 +3736,7 @@ fn apply_action(
                 vehicle_id,
                 crew_power,
                 eligible_creatures,
+                ..
             },
             GameAction::CrewVehicle {
                 vehicle_id: _vid,
@@ -3796,6 +3793,7 @@ fn apply_action(
                 mount_id,
                 saddle_power,
                 eligible_creatures,
+                ..
             },
             GameAction::SaddleMount {
                 mount_id: _mid,
@@ -6274,6 +6272,17 @@ fn handle_equip_activation(
 /// CR 702.122a: Activate a Vehicle's crew ability from Priority.
 /// Unlike Equip (CR 702.6a) and Saddle (CR 702.171a), Crew has NO "Activate only as a
 /// sorcery" restriction — it can be activated any time the controller has priority.
+fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
+    state.objects.get(&id).is_some_and(|o| {
+        o.controller == player
+            && !o.tapped
+            && o.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature)
+            && !crate::game::restrictions::object_cant_tap(state, id)
+    })
+}
+
 fn handle_crew_activation(
     state: &mut GameState,
     player: PlayerId,
@@ -6340,25 +6349,18 @@ fn handle_crew_activation(
         .copied()
         .filter(|&id| {
             id != vehicle_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                            && !super::static_abilities::object_has_cant_crew(state, id)
-                    })
-                    .unwrap_or(false)
+                && is_tappable_creature_for_cost(state, id, player)
+                && !super::static_abilities::object_has_cant_crew(state, id)
         })
         .collect();
 
     // Validate total power of all eligible creatures can meet the threshold.
     // CR 702.122a: a creature's contribution may be modified ("as though its
-    // power were N greater" / "using its toughness rather than its power").
-    let total_power: i32 = eligible_creatures
+    // power were N greater" / "using its toughness rather than its power"). The
+    // per-creature contributions travel with the choice so the UI gates the
+    // selection on the same adjusted values the engine validates against, rather
+    // than re-deriving from raw power.
+    let contributions: Vec<i32> = eligible_creatures
         .iter()
         .map(|&id| {
             super::static_abilities::object_crew_power_contribution(
@@ -6367,7 +6369,8 @@ fn handle_crew_activation(
                 crate::types::statics::CrewAction::Crew,
             )
         })
-        .sum();
+        .collect();
+    let total_power: i32 = contributions.iter().sum();
 
     if total_power < crew_power as i32 {
         return Err(EngineError::ActionNotAllowed(
@@ -6382,6 +6385,7 @@ fn handle_crew_activation(
         vehicle_id,
         crew_power,
         eligible_creatures,
+        contributions,
     })
 }
 
@@ -6463,6 +6467,11 @@ fn handle_crew_announcement(
                 "Creature is no longer eligible for crewing".to_string(),
             ));
         }
+        if crate::game::restrictions::object_cant_tap(state, cid) {
+            return Err(EngineError::InvalidAction(
+                "Creature can't become tapped".to_string(),
+            ));
+        }
         if super::static_abilities::object_has_cant_crew(state, cid) {
             return Err(EngineError::InvalidAction(
                 "Creature can't crew Vehicles".to_string(),
@@ -6483,15 +6492,11 @@ fn handle_crew_announcement(
         ));
     }
 
-    // CR 701.26a + CR 702.122b: Tap each creature as cost payment — creature "crews" the Vehicle.
+    // CR 701.26a + CR 702.122b + CR 508.1f: Tap each creature as cost payment —
+    // creature "crews" the Vehicle. Routed through the single authority so a
+    // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        if let Some(obj) = state.objects.get_mut(&cid) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: cid,
-            caused_by: None,
-        });
+        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
     }
 
     // CR 602.5b: Record this crew activation so an "Activate only once each turn"
@@ -6562,20 +6567,7 @@ fn handle_station_activation(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| {
-            id != spacecraft_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                    .unwrap_or(false)
-        })
+        .filter(|&id| id != spacecraft_id && is_tappable_creature_for_cost(state, id, player))
         .collect();
 
     if eligible_creatures.is_empty() {
@@ -6634,6 +6626,7 @@ fn handle_station_announcement(
             .card_types
             .core_types
             .contains(&crate::types::card_type::CoreType::Creature)
+        || crate::game::restrictions::object_cant_tap(state, creature_id)
     {
         return Err(EngineError::InvalidAction(
             "Creature is no longer eligible for Station".to_string(),
@@ -6652,14 +6645,10 @@ fn handle_station_announcement(
         crate::types::statics::CrewAction::Station,
     );
 
-    // CR 701.26a: Tap the creature as cost payment.
-    if let Some(obj) = state.objects.get_mut(&creature_id) {
-        obj.tapped = true;
-    }
-    events.push(GameEvent::PermanentTapped {
-        object_id: creature_id,
-        caused_by: None,
-    });
+    // CR 701.26a: Tap the creature as cost payment. Routed through the single
+    // authority (CR 508.1f exempts attacker declaration) so a "can't become
+    // tapped" creature is refused.
+    crate::game::restrictions::tap_permanent_for_cost(state, creature_id, events)?;
 
     Ok(push_keyword_action(
         state,
@@ -6727,24 +6716,11 @@ fn handle_saddle_activation(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| {
-            id != mount_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                    .unwrap_or(false)
-        })
+        .filter(|&id| id != mount_id && is_tappable_creature_for_cost(state, id, player))
         .collect();
 
     // CR 702.171a: a creature's saddle contribution may be modified.
-    let total_power: i32 = eligible_creatures
+    let contributions: Vec<i32> = eligible_creatures
         .iter()
         .map(|&id| {
             super::static_abilities::object_crew_power_contribution(
@@ -6753,7 +6729,8 @@ fn handle_saddle_activation(
                 crate::types::statics::CrewAction::Saddle,
             )
         })
-        .sum();
+        .collect();
+    let total_power: i32 = contributions.iter().sum();
 
     if total_power < saddle_power as i32 {
         return Err(EngineError::ActionNotAllowed(
@@ -6768,6 +6745,7 @@ fn handle_saddle_activation(
         mount_id,
         saddle_power,
         eligible_creatures,
+        contributions,
     })
 }
 
@@ -6818,6 +6796,11 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
+        if crate::game::restrictions::object_cant_tap(state, cid) {
+            return Err(EngineError::InvalidAction(
+                "Creature can't become tapped".to_string(),
+            ));
+        }
         // CR 702.171a: apply any saddle power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
@@ -6832,15 +6815,11 @@ fn handle_saddle_announcement(
         ));
     }
 
-    // CR 701.26a + CR 702.171c: Tap each creature as cost payment — creature "saddles" the Mount.
+    // CR 701.26a + CR 702.171c + CR 508.1f: Tap each creature as cost payment —
+    // creature "saddles" the Mount. Routed through the single authority so a
+    // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        if let Some(obj) = state.objects.get_mut(&cid) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: cid,
-            caused_by: None,
-        });
+        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
     }
 
     Ok(push_keyword_action(

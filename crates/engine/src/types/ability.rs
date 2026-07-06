@@ -1345,6 +1345,33 @@ pub enum CounterTransferMode {
     Put,
 }
 
+/// CR 122.1 (Clockspinning): which counter operations the controller may choose
+/// among, at resolution, for a player-chosen counter kind already present on the
+/// target. A typed axis (not two `bool`s) so the operation set is
+/// self-documenting and exhaustively matchable, mirroring `CounterTransferMode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CounterAdjustment {
+    /// "put another of those counters on it" — add one of the chosen kind.
+    Add,
+    /// "remove that counter" — remove one of the chosen kind.
+    Remove,
+    /// Clockspinning: "remove that counter ... or put another of those counters
+    /// on it" — the controller may add OR remove one of the chosen kind.
+    AddOrRemove,
+}
+
+impl CounterAdjustment {
+    /// Whether an "add one of the chosen kind" branch should be offered.
+    pub fn allows_add(self) -> bool {
+        matches!(self, Self::Add | Self::AddOrRemove)
+    }
+
+    /// Whether a "remove one of the chosen kind" branch should be offered.
+    pub fn allows_remove(self) -> bool {
+        matches!(self, Self::Remove | Self::AddOrRemove)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CounterMoveSelection {
     #[default]
@@ -3154,6 +3181,17 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 607.2d / CR 607.2m (by analogy) + CR 611.2c: matches objects whose
+    /// CONTROLLER's durable per-player choice records the anchor `label`
+    /// ("creatures controlled by players who last chose red waterfall …", Two
+    /// Streams Facility). Evaluated via `game::players::player_last_chose_label`
+    /// against `obj.controller`. Because the affected set is recomputed each layer
+    /// pass (CR 611.2c), a creature entering under a red-waterfall controller
+    /// joins the buff and one leaving drops it. Object-axis mirror of the
+    /// player-axis `TargetFilter::PlayerWhoChoseLabel`.
+    ControllerChoseLabel {
+        label: String,
+    },
     /// CR 305.1 + CR 601.2a: Matches objects entering from being played
     /// (land play) or cast (spell), excluding tokens put directly onto the
     /// battlefield without a prior zone.
@@ -4127,6 +4165,16 @@ pub enum TargetFilter {
     /// static's `affected` resolves to the ability's controller.
     SpecificPlayer {
         id: PlayerId,
+    },
+    /// CR 607.2d / CR 607.2m (by analogy): matches every player whose durable
+    /// per-player choice (`Player.chosen_attributes`) records the anchor `label`
+    /// ("each player who last chose green anchor …", Two Streams Facility).
+    /// Evaluated against `game::players::player_last_chose_label`. The player-axis
+    /// mirror of the object-scoped anchor gate `StaticCondition::ChosenLabelIs`;
+    /// the split (player vs object subject) mirrors the engine's existing
+    /// `SpecificPlayer` vs `SpecificObject` separation.
+    PlayerWhoChoseLabel {
+        label: String,
     },
     /// CR 102.1 + CR 103.1: living player seated immediately to controller's
     /// left/right; clockwise turn order, right = previous seat; resolved
@@ -8760,6 +8808,23 @@ impl DigSource {
     }
 }
 
+/// CR 122.1 + CR 208.1: the scaling clause of [`Effect::EachPlayerCopyChosen`]
+/// — put `counter_type` counters on the created copy equal to `scale_property`
+/// of the second chosen object. Absent (`scale: None`) when the effect never
+/// scales — the single-choice (`max: 1`) shape that never selects a second
+/// object. The both-or-neither invariant
+/// (a scale clause exists iff a second object may be chosen) lives in the type:
+/// the counter type and the read property travel together so no call site can
+/// place counters without knowing what to read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyScale {
+    /// CR 122.1: which counter kind to place on the created copy (Plus1Plus1).
+    pub counter_type: CounterType,
+    /// CR 208.1: the property of the second chosen object read live at
+    /// placement to determine the counter count (Power).
+    pub scale_property: ObjectProperty,
+}
+
 /// CR 723.1 / CR 723.2: the duration window of a control-another-player effect.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlWindow {
@@ -9899,6 +9964,35 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 122.1 + CR 608.2d (Clockspinning): The controller chooses one kind of
+    /// counter currently on the single target permanent or suspended card, then
+    /// — per `adjustment` — adds and/or removes `count` of that chosen kind. The
+    /// counter kind is chosen at resolution from the kinds actually present on
+    /// the target (CR 122.1 + CR 702.62b: a counter is a marker that can sit on
+    /// a card outside the battlefield, so a suspended card's time counters are
+    /// eligible).
+    ///
+    /// This effect has NO cast-time target slot of its own: the single target is
+    /// supplied by the parent `TargetOnly` clause through the propagated
+    /// `ability.targets` chain, exactly like `Effect::ChooseOneOf`. It is
+    /// therefore registered in the slot-less (`None`) groups of `target_filter`,
+    /// `count_expr`, and `count_expr_mut` alongside `ChooseOneOf`, and carries no
+    /// `target` field.
+    ///
+    /// CR 608.2d: a player can't choose an impossible option, so if the target
+    /// bears no counters there is no kind to choose and the effect does nothing
+    /// (Clockspinning Gatherer ruling: "if the chosen permanent or card has no
+    /// counters, nothing happens"). Resolution builds a flat `Effect::ChooseOneOf`
+    /// of concrete `PutCounter`/`RemoveCounter` branches (one per present kind ×
+    /// allowed operation), so the counter change dispatches onto the existing
+    /// counter resolvers and reuses the whole `ChooseOneOfBranch` interactive
+    /// surface. This is the choose-ONE-kind sibling of the
+    /// `repeat_for: DistinctCounterKindsAmong` for-EACH-kind loop.
+    ChooseCounterAdjustment {
+        adjustment: CounterAdjustment,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
     /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
     /// (CR 701.10a/b); `factor: 3` is "triple" (Tifa's Limit Break — Final
@@ -10262,6 +10356,17 @@ pub enum Effect {
         /// as a type-tagged enum (omitted when `Chosen`).
         #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
         selection: TargetSelectionMode,
+    },
+    /// CR 311.7 + CR 607.2d / CR 607.2m (by analogy): symmetric per-player anchor
+    /// swap — "each player who last chose `first` chooses `second`, and vice
+    /// versa" (Two Streams Facility's chaos ability). Iterates every
+    /// non-eliminated player: a `first`-anchor player's label becomes `second`
+    /// and a `second`-anchor player's label becomes `first` (other players
+    /// untouched), then re-runs layers. The effect fans internally, so it carries
+    /// no `player_scope`.
+    SwapChosenLabels {
+        first: String,
+        second: String,
     },
     /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
     /// source-object filter. This is object/source selection, not a named
@@ -10828,6 +10933,12 @@ pub enum Effect {
     /// ensues" triggered ability triggers. Payload-less resolving keyword action
     /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
     ChaosEnsues,
+    /// CR 103.1 + CR 101.4: Reverse the game's turn order (Temple of Atropos,
+    /// Aeon Engine, Time Distortion). Flips `state.turn_direction`; turn
+    /// progression, APNAP, and priority passing follow the new direction, while
+    /// physical seating is unchanged. Payload-less resolving keyword action
+    /// (mirrors `Effect::ChaosEnsues`). RUNTIME: reverse_turn_order::resolve.
+    ReverseTurnOrder,
     /// CR 701.51b: Open N Attractions by putting cards from the top of your
     /// Attraction deck onto the battlefield.
     OpenAttractions {
@@ -11046,6 +11157,50 @@ pub enum Effect {
         /// entry. `categories` is empty in this mode.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_power_cap: Option<QuantityExpr>,
+    },
+    /// CR 101.4 + CR 707.2 + CR 122.1: Each player, in APNAP order, chooses an
+    /// ordered `min..=max` selection of objects they control matching
+    /// `choose_filter`; creates a token that's a copy of the FIRST chosen (with
+    /// `copy_modifications` applied, e.g. "except it isn't legendary" →
+    /// `RemoveSupertype(Legendary)`); then, if `scale` is set AND a second was
+    /// chosen, puts `scale.counter_type` counters on that created token equal to
+    /// `scale.scale_property` of the second chosen object (read live at
+    /// placement, CR 122.1).
+    ///
+    /// Self-iterating (excluded from `player_scope` fan-out in
+    /// `resolve_ability_chain`, mirroring `ChooseAndSacrificeRest`): the resolver
+    /// walks the scoped player set itself and seeds
+    /// `WaitingFor::EachPlayerCopyChosenSelection` per player. The inner copy and
+    /// counter steps may pause on a CR 616.1 replacement choice; resumption is
+    /// threaded through `GameState::pending_each_player_copy_chosen` (see
+    /// `game/effects/each_player_copy_chosen.rs`).
+    ///
+    /// Real consumer (WHO phenomena): Human—Time Lord Meta-Crisis
+    /// (`min:1, max:2`, `[RemoveSupertype(Legendary)]`, scale by 2nd creature's
+    /// power).
+    ///
+    /// NOT yet covered: Caught in a Parallel Universe (`min:1, max:1`,
+    /// `[AddKeyword(Menace)]`, `scale: None`). It selects "a creature controlled
+    /// by the player to their left", a chooser-relative eligibility scope this
+    /// effect cannot represent — `choose_filter` resolves against each chooser's
+    /// own battlefield only. Covering it needs a chooser-relative scope on the
+    /// choose step; the single-choice `scale: None` shape here is forward-looking
+    /// infrastructure, not exercised by a covered card yet.
+    EachPlayerCopyChosen {
+        /// Objects eligible to be chosen from each player's own battlefield.
+        choose_filter: TargetFilter,
+        /// Minimum number of objects each player must choose (1).
+        min: u32,
+        /// Maximum number of objects each player may choose (1 or 2).
+        max: u32,
+        /// CR 707.9 + CR 205.4: "except …" modifications applied to the created
+        /// copy (supertype removal, keyword grant).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        copy_modifications: Vec<ContinuousModification>,
+        /// CR 122.1: optional scaling clause; `None` when no second object is
+        /// ever chosen (the effect never places counters).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<CopyScale>,
     },
     /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
     /// The controller may sacrifice any creature they control, including the exploiter itself.
@@ -12955,6 +13110,8 @@ impl Effect {
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
+            // CR 311.7: the chaos anchor swap is a non-targeting per-player effect.
+            | Effect::SwapChosenLabels { .. }
             // CR 109.4: owner/type_filter are non-targeting resolution-time
             // filters; the copy source is chosen from the format pool, not
             // declared as a target.
@@ -13021,6 +13178,7 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
             | Effect::GainEnergy { .. }
             | Effect::HeistExile
             | Effect::Cascade
@@ -13065,6 +13223,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
             | Effect::AssembleContraptions { .. }
@@ -13092,6 +13251,11 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            // CR 122.1 + CR 608.2d: ChooseCounterAdjustment is slot-less like
+            // ChooseOneOf — its single target arrives via the propagated
+            // `ability.targets` chain, not a cast-time slot, so it must NOT be
+            // surfaced by `collect_target_slots`.
+            | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
@@ -13358,13 +13522,19 @@ impl Effect {
             | Effect::BlightEffect { .. }
             | Effect::Cascade
             | Effect::Choose { .. }
+            | Effect::SwapChosenLabels { .. }
             | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
+            // CR 122.1: parent count is forwarded verbatim into the per-kind
+            // PutCounter/RemoveCounter branches, whose own `count` is resolved at
+            // the branch level by `resolve_branch`; never resolved generically here.
+            | Effect::ChooseCounterAdjustment { .. }
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
             | Effect::Conjure { .. }
@@ -13423,6 +13593,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -13601,13 +13772,19 @@ impl Effect {
             | Effect::BlightEffect { .. }
             | Effect::Cascade
             | Effect::Choose { .. }
+            | Effect::SwapChosenLabels { .. }
             | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
             | Effect::ForEachCategoryExile { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
+            // CR 122.1: parent count is forwarded verbatim into the per-kind
+            // PutCounter/RemoveCounter branches, whose own `count` is resolved at
+            // the branch level by `resolve_branch`; never resolved generically here.
+            | Effect::ChooseCounterAdjustment { .. }
             | Effect::Cleanup { .. }
             | Effect::CollectEvidence { .. }
             | Effect::Conjure { .. }
@@ -13666,6 +13843,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -13785,6 +13963,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ExileTop { .. } => "ExileTop",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
+        Effect::SwapChosenLabels { .. } => "SwapChosenLabels",
         Effect::ChooseDamageSource { .. } => "ChooseDamageSource",
         Effect::Suspect { .. } => "Suspect",
         Effect::Unsuspect { .. } => "Unsuspect",
@@ -13826,6 +14005,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::Planeswalk => "Planeswalk",
         Effect::ChaosEnsues => "ChaosEnsues",
+        Effect::ReverseTurnOrder => "ReverseTurnOrder",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::AssembleContraptions { .. } => "AssembleContraptions",
@@ -13843,6 +14023,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ForEachCategoryExile { .. } => "ForEachCategoryExile",
         Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
+        Effect::EachPlayerCopyChosen { .. } => "EachPlayerCopyChosen",
         Effect::Exploit { .. } => "Exploit",
         Effect::GainEnergy { .. } => "GainEnergy",
         Effect::GivePlayerCounter { .. } => "GivePlayerCounter",
@@ -13906,6 +14087,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ApplyPerpetual { .. } => "ApplyPerpetual",
         Effect::DraftFromSpellbook { .. } => "DraftFromSpellbook",
         Effect::ChooseOneOf { .. } => "ChooseOneOf",
+        Effect::ChooseCounterAdjustment { .. } => "ChooseCounterAdjustment",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -14062,6 +14244,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     Planeswalk,
     ChaosEnsues,
+    ReverseTurnOrder,
     OpenAttractions,
     RollToVisitAttractions,
     AssembleContraptions,
@@ -14080,6 +14263,7 @@ pub enum EffectKind {
     ChooseCounterKind,
     PutChosenCounter,
     ChooseAndSacrificeRest,
+    EachPlayerCopyChosen,
     Exploit,
     GainEnergy,
     GivePlayerCounter,
@@ -14140,6 +14324,7 @@ pub enum EffectKind {
     ApplyPerpetual,
     DraftFromSpellbook,
     ChooseOneOf,
+    ChooseCounterAdjustment,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -14269,6 +14454,9 @@ impl From<&Effect> for EffectKind {
             Effect::ExileTop { .. } => EffectKind::ExileTop,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
+            // CR 311.7: The chaos swap re-chooses each player's anchor, so it
+            // reports as a `Choose`-kind resolution for event/AI purposes.
+            Effect::SwapChosenLabels { .. } => EffectKind::Choose,
             Effect::ChooseDamageSource { .. } => EffectKind::ChooseDamageSource,
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::Unsuspect { .. } => EffectKind::Unsuspect,
@@ -14314,6 +14502,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
+            Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::AssembleContraptions { .. } => EffectKind::AssembleContraptions,
@@ -14341,6 +14530,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChooseCounterKind { .. } => EffectKind::ChooseCounterKind,
             Effect::PutChosenCounter { .. } => EffectKind::PutChosenCounter,
             Effect::ChooseAndSacrificeRest { .. } => EffectKind::ChooseAndSacrificeRest,
+            Effect::EachPlayerCopyChosen { .. } => EffectKind::EachPlayerCopyChosen,
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,
             Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
@@ -14404,6 +14594,7 @@ impl From<&Effect> for EffectKind {
             Effect::ApplyPerpetual { .. } => EffectKind::ApplyPerpetual,
             Effect::DraftFromSpellbook { .. } => EffectKind::DraftFromSpellbook,
             Effect::ChooseOneOf { .. } => EffectKind::ChooseOneOf,
+            Effect::ChooseCounterAdjustment { .. } => EffectKind::ChooseCounterAdjustment,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -18211,6 +18402,31 @@ pub struct CopiableValues {
     pub static_definitions: Arc<Vec<StaticDefinition>>,
 }
 
+/// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
+/// granted cost-bearing keyword's cost is DERIVED from each recipient. Extensible
+/// axis (build-for-the-class): today only the reduced-mana-cost form is printed;
+/// `ManaValue` ("cost equal to its mana value") and `Fixed` ("its foretell cost
+/// is {2}{U}") are the next natural leaves when a card needs them — each is a new
+/// leaf here, never a new `ContinuousModification` variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CostDerivation {
+    /// "Its foretell cost is equal to its mana cost reduced by {N}." The
+    /// recipient's printed mana cost with its generic component reduced by this
+    /// amount (floored at 0), colored pips preserved (CR 702.143's foretell-cost
+    /// reduction applies only to generic mana).
+    ManaCostReducedBy(ManaCost),
+}
+
+impl CostDerivation {
+    /// Derive the concrete cost from a recipient's base mana cost.
+    pub fn derive(&self, base_mana_cost: &ManaCost) -> ManaCost {
+        match self {
+            Self::ManaCostReducedBy(reduction) => base_mana_cost.reduced_generic_by(reduction),
+        }
+    }
+}
+
 /// What modification a continuous effect applies to an object.
 /// Each variant knows its own layer implicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18381,6 +18597,22 @@ pub enum ContinuousModification {
     AddDynamicKeyword {
         kind: crate::types::keywords::DynamicKeywordKind,
         value: QuantityExpr,
+    },
+    /// CR 702.143d (and the CR 702 cast-from-off-zone-for-alternative-cost
+    /// family): a continuous static that grants a cost-bearing keyword whose cost
+    /// is DERIVED from each recipient's characteristics. Parameterized over the
+    /// keyword family (`kind`) and the cost-derivation rule (`derivation`) so one
+    /// variant covers Foretell/Madness/Disturb/Mayhem/Dash/Unearth grants — no
+    /// per-keyword `ContinuousModification` leaf. The derived-cost analogue of
+    /// `AddDynamicKeyword` (which parameterizes a numeric keyword value). Applied
+    /// exclusively through the off-zone keyword path
+    /// (`off_zone_characteristics::apply_keyword_modification`), which reads each
+    /// recipient's mana cost and upserts the derived keyword; the battlefield
+    /// layers characteristic pass is a no-op for it (Singing Towers of Darillium
+    /// grants foretell to nonland hand cards).
+    AddKeywordWithDerivedCost {
+        kind: crate::types::keywords::CostBearingKeywordKind,
+        derivation: CostDerivation,
     },
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.

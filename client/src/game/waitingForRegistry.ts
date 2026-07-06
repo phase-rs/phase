@@ -123,6 +123,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "TimeTravelChoice",
     "ChooseObjectsSelection",
     "CategoryChoice",
+    "EachPlayerCopyChosenSelection",
     "KeepWithinTotalPowerChoice",
     "DistributeAmong",
     "MoveCountersDistribution",

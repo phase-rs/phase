@@ -127,6 +127,16 @@ fn make_creature(state: &mut GameState, name: &str, power: i32) -> ObjectId {
     id
 }
 
+fn grant_cant_tap(state: &mut GameState, id: ObjectId) {
+    let def =
+        crate::types::ability::StaticDefinition::new(crate::types::statics::StaticMode::CantTap)
+            .affected(crate::types::ability::TargetFilter::SelfRef);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.static_definitions.push(def.clone());
+    std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    crate::game::layers::evaluate_layers(state);
+}
+
 /// Simulates a Counterspell-analog effect resolving during the priority
 /// window that opens after a keyword-action announcement. The top stack
 /// entry is moved to the graveyard (per CR 701.5a — counter means "move
@@ -332,6 +342,28 @@ fn crew_opens_priority_window_between_announcement_and_resolution() {
 }
 
 // --- Saddle -------------------------------------------------------------
+
+#[test]
+fn saddle_activation_excludes_cant_tap_creatures_from_threshold() {
+    let mut state = setup_main_phase();
+    let mount_id = make_mount(&mut state, 3);
+    let restricted = make_creature(&mut state, "Restricted Rider", 2);
+    let rider = make_creature(&mut state, "Rider", 1);
+    grant_cant_tap(&mut state, restricted);
+
+    let err = apply_as_current(
+        &mut state,
+        GameAction::SaddleMount {
+            mount_id,
+            creature_ids: vec![],
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, EngineError::ActionNotAllowed(_)),
+        "Saddle 3 must not count restricted 2-power creature plus unrestricted 1-power {rider:?}"
+    );
+}
 
 #[test]
 fn saddle_can_be_countered_by_stack_targeting_effect() {

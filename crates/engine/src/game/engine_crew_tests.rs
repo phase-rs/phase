@@ -84,6 +84,14 @@ fn setup_crew_scenario() -> (GameState, ObjectId, ObjectId, ObjectId) {
     (state, vehicle_id, creature_a, creature_b)
 }
 
+fn grant_cant_tap(state: &mut GameState, id: ObjectId) {
+    let def = StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.static_definitions.push(def.clone());
+    std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    crate::game::layers::evaluate_layers(state);
+}
+
 #[test]
 fn test_crew_activation_enters_crew_vehicle_state() {
     let (mut state, vehicle_id, creature_a, creature_b) = setup_crew_scenario();
@@ -103,15 +111,37 @@ fn test_crew_activation_enters_crew_vehicle_state() {
             vehicle_id: vid,
             crew_power,
             eligible_creatures,
+            contributions,
         } => {
             assert_eq!(player, PlayerId(0));
             assert_eq!(vid, vehicle_id);
             assert_eq!(crew_power, 3);
             assert!(eligible_creatures.contains(&creature_a));
             assert!(eligible_creatures.contains(&creature_b));
+            // CR 702.122a: the choice carries one contribution per eligible
+            // creature so the UI gates on adjusted power, not printed power.
+            assert_eq!(contributions.len(), eligible_creatures.len());
         }
         other => panic!("Expected CrewVehicle, got {:?}", other),
     }
+}
+
+#[test]
+fn crew_activation_excludes_cant_tap_creatures_from_threshold() {
+    let (mut state, vehicle_id, creature_a, _creature_b) = setup_crew_scenario();
+    state.objects.get_mut(&creature_a).unwrap().power = Some(2);
+    state.objects.get_mut(&creature_a).unwrap().base_power = Some(2);
+    grant_cant_tap(&mut state, creature_a);
+
+    let err = apply_as_current(
+        &mut state,
+        GameAction::CrewVehicle {
+            vehicle_id,
+            creature_ids: vec![],
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, EngineError::ActionNotAllowed(_)));
 }
 
 #[test]

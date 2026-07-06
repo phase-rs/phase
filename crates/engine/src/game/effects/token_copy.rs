@@ -824,8 +824,12 @@ pub(crate) fn compute_copy_batch_prefix(
 ///   bodies that share grammar with `BecomeCopy`).
 /// - `SetCardTypes` — Myrkul, Lord of Bones: "it's an enchantment and loses
 ///   all other card types" replaces the copied core card-type set (CR 613.1d).
-/// - `AddKeyword` is NOT consumed here — keywords flow through the typed
-///   `extra_keywords` channel earlier in the resolver.
+/// - `AddKeyword` — dual-path: keywords in the typed `extra_keywords` channel
+///   are applied earlier in the resolver, and an `AddKeyword` that instead lands
+///   in `additional_modifications` (e.g. an "except it has menace" body, or a
+///   keyword adjacent to a quoted-ability grant) is applied here too, on the
+///   `AddKeyword` arm below (CR 707.9a). Both routes add to the copiable keyword
+///   set idempotently.
 ///
 /// Modifications not relevant to token-copy semantics (e.g. `CopyValues`,
 /// `ChangeController`, dynamic P/T) are skipped silently — they have no

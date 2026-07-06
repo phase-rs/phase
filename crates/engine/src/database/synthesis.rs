@@ -5044,6 +5044,12 @@ pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
     // CR 702.154a-c: the enlisted creature must be another untapped creature you
     // control, must not be a creature you chose to attack with, and must either
     // have haste or have been controlled continuously since turn began.
+    //
+    // The "can't become tapped" exclusion (CR 701.26a) is not expressible as a
+    // static `TargetFilter` prop, so the offer layer (`enlist_eligible_targets`
+    // in `engine_combat.rs`) applies it via the single `object_cant_tap`
+    // authority after evaluating this filter — mirroring the convoke/crew
+    // auto-tap gate. The commit taps through `tap_permanent_for_cost`.
     TargetFilter::And {
         filters: vec![
             TargetFilter::Typed(

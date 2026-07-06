@@ -1,7 +1,65 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::types::ability::{CountScope, DoorLockOp};
+use crate::types::ability::{CountScope, CounterAdjustment, DoorLockOp};
 use crate::types::counter::{CounterMatch, CounterType};
+
+/// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
+/// with zero `Unimplemented` — buyback consumed as a keyword line, sentence 1
+/// to a `TargetOnly` over the battlefield∪exile `Or` pool, sentence 2 to the
+/// `ChooseCounterAdjustment { AddOrRemove }` sub-ability.
+#[test]
+fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
+    let text = "Buyback {3} (You may pay an additional {3} as you cast this spell. \
+                    If you do, put this card into your hand as it resolves.)\n\
+                    Choose a counter on target permanent or suspended card. Remove that \
+                    counter from that permanent or card or put another of those counters on it.";
+    let parsed = parse_oracle_text(
+        text,
+        "Clockspinning",
+        &["Buyback".to_string()],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "one spell ability (buyback consumed as keyword): {:?}",
+        parsed.abilities
+    );
+    let ability = &parsed.abilities[0];
+    let Effect::TargetOnly {
+        target: TargetFilter::Or { filters },
+    } = ability.effect.as_ref()
+    else {
+        panic!("expected TargetOnly Or pool, got {:?}", ability.effect);
+    };
+    assert_eq!(filters.len(), 2, "permanent + suspended card legs");
+
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("sentence-2 ChooseCounterAdjustment sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::AddOrRemove,
+                ..
+            }
+        ),
+        "got {:?}",
+        sub.effect
+    );
+
+    fn has_unimpl(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_ref().is_some_and(|s| has_unimpl(s))
+    }
+    assert!(
+        !has_unimpl(ability),
+        "no Unimplemented expected: {ability:?}"
+    );
+}
 
 #[test]
 fn escape_keyword_extracted_on_instants_and_sorceries() {
@@ -8924,6 +8982,185 @@ fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
     ));
 }
 
+/// CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+/// phase" lowers to `Effect::AdditionalPhase { phase: Untap, .. }` (the
+/// beginning-phase marker), covering Temple of Atropos, Sphinx/Shadow of the
+/// Second Sun, and Cyclonus.
+#[test]
+fn additional_beginning_phase_parses_as_untap_phase_insert() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("there is an additional beginning phase after this phase"),
+        Effect::AdditionalPhase {
+            phase: Phase::Untap,
+            ..
+        }
+    ));
+}
+
+/// CR 103.1 + CR 101.4: both surface forms of the turn-order reversal lower to
+/// `Effect::ReverseTurnOrder` (Temple of Atropos chaos, Aeon Engine, Time
+/// Distortion).
+#[test]
+fn reverse_turn_order_parses_as_reverse_turn_order_effect() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("reverse the game's turn order"),
+        Effect::ReverseTurnOrder
+    ));
+    assert!(matches!(
+        parse_effect("reverse the turn order"),
+        Effect::ReverseTurnOrder
+    ));
+}
+
+/// Temple of Atropos parses with ZERO Unimplemented: the phase trigger inserts a
+/// beginning phase (CR 501.1), and the chaos trigger reverses the turn order
+/// (CR 103.1) then planeswalks (the already-supported `Planeswalk` sub-ability).
+#[test]
+fn temple_of_atropos_parses_with_zero_unimplemented() {
+    let text = "At the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)\nWhen chaos ensues, reverse the game's turn order. Then planeswalk. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)";
+    let r = parse(text, "Temple of Atropos", &[], &["Plane"], &["Time"]);
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Temple of Atropos must parse with zero Unimplemented: {r:#?}"
+    );
+    assert_eq!(r.triggers.len(), 2, "two triggers: {:?}", r.triggers);
+
+    let phase_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("postcombat-main phase trigger");
+    let phase_exec = phase_trigger.execute.as_deref().expect("phase execute");
+    assert!(
+        matches!(
+            phase_exec.effect.as_ref(),
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        ),
+        "phase trigger must insert a beginning phase, got {:?}",
+        phase_exec.effect
+    );
+
+    let chaos_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChaosEnsues)
+        .expect("chaos trigger");
+    let chaos_exec = chaos_trigger.execute.as_deref().expect("chaos execute");
+    assert!(
+        matches!(chaos_exec.effect.as_ref(), Effect::ReverseTurnOrder),
+        "chaos trigger head must reverse turn order, got {:?}",
+        chaos_exec.effect
+    );
+    let sub = chaos_exec
+        .sub_ability
+        .as_deref()
+        .expect("planeswalk sub-ability");
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Planeswalk),
+        "chaos trigger's second sentence must planeswalk, got {:?}",
+        sub.effect
+    );
+}
+
+#[test]
+fn turn_order_and_additional_beginning_phase_cards_parse_claimed_signatures() {
+    fn ability_has_effect(ability: &AbilityDefinition, pred: fn(&Effect) -> bool) -> bool {
+        pred(ability.effect.as_ref())
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| ability_has_effect(sub, pred))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|else_ability| ability_has_effect(else_ability, pred))
+    }
+
+    fn parsed_has_effect(parsed: &ParsedAbilities, pred: fn(&Effect) -> bool) -> bool {
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| ability_has_effect(ability, pred))
+            || parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .any(|ability| ability_has_effect(ability, pred))
+    }
+
+    fn is_reverse_turn_order(effect: &Effect) -> bool {
+        matches!(effect, Effect::ReverseTurnOrder)
+    }
+
+    fn is_additional_beginning_phase(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        )
+    }
+
+    for (name, text, keywords, types, subtypes, pred) in [
+        (
+            "Aeon Engine",
+            "This artifact enters tapped.\n{T}, Exile this artifact: Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)",
+            &[][..],
+            &["Artifact"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Time Distortion",
+            "When you encounter Time Distortion, reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise. Then planeswalk away from this phenomenon.)",
+            &[][..],
+            &["Phenomenon"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Sphinx of the Second Sun",
+            "Flying\nAt the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::Flying][..],
+            &["Creature"][..],
+            &["Sphinx"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Shadow of the Second Sun",
+            "Enchant player\nAt the beginning of each of enchanted player's postcombat main phases, there is an additional beginning phase after this phase. (The end step happens after the added untap, upkeep, and draw steps.)",
+            &[Keyword::Enchant(TargetFilter::Player)][..],
+            &["Enchantment"][..],
+            &["Aura"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Cyclonus, Cybertronian Fighter",
+            "Living metal (During your turn, this Vehicle is also a creature.)\nFlying\nWhenever Cyclonus deals combat damage to a player, convert it. If you do, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::LivingMetal, Keyword::Flying][..],
+            &["Artifact"][..],
+            &["Vehicle"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+    ] {
+        let parsed = parse(text, name, keywords, types, subtypes);
+        assert!(
+            !parsed_has_unimplemented(&parsed),
+            "{name} must parse with zero Unimplemented effects: {parsed:#?}"
+        );
+        assert!(
+            parsed_has_effect(&parsed, pred),
+            "{name} must contain the claimed parse-diff signature: {parsed:#?}"
+        );
+    }
+}
+
 #[test]
 fn spell_temporal_phase_line_builds_delayed_trigger() {
     // CR 603.7b: Full Throttle's second line. A *phase-based* inline delayed
@@ -13706,6 +13943,49 @@ fn top_level_static_scavenge_and_encore_grants_stay_on_graveyard_cards() {
                 static_def.modifications
             );
         }
+}
+
+/// CR 702.128a: Naktamun grants Embalm to every creature card in the
+/// controller's graveyard, with the embalm cost equal to that card's own
+/// mana cost — the same continuation-sentence shape as Scavenge/Encore, but
+/// for a keyword that was previously absent from `GrantedCastKeywordKind`
+/// even though the runtime resolver already supported it.
+#[test]
+fn top_level_static_embalm_grant_stays_on_graveyard_cards() {
+    let result = parse(
+        "Each creature card in your graveyard has embalm. Its embalm cost is equal to its mana cost.",
+        "Naktamun",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(result.statics.len(), 1, "{:?}", result.statics);
+    let static_def = &result.statics[0];
+    let TargetFilter::Typed(tf) = static_def
+        .affected
+        .as_ref()
+        .expect("expected affected filter")
+    else {
+        panic!("expected typed affected filter");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "missing graveyard filter: {:?}",
+        tf.properties
+    );
+    assert!(
+        static_def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                    ManaCost::SelfManaCost
+                )),
+            }),
+        "missing embalm grant: {:?}",
+        static_def.modifications
+    );
 }
 
 #[test]

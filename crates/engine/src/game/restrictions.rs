@@ -16,7 +16,8 @@ use crate::types::zones::Zone;
 use crate::types::SpellCastRecord;
 
 use super::engine::EngineError;
-use crate::game::functioning_abilities::static_kind_present;
+use crate::game::functioning_abilities::{active_static_definitions, static_kind_present};
+use crate::types::events::GameEvent;
 use crate::types::identifiers::ObjectId;
 
 /// CR 602.5b / CR 602.5d: loop-invariant existence gates for rare static modes
@@ -582,6 +583,15 @@ pub(crate) fn check_summoning_sickness_for_cost(
     if !cost_contains_tap_or_untap(cost) {
         return Ok(());
     }
+    // CR 701.26a + CR 508.1f: a permanent with a "can't become tapped" restriction
+    // can't pay a {T} activation cost (the restriction is lifted only by attacker
+    // declaration, which is not an activation cost). A {Q} untap cost is unaffected
+    // — untapping is governed by `StaticMode::CantUntap`, not CantTap.
+    if cost_contains_tap(cost) && object_cant_tap(state, source.id) {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent can't become tapped: its {T} ability can't be activated".to_string(),
+        ));
+    }
     if summoning_sick_for_tap_ability(state, source) {
         return Err(EngineError::ActionNotAllowed(
             "Creature has summoning sickness: activated abilities with {T} or {Q} \
@@ -631,6 +641,82 @@ fn cost_contains_tap_or_untap(cost: &AbilityCost) -> bool {
         }
         _ => false,
     }
+}
+
+/// Recursively inspects an `AbilityCost` for a `Tap` component only ({T}, not
+/// {Q}). A `StaticMode::CantTap` restriction forbids *becoming tapped*, so it
+/// gates a {T} cost but not a {Q} untap cost (that is `StaticMode::CantUntap`).
+fn cost_contains_tap(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Tap => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_tap),
+        AbilityCost::OneOf { costs } => !costs.is_empty() && costs.iter().all(cost_contains_tap),
+        _ => false,
+    }
+}
+
+/// CR 701.26a + CR 508.1f: does `id` currently carry a "can't become tapped"
+/// restriction (`StaticMode::CantTap`)? Single authority for the predicate,
+/// consulted by every tap chokepoint (cost-driven taps via
+/// [`tap_permanent_for_cost`], effect-driven taps via
+/// `effects::tap_untap::process_one_tap`, {T}-ability activation legality, mana
+/// -source readiness, and the AI/MP legal-action offers).
+///
+/// A restricted creature can still tap by attacking: CR 508.1f says tapping a
+/// creature as it's declared an attacker isn't a cost, so the declare-attackers
+/// path deliberately never consults this predicate.
+pub(crate) fn object_cant_tap(state: &crate::types::game_state::GameState, id: ObjectId) -> bool {
+    // Fast path: with no CantTap static anywhere on the board, nothing can be
+    // restricted — skip the per-object layered-static scan entirely. This keeps
+    // every routed tap chokepoint a zero-cost no-op in the common case.
+    if !static_kind_present(state, StaticModeKind::CantTap) {
+        return false;
+    }
+    let Some(obj) = state.objects.get(&id) else {
+        return false;
+    };
+    // Intrinsic path: Ood Sphere's Red-Eye grants CantTap onto the goaded
+    // creature's OWN `static_definitions` (a layer-6 `GrantStaticAbility`, the
+    // same mechanism `AttackOnlyNeighbor` relies on), so
+    // `active_static_definitions` yields it directly. A REMOTE CantTap (an
+    // `affected` filter naming another permanent) is out of scope for every
+    // current card; if one is ever printed, add the `check_static_ability(CantTap,
+    // ctx{ target_id: Some(id) })` OR-branch here exactly as `CantAttack` does —
+    // no call-site changes required.
+    active_static_definitions(state, obj).any(|sd| matches!(sd.mode, StaticMode::CantTap))
+}
+
+/// CR 701.26a: Tap `id` to pay a cost, honoring any `StaticMode::CantTap`
+/// ("can't become tapped") restriction. Single authority for every cost-driven
+/// creature/permanent tap ({T} activation costs, convoke, crew, station, saddle,
+/// harmonize, tap-N additional costs, {T} mana abilities) so the restriction is
+/// enforced in exactly one place instead of being re-checked at each scattered
+/// call site.
+///
+/// CR 508.1f attacker declaration is NOT a cost and never routes here, so a
+/// restricted creature still taps by attacking. The rules-correct PRIMARY gate is
+/// the choice/legal-action layer (a can't-tap creature is never offered to
+/// crew/convoke/tap-for-cost); this error is the defensive backstop, mirroring
+/// how `CantAttack` filters at declaration time yet still errors on an illegal
+/// commit.
+pub(crate) fn tap_permanent_for_cost(
+    state: &mut crate::types::game_state::GameState,
+    id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if object_cant_tap(state, id) {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent can't become tapped".to_string(),
+        ));
+    }
+    if let Some(obj) = state.objects.get_mut(&id) {
+        obj.tapped = true;
+    }
+    events.push(GameEvent::PermanentTapped {
+        object_id: id,
+        caused_by: None,
+    });
+    Ok(())
 }
 
 /// CR 602.5b: If an activated ability has a restriction on its use (e.g., "Activate only once
@@ -1770,13 +1856,17 @@ pub(crate) fn is_sorcery_speed_window(
 }
 
 fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
-    // CR 723: compare the active player against the semantic priority *seat*, not
-    // `priority_player` (the authorized submitter). Under turn-control these
-    // diverge, so the raw field would never equal `active_player` during a
-    // controlled turn and wrongly close this window. Behavior is identical
-    // without turn-control, where the seat and submitter are the same player.
-    super::turn_control::priority_seat(state) == state.active_player
-        && matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
+    // CR 508.1 + CR 508.2: attackers are declared as the first turn-based action
+    // of the declare-attackers step, BEFORE any player receives priority. So
+    // "before attackers are declared" is a pure PHASE property — we are strictly
+    // before that step — independent of which player currently holds priority.
+    // This is deliberately not priority-gated: a non-active player casting an
+    // instant during the active player's pre-combat (Siren's Call, Master
+    // Warcraft) is correctly inside the window, and turn-control (CR 723) can't
+    // affect a check that never reads priority. Turn-qualified cards (the
+    // `DuringYourTurn` activations) remain pinned to the active player by their
+    // own restriction, which is AND-composed with this one.
+    matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
 }
 
 fn is_before_combat_damage(phase: Phase) -> bool {
@@ -3870,5 +3960,225 @@ mod tests {
         // proving the assertion above is not vacuous.
         assert!(place_blocking(&mut state, blocker, normally_blocked));
         assert!(is_source_blocked(&state, normally_blocked));
+    }
+
+    // ── Ood Sphere: "can't become tapped" (StaticMode::CantTap) enforcement ──
+
+    /// Build a battlefield creature carrying a printed `CantTap` static and run a
+    /// layers pass so `static_mode_presence` + `static_definitions` reflect it.
+    fn creature_with_cant_tap(state: &mut crate::types::game_state::GameState) -> ObjectId {
+        use crate::types::statics::StaticMode;
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Goaded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            let def = crate::types::ability::StaticDefinition::new(StaticMode::CantTap)
+                .affected(crate::types::ability::TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        crate::game::layers::evaluate_layers(state);
+        id
+    }
+
+    #[test]
+    fn object_cant_tap_reflects_printed_cant_tap_static() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        assert!(object_cant_tap(&state, restricted));
+
+        // A plain creature (no CantTap) is never restricted.
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(!object_cant_tap(&state, plain));
+    }
+
+    #[test]
+    fn tap_permanent_for_cost_refuses_cant_tap_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let mut events = Vec::new();
+        let result = tap_permanent_for_cost(&mut state, restricted, &mut events);
+        assert!(
+            result.is_err(),
+            "a can't-become-tapped creature can't pay a tap cost"
+        );
+        assert!(
+            !state.objects.get(&restricted).unwrap().tapped,
+            "the creature must remain untapped after a refused cost tap"
+        );
+        assert!(
+            events.is_empty(),
+            "no PermanentTapped event on a refused tap"
+        );
+    }
+
+    #[test]
+    fn tap_permanent_for_cost_taps_unrestricted_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let plain = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut events = Vec::new();
+        assert!(tap_permanent_for_cost(&mut state, plain, &mut events).is_ok());
+        assert!(state.objects.get(&plain).unwrap().tapped);
+        assert_eq!(events.len(), 1, "unrestricted tap emits PermanentTapped");
+    }
+
+    #[test]
+    fn effect_tap_is_a_no_op_on_cant_tap_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let mut events = Vec::new();
+        // CR 701.26a: an effect can't tap the creature — process_one_tap no-ops.
+        crate::game::effects::tap_untap::process_one_tap(
+            &mut state,
+            restricted,
+            restricted,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.objects.get(&restricted).unwrap().tapped,
+            "an effect-driven tap must not tap a can't-become-tapped creature"
+        );
+    }
+
+    #[test]
+    fn tap_ability_activation_refused_but_untap_ability_allowed() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let source = state.objects.get(&restricted).unwrap();
+        // {T} cost → refused (would become tapped).
+        assert!(
+            check_summoning_sickness_for_cost(&state, source, &AbilityCost::Tap).is_err(),
+            "a {{T}} ability of a can't-become-tapped creature can't be activated"
+        );
+        // {Q} untap cost → NOT gated by CantTap (that is CantUntap's domain).
+        assert!(
+            check_summoning_sickness_for_cost(&state, source, &AbilityCost::Untap).is_ok(),
+            "a {{Q}} untap ability is unaffected by CantTap"
+        );
+    }
+
+    // CR 508.1 + CR 508.2: "before attackers are declared" is a phase property,
+    // independent of which player holds priority — so a NON-active player casting
+    // an instant during the active player's pre-combat (Master Warcraft, Siren's
+    // Call) is inside the window. Fails on revert of the phase-only fix (the old
+    // `priority_seat == active_player` clause rejected the non-active seat).
+    #[test]
+    fn before_attackers_window_admits_non_active_caster() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let active = PlayerId(0);
+        let non_active = PlayerId(1);
+        let src = ObjectId(10);
+        let restr = [CastingRestriction::BeforeAttackersDeclared];
+
+        for phase in [Phase::PreCombatMain, Phase::BeginCombat] {
+            state.active_player = active;
+            state.phase = phase;
+            // The non-active player holds priority to cast the instant — exactly
+            // the state the old priority_seat clause wrongly rejected.
+            state.priority_player = non_active;
+            state.waiting_for = WaitingFor::Priority { player: non_active };
+
+            assert!(
+                check_casting_restrictions(&state, non_active, src, &restr).is_ok(),
+                "non-active player must be inside the before-attackers window in {phase:?}"
+            );
+            // Reach-guard: the active player is also inside the window, so the
+            // assertion above is not vacuously true.
+            assert!(
+                check_casting_restrictions(&state, active, src, &restr).is_ok(),
+                "active player must also be inside the window in {phase:?}"
+            );
+        }
+    }
+
+    // CR 508.1/508.2: the window is strictly before the declare-attackers step;
+    // it must be closed once attackers are (or could have been) declared.
+    #[test]
+    fn before_attackers_window_closes_at_and_after_declaration() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let p = PlayerId(0);
+        let src = ObjectId(10);
+        let restr = [CastingRestriction::BeforeAttackersDeclared];
+        state.active_player = p;
+        state.priority_player = p;
+        state.waiting_for = WaitingFor::Priority { player: p };
+
+        for phase in [
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::PostCombatMain,
+        ] {
+            state.phase = phase;
+            assert!(
+                check_casting_restrictions(&state, p, src, &restr).is_err(),
+                "the window must be closed in {phase:?} (attackers already declared)"
+            );
+        }
+        // Reach-guard: open before declaration.
+        state.phase = Phase::BeginCombat;
+        assert!(check_casting_restrictions(&state, p, src, &restr).is_ok());
+    }
+
+    // Non-regression: `[DuringYourTurn, BeforeAttackersDeclared]` cards (King's
+    // Assassin and the Portal Three Kingdoms tap-ability cycle) must stay pinned
+    // to the active player. Widening the before-attackers window to phase-only
+    // must NOT let a non-active player activate them — DuringYourTurn (AND-composed)
+    // still gates, across the whole widened window (both PreCombatMain and BeginCombat).
+    #[test]
+    fn during_your_turn_before_attackers_stays_active_player_gated() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let src = ObjectId(10);
+        let restr = [
+            ActivationRestriction::DuringYourTurn,
+            ActivationRestriction::BeforeAttackersDeclared,
+        ];
+
+        for phase in [Phase::PreCombatMain, Phase::BeginCombat] {
+            // Controller's OWN turn: legal.
+            state.active_player = controller;
+            state.phase = phase;
+            state.priority_player = controller;
+            state.waiting_for = WaitingFor::Priority { player: controller };
+            assert!(
+                check_activation_restrictions(&state, controller, src, 0, &restr).is_ok(),
+                "own turn {phase:?} must be legal"
+            );
+            // Opponent's turn: illegal (DuringYourTurn fails) — proves phase-only
+            // did not widen these cards to opponents' turns.
+            state.active_player = opponent;
+            assert!(
+                check_activation_restrictions(&state, controller, src, 0, &restr).is_err(),
+                "opponent's turn {phase:?} must be illegal (DuringYourTurn gate)"
+            );
+        }
     }
 }

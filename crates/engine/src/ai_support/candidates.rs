@@ -881,6 +881,7 @@ pub fn candidate_actions_broad_with_probe(
             vehicle_id,
             crew_power,
             eligible_creatures,
+            ..
         } => crew_vehicle_candidates(state, *player, *vehicle_id, *crew_power, eligible_creatures),
         // CR 702.184a: Offer each eligible creature as the station cost payer.
         WaitingFor::StationTarget {
@@ -894,6 +895,7 @@ pub fn candidate_actions_broad_with_probe(
             mount_id,
             saddle_power,
             eligible_creatures,
+            ..
         } => saddle_mount_candidates(state, *player, *mount_id, *saddle_power, eligible_creatures),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
@@ -1262,6 +1264,51 @@ pub fn candidate_actions_broad_with_probe(
                 })
                 .collect()
         }
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — enumerate each
+        // single object (copy first only) plus representative first+second pairs
+        // when a second object may be chosen. Ordered: index 0 is copied, index 1
+        // scales the copy.
+        WaitingFor::EachPlayerCopyChosenSelection {
+            player,
+            eligible,
+            min,
+            max,
+            ..
+        } => {
+            let mut actions: Vec<CandidateAction> = Vec::new();
+            if *min <= 1 {
+                for e in eligible {
+                    actions.push(candidate(
+                        GameAction::SelectTargets {
+                            targets: vec![e.clone()],
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    ));
+                }
+            }
+            if *max >= 2 {
+                'outer: for first in eligible {
+                    for second in eligible {
+                        if first == second {
+                            continue;
+                        }
+                        actions.push(candidate(
+                            GameAction::SelectTargets {
+                                targets: vec![first.clone(), second.clone()],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        ));
+                        // Cap to avoid combinatorial explosion on wide boards.
+                        if actions.len() >= 64 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            actions
+        }
         WaitingFor::KeepWithinTotalPowerChoice {
             player,
             eligible,
@@ -1304,6 +1351,7 @@ pub fn candidate_actions_broad_with_probe(
             options,
             choice_type,
             source_id,
+            ..
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
         // CR 601.2b + CR 701.4a: pre-choice behold type prompt — one ChooseOption
         // per FEASIBLE creature type (options already exclude unpayable types).
@@ -3421,6 +3469,10 @@ pub(crate) fn priority_actions_with_probe(
                         && !c.tapped
                         && c.card_types.core_types.contains(&CoreType::Creature)
                 })
+                // CR 701.26a + CR 508.1f: crew/saddle/station all tap the chosen
+                // creature, so a "can't become tapped" creature is never eligible
+                // (attacking, CR 508.1f, is the only exemption and is not a cost).
+                && !crate::game::restrictions::object_cant_tap(state, cid)
             })
             .collect();
         // CR 702.122a: Crew additionally excludes creatures with a "can't crew"
@@ -4306,6 +4358,12 @@ fn mana_payment_actions(
                 let Some(obj) = state.objects.get(&obj_id) else {
                     continue;
                 };
+                // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
+                // tapped for convoke/improvise/waterbend (all tap the creature to
+                // pay). Delve (graveyard exile above) never taps, so it's exempt.
+                if crate::game::restrictions::object_cant_tap(state, obj_id) {
+                    continue;
+                }
                 match mode {
                     ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
                         // Waterbend: always colorless
@@ -4988,6 +5046,33 @@ mod tests {
         );
     }
 
+    /// CR 701.26a + CR 508.1f (Ood Sphere): a creature that "can't become tapped"
+    /// is excluded from the crew/saddle/station eligibility hoist, so the AI/MP
+    /// legal-action set never offers a Crew that would tap it.
+    #[test]
+    fn cant_become_tapped_creature_is_not_crew_eligible() {
+        let mut state = crew_priority_state();
+        add_crew_vehicle(&mut state, 100, PlayerId(0));
+        let creature = add_untapped_creature(&mut state, 200, PlayerId(0));
+        assert!(
+            has_crew(&priority_actions(&state, PlayerId(0))),
+            "baseline: an untapped creature enables the Crew offer"
+        );
+
+        // Grant CantTap (printed onto the creature's own static definitions).
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            let def = StaticDefinition::new(crate::types::statics::StaticMode::CantTap)
+                .affected(TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        assert!(
+            !has_crew(&priority_actions(&state, PlayerId(0))),
+            "a can't-become-tapped creature must not be offered to crew"
+        );
+    }
+
     /// Item C behavior (set divergence): when every other untapped creature
     /// can't crew, the Crew offer is suppressed but the Saddle offer (which has
     /// no cant-crew restriction) survives — `crew_eligible` is empty while
@@ -5567,6 +5652,7 @@ mod tests {
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
             source_id: Some(source),
+            persist_player: None,
         };
 
         let actions = candidate_actions(&state);

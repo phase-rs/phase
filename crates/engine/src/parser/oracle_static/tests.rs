@@ -7969,14 +7969,80 @@ fn static_each_player_may_play_an_additional_land() {
 }
 
 #[test]
-fn static_anchor_choice_land_drop_stays_unsupported_until_choice_filter_exists() {
-    assert!(
-        parse_static_line(
-            "Each player who last chose green anchor may play an additional land during each of their turns.",
-        )
-        .is_none(),
-        "chosen-word player subjects must not be widened to all players"
+fn static_anchor_choice_land_drop_parses_to_player_who_chose_label() {
+    // CR 607.2d / CR 607.2m (by analogy): the per-player anchor choice filter now
+    // exists, so Two Streams Facility's land-drop grant parses to a player-scoped
+    // `MayPlayAdditionalLand` narrowed to the anchor label — NOT widened to all
+    // players (which is exactly what the previous `is_none()` guard prevented).
+    let def = parse_static_line(
+        "Each player who last chose green anchor may play an additional land during each of their turns.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::MayPlayAdditionalLand);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::PlayerWhoChoseLabel {
+            label: "Green anchor".to_string()
+        })
     );
+}
+
+#[test]
+fn static_anchor_controlled_creature_anthem_parses() {
+    // CR 607.2d / CR 607.2m (by analogy): "creatures controlled by players who
+    // last chose red waterfall get +2/+0 and have haste" → creature filter
+    // carrying ControllerChoseLabel, with the +2/+0 buff and Haste grant.
+    let def = parse_static_line(
+        "Creatures controlled by players who last chose red waterfall get +2/+0 and have haste.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let TargetFilter::Typed(typed) = def.affected.as_ref().unwrap() else {
+        panic!("expected a typed creature filter, got {:?}", def.affected);
+    };
+    assert!(typed
+        .properties
+        .contains(&FilterProp::ControllerChoseLabel {
+            label: "Red waterfall".to_string()
+        }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }));
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddPower { value: 2 })));
+}
+
+#[test]
+fn static_singing_towers_derived_cost_foretell_grant_parses() {
+    // CR 702.143d: "Each nonland card in your hand without foretell has foretell.
+    // Its foretell cost is equal to its mana cost reduced by {2}." → a continuous
+    // AddKeywordWithDerivedCost{Foretell, ManaCostReducedBy({2})} on nonland
+    // cards you own in hand.
+    use crate::types::ability::CostDerivation;
+    use crate::types::keywords::CostBearingKeywordKind;
+    let def = parse_static_line(
+        "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeywordWithDerivedCost {
+            kind: CostBearingKeywordKind::Foretell,
+            derivation: CostDerivation::ManaCostReducedBy(ManaCost::generic(2)),
+        }]
+    );
+    let TargetFilter::Typed(typed) = def.affected.as_ref().unwrap() else {
+        panic!("expected a typed hand-card filter, got {:?}", def.affected);
+    };
+    assert!(typed.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::InAnyZone { zones } if zones == &vec![crate::types::zones::Zone::Hand]
+    )));
 }
 
 #[test]
@@ -24524,5 +24590,91 @@ fn granted_cast_keyword_zone_gate_declines_mismatches() {
         try_parse_graveyard_keyword_grant_clause("Each enchantment card in your hand has miracle.")
             .is_some(),
         "miracle functions from hand -- a hand subject must be accepted"
+    );
+}
+
+// ── Ood Sphere (WHO Planechase plane): "Noncreature spells have convoke." ──
+// CR 702.51a + CR 113.6b: the NON-possessive, all-players casting-keyword grant
+// must emit `StaticMode::CastWithKeyword` (the only mode the casting-keyword
+// path reads) with a CONTROLLER-AGNOSTIC affected filter — NOT the runtime-inert
+// anthem `AddKeyword` continuous static, and NOT `ControllerRef::You` scoping.
+
+#[test]
+fn noncreature_spells_have_convoke_grants_cast_with_keyword_all_players() {
+    // The ability-word "Song of the Ood — " label is stripped before this parser
+    // runs, so it receives the bare grant sentence.
+    let def = parse_static_line("Noncreature spells have convoke.")
+        .expect("noncreature-spells-have-convoke must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Convoke
+        },
+        "must be a casting-keyword grant, not an anthem AddKeyword: {def:?}"
+    );
+    assert!(
+        def.active_zones.contains(&Zone::Battlefield),
+        "active zones must include Battlefield (Command is appended by planechase synthesis): {:?}",
+        def.active_zones
+    );
+    match def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(
+                tf.controller, None,
+                "all-players grant must NOT scope to ControllerRef::You"
+            );
+            assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)
+                )),
+                "affected filter must be noncreature: {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected a Typed affected filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_spells_have_keyword_all_players_building_block() {
+    // Building block: any "[type] spells have [keyword]" (no possessive) form.
+    let def = parse_static_line("Artifact spells have flash.")
+        .expect("artifact-spells-have-flash must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        },
+        "{def:?}"
+    );
+    match def.affected {
+        Some(TargetFilter::Typed(tf)) => assert_eq!(
+            tf.controller, None,
+            "all-players grant stays controller-agnostic"
+        ),
+        other => panic!("expected Typed affected, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_spells_have_keyword_all_players_building_block() {
+    let def = parse_static_line("Spells have flash.").expect("spells-have-flash must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        },
+        "{def:?}"
+    );
+}
+
+#[test]
+fn creatures_you_control_have_flying_stays_anthem_not_cast_keyword() {
+    // Negative: a battlefield anthem ("creatures you control have flying") must
+    // NOT be claimed by the spell-keyword-grant path — its subject is not spells.
+    assert!(
+        parse_spells_have_keyword_for_test("Creatures you control have flying.").is_none(),
+        "creatures-have-flying is a battlefield anthem, not a casting-keyword grant"
     );
 }

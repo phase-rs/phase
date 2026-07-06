@@ -4181,6 +4181,20 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (None, text.to_string());
     }
 
+    // CR 311.7 + CR 607.2d / CR 607.2m (by analogy): "each player who last chose
+    // <A> chooses <B>, and vice versa" (Two Streams Facility's chaos swap) is a
+    // symmetric per-player anchor swap owned by `parse_swap_chosen_labels`, NOT a
+    // player-scoped imperative subject. Stripping "each player " would leave "who
+    // last chose …", which misroutes to `Unimplemented { who }`. Bail with
+    // `(None, full_text)` so the whole clause survives for the dedicated handler
+    // (mirrors the "may play"/"may cast" bail above).
+    if tag::<_, _, OracleError<'_>>("who last chose ")
+        .parse(rest_lower.as_str())
+        .is_ok()
+    {
+        return (None, text.to_string());
+    }
+
     // CR 700.2 + CR 701.21a + CR 608.2c: "for each player, you choose …" (Tragic
     // Arrogance → CategoryChooserScope::ControllerForAll) and "for each player,
     // choose … in that player's graveyard/zone" (Breach the Multiverse →
@@ -8317,6 +8331,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
@@ -8412,6 +8427,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }

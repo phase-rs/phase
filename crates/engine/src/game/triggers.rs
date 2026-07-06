@@ -5558,10 +5558,22 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
     let mut pending = normal_pending;
     pending.extend(delayed_pending);
 
+    // CR 603.3b (issue #770 cluster): a truly-empty batch for *this* event
+    // must still surface an orphaned `pending_trigger`/`deferred_triggers`
+    // left over from earlier processing — mirror the non-empty path's
+    // `current_trigger_prompt` computation below instead of hardcoding
+    // `prompt: None`. Otherwise a phase whose own trigger collection is
+    // legitimately empty silently discards a still-unresolved trigger from a
+    // prior phase, masking it from every later `WaitingFor` check.
     if pending.is_empty() {
+        let prompt = current_trigger_prompt(state, &waiting_before);
+        let fired = state.stack.len() > stack_before
+            || state.pending_trigger.is_some()
+            || !state.deferred_triggers.is_empty()
+            || prompt.is_some();
         return TriggerBatchOutcome {
-            fired: false,
-            prompt: None,
+            fired,
+            prompt,
             consumed_events,
         };
     }
@@ -7685,6 +7697,79 @@ pub mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// Regression (issue #770 cluster — Sheoldred/Replicating Ring/Skyline
+    /// Despot/Bitterbloom/Braids upkeep triggers silently not firing):
+    /// `process_collected_triggers_with_delayed_phase_events` must not
+    /// silently drop an orphaned `pending_trigger` left over from earlier
+    /// processing when the CURRENT event batch's own trigger collection is
+    /// empty. Before the fix, the empty-`pending` fast path hardcoded
+    /// `prompt: None, fired: false` unconditionally — discarding a
+    /// still-unresolved trigger from the caller's view — exactly the class of
+    /// silent trigger-masking the cluster describes: a phase whose own
+    /// collection legitimately finds nothing new must still report an
+    /// orphan from an earlier phase, the same way the non-empty path
+    /// (four lines below the fixed branch) already does via
+    /// `current_trigger_prompt`.
+    #[test]
+    fn empty_batch_still_surfaces_orphaned_pending_trigger() {
+        let mut state = setup();
+        let source_id = ObjectId(1);
+        let controller = PlayerId(0);
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+        state.pending_trigger = Some(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability,
+            timestamp: 0,
+            target_constraints: vec![],
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        });
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: controller,
+            source_id,
+            description: None,
+            may_trigger_key: None,
+        };
+
+        let mut events_out = Vec::new();
+        // An empty batch for THIS event (no new triggers match anything) must
+        // not discard the orphaned `pending_trigger` set above.
+        let outcome = process_collected_triggers_with_delayed_phase_events(
+            &mut state,
+            vec![],
+            &[],
+            &mut events_out,
+        );
+
+        assert!(
+            outcome.fired,
+            "an orphaned pending_trigger must be reported as still-active \
+             even when this batch's own collection is empty"
+        );
+        assert_eq!(
+            outcome.prompt,
+            Some(state.waiting_for.clone()),
+            "the orphaned trigger's prompt must be surfaced, not silently dropped"
+        );
     }
 
     #[test]

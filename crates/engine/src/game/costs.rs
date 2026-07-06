@@ -373,12 +373,10 @@ fn pay_ability_cost_inner(
                     "Cannot activate tap ability: permanent is tapped".to_string(),
                 ));
             }
-            let obj = state.objects.get_mut(&source_id).unwrap();
-            obj.tapped = true;
-            events.push(GameEvent::PermanentTapped {
-                object_id: source_id,
-                caused_by: None,
-            });
+            // CR 701.26a + CR 508.1f: route the {T}-cost tap through the single
+            // authority so a "can't become tapped" source is refused (the primary
+            // gate is `check_summoning_sickness_for_cost`; this is the backstop).
+            crate::game::restrictions::tap_permanent_for_cost(state, source_id, events)?;
         }
         // CR 107.6: The untap symbol in a cost means "Untap this permanent. A
         // permanent that's already untapped can't be untapped again to pay the

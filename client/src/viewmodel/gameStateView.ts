@@ -279,7 +279,12 @@ export type BoardChoiceSelection =
   | { type: "single"; immediate: true }
   | { type: "exactCount"; count: number; immediate?: boolean }
   | { type: "rangeCount"; min: number; max: number }
-  | { type: "totalPowerAtLeast"; power: number }
+  // `contributions` maps an eligible object id to the power it contributes
+  // toward the threshold. Supplied by the engine for Crew (CR 702.122a), where
+  // "as though its power were N greater" / "using its toughness" make the
+  // contribution differ from printed power; when absent (Ward-sacrifice total
+  // power), the summation falls back to raw power.
+  | { type: "totalPowerAtLeast"; power: number; contributions?: Record<ObjectId, number> }
   // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any subset whose
   // combined power is at most `power`; selecting beyond it blocks confirm.
   | { type: "totalPowerAtMost"; power: number };
@@ -302,6 +307,26 @@ export interface BoardChoiceView {
   sourceId?: ObjectId;
   skipAction?: GameAction;
   cancelAction?: GameAction;
+}
+
+/**
+ * Zip the engine's parallel `eligible_creatures` / `contributions` arrays into a
+ * lookup from object id to its adjusted crew/saddle contribution. The engine
+ * emits them index-aligned (CR 702.122a / 702.171a); a length mismatch falls
+ * back to an empty map so the caller degrades to raw power rather than misreads.
+ */
+function zipContributions(
+  eligibleCreatures: ObjectId[],
+  contributions?: number[],
+): Record<ObjectId, number> {
+  const map: Record<ObjectId, number> = {};
+  if (!contributions || eligibleCreatures.length !== contributions.length) {
+    return map;
+  }
+  eligibleCreatures.forEach((id, index) => {
+    map[id] = contributions[index];
+  });
+  return map;
 }
 
 function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"]): ObjectId | undefined {
@@ -432,7 +457,14 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible_creatures,
         intent: "crew",
-        selection: { type: "totalPowerAtLeast", power: waitingFor.data.crew_power },
+        selection: {
+          type: "totalPowerAtLeast",
+          power: waitingFor.data.crew_power,
+          contributions: zipContributions(
+            waitingFor.data.eligible_creatures,
+            waitingFor.data.contributions,
+          ),
+        },
         response: { type: "CrewVehicle", vehicleId: waitingFor.data.vehicle_id },
         sourceId: waitingFor.data.vehicle_id,
       };
@@ -441,7 +473,14 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible_creatures,
         intent: "saddle",
-        selection: { type: "totalPowerAtLeast", power: waitingFor.data.saddle_power },
+        selection: {
+          type: "totalPowerAtLeast",
+          power: waitingFor.data.saddle_power,
+          contributions: zipContributions(
+            waitingFor.data.eligible_creatures,
+            waitingFor.data.contributions,
+          ),
+        },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
       };
@@ -562,8 +601,14 @@ export function boardChoiceSelectedPower(
   // the total, so a 5/-1 pair fits a cap of 4. Crew/Saddle-style
   // `totalPowerAtLeast` contributes positive power only.
   const clampNegative = choice.selection.type === "totalPowerAtLeast";
+  // CR 702.122a / 702.171a: for Crew/Saddle the engine supplies each creature's
+  // adjusted contribution (Pilot tokens' "+2 greater", Giant Ox's toughness).
+  // Prefer it over printed power so the UI gates on the same value the engine
+  // validates; fall back to raw power when the engine sent no contributions.
+  const contributions =
+    choice.selection.type === "totalPowerAtLeast" ? choice.selection.contributions : undefined;
   return selectedIds.reduce((sum, id) => {
-    const power = objects?.[id]?.power ?? 0;
+    const power = contributions?.[id] ?? objects?.[id]?.power ?? 0;
     return sum + (clampNegative ? Math.max(power, 0) : power);
   }, 0);
 }

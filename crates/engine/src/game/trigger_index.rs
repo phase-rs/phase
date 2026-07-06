@@ -843,6 +843,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::TakeTheInitiative
         | EffectKind::Planeswalk
         | EffectKind::ChaosEnsues
+        | EffectKind::ReverseTurnOrder
         | EffectKind::OpenAttractions
         | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters
@@ -856,6 +857,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChooseCounterKind
         | EffectKind::PutChosenCounter
         | EffectKind::ChooseAndSacrificeRest
+        | EffectKind::EachPlayerCopyChosen
         | EffectKind::Exploit
         | EffectKind::GainEnergy
         | EffectKind::GivePlayerCounter
@@ -910,6 +912,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
+        | EffectKind::ChooseCounterAdjustment
         | EffectKind::Specialize
         | EffectKind::Unimplemented
         | EffectKind::Crew

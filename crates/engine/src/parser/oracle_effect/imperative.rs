@@ -32,12 +32,12 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
     CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControlWindow,
-    ControllerRef, CopyRetargetPermission, DigSource, DoorLockOp, Duration, Effect, EffectScope,
-    FaceDownProfile, FilterProp, GrantedAbilityScope, LibraryPosition, MultiTargetSpec,
-    OutsideGameSourcePool, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue,
-    QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint, StaticDefinition,
-    StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode, TypeFilter,
-    TypedFilter, ZoneOwner,
+    ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp, Duration,
+    Effect, EffectScope, FaceDownProfile, FilterProp, GrantedAbilityScope, LibraryPosition,
+    MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount, PreventionScope, PtStat,
+    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
+    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -260,6 +260,69 @@ fn parse_sticker_max_ticket_cost(input: &str) -> OracleResult<'_, QuantityExpr> 
         )));
     }
     Ok((rest, expr))
+}
+
+fn parse_manifest_count_card_words(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        value(
+            QuantityExpr::Fixed { value: 1 },
+            alt((
+                tag::<_, _, OracleError<'_>>("cards"),
+                tag::<_, _, OracleError<'_>>("card"),
+            )),
+        ),
+        map(
+            terminated(
+                nom_primitives::parse_number,
+                preceded(
+                    space1::<_, OracleError<'_>>,
+                    alt((
+                        tag::<_, _, OracleError<'_>>("cards"),
+                        tag::<_, _, OracleError<'_>>("card"),
+                    )),
+                ),
+            ),
+            |n| QuantityExpr::Fixed { value: n as i32 },
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_direct_manifest_clause<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (TargetFilter, QuantityExpr, Option<ControllerRef>)> {
+    let attach_to_it_continuation = value(
+        (),
+        preceded(
+            space1::<_, OracleError<'_>>,
+            (
+                tag::<_, _, OracleError<'_>>("and attach "),
+                take_until::<_, _, OracleError<'_>>(" to it"),
+                tag(" to it"),
+            ),
+        ),
+    );
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("manifest the top "),
+        parse_manifest_count_card_words,
+        space1::<_, OracleError<'_>>,
+        alt((
+            value(TargetFilter::Controller, tag("of your library")),
+            value(
+                that_player_library_filter(ctx),
+                tag("of that player's library"),
+            ),
+        )),
+        opt(preceded(
+            space1::<_, OracleError<'_>>,
+            tag("under your control"),
+        )),
+        opt(attach_to_it_continuation),
+        opt(tag(".")),
+    ))
+    .parse(input)
+    .map(|(rest, (_, count, _, target, _, _, _))| (rest, (target, count, Some(ControllerRef::You))))
 }
 
 fn parse_put_sticker_target_tail(
@@ -3256,6 +3319,14 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             tag("target opponent's hand"),
         ),
+        // "look at an opponent's hand" (Anointed Peacekeeper ETB) — a
+        // non-targeted controller choice. Ordered AFTER the longer "target …"
+        // tags so those still win. Routes the LookAt path to
+        // `Effect::RevealHand { reveal: false, target: Typed(Opponent) }`.
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("an opponent's hand"),
+        ),
         value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
         value(TargetFilter::TriggeringPlayer, tag("their hand")),
         value(
@@ -3264,6 +3335,47 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
         ),
     ))
     .parse(input)
+}
+
+/// CR 122.1 + CR 115.1: "[a|one|any] counter on <target>" — designate the object
+/// whose counters a later clause adjusts (Clockspinning sentence 1: "Choose a
+/// counter on target permanent or suspended card"). The chosen counter KIND is
+/// decided at resolution by sentence 2 (`Effect::ChooseCounterAdjustment`), so
+/// this clause only fixes the TARGET and lowers to `Effect::TargetOnly`.
+///
+/// `parse_target` does not forward-scan past the "counter on " lead-in (the lead
+/// is an effect noun, not a target descriptor), so it is stripped with a nom
+/// `tag` here before delegating to the shared target parser — mirroring the
+/// "for each kind of counter on " + `parse_target` structure in
+/// `try_parse_proliferate_target`. A bare `Any` target (no concrete filter) is
+/// rejected so this never swallows non-counter "choose" clauses; any leftover
+/// after the target phrase (beyond trailing punctuation) likewise rejects.
+fn try_parse_choose_counter_on_target(rest: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+    let lower = rest.to_lowercase();
+    let (_, after_on) = nom_on_lower(rest, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, E>("a counter on "),
+                tag("one counter on "),
+                tag("any counter on "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let (target, remainder) = parse_target(after_on);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    if !remainder
+        .trim_start_matches([',', ' '])
+        .trim_end_matches(['.', ' '])
+        .is_empty()
+    {
+        return None;
+    }
+    Some(ChooseImperativeAst::TargetOnly { target })
 }
 
 /// CR 701.9a + CR 107.1b: "[Target player] chooses a card in their hand and
@@ -3377,9 +3489,19 @@ pub(super) fn parse_choose_ast(
         // pick one of the distinct counter kinds on the anaphoric object
         // (The Caves of Androzani II/III). Anaphoric form only; the declared-
         // target form ("a counter on target permanent", Ichormoon Gauntlet)
-        // is not yet supported (its consumer "put one more or remove one" is
-        // also absent) and is left as an honest Unimplemented gap.
+        // is handled by the target parser below.
         if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
+            return Some(ast);
+        }
+
+        // CR 122.1 + CR 115.1: "Choose a counter on target <permanent/card>" only
+        // designates the object whose counters a later clause adjusts
+        // (Clockspinning). The "a counter on " lead-in is not a target descriptor,
+        // so `parse_target` does not forward-scan past it (it would fall through to
+        // `Any`); strip it with a nom `tag` before delegating to the shared target
+        // parser, mirroring `try_parse_proliferate_target`'s
+        // "for each kind of counter on " + `parse_target` structure.
+        if let Some(ast) = try_parse_choose_counter_on_target(rest) {
             return Some(ast);
         }
 
@@ -8086,6 +8208,26 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues));
     }
 
+    // CR 103.1 + CR 101.4: "reverse the game's turn order" / "reverse the turn
+    // order" (Temple of Atropos chaos, Aeon Engine activated ability, Time
+    // Distortion phenomenon). Whole-phrase imperative with no target; anchored
+    // nom production mirroring the "chaos ensues" parse so unrelated clauses
+    // cannot accidentally match it. The "(For example …)" reminder is stripped
+    // upstream, and the apostrophe reaching the parser is straight. The two
+    // surface forms are a single `alt()` axis (compose, don't enumerate).
+    if all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("reverse the game's turn order"),
+            tag("reverse the turn order"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::ReverseTurnOrder));
+    }
+
     // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
     // of Mortality). The subject ("two target players") precedes the verb, so
     // `first_word` is "two"/"target"/"have" rather than a verb keyword —
@@ -8158,6 +8300,25 @@ pub(super) fn parse_imperative_family_ast(
             target: TargetFilter::Controller,
             phase: Phase::End,
             after: Phase::End,
+            followed_by: vec![],
+            count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
+        }));
+    }
+    // CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+    // phase" (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus). The
+    // beginning phase is untap → upkeep → draw (CR 501.1). `phase: Untap` is the
+    // self-documenting marker the resolver keys the beginning-phase schedule on
+    // (untap begins only the beginning phase, CR 502) — no other AdditionalPhase
+    // producer emits `phase: Untap`. `after`/`followed_by` are unused for this
+    // shape: the resolver derives the anchor from the phase this ability resolves
+    // in ("this phase", CR 500.8) via `last_step_of_phase`, and resumes the turn
+    // at that phase's natural successor. `after` is a don't-care sentinel.
+    if nom_primitives::scan_contains(lower, "additional beginning phase") {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::Untap,
+            after: Phase::PostCombatMain,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
             attacker_restriction: None,
@@ -8636,57 +8797,17 @@ pub(super) fn parse_imperative_family_ast(
                 .is_ok()
             {
                 Some(ImperativeFamilyAst::ManifestDread)
-            } else if let Ok((rest, _)) =
-                tag::<_, _, OracleError<'_>>("manifest the top ").parse(lower)
+            } else if tag::<_, _, OracleError<'_>>("manifest the top ")
+                .parse(lower)
+                .is_ok()
             {
-                // CR 701.40a: "manifest the top card of your library"
-                // or "manifest the top N cards of your/that player's library"
-                let parsed = alt((
-                    value(
-                        QuantityExpr::Fixed { value: 1 },
-                        alt((
-                            tag::<_, _, OracleError<'_>>("card "),
-                            tag("cards "),
-                        )),
-                    ),
-                    map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
-                        value: n as i32,
-                    }),
-                ))
-                .parse(rest);
-
-                let (count, after_count) = if let Ok((after_count, count)) = parsed {
-                    let after_count = if matches!(&count, QuantityExpr::Fixed { value: 1 }) {
-                        after_count
-                    } else if let Ok((after_cards, _)) = preceded(
-                        tag::<_, _, OracleError<'_>>(" "),
-                        alt((tag("card "), tag("cards "))),
-                    )
-                    .parse(after_count)
-                    {
-                        after_cards
-                    } else {
-                        after_count
-                    };
-                    (count, after_count)
-                } else {
-                    (QuantityExpr::Fixed { value: 1 }, rest)
-                };
-
-                let target = if tag::<_, _, OracleError<'_>>("of your library")
-                    .parse(after_count)
-                    .is_ok()
-                {
-                    TargetFilter::Controller
-                } else if tag::<_, _, OracleError<'_>>("of that player's library")
-                    .parse(after_count)
-                    .is_ok()
-                {
-                    that_player_library_filter(ctx)
-                } else {
-                    TargetFilter::Controller
-                };
-                Some(ImperativeFamilyAst::Manifest { target, count })
+                let (_, (target, count, enters_under)) =
+                    parse_direct_manifest_clause(lower, ctx).ok()?;
+                Some(ImperativeFamilyAst::Manifest {
+                    target,
+                    count,
+                    enters_under,
+                })
             } else {
                 None
             }
@@ -10566,15 +10687,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
-        // CR 701.40a: The plain "manifest the top N cards" surface form carries
-        // neither an effect-specified face-down profile nor a controller
-        // override — those are only set by the "put ... onto the battlefield face
-        // down [under your control]" path (see `lower_put_ast`).
-        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest {
+        // CR 701.40a + CR 110.2a: The direct "manifest the top N cards" surface
+        // carries no effect-specified face-down profile; `enters_under` records
+        // the instruction-controller default. The put-form manifest may also
+        // seed an effect-specified profile (see `lower_put_ast`).
+        ImperativeFamilyAst::Manifest {
+            target,
+            count,
+            enters_under,
+        } => Effect::Manifest {
             target,
             count,
             profile: None,
-            enters_under: None,
+            enters_under,
         },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward
@@ -10789,6 +10914,87 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
     }
 }
 
+/// CR 122.1 + CR 608.2d (Clockspinning sentence 2): recognize the three forms
+/// of the "choose a counter, then adjust it" clause and return the operation set
+/// the controller may choose among:
+///
+/// - `AddOrRemove`: "remove that counter [from <anaphor>] or put another of
+///   those counters on <anaphor>" — Clockspinning.
+/// - `Remove`: "remove that counter [from <anaphor>]" — remove-only variants.
+/// - `Add`: "put another of those counters on <anaphor>" — add-only variants.
+///
+/// The singular "that counter" / plural "those counters" deictic anaphors are
+/// unique to the "choose a counter, then adjust it" class, so this is a
+/// self-contained combinator over the full clause — it deliberately does NOT
+/// delegate to the shared `parse_counter_anaphor` authority (which gates the
+/// remove-all sentinel path and has no singular "that counter" arm; extending
+/// it would wrongly widen that dispatch for unrelated cards).
+///
+/// The object anaphor on either side ("that permanent or card" / "that
+/// permanent" / "that card" / "it") is a don't-care: the established target is
+/// reused via the parent `TargetOnly` chain. Returns `None` for every other
+/// remove/add clause, leaving existing paths unchanged.
+fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment> {
+    type E<'a> = OracleError<'a>;
+
+    // The reused object anaphor, longest-match-first so "that permanent or card"
+    // is not shadowed by the "that permanent" prefix.
+    fn counter_object_anaphor(input: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            alt((
+                tag::<_, _, E>("that permanent or card"),
+                tag("that permanent"),
+                tag("that card"),
+                tag("it"),
+            )),
+        )
+        .parse(input)
+    }
+
+    let clause = lower.trim_end_matches(['.', ' ']);
+
+    // Remove-based forms share the "remove that counter [from <anaphor>]"
+    // prefix. Try AddOrRemove (longer form) before Remove-only so the shared
+    // prefix does not short-circuit into the wrong variant.
+    if let Ok((rest, _)) = tag::<_, _, E>("remove that counter").parse(clause) {
+        let (rest, _) = opt(preceded(tag::<_, _, E>(" from "), counter_object_anaphor))
+            .parse(rest)
+            .ok()?;
+        // AddOrRemove: remove leg followed by "or put another of those counters
+        // on <anaphor>".
+        if let Ok((rest2, _)) = preceded(
+            tag::<_, _, E>(" or put another of those counters on "),
+            counter_object_anaphor,
+        )
+        .parse(rest)
+        {
+            if rest2.is_empty() {
+                return Some(CounterAdjustment::AddOrRemove);
+            }
+        }
+        // Remove-only: the remove clause consumed the entire clause.
+        if rest.is_empty() {
+            return Some(CounterAdjustment::Remove);
+        }
+        return None;
+    }
+
+    // Add-only: "put another of those counters on <anaphor>".
+    if let Ok((rest, _)) = preceded(
+        tag::<_, _, E>("put another of those counters on "),
+        counter_object_anaphor,
+    )
+    .parse(clause)
+    {
+        if rest.is_empty() {
+            return Some(CounterAdjustment::Add);
+        }
+    }
+
+    None
+}
+
 pub(super) fn parse_zone_counter_ast(
     text: &str,
     lower: &str,
@@ -10915,6 +11121,16 @@ pub(super) fn parse_zone_counter_ast(
     // would drop them to `Unimplemented`. `parse_counter_anaphor` (the shared
     // anaphor authority in counter.rs) recognizes that surface against the
     // post-"remove " remainder so it reaches `try_parse_remove_counter`.
+    // CR 122.1 + CR 608.2d (Clockspinning sentence 2): "remove that counter ...
+    // or put another of those counters on it" — the controller chooses, at
+    // resolution, a kind of counter present on the established target and adds OR
+    // removes one of it. Must run BEFORE the generic `tag("remove ")` gate below
+    // so this anaphoric add-or-remove clause is captured here rather than failing
+    // through `try_parse_remove_counter`. The combinator returns `None` for every
+    // other "remove …" clause, leaving the existing remove path unchanged.
+    if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
+        return Some(ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment });
+    }
     if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
         let is_counter_remove = nom_primitives::scan_contains(lower, "counter")
             || nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some();
@@ -11109,6 +11325,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         },
+        // CR 122.1 + CR 608.2d: the kind/op choice happens at resolution; the
+        // target arrives via the parent `TargetOnly` chain, so this effect carries
+        // no target slot. `count` is one per the printed "another"/"that counter".
+        ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment } => {
+            Effect::ChooseCounterAdjustment {
+                adjustment,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        }
         ZoneCounterImperativeAst::MoveCounters {
             source,
             counter_type,
@@ -11538,6 +11763,137 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().any(is_stack_spell_leg),
             _ => false,
         }
+    }
+
+    /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): the add-or-remove anaphor
+    /// clause is recognized as `AddOrRemove`. The negative case proves the
+    /// self-contained combinator returns `None` for an ordinary "remove a <type>
+    /// counter" clause, leaving the existing remove path untouched.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_add_or_remove() {
+        assert_eq!(
+            try_parse_choose_counter_adjustment(
+                "remove that counter from that permanent or card or put another of those counters on it"
+            ),
+            Some(CounterAdjustment::AddOrRemove)
+        );
+        // Trailing punctuation and the bare "it" anaphor are both accepted.
+        assert_eq!(
+            try_parse_choose_counter_adjustment(
+                "remove that counter or put another of those counters on it."
+            ),
+            Some(CounterAdjustment::AddOrRemove)
+        );
+        // An ordinary remove clause must NOT be captured here.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove a +1/+1 counter from ~"),
+            None
+        );
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove all +1/+1 counters from it"),
+            None
+        );
+    }
+
+    /// CR 122.1: the remove-only form ("remove that counter [from <anaphor>]"
+    /// without an add-back clause) parses as `Remove`, making the `Remove`
+    /// variant reachable from the parser.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_remove_only() {
+        // Bare "it" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from it"),
+            Some(CounterAdjustment::Remove)
+        );
+        // "that permanent" anaphor with trailing punctuation.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from that permanent."),
+            Some(CounterAdjustment::Remove)
+        );
+        // "that permanent or card" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from that permanent or card"),
+            Some(CounterAdjustment::Remove)
+        );
+        // Clause without an explicit "from <anaphor>" phrase.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter"),
+            Some(CounterAdjustment::Remove)
+        );
+        // Must NOT fire for an ordinary type-specific remove.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove a +1/+1 counter from it"),
+            None
+        );
+    }
+
+    /// CR 122.1: the add-only form ("put another of those counters on <anaphor>")
+    /// without a preceding remove clause parses as `Add`, making the `Add`
+    /// variant reachable from the parser.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_add_only() {
+        // Bare "it" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put another of those counters on it"),
+            Some(CounterAdjustment::Add)
+        );
+        // "that permanent" anaphor with trailing punctuation.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put another of those counters on that permanent."),
+            Some(CounterAdjustment::Add)
+        );
+        // "that permanent or card" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment(
+                "put another of those counters on that permanent or card"
+            ),
+            Some(CounterAdjustment::Add)
+        );
+        // Must NOT fire for an ordinary PutCounter clause.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put a +1/+1 counter on it"),
+            None
+        );
+    }
+
+    /// CR 122.1 + CR 115.1 + CR 702.62b (Clockspinning sentence 1): "choose a
+    /// counter on target permanent or suspended card" designates the target only
+    /// and lowers to `TargetOnly` over the battlefield∪exile `Or` pool.
+    #[test]
+    fn try_parse_choose_counter_on_target_yields_permanent_or_suspended_card() {
+        let ast =
+            try_parse_choose_counter_on_target("a counter on target permanent or suspended card.")
+                .expect("counter-on-target designation must parse");
+        let ChooseImperativeAst::TargetOnly { target } = ast else {
+            panic!("expected TargetOnly, got {ast:?}");
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected an Or target pool, got {target:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "battlefield permanent + suspended card legs"
+        );
+        // Battlefield-permanent leg carries an explicit InZone{Battlefield}.
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Permanent]
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })
+        )));
+        // Suspended-card leg: exile + suspend keyword + time counter.
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.properties.contains(&FilterProp::InZone { zone: Zone::Exile })
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::HasKeywordKind {
+                            value: crate::types::keywords::KeywordKind::Suspend
+                        }
+                    ))
+        )));
     }
 
     fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
