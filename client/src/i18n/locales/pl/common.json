@@ -215,7 +215,8 @@
     "reportCardNudge": {
       "message": "Karta wyświetla się lub działa źle? Dotknij <flag>flagi zgłoszenia</flag> w lewym górnym rogu, aby ją zgłosić, a my ją naprawimy.",
       "dismiss": "Odrzuć",
-      "open": "Zgłoś kartę"
+      "open": "Zgłoś kartę",
+      "debugPrompt": "Karta wyświetla się lub działa źle? Zgłoś ją, a my ją naprawimy."
     }
   },
   "splash": {

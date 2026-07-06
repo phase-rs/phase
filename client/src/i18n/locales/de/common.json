@@ -215,7 +215,8 @@
     "reportCardNudge": {
       "message": "Wird eine Karte falsch dargestellt oder gespielt? Tippe oben links auf die <flag>Melden-Flagge</flag>, um sie zu melden, damit wir sie beheben können.",
       "dismiss": "Schließen",
-      "open": "Karte melden"
+      "open": "Karte melden",
+      "debugPrompt": "Wird eine Karte falsch dargestellt oder gespielt? Melde sie, damit wir sie beheben können."
     }
   },
   "splash": {

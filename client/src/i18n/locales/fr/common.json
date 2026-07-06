@@ -215,7 +215,8 @@
     "reportCardNudge": {
       "message": "Une carte s'affiche ou se joue mal ? Touchez le <flag>drapeau de signalement</flag> en haut à gauche pour la signaler afin que nous la corrigions.",
       "dismiss": "Ignorer",
-      "open": "Signaler une carte"
+      "open": "Signaler une carte",
+      "debugPrompt": "Une carte s'affiche ou se joue mal ? Signalez-la pour que nous la corrigions."
     }
   },
   "splash": {

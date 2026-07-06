@@ -215,7 +215,8 @@
     "reportCardNudge": {
       "message": "¿Una carta se muestra o juega mal? Toca la <flag>bandera de reporte</flag> arriba a la izquierda para reportarla y poder corregirla.",
       "dismiss": "Descartar",
-      "open": "Reportar carta"
+      "open": "Reportar carta",
+      "debugPrompt": "¿Una carta se muestra o juega mal? Repórtala para que podamos corregirla."
     }
   },
   "splash": {

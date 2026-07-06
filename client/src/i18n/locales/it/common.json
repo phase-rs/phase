@@ -215,7 +215,8 @@
     "reportCardNudge": {
       "message": "Una carta viene mostrata o giocata in modo errato? Tocca la <flag>bandierina di segnalazione</flag> in alto a sinistra per segnalarla così possiamo correggerla.",
       "dismiss": "Ignora",
-      "open": "Segnala una carta"
+      "open": "Segnala una carta",
+      "debugPrompt": "Una carta viene mostrata o giocata in modo errato? Segnalala così possiamo correggerla."
     }
   },
   "splash": {

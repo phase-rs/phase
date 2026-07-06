@@ -215,7 +215,8 @@
     "reportCardNudge": {
       "message": "See a card render or play wrong? Tap the <flag>report flag</flag> in the top-left to flag it so we can fix it.",
       "dismiss": "Dismiss",
-      "open": "Report a Card"
+      "open": "Report a Card",
+      "debugPrompt": "See a card render or play wrong? Flag it so we can fix it."
     }
   },
   "splash": {

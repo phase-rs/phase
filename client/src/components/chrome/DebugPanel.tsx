@@ -1,6 +1,7 @@
 import { strToU8, zipSync } from "fflate";
 import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameState } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
@@ -57,6 +58,7 @@ function patchConsole(): void {
 patchConsole();
 
 export function DebugPanel() {
+  const { t } = useTranslation();
   const open = useUiStore((s) => s.debugPanelOpen);
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
   const gameState = useGameStore((s) => s.gameState);
@@ -310,7 +312,7 @@ export function DebugPanel() {
           card from here too. */}
       <section className="border-b border-gray-700 px-3 py-2">
         <p className="mb-1 text-xs text-gray-500">
-          See a card rendering or behaving wrong? Flag it so we can fix it.
+          {t("help.reportCardNudge.debugPrompt")}
         </p>
         <button
           onClick={handleReportCard}
@@ -330,7 +332,7 @@ export function DebugPanel() {
             <path d="M4 2.5v15" />
             <path d="M4 3.5h9.5l-1.6 3 1.6 3H4" />
           </svg>
-          Report a Card Problem
+          {t("help.reportCardNudge.open")}
         </button>
       </section>
 
