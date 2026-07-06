@@ -1,7 +1,11 @@
 use crate::database::legality::LegalityFormat;
 use crate::database::CardDatabase;
+use crate::game::effects::token::{
+    materialize_token_ability_payload, TokenAbilityMaterialization, TokenAbilitySource,
+};
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
+use crate::game::token_presets::{known_token_presets, PresetFidelity, TokenPreset};
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::{
     is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
@@ -38,6 +42,11 @@ use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
+    "TokenFidelity:PartialMissingAbilities";
+const TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL: &str =
+    "TokenBody:DynamicOrSourceDefinedPowerToughness";
 
 /// Data-carrying static mode variants that are supported but can't be registered
 /// by exact key in the static registry (because the key includes runtime data).
@@ -4702,10 +4711,24 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     missing
 }
 
-fn analyze_token_coverage() -> TokenCoverageSummary {
-    use crate::game::effects::token::{materialize_token_ability_payload, TokenAbilitySource};
-    use crate::game::token_presets::{known_token_presets, PresetFidelity};
+fn unsupported_partial_token_gap_label(
+    preset: &TokenPreset,
+    materialized: &TokenAbilityMaterialization,
+) -> &'static str {
+    if preset.body.core_types.contains(&CoreType::Creature)
+        && (preset.body.power.is_none() || preset.body.toughness.is_none())
+        && materialized.source == TokenAbilitySource::None
+        && materialized.rules_text.is_none()
+        && !materialized.has_functional_payload()
+        && materialized.unparsed_rules_text_lines.is_empty()
+    {
+        TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+    } else {
+        TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+    }
+}
 
+fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
 
@@ -4733,9 +4756,10 @@ fn analyze_token_coverage() -> TokenCoverageSummary {
             PresetFidelity::Full => summary.full_fidelity_tokens += 1,
             PresetFidelity::PartialMissingAbilities if !supported => {
                 summary.partial_fidelity_tokens += 1;
+                let handler = unsupported_partial_token_gap_label(preset, &materialized);
                 push_token_gap(
                     &mut gap_accumulators,
-                    "TokenFidelity:PartialMissingAbilities",
+                    handler,
                     &preset.body.display_name,
                     source_refs,
                 );
@@ -10047,6 +10071,140 @@ mod tests {
             "Test Card".to_string(),
             Zone::Battlefield,
         )
+    }
+
+    fn token_preset_with_body(
+        core_types: Vec<CoreType>,
+        power: Option<i32>,
+        toughness: Option<i32>,
+    ) -> TokenPreset {
+        let category = if core_types.contains(&CoreType::Creature) {
+            crate::game::token_presets::TokenCategory::Creature
+        } else {
+            crate::game::token_presets::TokenCategory::Artifact
+        };
+
+        TokenPreset {
+            id: "test-token".to_string(),
+            category,
+            fidelity: PresetFidelity::PartialMissingAbilities,
+            body: crate::types::proposed_event::TokenCharacteristics {
+                display_name: "Test Token".to_string(),
+                power,
+                toughness,
+                core_types,
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            source_card_names: Vec::new(),
+            source_card_refs: Vec::new(),
+            token_image_ref: None,
+            set_code: String::new(),
+            set_name: String::new(),
+            collector_number: None,
+            released_at: None,
+            type_line: String::new(),
+            rules_text: None,
+        }
+    }
+
+    fn token_materialization_none() -> TokenAbilityMaterialization {
+        TokenAbilityMaterialization {
+            source: TokenAbilitySource::None,
+            abilities: Vec::new(),
+            trigger_definitions: Vec::new(),
+            static_definitions: Vec::new(),
+            keywords: Vec::new(),
+            modifications: Vec::new(),
+            back_face: None,
+            rules_text: None,
+            unparsed_rules_text_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_marks_missing_pt_creature_without_payload() {
+        let preset = token_preset_with_body(vec![CoreType::Creature], None, Some(1));
+        let materialized = token_materialization_none();
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_fixed_pt_creature_as_partial_fidelity() {
+        let preset = token_preset_with_body(vec![CoreType::Creature], Some(1), Some(1));
+        let materialized = token_materialization_none();
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_missing_pt_noncreature_as_partial_fidelity() {
+        let preset = token_preset_with_body(vec![CoreType::Artifact], None, None);
+        let materialized = token_materialization_none();
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_functional_payload_as_partial_fidelity() {
+        let preset = token_preset_with_body(vec![CoreType::Creature], None, Some(1));
+        let mut materialized = token_materialization_none();
+        materialized.keywords.push(Keyword::Flying);
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn unsupported_partial_token_gap_label_keeps_rules_text_as_partial_fidelity() {
+        let preset = token_preset_with_body(vec![CoreType::Creature], None, Some(1));
+        let mut materialized = token_materialization_none();
+        materialized.rules_text = Some("Flying".to_string());
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+
+        let mut materialized = token_materialization_none();
+        materialized
+            .unparsed_rules_text_lines
+            .push("unparsed text".to_string());
+
+        assert_eq!(
+            unsupported_partial_token_gap_label(&preset, &materialized),
+            TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
+        );
+    }
+
+    #[test]
+    fn analyze_token_coverage_reports_dynamic_pt_body_gap_as_top_gap() {
+        let summary = analyze_token_coverage();
+
+        assert_eq!(summary.supported_tokens, 2776);
+        assert_eq!(summary.rules_text_tokens, 1479);
+        assert_eq!(summary.parsed_rules_text_tokens, 1479);
+        let top_gap = summary.top_gaps.first().unwrap();
+        assert_eq!(
+            top_gap.handler,
+            TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+        );
+        assert_eq!(top_gap.total_count, 68);
+        assert_eq!(top_gap.source_card_refs, 126);
     }
 
     #[test]
