@@ -400,6 +400,11 @@ describe("MyDecks", () => {
       sideboard: [],
       commander: ["Zimone, Mystery Unraveler"],
     });
+    saveDeck("[Pre-built] Secrets of Strixhaven (SOS)", {
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Zimone, Mystery Unraveler"],
+    });
     vi.mocked(loadPreconDeckMap).mockResolvedValue({
       sos: {
         code: "SOS",
@@ -436,6 +441,12 @@ describe("MyDecks", () => {
     expect(await screen.findByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
 
     const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Deck source" }));
+    await user.click(screen.getByRole("option", { name: "My decks" }));
+
+    expect(screen.getByText("User Commander")).toBeInTheDocument();
+    expect(screen.queryByText("Secrets of Strixhaven (SOS)")).not.toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Deck source" }));
     await user.click(screen.getByRole("option", { name: "Precons" }));
 

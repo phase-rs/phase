@@ -163,6 +163,16 @@ const FORMAT_FILTERS: Array<{ key: DeckFilter; label: string; aetherhubUrl?: str
 
 const PRECON_SET_ALL = "__all__";
 
+function savedPreconSetCode(deckName: string): string | null {
+  if (!deckName.startsWith(PRECON_PREFIX)) return null;
+  return deckName.slice(PRECON_PREFIX.length).match(/\(([^()]+)\)$/)?.[1] ?? null;
+}
+
+function savedPreconMatchesSetFilter(deckName: string, setFilter: string): boolean {
+  const code = savedPreconSetCode(deckName);
+  return code != null && (setFilter === PRECON_SET_ALL || code === setFilter);
+}
+
 function DeckArtTile({ cardName }: { cardName: string | null }) {
   const { src, isLoading } = useCardImage(cardName ?? "", { size: "art_crop" });
 
@@ -962,11 +972,12 @@ export function MyDecks({
     if (mode !== "select" || selectSourceFilter === "all") return searchFiltered;
     return searchFiltered.filter((deckName) => {
       const feedOrigin = getDeckFeedOrigin(deckName);
+      const savedPrecon = savedPreconSetCode(deckName) != null;
       if (selectSourceFilter === "feed") return feedOrigin != null;
-      if (selectSourceFilter === "user") return feedOrigin == null;
-      return false;
+      if (selectSourceFilter === "user") return feedOrigin == null && !savedPrecon;
+      return feedOrigin == null && savedPreconMatchesSetFilter(deckName, preconSetFilter);
     });
-  }, [mode, searchFiltered, selectSourceFilter]);
+  }, [mode, preconSetFilter, searchFiltered, selectSourceFilter]);
 
   const filteredPreconCandidates = useMemo(() => {
     const saved = new Set(deckNames);
@@ -991,15 +1002,18 @@ export function MyDecks({
 
   const preconSetMenuItems = useMemo(() => {
     const codes = Array.from(new Set(
-      legalPreconCandidates.flatMap((candidate) =>
-        candidate.source.type === "precon" ? [candidate.source.code] : [],
-      ),
+      [
+        ...legalPreconCandidates.flatMap((candidate) =>
+          candidate.source.type === "precon" ? [candidate.source.code] : [],
+        ),
+        ...searchFiltered.flatMap((deckName) => savedPreconSetCode(deckName) ?? []),
+      ],
     )).sort((a, b) => a.localeCompare(b));
     return [
       { value: PRECON_SET_ALL, label: t("myDecks.preconSetFilterAll") },
       ...codes.map((code) => ({ value: code, label: code })),
     ];
-  }, [legalPreconCandidates, t]);
+  }, [legalPreconCandidates, searchFiltered, t]);
 
   const preconSetMenuLabel =
     preconSetMenuItems.find((item) => item.value === preconSetFilter)?.label
