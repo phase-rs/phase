@@ -655,19 +655,41 @@ export type CastingPermission =
 
 // ── Game Restriction ────────────────────────────────────────────────────
 
-export type RestrictionExpiry = { type: "EndOfTurn" } | { type: "EndOfCombat" };
+export type RestrictionExpiry =
+  | { type: "EndOfTurn" }
+  | { type: "EndOfCombat" }
+  | { type: "UntilPlayerNextTurn"; player: PlayerId }
+  | { type: "UntilEndOfNextTurnOf"; player: PlayerId };
 
 export type RestrictionScope =
   | { type: "SourcesControlledBy"; data: PlayerId }
   | { type: "SpecificSource"; data: ObjectId }
   | { type: "DamageToTarget"; data: ObjectId };
 
-export type GameRestriction = {
-  type: "DamagePreventionDisabled";
-  source: ObjectId;
-  expiry: RestrictionExpiry;
-  scope?: RestrictionScope | null;
-};
+export type GameRestriction =
+  | {
+      type: "DamagePreventionDisabled";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      scope?: RestrictionScope | null;
+    }
+  | {
+      // CR 101.2 + CR 601.2a: player-scoped activity prohibition. Mirrored
+      // loosely — the display layer never inspects the nested activity axis.
+      type: "ProhibitActivity";
+      source: ObjectId;
+      affected_players: Record<string, unknown>;
+      expiry: RestrictionExpiry;
+      activity: Record<string, unknown>;
+    }
+  | {
+      // CR 611.2a + CR 614.1d: floating "cards can't enter the battlefield from
+      // <zone>" restriction (Bad Wolf Bay). Mirrors the engine variant.
+      type: "CantEnterBattlefieldFrom";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      filter: TargetFilter;
+    };
 
 export interface SerializedManaProduction {
   type: string;

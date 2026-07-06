@@ -8244,13 +8244,26 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             Vec<&AbilityDefinition>,
         ) = {
             let line_matches_effect_type = |d: &AbilityDefinition| match &*d.effect {
-                Effect::AddRestriction { restriction, .. } => {
-                    matches!(
-                        restriction,
-                        GameRestriction::DamagePreventionDisabled { .. }
-                    ) && effective_lower.contains("can't be prevented")
-                        && effective_lower.contains("damage")
-                }
+                Effect::AddRestriction { restriction, .. } => match restriction {
+                    GameRestriction::DamagePreventionDisabled { .. } => {
+                        effective_lower.contains("can't be prevented")
+                            && effective_lower.contains("damage")
+                    }
+                    // CR 611.2a + CR 614.1d: "cards can't enter [the battlefield]
+                    // from <zone>" (Bad Wolf Bay). AddRestriction carries no
+                    // description string, so match the source prose here to keep
+                    // the semantic-audit from flagging a false positive.
+                    GameRestriction::CantEnterBattlefieldFrom { .. } => {
+                        effective_lower.contains("can't enter")
+                            && (effective_lower.contains("from exile")
+                                || effective_lower.contains("from a graveyard")
+                                || effective_lower.contains("from your graveyard")
+                                || effective_lower.contains("from a library")
+                                || effective_lower.contains("from your library")
+                                || effective_lower.contains("from your hand"))
+                    }
+                    GameRestriction::ProhibitActivity { .. } => false,
+                },
                 Effect::CastFromZone { .. } => {
                     effective_lower.contains("you may cast")
                         || effective_lower.contains("you may play")

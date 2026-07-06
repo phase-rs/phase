@@ -2955,6 +2955,80 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
     })
 }
 
+/// CR 611.2a + CR 614.1d: "[<type>] cards can't enter [the battlefield] from
+/// <zone> [this turn]" → a floating, turn-scoped `GameRestriction::
+/// CantEnterBattlefieldFrom`. The resolution-generated cousin of the permanent
+/// `StaticMode::CantEnterBattlefieldFrom` static (Grafdigger's Cage), e.g. Bad
+/// Wolf Bay's chaos ability "cards can't enter from exile this turn."
+///
+/// Every dispatch step is a nom combinator (no `contains`/`starts_with`). The
+/// origin zone is parsed by the shared `parse_enters_origin_zone` combinator, so
+/// this generalizes over any origin zone it recognizes (exile / graveyard /
+/// library / hand). An optional single-type-word prefix scopes the subject; its
+/// absence matches any card. The only accepted trailing duration is " this
+/// turn", matching the fixed `EndOfTurn` expiry; other trailing text is rejected
+/// so unsupported durations cannot silently lower to the wrong cleanup timing.
+fn cant_enter_battlefield_from_zone(input: &str) -> OracleResult<'_, (Zone, Vec<TypeFilter>)> {
+    let (input, type_filter) = opt(terminated(
+        alt((
+            value(TypeFilter::Creature, tag("creature")),
+            value(TypeFilter::Artifact, tag("artifact")),
+            value(TypeFilter::Enchantment, tag("enchantment")),
+            value(TypeFilter::Instant, tag("instant")),
+            value(TypeFilter::Sorcery, tag("sorcery")),
+            value(TypeFilter::Planeswalker, tag("planeswalker")),
+            value(TypeFilter::Land, tag("land")),
+        )),
+        tag(" "),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((tag("cards"), tag("a card"), tag("card"))).parse(input)?;
+    let (input, _) = tag(" can't enter").parse(input)?;
+    // Oracle omits "the battlefield" on Bad Wolf Bay ("can't enter from exile");
+    // accept it when present so the combinator also covers the fuller phrasing.
+    let (input, _) = opt(tag(" the battlefield")).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    let (input, zone) = super::oracle_nom::filter::parse_enters_origin_zone(input)?;
+    let (input, _) = opt(tag(" this turn")).parse(input)?;
+    Ok((input, (zone, type_filter.into_iter().collect())))
+}
+
+fn try_parse_cant_enter_battlefield_from_restriction(
+    tp: TextPair<'_>,
+) -> Option<ParsedEffectClause> {
+    let ((zone, type_filters), rest) =
+        nom_on_lower(tp.original, tp.lower, cant_enter_battlefield_from_zone)?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    // Encode both subject type (possibly empty = any card) and origin zone in
+    // the reused `TargetFilter` / `FilterProp::InAnyZone` vocabulary, identical
+    // in shape to the filter the Grafdigger's Cage static builds.
+    let filter = TargetFilter::Typed(TypedFilter {
+        type_filters,
+        properties: vec![FilterProp::InAnyZone { zones: vec![zone] }],
+        ..TypedFilter::default()
+    });
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::CantEnterBattlefieldFrom {
+                source: ObjectId(0), // Filled in at resolution time.
+                expiry: RestrictionExpiry::EndOfTurn,
+                filter,
+            },
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (scope_tp, expiry, duration) = if let Some(((expiry, duration), rest)) =
         nom_on_lower(tp.original, tp.lower, |input| {
@@ -7285,6 +7359,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 614.16: "Damage can't be prevented [this turn]" → Effect::AddRestriction
     if let Some(clause) = try_parse_damage_prevention_disabled(tp) {
+        return clause;
+    }
+
+    // CR 611.2a + CR 614.1d: "[<type>] cards can't enter [the battlefield] from
+    // <zone> [this turn]" → floating CantEnterBattlefieldFrom restriction
+    // (Bad Wolf Bay's chaos ability).
+    if let Some(clause) = try_parse_cant_enter_battlefield_from_restriction(tp) {
         return clause;
     }
 

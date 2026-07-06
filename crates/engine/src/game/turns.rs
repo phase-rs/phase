@@ -1014,7 +1014,10 @@ pub fn execute_untap_with_choices(
             GameRestriction::ProhibitActivity { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { player } if *player == active)
             }
-            GameRestriction::DamagePreventionDisabled { .. } => true,
+            // Not untap-anchored — CantEnterBattlefieldFrom expires at cleanup
+            // (CR 514.2), handled in the end-of-turn retain below.
+            GameRestriction::DamagePreventionDisabled { .. }
+            | GameRestriction::CantEnterBattlefieldFrom { .. } => true,
         }
     });
 
@@ -1769,7 +1772,8 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         use crate::types::ability::{GameRestriction, RestrictionExpiry};
         match r {
             GameRestriction::DamagePreventionDisabled { expiry, .. }
-            | GameRestriction::ProhibitActivity { expiry, .. } => {
+            | GameRestriction::ProhibitActivity { expiry, .. }
+            | GameRestriction::CantEnterBattlefieldFrom { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::EndOfTurn)
             }
         }
