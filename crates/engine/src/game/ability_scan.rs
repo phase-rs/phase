@@ -1521,6 +1521,7 @@ fn scan_effect(x: &Effect) -> Axes {
             scan_effect(replacement_effect)
         }
         Effect::ChaosEnsues => Axes::NONE,
+        Effect::ReverseTurnOrder => Axes::NONE,
         Effect::ChooseOneOf { .. } => Axes::CONSERVATIVE,
         Effect::Unimplemented {
             name: _,
@@ -3615,6 +3616,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ChooseCounterAdjustment { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
         | Effect::Unimplemented { .. } => ResolutionChoiceFreedom::MayPrompt,
     }

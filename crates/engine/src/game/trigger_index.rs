@@ -843,6 +843,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::TakeTheInitiative
         | EffectKind::Planeswalk
         | EffectKind::ChaosEnsues
+        | EffectKind::ReverseTurnOrder
         | EffectKind::OpenAttractions
         | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters

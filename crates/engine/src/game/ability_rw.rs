@@ -2869,6 +2869,9 @@ fn legacy_effect(x: &Effect) -> bool {
         }
         // Payload-less keyword action (planar chaos, CR 311.7) — no tag-bearing field.
         Effect::ChaosEnsues => false,
+        // Payload-less keyword action (reverse turn order, CR 103.1) — no
+        // tag-bearing field and reads no per-object state.
+        Effect::ReverseTurnOrder => false,
         Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } => {
             legacy_target_filter(attachment) || legacy_target_filter(target)
         }
@@ -3905,6 +3908,8 @@ fn rw_effect(
         // CR 311.7 + CR 901.9b: fire the active plane's chaos trigger (mirrors
         // Planeswalk / VentureIntoDungeon).
         Effect::ChaosEnsues => (ext_write(StateKind::Other), None),
+        // CR 103.1: reverse turn order writes global turn-direction state.
+        Effect::ReverseTurnOrder => (ext_write(StateKind::Other), None),
 
         // ---- Hand / library ----
         Effect::Draw { count, target: _ } => {

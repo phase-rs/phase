@@ -5283,6 +5283,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }

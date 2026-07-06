@@ -8982,6 +8982,91 @@ fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
     ));
 }
 
+/// CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+/// phase" lowers to `Effect::AdditionalPhase { phase: Untap, .. }` (the
+/// beginning-phase marker), covering Temple of Atropos, Sphinx/Shadow of the
+/// Second Sun, and Cyclonus.
+#[test]
+fn additional_beginning_phase_parses_as_untap_phase_insert() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("there is an additional beginning phase after this phase"),
+        Effect::AdditionalPhase {
+            phase: Phase::Untap,
+            ..
+        }
+    ));
+}
+
+/// CR 103.1 + CR 101.4: both surface forms of the turn-order reversal lower to
+/// `Effect::ReverseTurnOrder` (Temple of Atropos chaos, Aeon Engine, Time
+/// Distortion).
+#[test]
+fn reverse_turn_order_parses_as_reverse_turn_order_effect() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("reverse the game's turn order"),
+        Effect::ReverseTurnOrder
+    ));
+    assert!(matches!(
+        parse_effect("reverse the turn order"),
+        Effect::ReverseTurnOrder
+    ));
+}
+
+/// Temple of Atropos parses with ZERO Unimplemented: the phase trigger inserts a
+/// beginning phase (CR 501.1), and the chaos trigger reverses the turn order
+/// (CR 103.1) then planeswalks (the already-supported `Planeswalk` sub-ability).
+#[test]
+fn temple_of_atropos_parses_with_zero_unimplemented() {
+    let text = "At the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)\nWhen chaos ensues, reverse the game's turn order. Then planeswalk. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)";
+    let r = parse(text, "Temple of Atropos", &[], &["Plane"], &["Time"]);
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Temple of Atropos must parse with zero Unimplemented: {r:#?}"
+    );
+    assert_eq!(r.triggers.len(), 2, "two triggers: {:?}", r.triggers);
+
+    let phase_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("postcombat-main phase trigger");
+    let phase_exec = phase_trigger.execute.as_deref().expect("phase execute");
+    assert!(
+        matches!(
+            phase_exec.effect.as_ref(),
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        ),
+        "phase trigger must insert a beginning phase, got {:?}",
+        phase_exec.effect
+    );
+
+    let chaos_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChaosEnsues)
+        .expect("chaos trigger");
+    let chaos_exec = chaos_trigger.execute.as_deref().expect("chaos execute");
+    assert!(
+        matches!(chaos_exec.effect.as_ref(), Effect::ReverseTurnOrder),
+        "chaos trigger head must reverse turn order, got {:?}",
+        chaos_exec.effect
+    );
+    let sub = chaos_exec
+        .sub_ability
+        .as_deref()
+        .expect("planeswalk sub-ability");
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Planeswalk),
+        "chaos trigger's second sentence must planeswalk, got {:?}",
+        sub.effect
+    );
+}
+
 #[test]
 fn spell_temporal_phase_line_builds_delayed_trigger() {
     // CR 603.7b: Full Throttle's second line. A *phase-based* inline delayed

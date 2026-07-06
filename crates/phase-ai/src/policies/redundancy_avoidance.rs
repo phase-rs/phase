@@ -495,6 +495,8 @@ fn redundancy_delta(
         // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
         // triggered ability — it has no target and no static redundancy signal.
         | Effect::ChaosEnsues
+        // CR 103.1: ReverseTurnOrder has no target and no static redundancy signal.
+        | Effect::ReverseTurnOrder
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::ForEachCategoryExile { .. }

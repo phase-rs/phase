@@ -174,6 +174,7 @@ pub mod reveal_from_hand;
 pub mod reveal_hand;
 pub mod reveal_top;
 pub mod reveal_until;
+pub mod reverse_turn_order;
 pub mod ring;
 pub mod ripple;
 pub mod roll_die;
@@ -3329,6 +3330,7 @@ pub fn resolve_effect(
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
         Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
+        Effect::ReverseTurnOrder => reverse_turn_order::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
