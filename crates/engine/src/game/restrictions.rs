@@ -1056,6 +1056,16 @@ fn casting_restriction_applies(
         CastingRestriction::BeforeBlockersDeclared => {
             matches!(state.phase, Phase::BeginCombat | Phase::DeclareAttackers)
         }
+        // CR 509.1 + CR 510.1 + CR 511.1: "after blockers are declared" opens
+        // once the declare-blockers turn-based action has placed blockers and
+        // stays open through combat damage and end of combat — the exact
+        // complement of BeforeBlockersDeclared within the combat phase (CR
+        // 506.1). ANDed with the separately-emitted DuringCombat, the effective
+        // legal window is exactly these three steps.
+        CastingRestriction::AfterBlockersDeclared => matches!(
+            state.phase,
+            Phase::DeclareBlockers | Phase::CombatDamage | Phase::EndCombat
+        ),
         CastingRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
         CastingRestriction::AfterCombat => matches!(
             state.phase,
