@@ -9601,6 +9601,81 @@ fn effect_put_top_onto_battlefield_face_down_lowers_to_manifest() {
 }
 
 #[test]
+fn effect_direct_manifest_top_library_parses_controller_override_only_for_imperative() {
+    let singular = parse_effect("Manifest the top card of your library.");
+    assert!(
+        matches!(
+            &singular,
+            Effect::Manifest {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "direct singular manifest should default enters_under to You, got: {singular:?}"
+    );
+
+    let plural = parse_effect("Manifest the top two cards of your library under your control.");
+    assert!(
+        matches!(
+            &plural,
+            Effect::Manifest {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 2 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "direct plural manifest with explicit control clause should parse, got: {plural:?}"
+    );
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::TargetPlayer),
+        ..ParseContext::default()
+    };
+    let that_player = parse_effect_chain_with_context(
+        "Manifest the top card of that player's library under your control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    assert!(
+        matches!(
+            *that_player.effect,
+            Effect::Manifest {
+                target: TargetFilter::TriggeringPlayer,
+                count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "that player's library should bind through context and enter under source controller, got: {:?}",
+        that_player.effect
+    );
+
+    let attach_continuation =
+        parse_effect("Manifest the top card of your library and attach Lightform to it.");
+    assert!(
+        matches!(
+            &attach_continuation,
+            Effect::Manifest {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
+                profile: None,
+            }
+        ),
+        "direct manifest should accept bounded attach-to-it continuation, got: {attach_continuation:?}"
+    );
+
+    let invalid_tail = parse_effect("Manifest the top card of your library with haste.");
+    assert!(
+        !matches!(invalid_tail, Effect::Manifest { .. }),
+        "direct manifest grammar must be all-consuming; invalid tail got: {invalid_tail:?}"
+    );
+}
+
+#[test]
 fn effect_its_controller_manifests_top_card() {
     // CR 701.40a + CR 608.2c: Reality Shift — subject-shifted manifest binds
     // the acting player to ParentTargetController (the exiled creature's
@@ -9625,10 +9700,11 @@ fn effect_its_controller_manifests_top_card() {
             Effect::Manifest {
                 target: TargetFilter::ParentTargetController,
                 count: QuantityExpr::Fixed { value: 1 },
+                enters_under: None,
                 ..
             }
         ),
-        "expected Manifest {{ ParentTargetController, count: 1 }}, got: {:?}",
+        "expected subject-predicate Manifest {{ ParentTargetController, count: 1, enters_under: None }}, got: {:?}",
         sub.effect
     );
 }

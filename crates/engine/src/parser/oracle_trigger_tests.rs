@@ -2190,10 +2190,11 @@ fn trigger_combat_damage_create_treasure_and_manifest_that_players_library() {
             Effect::Manifest {
                 target: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
                 ..
             }
         ),
-        "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
+        "expected Manifest {{ TriggeringPlayer, count: 1, enters_under: You }}, got: {:?}",
         sub.effect
     );
 }
@@ -4785,7 +4786,9 @@ fn parse_angel_of_destiny_end_step_loss_issue_1599() {
 ///   `QuantityCheck` on `Power { scope: Source } >= 7`.
 #[test]
 fn parse_cloud_ex_soldier_attack_trigger_structure() {
-    use crate::types::ability::{AbilityCondition, Effect};
+    use crate::types::ability::{
+        AbilityCondition, Effect, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    };
 
     let def = parse_trigger_line(
             "Whenever ~ attacks, draw a card for each equipped attacking creature you control. Then if ~ has power 7 or greater, create two Treasure tokens.",
@@ -4802,11 +4805,31 @@ fn parse_cloud_ex_soldier_attack_trigger_structure() {
     let execute = def.execute.as_ref().expect("execute must be Some");
 
     // Outer effect: draw clause.
-    assert!(
-        matches!(*execute.effect, Effect::Draw { .. }),
-        "outer execute must be Draw, got {:?}",
-        execute.effect,
-    );
+    match &*execute.effect {
+        Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter:
+                                TargetFilter::Typed(TypedFilter {
+                                    type_filters,
+                                    controller: Some(ControllerRef::You),
+                                    properties,
+                                }),
+                        },
+                },
+            ..
+        } if type_filters == &vec![TypeFilter::Creature]
+            && properties
+                == &vec![
+                    FilterProp::EquippedBy,
+                    FilterProp::Attacking { defender: None },
+                ] => {}
+        other => panic!(
+            "outer execute must draw for each equipped attacking creature you control, got {other:?}"
+        ),
+    }
 
     // Sub-ability: Treasure token creation gated on Power >= 7.
     let sub = execute

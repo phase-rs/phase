@@ -262,6 +262,69 @@ fn parse_sticker_max_ticket_cost(input: &str) -> OracleResult<'_, QuantityExpr> 
     Ok((rest, expr))
 }
 
+fn parse_manifest_count_card_words(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        value(
+            QuantityExpr::Fixed { value: 1 },
+            alt((
+                tag::<_, _, OracleError<'_>>("cards"),
+                tag::<_, _, OracleError<'_>>("card"),
+            )),
+        ),
+        map(
+            terminated(
+                nom_primitives::parse_number,
+                preceded(
+                    space1::<_, OracleError<'_>>,
+                    alt((
+                        tag::<_, _, OracleError<'_>>("cards"),
+                        tag::<_, _, OracleError<'_>>("card"),
+                    )),
+                ),
+            ),
+            |n| QuantityExpr::Fixed { value: n as i32 },
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_direct_manifest_clause<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (TargetFilter, QuantityExpr, Option<ControllerRef>)> {
+    let attach_to_it_continuation = value(
+        (),
+        preceded(
+            space1::<_, OracleError<'_>>,
+            (
+                tag::<_, _, OracleError<'_>>("and attach "),
+                take_until::<_, _, OracleError<'_>>(" to it"),
+                tag(" to it"),
+            ),
+        ),
+    );
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("manifest the top "),
+        parse_manifest_count_card_words,
+        space1::<_, OracleError<'_>>,
+        alt((
+            value(TargetFilter::Controller, tag("of your library")),
+            value(
+                that_player_library_filter(ctx),
+                tag("of that player's library"),
+            ),
+        )),
+        opt(preceded(
+            space1::<_, OracleError<'_>>,
+            tag("under your control"),
+        )),
+        opt(attach_to_it_continuation),
+        opt(tag(".")),
+    ))
+    .parse(input)
+    .map(|(rest, (_, count, _, target, _, _, _))| (rest, (target, count, Some(ControllerRef::You))))
+}
+
 fn parse_put_sticker_target_tail(
     input: &str,
 ) -> OracleResult<'_, (&str, StickerTicketCostPayment)> {
@@ -8687,57 +8750,17 @@ pub(super) fn parse_imperative_family_ast(
                 .is_ok()
             {
                 Some(ImperativeFamilyAst::ManifestDread)
-            } else if let Ok((rest, _)) =
-                tag::<_, _, OracleError<'_>>("manifest the top ").parse(lower)
+            } else if tag::<_, _, OracleError<'_>>("manifest the top ")
+                .parse(lower)
+                .is_ok()
             {
-                // CR 701.40a: "manifest the top card of your library"
-                // or "manifest the top N cards of your/that player's library"
-                let parsed = alt((
-                    value(
-                        QuantityExpr::Fixed { value: 1 },
-                        alt((
-                            tag::<_, _, OracleError<'_>>("card "),
-                            tag("cards "),
-                        )),
-                    ),
-                    map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
-                        value: n as i32,
-                    }),
-                ))
-                .parse(rest);
-
-                let (count, after_count) = if let Ok((after_count, count)) = parsed {
-                    let after_count = if matches!(&count, QuantityExpr::Fixed { value: 1 }) {
-                        after_count
-                    } else if let Ok((after_cards, _)) = preceded(
-                        tag::<_, _, OracleError<'_>>(" "),
-                        alt((tag("card "), tag("cards "))),
-                    )
-                    .parse(after_count)
-                    {
-                        after_cards
-                    } else {
-                        after_count
-                    };
-                    (count, after_count)
-                } else {
-                    (QuantityExpr::Fixed { value: 1 }, rest)
-                };
-
-                let target = if tag::<_, _, OracleError<'_>>("of your library")
-                    .parse(after_count)
-                    .is_ok()
-                {
-                    TargetFilter::Controller
-                } else if tag::<_, _, OracleError<'_>>("of that player's library")
-                    .parse(after_count)
-                    .is_ok()
-                {
-                    that_player_library_filter(ctx)
-                } else {
-                    TargetFilter::Controller
-                };
-                Some(ImperativeFamilyAst::Manifest { target, count })
+                let (_, (target, count, enters_under)) =
+                    parse_direct_manifest_clause(lower, ctx).ok()?;
+                Some(ImperativeFamilyAst::Manifest {
+                    target,
+                    count,
+                    enters_under,
+                })
             } else {
                 None
             }
@@ -10617,15 +10640,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
-        // CR 701.40a: The plain "manifest the top N cards" surface form carries
-        // neither an effect-specified face-down profile nor a controller
-        // override — those are only set by the "put ... onto the battlefield face
-        // down [under your control]" path (see `lower_put_ast`).
-        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest {
+        // CR 701.40a + CR 110.2a: The direct "manifest the top N cards" surface
+        // carries no effect-specified face-down profile; `enters_under` records
+        // the instruction-controller default. The put-form manifest may also
+        // seed an effect-specified profile (see `lower_put_ast`).
+        ImperativeFamilyAst::Manifest {
+            target,
+            count,
+            enters_under,
+        } => Effect::Manifest {
             target,
             count,
             profile: None,
-            enters_under: None,
+            enters_under,
         },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward

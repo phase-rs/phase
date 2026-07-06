@@ -555,6 +555,10 @@ pub(crate) enum ImperativeFamilyAst {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 110.2a: Direct imperative manifest defaults to the instruction's
+        /// controller; subject-predicate forms leave this unset so the subject's
+        /// library owner controls the manifested card.
+        enters_under: Option<ControllerRef>,
     },
     /// CR 701.62a: Manifest dread.
     ManifestDread,

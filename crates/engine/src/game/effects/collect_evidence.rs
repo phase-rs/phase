@@ -72,6 +72,7 @@ pub(crate) fn begin_cost_payment(
     player: PlayerId,
     amount: u32,
     pending_cast: PendingCast,
+    source: crate::types::game_state::SpellCostSource,
 ) -> Result<WaitingFor, EngineError> {
     if !can_collect_evidence(state, player, amount) {
         return Err(EngineError::ActionNotAllowed(format!(
@@ -86,6 +87,7 @@ pub(crate) fn begin_cost_payment(
         amount,
         CollectEvidenceResume::Casting {
             pending_cast: Box::new(pending_cast),
+            source,
         },
     ))
 }
@@ -199,9 +201,13 @@ pub(crate) fn handle_choice(
     });
 
     match resume {
-        CollectEvidenceResume::Casting { pending_cast } => {
+        CollectEvidenceResume::Casting {
+            pending_cast,
+            source,
+        } => {
             let mut pending = pending_cast.as_ref().clone();
             pending.ability.context.additional_cost_paid = true;
+            pending.additional_cost_source = *source;
             // CR 602.2b: An ACTIVATED ability paying collect evidence as its cost
             // (Kylox's Voltstrider) goes on the stack via the activation
             // authority, not the spell-cast path. The exile loop above already
@@ -310,7 +316,13 @@ mod tests {
             crate::types::mana::ManaCost::zero(),
         );
 
-        let result = begin_cost_payment(&state, PlayerId(0), 8, pending);
+        let result = begin_cost_payment(
+            &state,
+            PlayerId(0),
+            8,
+            pending,
+            crate::types::game_state::SpellCostSource::Other,
+        );
         assert!(result.is_err());
     }
 
@@ -346,7 +358,14 @@ mod tests {
             crate::types::mana::ManaCost::zero(),
         );
 
-        let waiting = begin_cost_payment(&state, PlayerId(0), 8, pending).unwrap();
+        let waiting = begin_cost_payment(
+            &state,
+            PlayerId(0),
+            8,
+            pending,
+            crate::types::game_state::SpellCostSource::Other,
+        )
+        .unwrap();
         let (minimum_mana_value, cards, resume) = match waiting {
             WaitingFor::CollectEvidenceChoice {
                 minimum_mana_value,

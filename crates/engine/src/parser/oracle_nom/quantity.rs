@@ -3569,17 +3569,27 @@ fn parse_for_each_combat_creature_controlled(
     input: &str,
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
+    let (rest, attachment_property) = opt(alt((
+        value(FilterProp::EquippedBy, tag("equipped ")),
+        value(FilterProp::EnchantedBy, tag("enchanted ")),
+    )))
+    .parse(input)?;
     let (rest, combat_property) = alt((
         value(FilterProp::Attacking { defender: None }, tag("attacking ")),
         value(FilterProp::Blocking, tag("blocking ")),
     ))
-    .parse(input)?;
+    .parse(rest)?;
     let (rest, tf) = parse_type_filter_word(rest)?;
     let (rest, controller) = alt((
         value(they_controller, tag(" they control")),
         value(ControllerRef::You, tag(" you control")),
     ))
     .parse(rest)?;
+    let mut properties = Vec::new();
+    if let Some(prop) = attachment_property {
+        properties.push(prop);
+    }
+    properties.push(combat_property);
 
     Ok((
         rest,
@@ -3587,7 +3597,7 @@ fn parse_for_each_combat_creature_controlled(
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![tf],
                 controller: Some(controller),
-                properties: vec![combat_property],
+                properties,
             }),
         },
     ))
@@ -7788,6 +7798,27 @@ mod tests {
                     ..
                 })
             }
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_each_equipped_attacking_creature_you_control() {
+        let (rest, q) =
+            parse_for_each_clause_ref("equipped attacking creature you control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    properties,
+                })
+            } if type_filters == vec![TypeFilter::Creature]
+                && properties == vec![
+                    FilterProp::EquippedBy,
+                    FilterProp::Attacking { defender: None },
+                ]
         ));
     }
 
