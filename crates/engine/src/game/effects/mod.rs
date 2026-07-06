@@ -54,6 +54,7 @@ pub mod chaos_ensues;
 pub mod choose;
 pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
+pub mod choose_counter_adjustment;
 pub mod choose_counter_kind;
 pub mod choose_damage_source;
 pub mod choose_from_zone;
@@ -3353,6 +3354,9 @@ pub fn resolve_effect(
         Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
+        Effect::ChooseCounterAdjustment { .. } => {
+            choose_counter_adjustment::resolve(state, ability, events)
+        }
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

@@ -236,6 +236,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::ChooseCard { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::ChooseCounterKind { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }

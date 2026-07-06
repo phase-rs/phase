@@ -32,12 +32,12 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
     CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControlWindow,
-    ControllerRef, CopyRetargetPermission, DigSource, DoorLockOp, Duration, Effect, EffectScope,
-    FaceDownProfile, FilterProp, GrantedAbilityScope, LibraryPosition, MultiTargetSpec,
-    OutsideGameSourcePool, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue,
-    QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint, StaticDefinition,
-    StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode, TypeFilter,
-    TypedFilter, ZoneOwner,
+    ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp, Duration,
+    Effect, EffectScope, FaceDownProfile, FilterProp, GrantedAbilityScope, LibraryPosition,
+    MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount, PreventionScope, PtStat,
+    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
+    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -3266,6 +3266,47 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
     .parse(input)
 }
 
+/// CR 122.1 + CR 115.1: "[a|one|any] counter on <target>" — designate the object
+/// whose counters a later clause adjusts (Clockspinning sentence 1: "Choose a
+/// counter on target permanent or suspended card"). The chosen counter KIND is
+/// decided at resolution by sentence 2 (`Effect::ChooseCounterAdjustment`), so
+/// this clause only fixes the TARGET and lowers to `Effect::TargetOnly`.
+///
+/// `parse_target` does not forward-scan past the "counter on " lead-in (the lead
+/// is an effect noun, not a target descriptor), so it is stripped with a nom
+/// `tag` here before delegating to the shared target parser — mirroring the
+/// "for each kind of counter on " + `parse_target` structure in
+/// `try_parse_proliferate_target`. A bare `Any` target (no concrete filter) is
+/// rejected so this never swallows non-counter "choose" clauses; any leftover
+/// after the target phrase (beyond trailing punctuation) likewise rejects.
+fn try_parse_choose_counter_on_target(rest: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+    let lower = rest.to_lowercase();
+    let (_, after_on) = nom_on_lower(rest, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, E>("a counter on "),
+                tag("one counter on "),
+                tag("any counter on "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let (target, remainder) = parse_target(after_on);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    if !remainder
+        .trim_start_matches([',', ' '])
+        .trim_end_matches(['.', ' '])
+        .is_empty()
+    {
+        return None;
+    }
+    Some(ChooseImperativeAst::TargetOnly { target })
+}
+
 /// CR 701.9a + CR 107.1b: "[Target player] chooses a card in their hand and
 /// discards the rest" (Monomania). The chosen player keeps exactly one card of
 /// their choice and discards every other card in hand -- equivalently, discards
@@ -3377,9 +3418,19 @@ pub(super) fn parse_choose_ast(
         // pick one of the distinct counter kinds on the anaphoric object
         // (The Caves of Androzani II/III). Anaphoric form only; the declared-
         // target form ("a counter on target permanent", Ichormoon Gauntlet)
-        // is not yet supported (its consumer "put one more or remove one" is
-        // also absent) and is left as an honest Unimplemented gap.
+        // is handled by the target parser below.
         if let Some(ast) = try_parse_choose_counter_kind(rest_lower) {
+            return Some(ast);
+        }
+
+        // CR 122.1 + CR 115.1: "Choose a counter on target <permanent/card>" only
+        // designates the object whose counters a later clause adjusts
+        // (Clockspinning). The "a counter on " lead-in is not a target descriptor,
+        // so `parse_target` does not forward-scan past it (it would fall through to
+        // `Any`); strip it with a nom `tag` before delegating to the shared target
+        // parser, mirroring `try_parse_proliferate_target`'s
+        // "for each kind of counter on " + `parse_target` structure.
+        if let Some(ast) = try_parse_choose_counter_on_target(rest) {
             return Some(ast);
         }
 
@@ -10789,6 +10840,87 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
     }
 }
 
+/// CR 122.1 + CR 608.2d (Clockspinning sentence 2): recognize the three forms
+/// of the "choose a counter, then adjust it" clause and return the operation set
+/// the controller may choose among:
+///
+/// - `AddOrRemove`: "remove that counter [from <anaphor>] or put another of
+///   those counters on <anaphor>" — Clockspinning.
+/// - `Remove`: "remove that counter [from <anaphor>]" — remove-only variants.
+/// - `Add`: "put another of those counters on <anaphor>" — add-only variants.
+///
+/// The singular "that counter" / plural "those counters" deictic anaphors are
+/// unique to the "choose a counter, then adjust it" class, so this is a
+/// self-contained combinator over the full clause — it deliberately does NOT
+/// delegate to the shared `parse_counter_anaphor` authority (which gates the
+/// remove-all sentinel path and has no singular "that counter" arm; extending
+/// it would wrongly widen that dispatch for unrelated cards).
+///
+/// The object anaphor on either side ("that permanent or card" / "that
+/// permanent" / "that card" / "it") is a don't-care: the established target is
+/// reused via the parent `TargetOnly` chain. Returns `None` for every other
+/// remove/add clause, leaving existing paths unchanged.
+fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment> {
+    type E<'a> = OracleError<'a>;
+
+    // The reused object anaphor, longest-match-first so "that permanent or card"
+    // is not shadowed by the "that permanent" prefix.
+    fn counter_object_anaphor(input: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            alt((
+                tag::<_, _, E>("that permanent or card"),
+                tag("that permanent"),
+                tag("that card"),
+                tag("it"),
+            )),
+        )
+        .parse(input)
+    }
+
+    let clause = lower.trim_end_matches(['.', ' ']);
+
+    // Remove-based forms share the "remove that counter [from <anaphor>]"
+    // prefix. Try AddOrRemove (longer form) before Remove-only so the shared
+    // prefix does not short-circuit into the wrong variant.
+    if let Ok((rest, _)) = tag::<_, _, E>("remove that counter").parse(clause) {
+        let (rest, _) = opt(preceded(tag::<_, _, E>(" from "), counter_object_anaphor))
+            .parse(rest)
+            .ok()?;
+        // AddOrRemove: remove leg followed by "or put another of those counters
+        // on <anaphor>".
+        if let Ok((rest2, _)) = preceded(
+            tag::<_, _, E>(" or put another of those counters on "),
+            counter_object_anaphor,
+        )
+        .parse(rest)
+        {
+            if rest2.is_empty() {
+                return Some(CounterAdjustment::AddOrRemove);
+            }
+        }
+        // Remove-only: the remove clause consumed the entire clause.
+        if rest.is_empty() {
+            return Some(CounterAdjustment::Remove);
+        }
+        return None;
+    }
+
+    // Add-only: "put another of those counters on <anaphor>".
+    if let Ok((rest, _)) = preceded(
+        tag::<_, _, E>("put another of those counters on "),
+        counter_object_anaphor,
+    )
+    .parse(clause)
+    {
+        if rest.is_empty() {
+            return Some(CounterAdjustment::Add);
+        }
+    }
+
+    None
+}
+
 pub(super) fn parse_zone_counter_ast(
     text: &str,
     lower: &str,
@@ -10915,6 +11047,16 @@ pub(super) fn parse_zone_counter_ast(
     // would drop them to `Unimplemented`. `parse_counter_anaphor` (the shared
     // anaphor authority in counter.rs) recognizes that surface against the
     // post-"remove " remainder so it reaches `try_parse_remove_counter`.
+    // CR 122.1 + CR 608.2d (Clockspinning sentence 2): "remove that counter ...
+    // or put another of those counters on it" — the controller chooses, at
+    // resolution, a kind of counter present on the established target and adds OR
+    // removes one of it. Must run BEFORE the generic `tag("remove ")` gate below
+    // so this anaphoric add-or-remove clause is captured here rather than failing
+    // through `try_parse_remove_counter`. The combinator returns `None` for every
+    // other "remove …" clause, leaving the existing remove path unchanged.
+    if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
+        return Some(ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment });
+    }
     if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
         let is_counter_remove = nom_primitives::scan_contains(lower, "counter")
             || nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some();
@@ -11109,6 +11251,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         },
+        // CR 122.1 + CR 608.2d: the kind/op choice happens at resolution; the
+        // target arrives via the parent `TargetOnly` chain, so this effect carries
+        // no target slot. `count` is one per the printed "another"/"that counter".
+        ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment } => {
+            Effect::ChooseCounterAdjustment {
+                adjustment,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        }
         ZoneCounterImperativeAst::MoveCounters {
             source,
             counter_type,
@@ -11538,6 +11689,137 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().any(is_stack_spell_leg),
             _ => false,
         }
+    }
+
+    /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): the add-or-remove anaphor
+    /// clause is recognized as `AddOrRemove`. The negative case proves the
+    /// self-contained combinator returns `None` for an ordinary "remove a <type>
+    /// counter" clause, leaving the existing remove path untouched.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_add_or_remove() {
+        assert_eq!(
+            try_parse_choose_counter_adjustment(
+                "remove that counter from that permanent or card or put another of those counters on it"
+            ),
+            Some(CounterAdjustment::AddOrRemove)
+        );
+        // Trailing punctuation and the bare "it" anaphor are both accepted.
+        assert_eq!(
+            try_parse_choose_counter_adjustment(
+                "remove that counter or put another of those counters on it."
+            ),
+            Some(CounterAdjustment::AddOrRemove)
+        );
+        // An ordinary remove clause must NOT be captured here.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove a +1/+1 counter from ~"),
+            None
+        );
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove all +1/+1 counters from it"),
+            None
+        );
+    }
+
+    /// CR 122.1: the remove-only form ("remove that counter [from <anaphor>]"
+    /// without an add-back clause) parses as `Remove`, making the `Remove`
+    /// variant reachable from the parser.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_remove_only() {
+        // Bare "it" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from it"),
+            Some(CounterAdjustment::Remove)
+        );
+        // "that permanent" anaphor with trailing punctuation.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from that permanent."),
+            Some(CounterAdjustment::Remove)
+        );
+        // "that permanent or card" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter from that permanent or card"),
+            Some(CounterAdjustment::Remove)
+        );
+        // Clause without an explicit "from <anaphor>" phrase.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove that counter"),
+            Some(CounterAdjustment::Remove)
+        );
+        // Must NOT fire for an ordinary type-specific remove.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("remove a +1/+1 counter from it"),
+            None
+        );
+    }
+
+    /// CR 122.1: the add-only form ("put another of those counters on <anaphor>")
+    /// without a preceding remove clause parses as `Add`, making the `Add`
+    /// variant reachable from the parser.
+    #[test]
+    fn try_parse_choose_counter_adjustment_recognizes_add_only() {
+        // Bare "it" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put another of those counters on it"),
+            Some(CounterAdjustment::Add)
+        );
+        // "that permanent" anaphor with trailing punctuation.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put another of those counters on that permanent."),
+            Some(CounterAdjustment::Add)
+        );
+        // "that permanent or card" anaphor.
+        assert_eq!(
+            try_parse_choose_counter_adjustment(
+                "put another of those counters on that permanent or card"
+            ),
+            Some(CounterAdjustment::Add)
+        );
+        // Must NOT fire for an ordinary PutCounter clause.
+        assert_eq!(
+            try_parse_choose_counter_adjustment("put a +1/+1 counter on it"),
+            None
+        );
+    }
+
+    /// CR 122.1 + CR 115.1 + CR 702.62b (Clockspinning sentence 1): "choose a
+    /// counter on target permanent or suspended card" designates the target only
+    /// and lowers to `TargetOnly` over the battlefield∪exile `Or` pool.
+    #[test]
+    fn try_parse_choose_counter_on_target_yields_permanent_or_suspended_card() {
+        let ast =
+            try_parse_choose_counter_on_target("a counter on target permanent or suspended card.")
+                .expect("counter-on-target designation must parse");
+        let ChooseImperativeAst::TargetOnly { target } = ast else {
+            panic!("expected TargetOnly, got {ast:?}");
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected an Or target pool, got {target:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "battlefield permanent + suspended card legs"
+        );
+        // Battlefield-permanent leg carries an explicit InZone{Battlefield}.
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Permanent]
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })
+        )));
+        // Suspended-card leg: exile + suspend keyword + time counter.
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.properties.contains(&FilterProp::InZone { zone: Zone::Exile })
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::HasKeywordKind {
+                            value: crate::types::keywords::KeywordKind::Suspend
+                        }
+                    ))
+        )));
     }
 
     fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {

@@ -1524,6 +1524,10 @@ fn scan_effect(x: &Effect) -> Axes {
             destination: _,
             tapped: _,
         } => Axes::NONE,
+        Effect::ChooseCounterAdjustment {
+            adjustment: _,
+            count,
+        } => scan_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             scan_effect(replacement_effect)
         }
@@ -3620,6 +3624,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::ChaosEnsues
         | Effect::ChooseOneOf { .. }

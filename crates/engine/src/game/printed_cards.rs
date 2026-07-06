@@ -1081,6 +1081,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        // Builds its PutCounter/RemoveCounter branches at resolution — carries no
+        // static conjure name to preload.
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }

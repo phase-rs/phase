@@ -300,6 +300,19 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If a [filter] would enter and it wasn't cast, exile it instead" ---
+    // CR 614.1a + CR 614.1d + CR 614.12: A permanent-static ETB replacement
+    // that exiles creatures which enter without having been cast. E.g.
+    // Containment Priest:
+    //   "If a nontoken creature would enter and it wasn't cast, exile it instead."
+    // Only the clean, always-on static form is handled here; the duration-scoped
+    // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) and the
+    // self-referential form ("if this creature would enter ...": Primeval Spawn)
+    // are deliberately excluded (see the guards inside).
+    if let Some(def) = parse_creature_enter_wasnt_cast_exile_replacement(&norm_lower, &normalized) {
+        return Some(def);
+    }
+
     // CR 614.1a + CR 120.6: Wolverine, Fierce Fighter — heal-prior-damage
     // replacement ("instead that damage is dealt, but all other damage already
     // dealt to him is healed"). The new damage IS dealt (no prevention); only
@@ -4320,6 +4333,121 @@ fn parse_creature_die_exile_replacement(
         def = def.condition(cond);
     }
     Some(def)
+}
+
+/// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
+/// cast, exile it instead." (Containment Priest). A static ETB replacement
+/// gated on the entering object not having been cast. Only the always-on,
+/// non-self form is recognized here — duration-scoped ("Until end of turn, ...")
+/// and self-referential ("if this creature would enter ...") variants return
+/// `None`.
+///
+/// The "wasn't cast" gate is expressed as `Not(WasPlayed)` on the valid-card
+/// filter: `WasPlayed` is `played_from_zone.is_some() || cast_from_zone.is_some()`
+/// (see `game/filter.rs`), and a nontoken creature only ever enters via casting
+/// or via an effect that puts it onto the battlefield, so `Not(WasPlayed)` is
+/// exactly "entered without being cast." Because a cast Containment Priest sets
+/// `cast_from_zone`, this gate also stops the replacement from exiling the
+/// permanent's own casting — the reported bug in issue #4761.
+fn parse_creature_enter_wasnt_cast_exile_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Grammar: "if" <subject> "would enter" ["the battlefield"] "and it wasn't
+    // cast," "exile it instead". Composed from nom combinators (parser seam
+    // rule R1) rather than string scanning. `norm_lower` is lower-cased but not
+    // apostrophe-normalized, so the gate accepts both the ASCII and typographic
+    // apostrophe.
+    let (after_subject, subject) = preceded(
+        tag::<_, _, OracleError<'_>>("if "),
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" would enter"),
+            tag(" would enter"),
+        ),
+    )
+    .parse(norm_lower)
+    .ok()?;
+
+    // Require the "wasn't cast" gate and the exile-instead outcome, tolerating an
+    // optional "the battlefield" between "would enter" and the gate.
+    all_consuming((
+        preceded(
+            opt(tag::<_, _, OracleError<'_>>(" the battlefield")),
+            preceded(
+                alt((
+                    tag(" and it wasn't cast"),
+                    tag(" and it wasn\u{2019}t cast"),
+                )),
+                preceded(tag(", "), tag("exile it instead")),
+            ),
+        ),
+        opt(tag(".")),
+        multispace0,
+    ))
+    .parse(after_subject)
+    .ok()?;
+
+    let subject = subject.trim();
+
+    // Exclude the self-referential form ("if this creature would enter ...",
+    // Primeval Spawn) and any `~` self-reference — those are handled elsewhere.
+    if tag::<_, _, OracleError<'_>>("this ").parse(subject).is_ok()
+        || take_until::<_, _, OracleError<'_>>("~")
+            .parse(subject)
+            .is_ok()
+    {
+        return None;
+    }
+
+    // Strip the leading article ("a"/"an"/"the") and parse the creature filter.
+    let subject = nom_primitives::parse_article
+        .parse(subject)
+        .map_or(subject, |(rest, _)| rest)
+        .trim();
+    let (filter, subject_rest) = parse_type_phrase(subject);
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
+        return None;
+    }
+
+    // Attach the "wasn't cast" gate as `Not(WasPlayed)` on the entering object.
+    let filter = match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::Not {
+                prop: Box::new(FilterProp::WasPlayed),
+            });
+            TargetFilter::Typed(tf)
+        }
+        _ => return None,
+    };
+
+    // Exile the entering object. SelfRef refers to the object whose ETB event is
+    // being replaced (same convention as the die-exile / ETB-tapped replacements).
+    let exile_self = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin: None,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(exile_self)
+            .valid_card(filter)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
 }
 
 fn split_dealt_damage_subject_condition(
@@ -12452,6 +12580,98 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn containment_priest_enter_wasnt_cast_exile_replacement() {
+        // Issue #4761: "If a nontoken creature would enter and it wasn't cast,
+        // exile it instead." must parse as a ChangeZone→Battlefield replacement
+        // that exiles the entering object — NOT as a Spell effect exiling the
+        // card itself (the regression that made casting Containment Priest exile
+        // itself).
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.",
+            "Containment Priest",
+            &["Flash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+        // The bogus self-exile Spell ability must be gone.
+        assert!(
+            parsed.abilities.is_empty(),
+            "no spell ability should be produced, got {:?}",
+            parsed.abilities
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected one ETB replacement, got {:?}",
+            parsed.replacements
+        );
+        let def = &parsed.replacements[0];
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        // valid_card = nontoken creature gated on "wasn't cast" (Not(WasPlayed)).
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::NonToken));
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Not { prop } if matches!(**prop, FilterProp::WasPlayed)
+                    )),
+                    "expected Not(WasPlayed) gate, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_wasnt_cast_exile_excludes_duration_and_self_variants() {
+        // Duration-scoped ("Until end of turn, ...") and self-referential
+        // ("if this creature would enter ...") variants must NOT be captured by
+        // the Containment Priest static arm — they need separate handling.
+        assert!(
+            parse_replacement_line(
+                "Until end of turn, if a creature would enter and it wasn't cast, exile it instead.",
+                "Hallowed Moonlight",
+            )
+            .filter(|d| d.event == ReplacementEvent::ChangeZone
+                && d.destination_zone == Some(Zone::Battlefield))
+            .is_none(),
+            "duration-scoped variant must not match the static enter-exile arm"
+        );
+        assert!(
+            parse_replacement_line(
+                "If this creature would enter and it wasn't cast or no mana was spent to cast it, exile it instead.",
+                "Primeval Spawn",
+            )
+            .filter(|d| matches!(&d.valid_card, Some(TargetFilter::Typed(tf))
+                if tf.properties.iter().any(|p| matches!(p, FilterProp::Not { prop } if matches!(**prop, FilterProp::WasPlayed)))))
+            .is_none(),
+            "self-referential variant must not match the static enter-exile arm"
+        );
+        assert!(
+            parse_replacement_line(
+                "If a nontoken creature would enter and it wasn't cast, exile it instead, draw a card.",
+                "Trailing Rider Guard",
+            )
+            .filter(|d| d.event == ReplacementEvent::ChangeZone
+                && d.destination_zone == Some(Zone::Battlefield))
+            .is_none(),
+            "static enter-exile arm must not swallow trailing riders after instead"
+        );
     }
 
     #[test]

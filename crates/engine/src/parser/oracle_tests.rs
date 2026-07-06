@@ -1,7 +1,65 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::types::ability::{CountScope, DoorLockOp};
+use crate::types::ability::{CountScope, CounterAdjustment, DoorLockOp};
 use crate::types::counter::{CounterMatch, CounterType};
+
+/// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
+/// with zero `Unimplemented` — buyback consumed as a keyword line, sentence 1
+/// to a `TargetOnly` over the battlefield∪exile `Or` pool, sentence 2 to the
+/// `ChooseCounterAdjustment { AddOrRemove }` sub-ability.
+#[test]
+fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
+    let text = "Buyback {3} (You may pay an additional {3} as you cast this spell. \
+                    If you do, put this card into your hand as it resolves.)\n\
+                    Choose a counter on target permanent or suspended card. Remove that \
+                    counter from that permanent or card or put another of those counters on it.";
+    let parsed = parse_oracle_text(
+        text,
+        "Clockspinning",
+        &["Buyback".to_string()],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "one spell ability (buyback consumed as keyword): {:?}",
+        parsed.abilities
+    );
+    let ability = &parsed.abilities[0];
+    let Effect::TargetOnly {
+        target: TargetFilter::Or { filters },
+    } = ability.effect.as_ref()
+    else {
+        panic!("expected TargetOnly Or pool, got {:?}", ability.effect);
+    };
+    assert_eq!(filters.len(), 2, "permanent + suspended card legs");
+
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("sentence-2 ChooseCounterAdjustment sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::AddOrRemove,
+                ..
+            }
+        ),
+        "got {:?}",
+        sub.effect
+    );
+
+    fn has_unimpl(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_ref().is_some_and(|s| has_unimpl(s))
+    }
+    assert!(
+        !has_unimpl(ability),
+        "no Unimplemented expected: {ability:?}"
+    );
+}
 
 #[test]
 fn escape_keyword_extracted_on_instants_and_sorceries() {

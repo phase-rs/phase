@@ -846,6 +846,47 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
+        // CR 122.1 + CR 702.62b: "target permanent or suspended card" — a
+        // battlefield∪exile target pool (Clockspinning). A suspended card is in
+        // exile, has suspend, and bears ≥1 time counter. Matched before the bare
+        // "permanent" type phrase (longest-match-first) so the "or suspended card"
+        // half is not dropped.
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("permanent or suspended card").parse(after_target)
+        {
+            return (
+                TargetFilter::Or {
+                    filters: vec![
+                        // Battlefield permanent. The explicit `InZone{Battlefield}`
+                        // is required so `targeting::extract_explicit_zones` unions
+                        // Battlefield with Exile across this `Or` (otherwise only
+                        // Exile would be searched for legal targets).
+                        typed(
+                            TypeFilter::Permanent,
+                            None,
+                            vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                            vec![],
+                        ),
+                        // CR 702.62b: a suspended card.
+                        TargetFilter::Typed(TypedFilter::card().properties(vec![
+                            FilterProp::InZone { zone: Zone::Exile },
+                            FilterProp::HasKeywordKind {
+                                value: KeywordKind::Suspend,
+                            },
+                            FilterProp::Counters {
+                                counters: CounterMatch::OfType(CounterType::Time),
+                                comparator: Comparator::GE,
+                                count: QuantityExpr::Fixed { value: 1 },
+                            },
+                        ])),
+                    ],
+                },
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
+        }
         // "target opponent"
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("opponent").parse(after_target) {
             return (
@@ -6800,6 +6841,55 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
             _ => None,
         }
+    }
+
+    /// CR 122.1 + CR 702.62b (Clockspinning): "target permanent or suspended
+    /// card" is a battlefield∪exile target pool. The permanent leg must carry an
+    /// explicit `InZone{Battlefield}` (so `extract_explicit_zones` unions both
+    /// zones) and the card leg must encode the suspended-card definition.
+    #[test]
+    fn parse_target_permanent_or_suspended_card() {
+        let (filter, rest) = parse_target("target permanent or suspended card");
+        assert_eq!(rest, "");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or pool, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let permanent_leg = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Permanent] => {
+                    Some(tf)
+                }
+                _ => None,
+            })
+            .expect("battlefield permanent leg");
+        assert!(permanent_leg.properties.contains(&FilterProp::InZone {
+            zone: Zone::Battlefield
+        }));
+
+        let card_leg = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Card] => Some(tf),
+                _ => None,
+            })
+            .expect("suspended card leg");
+        assert!(card_leg
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }));
+        assert!(card_leg.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Suspend
+        }));
+        assert!(card_leg.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                comparator: Comparator::GE,
+                ..
+            }
+        )));
     }
 
     /// Issue #3677 (Flare of Denial): "sacrifice a nontoken blue creature" must

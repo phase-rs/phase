@@ -3263,6 +3263,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::EachPlayerCopyChosen { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Specialize => {}
     }
