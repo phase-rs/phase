@@ -990,7 +990,7 @@ fn two_streams_anchor_statics_apply_from_command_zone() {
     let bear = state.objects.get(&creature_id).unwrap();
     assert_eq!(bear.power, Some(3), "red-waterfall creature must get +2/+0");
     assert!(
-        bear.keywords.contains(&Keyword::Haste),
+        bear.has_keyword(&Keyword::Haste),
         "red-waterfall creature must gain haste"
     );
 }
