@@ -75,7 +75,7 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
     );
 }
 
-// CR 611.3 + CR 613.4c/613.7c: Angry Mob — a two-clause turn-window CDA. "During
+// CR 611.3a + CR 604.3 + CR 613.4a: Angry Mob — a two-clause turn-window CDA. "During
 // your turn, ~'s power and toughness are each equal to 2 plus the number of
 // Swamps your opponents control. During turns other than yours, ~'s power and
 // toughness are each 2." Splits into two CDA statics: the on-turn clause is a

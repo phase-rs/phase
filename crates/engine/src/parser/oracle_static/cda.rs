@@ -11,39 +11,44 @@ use super::support::*;
 ///   and its toughness is equal to that number plus 1."
 /// - "~'s toughness is equal to the number of cards in your hand."
 pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
-    // CR 611.3 + CR 613.7c: peel a leading turn-window timing condition so a CDA
+    // CR 611.3a + CR 604.3: peel a leading turn-window timing condition so a CDA
     // scoped to "During your turn," / "During turns other than yours," carries
-    // that condition (Angry Mob), mirroring the base-P/T-set path. Such a card's
-    // two clauses are split into separate sentences upstream by
-    // `parse_multi_sentence_statics`, so each clause reaches here independently.
-    let (lower, text, timing_condition) =
-        if let Some(rest) = nom_tag_lower(lower, lower, "during your turn, ") {
-            (
-                rest,
-                &text[text.len() - rest.len()..],
-                Some(StaticCondition::DuringYourTurn),
-            )
-        } else if let Some(rest) = nom_tag_lower(lower, lower, "during turns other than yours, ") {
-            (
-                rest,
-                &text[text.len() - rest.len()..],
-                Some(StaticCondition::Not {
-                    condition: Box::new(StaticCondition::DuringYourTurn),
-                }),
-            )
-        } else {
-            (lower, text, None)
-        };
+    // that condition (Angry Mob). A continuous effect from a static ability
+    // applies at any moment to whatever its text indicates (CR 611.3a), so the
+    // turn window becomes a `StaticCondition`. Such a card's two clauses are split
+    // into separate sentences upstream by `parse_multi_sentence_statics`, so each
+    // clause reaches here independently. `nom_tag_tp` slices the original and
+    // lowercased text in lockstep (no manual byte-offset arithmetic).
+    let tp = TextPair::new(text, lower);
+    let (lower, text, timing_condition) = if let Some(rest) = nom_tag_tp(&tp, "during your turn, ")
+    {
+        (
+            rest.lower,
+            rest.original,
+            Some(StaticCondition::DuringYourTurn),
+        )
+    } else if let Some(rest) = nom_tag_tp(&tp, "during turns other than yours, ") {
+        (
+            rest.lower,
+            rest.original,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            }),
+        )
+    } else {
+        (lower, text, None)
+    };
 
     // Detect framing
     let both = nom_primitives::scan_contains(lower, "power and toughness are each equal to");
     let power_only = !both && nom_primitives::scan_contains(lower, "power is equal to");
     let toughness_only =
         !both && !power_only && nom_primitives::scan_contains(lower, "toughness is equal to");
-    // CR 613.4c: constant characteristic-defining P/T — "~'s power and toughness
-    // are each N" (Angry Mob's off-turn clause "... are each 2"): a fixed base
-    // value, not a dynamic quantity. Guarded by `!both` so the dynamic "are each
-    // equal to" framing (which also contains "are each ") keeps priority.
+    // CR 604.3 + CR 613.4a (Layer 7a): constant characteristic-defining P/T —
+    // "~'s power and toughness are each N" (Angry Mob's off-turn clause "... are
+    // each 2") is a CDA that defines P/T as a fixed value, not a dynamic quantity.
+    // Guarded by `!both` so the dynamic "are each equal to" framing (which also
+    // contains "are each ") keeps priority.
     let both_const = !both
         && !power_only
         && !toughness_only
