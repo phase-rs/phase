@@ -1642,7 +1642,7 @@ pub(super) const ABILITY_WORD_NAMES: &[&str] = &[
     "pack tactics",
     "paradox",
     "parley",
-    // Warhammer 40,000 Commander (40K) flavor ability words — no rules meaning.
+    // CR 207.2c: Warhammer 40,000 Commander (40K) flavor ability words — no rules meaning.
     "proclamator hailer",
     "protector",
     "radiance",

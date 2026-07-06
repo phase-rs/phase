@@ -23,39 +23,100 @@ use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributio
 /// left intact so the fallback can't mis-strip a real subject.
 #[test]
 fn ability_word_prefix_is_stripped_from_subject_anchored_statics() {
-    // Whitelisted ability words (already known) whose statics only dropped
-    // because the static dispatch never stripped the flavor label.
-    assert_eq!(
-        parse_static_line_multi(
-            "Chroma — Each creature you control gets +1/+1 for each white mana symbol in its mana cost."
-        )
-        .len(),
-        1,
-        "Light from Within: Chroma prefix must be stripped"
+    use crate::types::mana::ManaColor;
+
+    // Light from Within (Chroma, whitelisted): the stripped body must produce the
+    // same static it would without the label — creatures-you-control gaining a
+    // dynamic +N/+N equal to the white pips in each recipient's own mana cost.
+    let chroma = parse_static_line_multi(
+        "Chroma — Each creature you control gets +1/+1 for each white mana symbol in its mana cost.",
+    );
+    assert_eq!(chroma.len(), 1, "Chroma prefix must be stripped");
+    let def = &chroma[0];
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.is_empty()),
+        "Chroma affected must be creatures you control: {:?}",
+        def.affected
+    );
+    assert!(def.condition.is_none(), "Chroma carries no condition");
+    assert!(
+        matches!(&def.modifications[..],
+            [
+                ContinuousModification::AddDynamicPower { value: p },
+                ContinuousModification::AddDynamicToughness { value: t },
+            ]
+            if matches!(p, QuantityExpr::Ref { qty: QuantityRef::ManaSymbolsInManaCost { color: Some(ManaColor::White), .. } })
+                && p == t),
+        "Chroma must add dynamic P/T = white pips in mana cost: {:?}",
+        def.modifications
+    );
+
+    // Gavony Ironwright (Fateful hour, whitelisted): a life<=5 gate on an
+    // "other creatures you control" +1/+4 pump.
+    let fateful = parse_static_line_multi(
+        "Fateful hour — As long as you have 5 or less life, other creatures you control get +1/+4.",
+    );
+    assert_eq!(fateful.len(), 1, "Fateful hour prefix must be stripped");
+    let def = &fateful[0];
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&FilterProp::Another)),
+        "Fateful hour affected must be OTHER creatures you control: {:?}",
+        def.affected
+    );
+    assert!(
+        matches!(&def.condition, Some(StaticCondition::QuantityComparison { comparator: Comparator::LE, rhs, .. })
+            if matches!(rhs, QuantityExpr::Fixed { value: 5 })),
+        "Fateful hour must gate on your life <= 5: {:?}",
+        def.condition
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddPower { value: 1 })
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 4 }),
+        "Fateful hour must pump +1/+4: {:?}",
+        def.modifications
+    );
+
+    // Cryptothrall (Protector, newly whitelisted 40K word): an "Other artifact
+    // creatures you control" hexproof grant.
+    let protector =
+        parse_static_line_multi("Protector — Other artifact creatures you control have hexproof.");
+    assert_eq!(protector.len(), 1, "Protector prefix must be stripped");
+    let def = &protector[0];
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature, TypeFilter::Artifact]
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&FilterProp::Another)),
+        "Protector affected must be OTHER artifact creatures you control: {:?}",
+        def.affected
     );
     assert_eq!(
-        parse_static_line_multi(
-            "Fateful hour — As long as you have 5 or less life, other creatures you control get +1/+4."
-        )
-        .len(),
-        1,
-        "Gavony Ironwright: Fateful hour prefix must be stripped"
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }],
+        "Protector must grant hexproof"
     );
-    // Set-specific 40K flavor words newly added to the whitelist.
-    assert_eq!(
-        parse_static_line_multi("Protector — Other artifact creatures you control have hexproof.")
-            .len(),
-        1,
-        "Cryptothrall: Protector prefix must be stripped"
-    );
+
+    // Clamavus (Proclamator Hailer, newly whitelisted 40K word): still parses.
     assert_eq!(
         parse_static_line_multi(
             "Proclamator Hailer — Each creature you control gets +1/+1 for each +1/+1 counter on it."
         )
         .len(),
         1,
-        "Clamavus: Proclamator Hailer prefix must be stripped"
+        "Proclamator Hailer prefix must be stripped"
     );
+
     // Safety: a capitalized em-dash label that is NOT a recognized ability word
     // must never be stripped — the fallback stays whitelist-gated.
     assert_eq!(
