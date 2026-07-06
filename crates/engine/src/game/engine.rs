@@ -6257,6 +6257,17 @@ fn handle_equip_activation(
 /// CR 702.122a: Activate a Vehicle's crew ability from Priority.
 /// Unlike Equip (CR 702.6a) and Saddle (CR 702.171a), Crew has NO "Activate only as a
 /// sorcery" restriction — it can be activated any time the controller has priority.
+fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
+    state.objects.get(&id).is_some_and(|o| {
+        o.controller == player
+            && !o.tapped
+            && o.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature)
+            && !crate::game::restrictions::object_cant_tap(state, id)
+    })
+}
+
 fn handle_crew_activation(
     state: &mut GameState,
     player: PlayerId,
@@ -6323,18 +6334,8 @@ fn handle_crew_activation(
         .copied()
         .filter(|&id| {
             id != vehicle_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                            && !super::static_abilities::object_has_cant_crew(state, id)
-                    })
-                    .unwrap_or(false)
+                && is_tappable_creature_for_cost(state, id, player)
+                && !super::static_abilities::object_has_cant_crew(state, id)
         })
         .collect();
 
@@ -6446,6 +6447,11 @@ fn handle_crew_announcement(
                 "Creature is no longer eligible for crewing".to_string(),
             ));
         }
+        if crate::game::restrictions::object_cant_tap(state, cid) {
+            return Err(EngineError::InvalidAction(
+                "Creature can't become tapped".to_string(),
+            ));
+        }
         if super::static_abilities::object_has_cant_crew(state, cid) {
             return Err(EngineError::InvalidAction(
                 "Creature can't crew Vehicles".to_string(),
@@ -6541,20 +6547,7 @@ fn handle_station_activation(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| {
-            id != spacecraft_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                    .unwrap_or(false)
-        })
+        .filter(|&id| id != spacecraft_id && is_tappable_creature_for_cost(state, id, player))
         .collect();
 
     if eligible_creatures.is_empty() {
@@ -6613,6 +6606,7 @@ fn handle_station_announcement(
             .card_types
             .core_types
             .contains(&crate::types::card_type::CoreType::Creature)
+        || crate::game::restrictions::object_cant_tap(state, creature_id)
     {
         return Err(EngineError::InvalidAction(
             "Creature is no longer eligible for Station".to_string(),
@@ -6702,20 +6696,7 @@ fn handle_saddle_activation(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| {
-            id != mount_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                    .unwrap_or(false)
-        })
+        .filter(|&id| id != mount_id && is_tappable_creature_for_cost(state, id, player))
         .collect();
 
     // CR 702.171a: a creature's saddle contribution may be modified.
@@ -6791,6 +6772,11 @@ fn handle_saddle_announcement(
         if obj.zone != Zone::Battlefield || obj.tapped {
             return Err(EngineError::InvalidAction(
                 "Creature is no longer eligible for saddling".to_string(),
+            ));
+        }
+        if crate::game::restrictions::object_cant_tap(state, cid) {
+            return Err(EngineError::InvalidAction(
+                "Creature can't become tapped".to_string(),
             ));
         }
         // CR 702.171a: apply any saddle power-contribution modifier.

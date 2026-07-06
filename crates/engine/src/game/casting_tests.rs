@@ -24516,6 +24516,14 @@ fn add_harmonize_draw_spell_to_graveyard(
     spell
 }
 
+fn grant_cant_tap(state: &mut GameState, id: ObjectId) {
+    let def = StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.static_definitions.push(def.clone());
+    Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    crate::game::layers::evaluate_layers(state);
+}
+
 /// CR 702.180a (issue #1550): Winternight Stories — Harmonize {4}{U}. With
 /// only 4 mana but a 4-power creature to tap (reducing the {4} generic to
 /// {0}), the spell must be legally castable from the graveyard. Before the
@@ -24553,6 +24561,104 @@ fn harmonize_card_castable_when_creature_tap_covers_generic() {
         can_cast_object_now(&state, PlayerId(0), spell),
         "Harmonize {{4}}{{U}} must be castable with 4 mana + a 4-power creature to tap"
     );
+}
+
+#[test]
+fn harmonize_card_not_castable_when_only_reduction_creature_cant_tap() {
+    let mut state = setup_game_at_main_phase();
+
+    let spell = add_harmonize_draw_spell_to_graveyard(
+        &mut state,
+        PlayerId(0),
+        CardId(77_020),
+        "Winternight Stories",
+    );
+
+    let creature = create_object(
+        &mut state,
+        CardId(77_021),
+        PlayerId(0),
+        "Power Four".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(4);
+        obj.toughness = Some(4);
+    }
+    grant_cant_tap(&mut state, creature);
+
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 4);
+
+    assert!(
+        !can_cast_object_now(&state, PlayerId(0), spell),
+        "Harmonize reduction must not count a creature that can't become tapped"
+    );
+}
+
+#[test]
+fn harmonize_tap_choice_excludes_cant_tap_creature() {
+    let mut state = setup_game_at_main_phase();
+
+    let spell = add_harmonize_draw_spell_to_graveyard(
+        &mut state,
+        PlayerId(0),
+        CardId(77_030),
+        "Winternight Stories",
+    );
+
+    let restricted = create_object(
+        &mut state,
+        CardId(77_031),
+        PlayerId(0),
+        "Restricted Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&restricted).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(4);
+        obj.toughness = Some(4);
+    }
+    grant_cant_tap(&mut state, restricted);
+
+    let eligible = create_object(
+        &mut state,
+        CardId(77_032),
+        PlayerId(0),
+        "Eligible Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&eligible).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 5);
+
+    let card_id = state.objects.get(&spell).unwrap().card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+
+    match result.waiting_for {
+        WaitingFor::HarmonizeTapChoice {
+            eligible_creatures, ..
+        } => {
+            assert!(eligible_creatures.contains(&eligible));
+            assert!(!eligible_creatures.contains(&restricted));
+        }
+        other => panic!("Expected HarmonizeTapChoice, got {other:?}"),
+    }
 }
 
 /// CR 702.180a + CR 601.2h: A creature tapped for Harmonize's cost

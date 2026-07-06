@@ -1068,6 +1068,7 @@ fn prowl_damage_ledger_satisfied(state: &GameState, player: PlayerId, object_id:
 /// foretell special action (`handle_foretell`) and the effect-driven "becomes
 /// foretold" grant (`effects::grant_permission`).
 pub(crate) fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
+    // allow-raw-authority: object-local Foretell cost extraction while stamping a permission grant
     obj.keywords.iter().find_map(|keyword| match keyword {
         Keyword::Foretell(cost) => Some(cost.clone()),
         _ => None,
@@ -10765,6 +10766,7 @@ fn can_feasibly_pay_harmonize_mana_cost_with_probe(
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Creature)
                 && o.power.is_some_and(|power| power > 0)
+                && !crate::game::restrictions::object_cant_tap(state, o.id)
             {
                 Some((o.id, o.power.unwrap_or(0) as u32))
             } else {

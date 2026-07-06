@@ -5553,6 +5553,7 @@ pub(super) fn pay_and_push(
                             .core_types
                             .contains(&crate::types::card_type::CoreType::Creature)
                         && o.power.is_some_and(|p| p > 0)
+                        && !crate::game::restrictions::object_cant_tap(state, o.id)
                 })
                 .map(|o| o.id)
                 .collect();
