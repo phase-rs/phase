@@ -3190,7 +3190,7 @@ fn detect_duration_this_turn(
         // intervening-if condition consumes the "this turn" scope (Avatar Aang).
         "BendTypesThisTurn",
         "OpponentLostLife",
-        "OpponentDealtCombatDamage",
+        "OpponentDealtDamage",
         // CR 611.3: a condition slot serialized as the typed `Unrecognized`
         // marker means the parser routed the "as long as ... this turn" clause
         // INTO a condition slot (and explicitly recorded that it could not

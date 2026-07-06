@@ -6947,6 +6947,85 @@ fn for_each_token_count_replaced() {
     );
 }
 
+/// CR 109.5 + CR 111.11: a NON-controller token "create … for each X" creator
+/// must NOT be accepted as a `Controller`-owned token via the subject-stripped
+/// fallback inside the token for-each arm.
+///
+/// This targets `try_parse_for_each_effect` DIRECTLY — not `parse_effect` — on
+/// purpose. The token for-each arm early-returns and so never runs the
+/// subject→owner rebinding; `try_parse_token` defaults `owner` to `Controller`.
+/// Under the pre-fix broad `strip_subject_clause`, the leading "each player "
+/// was stripped, `try_parse_token` accepted the bare imperative, and the arm
+/// returned `Effect::Token { owner: Controller, count: Ref }` — silently
+/// creating the tokens for the SOURCE controller instead of each player. The
+/// fix restricts the fallback to a controller ("you"/"you may") subject, so
+/// this arm must now DECLINE (return `None`) for a non-controller subject.
+///
+/// Why the arm and not `parse_effect`: at the full-pipeline level "each player
+/// creates …" is ALSO mis-owned to `Controller` by a SEPARATE, out-of-scope
+/// path (`thread_for_each_subject` has no `Effect::Token` arm, so it strips the
+/// subject and fails to rebind the owner). That path is unchanged by this fix,
+/// so a `parse_effect` assertion would not isolate — or discriminate — the
+/// fallback this change actually narrows. Calling the arm directly does.
+///
+/// Discriminating: this assertion FAILS under the pre-fix code (the arm returns
+/// `owner: Controller`) and PASSES after (the arm returns `None`).
+#[test]
+fn for_each_token_non_controller_subject_not_misowned_via_fallback() {
+    let clause = try_parse_for_each_effect(
+        "each player creates a Treasure token for each creature they control",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        clause.is_none(),
+        "non-controller 'each player creates … for each' must DECLINE (return None) at \
+         the controller-only fallback — not merely avoid Controller ownership; got {clause:?}"
+    );
+}
+
+/// Companion for the "target opponent" non-controller creator — same hazard,
+/// different subject form. The arm must decline rather than mis-own to Controller.
+#[test]
+fn for_each_token_target_opponent_subject_not_misowned_via_fallback() {
+    let clause = try_parse_for_each_effect(
+        "target opponent creates a Treasure token for each artifact they control",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        clause.is_none(),
+        "non-controller 'target opponent creates … for each' must DECLINE (return None) at \
+         the controller-only fallback — not merely avoid Controller ownership; got {clause:?}"
+    );
+}
+
+/// Positive companion: the intended controller form ("You create …") STILL
+/// parses through the arm's controller-only fallback to a `Controller`-owned
+/// dynamic-count Token. This is the case the fallback exists to support
+/// (You've Been Caught Stealing; Cavern-Hoard Dragon; Covetous Elegy; Yes Man,
+/// Personal Securitron; Wreck Hunter) — it proves the narrowing did not break
+/// the fix it was tightening.
+#[test]
+fn for_each_token_controller_subject_still_controller_owned() {
+    let clause = try_parse_for_each_effect(
+        "you create a Treasure token for each creature you control",
+        &mut ParseContext::default(),
+    )
+    .expect("controller 'you create … for each' should parse via the arm");
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Token {
+                owner: TargetFilter::Controller,
+                count: QuantityExpr::Ref { .. },
+                ..
+            }
+        ),
+        "controller 'you create … for each' must stay a Controller-owned \
+         dynamic Token, got {:?}",
+        clause.effect
+    );
+}
+
 /// CR 701.9 + CR 603.4: "draw a card for each card you've discarded this
 /// turn" must produce a dynamic Draw count referencing the controller's
 /// per-turn discard tally, not a dropped `Fixed(1)`.

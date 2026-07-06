@@ -9743,7 +9743,7 @@ fn count_ticket_symbols(rest: &str) -> Option<u32> {
 /// - "gets two experience counters"
 /// - "get ten rad counters"
 /// - "get {TK}{TK}" (CR 107.17 ticket symbol form; see `count_ticket_symbols`)
-fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
+pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
     // Strip "get/gets " prefix
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
         .parse(lower)

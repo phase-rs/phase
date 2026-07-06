@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 164,
+      "date": "2026-07-06",
+      "title": "Spider-Man cards arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• A 33-card Standard-set Spider-Man tranche is now live, including Stargaze, Quick Draw, Memory Vessel, Stolen Uniform, Symbiote Spider-Man, Vraska the Silencer, The Skullspore Nexus, Parker Luck, and more\n• New building blocks unlock more card classes: dynamic dig keeps, reflexive “this way” triggers, face-down exile play permissions, Behold choices, cloak from non-library sources, and “repeat this process” effects\n• Gollum, Scheming Guide now handles land/nonland opponent guesses, and opponent-guess cards have a more general choice engine behind them\n• Scavenge, Encore, Embalm, and related granted keyword abilities now work from the right zones and use each card’s own costs\n• Talruum Piper, Deathknell Berserker, Wretched Banquet, Anointed Peacekeeper, Verdeloth the Ancient, Angry Mob, Frantic Inventory, Furious Spinesplitter, and You’ve Been Caught Stealing are newly supported or more complete\n\n🛠️ Cards That Now Work Right\n• Vraska’s Fall and similar “each opponent … and gets a counter” effects now give poison, experience, rad, or ticket counters to each opponent instead of the caster\n• “N additional counters” now strips the word “additional” from the counter type, so Necromantic Summons, Heroic Return, Turntimber Symbiosis, Curator Beastie, and Ravaging Riftwurm place real +1/+1 or time counters\n• Frantic Inventory, Accumulated Knowledge, Take Inventory, Undead Servant, Goblin Gathering, Galvanic Bombardment, Ancestral Anger, Plague Rats, and similar named-card counts now look in the printed zone instead of treating “in your graveyard” as part of the card name\n• Imprisoned in the Moon and Sugar Coat now remove the right card types and abilities while preserving the granted ability they add\n• Anje Falkenrath now untaps only when the discarded card actually has madness, and behold choices are re-prompted when a spell is cast again from a new zone\n• Path to Exile and Erode now offer the library-search choice to the creature’s controller at the moment it left, not its owner after it moved zones\n• Amass Army references, Containment Priest, Orochi/Witherbloom/Cloud edge cases, and pilot-token crew checks now line up with the current board state\n\n⚔️ Combat & Gameplay\n• “Before attackers are declared” restrictions now use the actual combat window, so cards like Master Warcraft and Siren’s Call can be cast or activated by the right players before attackers are chosen\n• Divided-damage and divided-counter spells now pause for distribution after slot-by-slot target selection instead of skipping that assignment step\n• Cast cancellation works cleanly during distribution prompts, and orphaned pending triggers can surface recoverably instead of stalling the game\n• Filtered Lure-style effects now force only the matching blockers, so Talruum Piper, Marble Priest, and You Look Upon the Tarrasque apply their printed blocker sets\n\n🖥️ Interface\n• The card-problem picker now has player filters, art thumbnails, sticky search controls, full-row report confirmation, and clearer localized debug labels\n• Report-card entry points are easier to find from the board and debug menu, and priority-yield auto-pass controls are more discoverable\n• Deck import and card images no longer break on names that literally contain “//” or on hand-typed glued double-faced names\n• A rare degenerate viewport resize path no longer collapses the board layout",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1523742176402608250"
+    },
+    {
       "id": 163,
       "date": "2026-07-05",
       "title": "Priority yields and card reports",

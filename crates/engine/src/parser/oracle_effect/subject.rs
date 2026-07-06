@@ -5157,6 +5157,44 @@ pub(super) fn strip_subject_clause(text: &str) -> Option<String> {
     Some(deconjugate_verb(predicate))
 }
 
+/// Strip a leading *controller* subject ("you may " / "you ") from `text`,
+/// returning the imperative remainder in original case; `None` for every other
+/// leading subject.
+///
+/// This is the controller-only counterpart to [`strip_subject_clause`]. It
+/// exists for the token "create … for each X" fallback in
+/// `oracle_effect/mod.rs`, which delegates to `token::try_parse_token`. That
+/// path defaults `Effect::Token.owner` to `TargetFilter::Controller`
+/// (CR 109.5: an unqualified "you" is the controller of the source) and — via
+/// the early return in `try_parse_for_each_effect` — does NOT run the
+/// subject→owner rebinding that the numeric/targeted for-each arms use. So
+/// stripping a *non-controller* subject there ("each player", "each opponent",
+/// "target player/opponent", "its controller", "that player", …) would
+/// silently mis-own the created token to the source controller
+/// (CR 111.11: a token is created under a specific player's control). Only the
+/// controller subject may be stripped in that fallback; any other leading
+/// subject returns `None` so the clause honestly falls through to unsupported.
+pub(super) fn strip_controller_subject_clause(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    // Longest-match first: "you may " before the bare "you " so the optional
+    // permission word is consumed rather than stranded on the remainder.
+    let ((), remainder) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("you may "),
+                tag::<_, _, OracleError<'_>>("you "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let remainder = remainder.trim();
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(remainder.to_string())
+}
+
 /// Strip third-person 's' from the first word: "discards a card" → "discard a card".
 pub(super) fn deconjugate_verb(text: &str) -> String {
     let text = text.trim();
