@@ -3769,6 +3769,28 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         persist_player: Option<PlayerId>,
     },
+    /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
+    /// the defending player) guesses a committed value or proposition during
+    /// resolution of an `Effect::OpponentGuess`. `player` is the guesser;
+    /// `source_id` lets the answer handler derive the controller and read the
+    /// committed `ChosenAttribute::Number`. This wait is a member of
+    /// `waits_for_resolution_choice` — the branch chain is auto-stashed onto
+    /// `pending_continuation` and re-evaluated on drain once the outcome is known
+    /// (the deferred "If you do" / `NamedChoice` resolution pattern).
+    OpponentGuess {
+        player: PlayerId,
+        options: Vec<String>,
+        choice_type: ChoiceType,
+        source_id: ObjectId,
+        /// CR 608.2d: For a `GuessSubject::Proposition`, the proposition's truth
+        /// resolved at the moment the guess was raised (when the resolving
+        /// ability's targets are still in scope). The answer handler compares the
+        /// guesser's chosen label against this to decide correctness. `None` for
+        /// `GuessSubject::CommittedChoice`, whose correctness is read from the
+        /// source's last committed `ChosenAttribute::Number` at answer time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposition_truth: Option<bool>,
+    },
     /// Alchemy "draft a card from [card]'s spellbook": `player` chooses one card
     /// name from `options` (the source card's spellbook list); the chosen card is
     /// then conjured into `destination` (`tapped` if a "tapped" rider applied).
@@ -4938,6 +4960,7 @@ impl WaitingFor {
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
             WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
@@ -5078,6 +5101,7 @@ impl WaitingFor {
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
             | WaitingFor::NamedChoice { player, .. }
+            | WaitingFor::OpponentGuess { player, .. }
             | WaitingFor::SpellbookDraft { player, .. }
             | WaitingFor::DamageSourceChoice { player, .. }
             | WaitingFor::ModeChoice { player, .. }

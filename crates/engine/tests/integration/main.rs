@@ -593,6 +593,7 @@ mod terror_of_the_peaks_issue_2911;
 mod the_chain_veil_loyalty_grants;
 mod the_kingpin_of_crime_combat_damage;
 mod the_ur_dragon_eminence;
+mod the_who_opponent_guess_resolution;
 mod thoughtweft_trample_regression;
 mod throw_instead_tail_class;
 mod timely_ward_regression;

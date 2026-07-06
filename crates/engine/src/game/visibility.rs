@@ -62,6 +62,52 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 608.2d: While an `OpponentGuess` is pending, strip the secret the
+    // guesser must not see so the round-trip can't be auto-won. Two redactions:
+    //
+    //   * `proposition_truth` — the resolved yes/no answer for a
+    //     `GuessSubject::Proposition` (The Seventh Doctor: "is the face-down
+    //     card's mana value greater than your artifact count"). For that card the
+    //     guesser IS the viewer who receives this `WaitingFor`, so leaving the
+    //     answer in would let them guess correctly every time. The engine always
+    //     resolves correctness on the UNFILTERED state and the frontend never
+    //     reads this field, so it is stripped for EVERY viewer.
+    //
+    //   * the controller's most-recently committed number for a
+    //     `GuessSubject::CommittedChoice` (The Toymaker's Trap) — hidden from
+    //     everyone except the controller until "then you reveal the number you
+    //     chose" makes it public. Only the LAST committed number is hidden;
+    //     numbers revealed on earlier upkeeps are already public and stay
+    //     visible (re-hiding them would misreport which numbers were used up).
+    if let WaitingFor::OpponentGuess {
+        player,
+        ref options,
+        ref choice_type,
+        source_id,
+        proposition_truth: _,
+    } = state.waiting_for
+    {
+        filtered.waiting_for = WaitingFor::OpponentGuess {
+            player,
+            options: options.clone(),
+            choice_type: choice_type.clone(),
+            source_id,
+            proposition_truth: None,
+        };
+        let is_controller = state.objects.get(&source_id).map(|o| o.controller) == Some(viewer);
+        if !is_controller {
+            if let Some(obj) = filtered.objects.get_mut(&source_id) {
+                if let Some(pos) = obj
+                    .chosen_attributes
+                    .iter()
+                    .rposition(|a| matches!(a, crate::types::ability::ChosenAttribute::Number(_)))
+                {
+                    obj.chosen_attributes.remove(pos);
+                }
+            }
+        }
+    }
+
     let (manifest_dread_visible, manifest_dread_cards): (HashSet<ObjectId>, HashSet<ObjectId>) =
         if let WaitingFor::ManifestDreadChoice {
             player, ref cards, ..
@@ -3187,5 +3233,107 @@ mod tests {
             }
             other => panic!("expected FreeCastWindow for opponent, got {other:?}"),
         }
+    }
+
+    /// CR 608.2d: The resolved yes/no answer to a `GuessSubject::Proposition`
+    /// (`proposition_truth`) must never reach any viewer over the wire — for The
+    /// Seventh Doctor the guesser IS the viewer receiving the `WaitingFor`, so an
+    /// un-redacted answer would let them guess correctly every time. The engine
+    /// resolves correctness on the unfiltered state, so it is stripped for all.
+    #[test]
+    fn opponent_guess_proposition_truth_is_redacted_for_all_viewers() {
+        use crate::types::ability::ChoiceType;
+        let mut state = GameState::new_two_player(42);
+        // Source controlled by PlayerId(1); the guesser is PlayerId(0).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "The Seventh Doctor".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: vec!["greater".to_string(), "not greater".to_string()],
+            choice_type: ChoiceType::Labeled {
+                options: vec!["greater".to_string(), "not greater".to_string()],
+            },
+            source_id: source,
+            proposition_truth: Some(true),
+        };
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            match filtered.waiting_for {
+                WaitingFor::OpponentGuess {
+                    proposition_truth, ..
+                } => assert_eq!(
+                    proposition_truth, None,
+                    "proposition_truth must be stripped for viewer {viewer:?}"
+                ),
+                other => panic!("expected OpponentGuess, got {other:?}"),
+            }
+        }
+        // The unfiltered state keeps the answer so the engine can resolve it.
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OpponentGuess {
+                proposition_truth: Some(true),
+                ..
+            }
+        ));
+    }
+
+    /// CR 608.2d: For a `GuessSubject::CommittedChoice` (The Toymaker's Trap),
+    /// only the MOST-RECENTLY committed number is hidden from the guesser — it is
+    /// the secret of the pending guess. Numbers chosen on earlier upkeeps were
+    /// already revealed ("then you reveal the number you chose") and stay public,
+    /// so the guesser's client can still see which numbers are used up. The
+    /// controller always sees the full committed history.
+    #[test]
+    fn opponent_guess_hides_only_last_committed_number_from_guesser() {
+        use crate::types::ability::{ChoiceType, ChosenAttribute, NumberDistinctness};
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "The Toymaker's Trap".to_string(),
+            Zone::Battlefield,
+        );
+        // Number(3) was revealed on a prior upkeep; Number(5) is this upkeep's
+        // secret commit.
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Number(3), ChosenAttribute::Number(5)];
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: (1..=5).map(|n| n.to_string()).collect(),
+            choice_type: ChoiceType::NumberRange {
+                min: 1,
+                max: 5,
+                distinctness: NumberDistinctness::DistinctFromSourceHistory,
+            },
+            source_id: source,
+            proposition_truth: None,
+        };
+
+        // Guesser (non-controller): the last committed number (5) is hidden, the
+        // already-revealed earlier number (3) stays visible.
+        let guesser_view = filter_state_for_viewer(&state, PlayerId(0));
+        let guesser_attrs = &guesser_view.objects[&source].chosen_attributes;
+        assert!(
+            guesser_attrs.contains(&ChosenAttribute::Number(3)),
+            "the earlier, already-revealed number must stay visible to the guesser"
+        );
+        assert!(
+            !guesser_attrs.contains(&ChosenAttribute::Number(5)),
+            "the pending-guess secret (last committed number) must be hidden"
+        );
+
+        // Controller: sees the full committed history.
+        let controller_view = filter_state_for_viewer(&state, PlayerId(1));
+        let controller_attrs = &controller_view.objects[&source].chosen_attributes;
+        assert!(controller_attrs.contains(&ChosenAttribute::Number(3)));
+        assert!(controller_attrs.contains(&ChosenAttribute::Number(5)));
     }
 }

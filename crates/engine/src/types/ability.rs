@@ -296,6 +296,20 @@ pub enum OpponentMayScope {
     AnyPlayer,
 }
 
+/// CR 609.3 + CR 608.2d: whether a "choose a number" domain must exclude numbers
+/// already committed on this source ("...that hasn't been chosen"), or repeats
+/// are legal. Parse-detected; static; serialized only when non-default so the
+/// existing `NumberRange` card-data stays byte-stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NumberDistinctness {
+    /// The default for the entire existing `NumberRange` pool — repeats allowed.
+    #[default]
+    Repeatable,
+    /// Each commit must differ from every prior `ChosenAttribute::Number` on the
+    /// source (The Toymaker's Trap "a number ... that hasn't been chosen").
+    DistinctFromSourceHistory,
+}
+
 /// What kind of named choice the player must make at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
@@ -329,6 +343,9 @@ pub enum ChoiceType {
     NumberRange {
         min: u8,
         max: u8,
+        /// CR 609.3: distinctness requirement, parse-detected from "that hasn't
+        /// been chosen". Default `Repeatable` for every existing card.
+        distinctness: NumberDistinctness,
     },
     /// "Choose left or right", "choose fame or fortune" — options come from the parser.
     Labeled {
@@ -564,11 +581,25 @@ impl Serialize for ChoiceType {
                 }
             }
             Self::CardName => serializer.serialize_unit_variant("ChoiceType", 5, "CardName"),
-            Self::NumberRange { min, max } => {
-                let mut variant =
-                    serializer.serialize_struct_variant("ChoiceType", 6, "NumberRange", 2)?;
+            Self::NumberRange {
+                min,
+                max,
+                distinctness,
+            } => {
+                // Emit `distinctness` only when non-default so existing
+                // `{min,max}` card-data stays byte-stable.
+                let field_count = 2 + (*distinctness != NumberDistinctness::Repeatable) as usize;
+                let mut variant = serializer.serialize_struct_variant(
+                    "ChoiceType",
+                    6,
+                    "NumberRange",
+                    field_count,
+                )?;
                 variant.serialize_field("min", min)?;
                 variant.serialize_field("max", max)?;
+                if *distinctness != NumberDistinctness::Repeatable {
+                    variant.serialize_field("distinctness", distinctness)?;
+                }
                 variant.end()
             }
             Self::Labeled { options } => {
@@ -668,6 +699,8 @@ impl<'de> Deserialize<'de> for ChoiceType {
             NumberRange {
                 min: u8,
                 max: u8,
+                #[serde(default)]
+                distinctness: NumberDistinctness,
             },
             Labeled {
                 options: Vec<String>,
@@ -734,7 +767,15 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
-                ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
+                ChoiceTypeData::NumberRange {
+                    min,
+                    max,
+                    distinctness,
+                } => Ok(Self::NumberRange {
+                    min,
+                    max,
+                    distinctness,
+                }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
                 ChoiceTypeData::CardPredicate { options } => Ok(Self::CardPredicate { options }),
                 ChoiceTypeData::CardPredicateGuess { options } => {
@@ -1090,7 +1131,11 @@ impl ChosenAttribute {
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
             Self::CardName(_) => ChoiceType::CardName,
-            Self::Number(_) => ChoiceType::NumberRange { min: 0, max: 20 },
+            Self::Number(_) => ChoiceType::NumberRange {
+                min: 0,
+                max: 20,
+                distinctness: NumberDistinctness::Repeatable,
+            },
             // Player covers both Player and Opponent choice types
             Self::Player(_) => ChoiceType::Player,
             Self::TwoColors(_) => ChoiceType::TwoColors,
@@ -8808,6 +8853,35 @@ impl DigSource {
     }
 }
 
+/// CR 608.2d + CR 608.2e: what a player other than the controller is asked to
+/// guess during resolution of an `Effect::OpponentGuess`.
+///
+/// The two variants cover the two structural shapes in the printed card pool:
+/// guessing a value the controller secretly committed (`CommittedChoice`), and
+/// guessing whether a typed quantity comparison holds (`Proposition`). Both feed
+/// the same `EffectOutcomeSignal::Guessed { outcome }` branch machinery, so every
+/// downstream effect dispatches onto existing handlers — this is the building
+/// block, not a per-card special case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum GuessSubject {
+    /// CR 608.2d + CR 608.2c: "guesses which number/color/name you chose" — the
+    /// guesser names a value from the committed choice's printed domain; the
+    /// guess is checked against the controller's last committed value on the
+    /// source (CR 608.2c "the last chosen [value]" — an in-resolution
+    /// back-reference within the single ability, not a CR 607.2d link between two
+    /// distinct printed abilities).
+    CommittedChoice { choice_type: ChoiceType },
+    /// CR 608.2d: "guesses whether [lhs] [comparator] [rhs]" — the guesser
+    /// answers a yes/no proposition about a typed quantity comparison resolved
+    /// against game state at resolution.
+    Proposition {
+        lhs: QuantityExpr,
+        comparator: Comparator,
+        rhs: QuantityExpr,
+    },
+}
+
 /// CR 122.1 + CR 208.1: the scaling clause of [`Effect::EachPlayerCopyChosen`]
 /// — put `counter_type` counters on the created copy equal to `scale_property`
 /// of the second chosen object. Absent (`scale: None`) when the effect never
@@ -10356,6 +10430,20 @@ pub enum Effect {
         /// as a type-tagged enum (omitted when `Chosen`).
         #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
         selection: TargetSelectionMode,
+    },
+    /// CR 608.2d + CR 608.2e: a player other than the controller makes a guess
+    /// (a choice made during resolution by a player other than the spell/ability
+    /// controller). The controller's source generated the ability (CR 113.7).
+    ///
+    /// This is the deferred-outcome interactive primitive: the resolver only
+    /// raises the `WaitingFor::OpponentGuess` round-trip and computes the legal
+    /// option set; the answer handler stamps the correct/incorrect outcome onto
+    /// the stashed continuation chain via `EffectOutcomeSignal::Guessed`. Both
+    /// the guesser and the thing being guessed are reference-resolved, so this
+    /// effect is non-targeting.
+    OpponentGuess {
+        guesser: ControllerRef,
+        subject: Box<GuessSubject>,
     },
     /// CR 311.7 + CR 607.2d / CR 607.2m (by analogy): symmetric per-player anchor
     /// swap — "each player who last chose `first` chooses `second`, and vice
@@ -13157,6 +13245,7 @@ impl Effect {
             | Effect::Cleanup { .. }
             | Effect::SearchOutsideGame { .. }
             | Effect::Choose { .. }
+            | Effect::OpponentGuess { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::SolveCase
             | Effect::SetClassLevel { .. }
@@ -13463,6 +13552,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Populate
             | Effect::Clash
+            | Effect::OpponentGuess { .. }
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
@@ -13713,6 +13803,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Populate
             | Effect::Clash
+            | Effect::OpponentGuess { .. }
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
@@ -13963,6 +14054,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ExileTop { .. } => "ExileTop",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
+        Effect::OpponentGuess { .. } => "OpponentGuess",
         Effect::SwapChosenLabels { .. } => "SwapChosenLabels",
         Effect::ChooseDamageSource { .. } => "ChooseDamageSource",
         Effect::Suspect { .. } => "Suspect",
@@ -14154,6 +14246,9 @@ pub enum EffectKind {
     ProliferateTarget,
     Populate,
     Clash,
+    /// CR 608.2d + CR 608.2e: an opponent / the defending player guesses a
+    /// committed value or proposition during resolution.
+    OpponentGuess,
     /// CR 701.4a: Behold a [quality] (choose-or-reveal keyword action).
     Behold,
     EndTheTurn,
@@ -14454,6 +14549,7 @@ impl From<&Effect> for EffectKind {
             Effect::ExileTop { .. } => EffectKind::ExileTop,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
+            Effect::OpponentGuess { .. } => EffectKind::OpponentGuess,
             // CR 311.7: The chaos swap re-chooses each player's anchor, so it
             // reports as a `Choose`-kind resolution for event/AI purposes.
             Effect::SwapChosenLabels { .. } => EffectKind::Choose,
@@ -15717,6 +15813,21 @@ impl AbilityDefinition {
     }
 }
 
+/// The result of an `Effect::OpponentGuess` round-trip.
+///
+/// CR 608.2d: after the guesser answers, the outcome is stamped onto every
+/// stashed continuation branch via `set_guess_outcome_recursive`. Both
+/// polarities are positive tests: "if they guessed right" checks
+/// `GuessOutcome::Correct`, "if they guessed wrong" checks
+/// `GuessOutcome::Incorrect`. When no guess happened (impossible commit per
+/// CR 609.3, or empty hand) `SpellContext::guess_outcome` is `None` and
+/// NEITHER polarity fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuessOutcome {
+    Correct,
+    Incorrect,
+}
+
 /// Which previous-effect outcome a conditional sub-ability asks about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectOutcomeSignal {
@@ -15727,6 +15838,13 @@ pub enum EffectOutcomeSignal {
     /// CR 101.3 + CR 608.2c: "for each opponent who can't" reads whether the
     /// current player-scope iteration's mandatory instruction succeeded.
     CurrentScopeSucceeded,
+    /// CR 608.2d: the just-resolved `Effect::OpponentGuess` outcome. Both
+    /// polarities are positive tests: "if they guessed right" reads
+    /// `Guessed { outcome: GuessOutcome::Correct }`, "if they guessed wrong"
+    /// reads `Guessed { outcome: GuessOutcome::Incorrect }`. When no guess
+    /// happened (impossible commit per CR 609.3, empty hand) the source
+    /// `SpellContext::guess_outcome` is `None` and NEITHER polarity fires.
+    Guessed { outcome: GuessOutcome },
 }
 
 /// Condition on an ability within a sub_ability chain.
@@ -16344,6 +16462,15 @@ pub struct SpellContext {
     /// Used by AbilityCondition::effect_performed() to gate dependent sub_abilities.
     #[serde(default)]
     pub optional_effect_performed: bool,
+    /// CR 608.2d: The just-resolved `Effect::OpponentGuess` outcome, stamped onto
+    /// the stashed continuation chain by the guess answer handler. Tri-state:
+    /// `None` = no guess happened (impossible commit per CR 609.3 / empty hand),
+    /// `Some(GuessOutcome::Correct)` = guessed correctly,
+    /// `Some(GuessOutcome::Incorrect)` = guessed incorrectly.
+    /// Read by `EffectOutcomeSignal::Guessed { outcome }`; `None` makes both
+    /// polarities false so neither rider branch fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guess_outcome: Option<GuessOutcome>,
     /// CR 608.2d: The player who accepted an "any opponent may" optional effect.
     /// Used to resolve "that player" / "them" backreferences and target scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -19307,6 +19434,40 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2d: Stamp `context.guess_outcome` across the local ability chain.
+    /// Used when the `Effect::OpponentGuess` answer arrives after the prompt
+    /// suspended the parent chain — the stashed branch continuation was captured
+    /// before the guess, so its context must be updated retroactively for
+    /// `EffectOutcomeSignal::Guessed { outcome }` gates to evaluate correctly on
+    /// drain (mirrors `set_optional_effect_performed_recursive`).
+    pub fn set_guess_outcome_recursive(&mut self, outcome: Option<GuessOutcome>) {
+        self.context.guess_outcome = outcome;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_guess_outcome_recursive(outcome);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_guess_outcome_recursive(outcome);
+        }
+    }
+
+    /// CR 608.2d: Make `player` available as a player target across the chain so
+    /// a `TargetFilter::ParentTarget` anaphor ("they lose life ...") resolves to
+    /// the guesser. Inserted at the front so it wins the first-player-target
+    /// lookup. Any existing occurrence of this player is removed first to
+    /// guarantee they land at index 0 regardless of their prior seat position.
+    pub fn push_front_player_target_recursive(&mut self, player: PlayerId) {
+        // CR 608.2d: Remove any existing occurrence first so the guesser is
+        // always at index 0 regardless of seat order in the target list.
+        self.targets.retain(|t| t != &TargetRef::Player(player));
+        self.targets.insert(0, TargetRef::Player(player));
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.push_front_player_target_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.push_front_player_target_recursive(player);
+        }
+    }
+
     pub fn set_original_controller_recursive(&mut self, player: PlayerId) {
         self.original_controller = Some(player);
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -19477,6 +19638,40 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn number_range_distinctness_serde_is_backward_compatible() {
+        // Legacy `{min,max}` JSON deserializes to the default Repeatable, and a
+        // Repeatable value re-serializes WITHOUT the field (byte-stable).
+        let legacy: ChoiceType =
+            serde_json::from_str(r#"{"NumberRange":{"min":1,"max":5}}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ChoiceType::NumberRange {
+                min: 1,
+                max: 5,
+                distinctness: NumberDistinctness::Repeatable,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"NumberRange":{"min":1,"max":5}}"#,
+            "Repeatable must not emit the distinctness field"
+        );
+
+        // A DistinctFromSourceHistory value round-trips and emits the field.
+        let distinct = ChoiceType::NumberRange {
+            min: 1,
+            max: 5,
+            distinctness: NumberDistinctness::DistinctFromSourceHistory,
+        };
+        let json = serde_json::to_string(&distinct).unwrap();
+        assert!(
+            json.contains("DistinctFromSourceHistory"),
+            "non-default distinctness must serialize, got {json}"
+        );
+        assert_eq!(serde_json::from_str::<ChoiceType>(&json).unwrap(), distinct);
+    }
 
     /// CR 106.6: `ManaSpendRestriction::is_coverage_supported` must classify each
     /// leaf by whether its lowered semantics are production-live today, and require
@@ -21907,5 +22102,73 @@ mod modal_ability_tests {
         let json = serde_json::to_string(&modern).expect("serialize modern PayCost");
         let back: Effect = serde_json::from_str(&json).expect("modern PayCost must round-trip");
         assert_eq!(back, modern);
+    }
+
+    /// CR 608.2d: `push_front_player_target_recursive` must promote a guesser
+    /// from any non-leading slot to index 0, and the guesser must appear exactly
+    /// once afterward. This is the regression for the prior bug where a
+    /// continuation with targets `[Player(other), Player(guesser)]` — guesser in
+    /// slot 1 — was NOT corrected before the fix, causing `target_player()` to
+    /// bind `other` instead of `guesser` for the "they lose life" rider.
+    ///
+    /// The fix (`retain` before `insert`) must hold for both top-level targets and
+    /// every recursive sub/else branch.
+    #[test]
+    fn push_front_player_target_recursive_promotes_non_leading_guesser() {
+        let other = PlayerId(1);
+        let guesser = PlayerId(2);
+
+        // Hostile fixture: [Player(other), Player(guesser)] — guesser at slot 1,
+        // not slot 0. Build the same layout into a sub_ability to verify recursion.
+        let sub = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            vec![TargetRef::Player(other), TargetRef::Player(guesser)],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Player(other), TargetRef::Player(guesser)],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+
+        ability.push_front_player_target_recursive(guesser);
+
+        // Top-level: guesser must be at index 0 and appear exactly once.
+        assert_eq!(
+            ability.targets[0],
+            TargetRef::Player(guesser),
+            "guesser must be promoted to index 0 in top-level targets"
+        );
+        assert_eq!(
+            ability
+                .targets
+                .iter()
+                .filter(|t| **t == TargetRef::Player(guesser))
+                .count(),
+            1,
+            "guesser must appear exactly once in top-level targets after promotion"
+        );
+
+        // Sub-ability: the fix must propagate recursively.
+        let sub = ability.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub.targets[0],
+            TargetRef::Player(guesser),
+            "guesser must be promoted to index 0 in sub_ability targets"
+        );
+        assert_eq!(
+            sub.targets
+                .iter()
+                .filter(|t| **t == TargetRef::Player(guesser))
+                .count(),
+            1,
+            "guesser must appear exactly once in sub_ability targets after promotion"
+        );
     }
 }

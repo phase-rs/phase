@@ -4384,6 +4384,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
                     max: max_u8,
+                    distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,

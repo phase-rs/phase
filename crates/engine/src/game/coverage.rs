@@ -1864,7 +1864,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
             }
         }
         ChoiceType::CardName => "card name",
-        ChoiceType::NumberRange { min, max } => return format!("number ({min}-{max})"),
+        ChoiceType::NumberRange { min, max, .. } => return format!("number ({min}-{max})"),
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
         ChoiceType::CardPredicate { .. } => "card predicate",
@@ -2563,6 +2563,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if *persist {
                 d.push(("persist".into(), "yes".into()));
             }
+        }
+        Effect::OpponentGuess { guesser, subject } => {
+            d.push(("guesser".into(), format!("{guesser:?}")));
+            d.push((
+                "subject".into(),
+                match subject.as_ref() {
+                    crate::types::ability::GuessSubject::CommittedChoice { choice_type } => {
+                        format!("committed {}", fmt_choice_type(choice_type))
+                    }
+                    crate::types::ability::GuessSubject::Proposition { .. } => {
+                        "proposition".into()
+                    }
+                },
+            ));
         }
         Effect::SwapChosenLabels { first, second } => {
             d.push(("swap".into(), format!("{first} <-> {second}")));
@@ -6450,6 +6464,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             EffectOutcomeSignal::CurrentScopeSucceeded => {
                 ("EffectOutcomeCurrentScopeSucceeded", Handled)
             }
+            EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),

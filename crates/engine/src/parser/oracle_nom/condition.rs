@@ -3988,7 +3988,7 @@ fn existential_aggregate(comparator: Comparator) -> AggregateFunction {
 /// CR 119: Comparator phrase for current life total checks. Longest
 /// alternatives must precede their prefixes ("less than or equal to" before
 /// "less than").
-fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
+pub(crate) fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
     alt((
         value(
             Comparator::LE,

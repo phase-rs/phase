@@ -76,6 +76,11 @@ pub fn resolve(
     } else {
         None
     };
+    let persist_player = if persist && matches!(choice_type, ChoiceType::Labeled { .. }) {
+        ability.scoped_player
+    } else {
+        None
+    };
 
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
@@ -89,7 +94,7 @@ pub fn resolve(
         // persisting choice records the anchor onto that exact player. Outside a
         // fan-out (Khans Siege), `scoped_player` is `None`, so this stays `None`
         // and the object-scoped `source_id` binding is preserved unchanged.
-        persist_player: if persist { ability.scoped_player } else { None },
+        persist_player,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -490,7 +495,47 @@ fn compute_options(
         // CardName options are provided by the frontend from its local card database.
         // The engine sends an empty list to avoid serializing 30k+ names every state update.
         ChoiceType::CardName => Vec::new(),
-        ChoiceType::NumberRange { min, max } => (*min..=*max).map(|n| n.to_string()).collect(),
+        ChoiceType::NumberRange {
+            min,
+            max,
+            distinctness,
+        } => match distinctness {
+            crate::types::ability::NumberDistinctness::Repeatable => {
+                (*min..=*max).map(|n| n.to_string()).collect()
+            }
+            // CR 609.3 + "...that hasn't been chosen": each successive COMMIT
+            // excludes numbers already committed on this source across prior
+            // resolutions. Chosen numbers persist as `ChosenAttribute::Number`
+            // (bind_named_choice when persist), so the legal domain is
+            // (min..=max) minus that history. When all are exhausted, options is
+            // empty → `choose::resolve` sets `cost_payment_failed_flag` and
+            // no-ops, blocking any dependent guess (CR 609.3).
+            //
+            // BOUNDARY: source-global subtraction; safe for the current pool
+            // (only The Toymaker's Trap sets DistinctFromSourceHistory AND
+            // re-chooses). If a card ever persists a number from one choice AND
+            // offers a separate DistinctFromSourceHistory NumberRange on the same
+            // source, scope the read to a per-choice tag.
+            crate::types::ability::NumberDistinctness::DistinctFromSourceHistory => {
+                let used: Vec<u8> = state
+                    .objects
+                    .get(&source_id)
+                    .map(|o| {
+                        o.chosen_attributes
+                            .iter()
+                            .filter_map(|a| match a {
+                                ChosenAttribute::Number(n) => Some(*n),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (*min..=*max)
+                    .filter(|n| !used.contains(n))
+                    .map(|n| n.to_string())
+                    .collect()
+            }
+        },
         ChoiceType::Labeled { options } => options.clone(),
         ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
             ChoiceType::card_predicate_labels(options)
@@ -923,7 +968,11 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Choose {
-                choice_type: ChoiceType::NumberRange { min: 0, max: 5 },
+                choice_type: ChoiceType::NumberRange {
+                    min: 0,
+                    max: 5,
+                    distinctness: crate::types::ability::NumberDistinctness::Repeatable,
+                },
                 persist: false,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
@@ -939,6 +988,49 @@ mod tests {
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn number_range_distinctness_excludes_committed_history() {
+        // CR 609.3: a DistinctFromSourceHistory domain excludes numbers already
+        // committed on the source; Repeatable ignores history.
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let mut obj = crate::game::game_object::GameObject::new(
+            source_id,
+            crate::types::identifiers::CardId(0),
+            PlayerId(0),
+            "Source".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Number(2));
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Number(4));
+        state.objects.insert(source_id, obj);
+
+        let distinct = ChoiceType::NumberRange {
+            min: 1,
+            max: 5,
+            distinctness: crate::types::ability::NumberDistinctness::DistinctFromSourceHistory,
+        };
+        assert_eq!(
+            compute_options(&state, &distinct, PlayerId(0), source_id, &[]),
+            vec!["1", "3", "5"],
+            "committed 2 and 4 are excluded"
+        );
+
+        // Same history under Repeatable: full range is still offered.
+        let repeatable = ChoiceType::NumberRange {
+            min: 1,
+            max: 5,
+            distinctness: crate::types::ability::NumberDistinctness::Repeatable,
+        };
+        assert_eq!(
+            compute_options(&state, &repeatable, PlayerId(0), source_id, &[]),
+            vec!["1", "2", "3", "4", "5"],
+            "Repeatable ignores source history"
+        );
     }
 
     #[test]

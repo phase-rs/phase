@@ -103,9 +103,10 @@
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
-    ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, RepeatContinuation, ResolvedAbility, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2877,6 +2878,9 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             legacy_effect(replacement_effect)
         }
+        Effect::OpponentGuess { guesser, subject } => {
+            legacy_controller_ref(guesser) || legacy_guess_subject(subject)
+        }
         // Payload-less keyword action (planar chaos, CR 311.7) — no tag-bearing field.
         Effect::ChaosEnsues => false,
         // Payload-less keyword action (reverse turn order, CR 103.1) — no
@@ -3251,6 +3255,42 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::Unimplemented { .. } => false,
+    }
+}
+
+fn legacy_guess_subject(subject: &GuessSubject) -> bool {
+    match subject {
+        GuessSubject::CommittedChoice { choice_type } => legacy_choice_type(choice_type),
+        GuessSubject::Proposition {
+            lhs,
+            comparator: _,
+            rhs,
+        } => legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs),
+    }
+}
+
+fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
+    match choice_type {
+        crate::types::ability::ChoiceType::Opponent { restriction } => {
+            restriction.as_deref().is_some_and(legacy_player_filter)
+        }
+        crate::types::ability::ChoiceType::CreatureType { .. }
+        | crate::types::ability::ChoiceType::Color { .. }
+        | crate::types::ability::ChoiceType::OddOrEven
+        | crate::types::ability::ChoiceType::BasicLandType
+        | crate::types::ability::ChoiceType::CardType { .. }
+        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::NumberRange { .. }
+        | crate::types::ability::ChoiceType::Labeled { .. }
+        | crate::types::ability::ChoiceType::LandType
+        | crate::types::ability::ChoiceType::CardPredicate { .. }
+        | crate::types::ability::ChoiceType::CardPredicateGuess { .. }
+        | crate::types::ability::ChoiceType::Player
+        | crate::types::ability::ChoiceType::TwoColors
+        | crate::types::ability::ChoiceType::Word
+        | crate::types::ability::ChoiceType::Artist
+        | crate::types::ability::ChoiceType::Keyword { .. }
+        | crate::types::ability::ChoiceType::CounterKind { .. } => false,
     }
 }
 
@@ -3921,6 +3961,11 @@ fn rw_effect(
         Effect::ChooseCounterAdjustment { count, .. } => {
             let mut p = RwProfile::conservative();
             p.merge(rw_quantity_expr(count));
+            (p, None)
+        }
+        Effect::OpponentGuess { guesser, subject } => {
+            let mut p = rw_controller_ref(guesser);
+            p.merge(rw_guess_subject(subject));
             (p, None)
         }
         // CR 614.1a + CR 611.2c + CR 603.7 (PR-6.75): a floating planeswalk
@@ -5351,6 +5396,53 @@ fn rw_quantity_expr(x: &QuantityExpr) -> RwProfile {
             }
             p
         }
+    }
+}
+
+fn rw_guess_subject(subject: &GuessSubject) -> RwProfile {
+    match subject {
+        GuessSubject::CommittedChoice { choice_type } => {
+            let mut p = rw_choice_type(choice_type);
+            // CR 608.2d + CR 603.10a: a committed-value guess consumes the source's
+            // persisted choice, so same-event sibling instances are member-bound.
+            p.reads_member_bound = true;
+            p
+        }
+        GuessSubject::Proposition {
+            lhs,
+            comparator: _,
+            rhs,
+        } => {
+            let mut p = rw_quantity_expr(lhs);
+            p.merge(rw_quantity_expr(rhs));
+            p
+        }
+    }
+}
+
+fn rw_choice_type(choice_type: &crate::types::ability::ChoiceType) -> RwProfile {
+    match choice_type {
+        crate::types::ability::ChoiceType::Opponent { restriction } => match restriction {
+            Some(filter) => rw_player_filter(filter),
+            None => RwProfile::empty(),
+        },
+        crate::types::ability::ChoiceType::CreatureType { .. }
+        | crate::types::ability::ChoiceType::Color { .. }
+        | crate::types::ability::ChoiceType::OddOrEven
+        | crate::types::ability::ChoiceType::BasicLandType
+        | crate::types::ability::ChoiceType::CardType { .. }
+        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::NumberRange { .. }
+        | crate::types::ability::ChoiceType::Labeled { .. }
+        | crate::types::ability::ChoiceType::LandType
+        | crate::types::ability::ChoiceType::CardPredicate { .. }
+        | crate::types::ability::ChoiceType::CardPredicateGuess { .. }
+        | crate::types::ability::ChoiceType::Player
+        | crate::types::ability::ChoiceType::TwoColors
+        | crate::types::ability::ChoiceType::Word
+        | crate::types::ability::ChoiceType::Artist
+        | crate::types::ability::ChoiceType::Keyword { .. }
+        | crate::types::ability::ChoiceType::CounterKind { .. } => RwProfile::empty(),
     }
 }
 

@@ -2211,6 +2211,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         result.repeat_until = Some(continuation.clone());
     }
 
+    // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
+    super::propagate_committed_choice_type_to_guesses(&mut result);
+    // CR 608.2d: gate the whole "if they guessed wrong/right" branch, including
+    // any "and ..." continuation steps.
+    super::propagate_guess_branch_condition_to_continuations(&mut result);
+
     result
 }
 

@@ -496,6 +496,10 @@ fn ability_uses_chosen_card_predicate(def: &AbilityDefinition) -> bool {
 
 fn effect_uses_chosen_card_predicate(effect: &Effect) -> bool {
     match effect {
+        Effect::Choose {
+            choice_type: ChoiceType::CardPredicateGuess { .. },
+            ..
+        } => true,
         Effect::Dig { filter, .. }
         | Effect::RevealUntil { filter, .. }
         | Effect::SearchLibrary { filter, .. }
@@ -5242,6 +5246,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }

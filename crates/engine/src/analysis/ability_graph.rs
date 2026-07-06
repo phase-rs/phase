@@ -1012,6 +1012,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::ChooseCounterAdjustment { .. }
         // CR 608.2d + CR 122.1: interactive counter-kind choice + its consume
         // add no static resource seed (the magnitude is one counter, gated on a

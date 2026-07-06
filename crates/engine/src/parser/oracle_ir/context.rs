@@ -49,6 +49,14 @@ pub(crate) struct ParseContext {
     /// ("they put counters on a creature they control") binds to the player
     /// chosen by the immediately-preceding `Choose(Player)`.
     pub chosen_player_count: u8,
+    /// CR 608.2d + CR 608.2c: Committed `ChoiceType` from a preceding
+    /// `Effect::Choose` clause, threaded forward so a later "an opponent guesses
+    /// which [value] you chose" clause embeds the printed domain in
+    /// `GuessSubject::CommittedChoice`. The choose and the guess sit in the same
+    /// ability resolution (CR 608.2c in-order instructions), not two distinct
+    /// printed abilities (CR 607.2d). Mirrors `chosen_player_count` as a
+    /// parse-time accumulator (not serialized).
+    pub pending_choice_type: Option<crate::types::ability::ChoiceType>,
     /// CR 115.1 + CR 701.9b: Target selection mode for the most recent target
     /// phrase parsed via `parse_target_with_ctx`. The chunk loop in
     /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and

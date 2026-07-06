@@ -1353,6 +1353,24 @@ pub fn candidate_actions_broad_with_probe(
             source_id,
             ..
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        // CR 608.2d: every printed guess is a legal candidate. Enumerated
+        // uniformly here for legality + server validation; the AI's actual pick
+        // is made by a hidden-info determinization pre-emption in
+        // `phase-ai::search::choose_action` so it cannot read the committed value.
+        WaitingFor::OpponentGuess {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|choice| {
+                candidate(
+                    GameAction::ChooseOption {
+                        choice: choice.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 601.2b + CR 701.4a: pre-choice behold type prompt — one ChooseOption
         // per FEASIBLE creature type (options already exclude unpayable types).
         WaitingFor::CostTypeChoice {

@@ -3536,6 +3536,11 @@ pub(super) fn parse_choose_ast(
         } else {
             TargetSelectionMode::Chosen
         };
+        // CR 608.2c: stash the committed domain so a later "an opponent guesses
+        // which [value] you chose" clause in this same ability resolution embeds
+        // it in `GuessSubject::CommittedChoice` (in-order instructions within one
+        // ability — not a CR 607.2d link between two distinct printed abilities).
+        ctx.pending_choice_type = Some(choice_type.clone());
         return Some(ChooseImperativeAst::NamedChoice {
             choice_type,
             selection,
@@ -4609,6 +4614,12 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // control gain that ability" clause can read the typed
             // `ChosenAttribute::Keyword` via
             // `ContinuousModification::AddChosenKeyword` at layer evaluation.
+            // CR 609.3 + CR 608.2d: a `DistinctFromSourceHistory` number choice
+            // ("...that hasn't been chosen") must persist each committed value on
+            // the source so successive resolutions exclude prior picks — an
+            // already-chosen number is an illegal option (CR 608.2d). The same
+            // persisted value lets the guess answer read the last committed
+            // number within that resolution (CR 608.2c; The Toymaker's Trap).
             persist: matches!(
                 choice_type,
                 ChoiceType::CardName
@@ -4616,6 +4627,11 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                     | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
                     | ChoiceType::Keyword { .. }
+                    | ChoiceType::NumberRange {
+                        distinctness:
+                            crate::types::ability::NumberDistinctness::DistinctFromSourceHistory,
+                        ..
+                    }
             ),
             choice_type,
         },

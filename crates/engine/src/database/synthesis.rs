@@ -8834,6 +8834,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
             choice_type: ChoiceType::NumberRange {
                 min: 1,
                 max: final_chapter.min(u8::MAX as u32) as u8,
+                distinctness: crate::types::ability::NumberDistinctness::Repeatable,
             },
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -22575,7 +22576,7 @@ mod devour_synthesis_tests {
             .expect("read-ahead ETB replacement");
         let execute = etb.execute.as_deref().expect("execute body");
         let Effect::Choose {
-            choice_type: ChoiceType::NumberRange { min, max },
+            choice_type: ChoiceType::NumberRange { min, max, .. },
             persist,
             ..
         } = &*execute.effect

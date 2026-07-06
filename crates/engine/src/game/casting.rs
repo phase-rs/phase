@@ -267,7 +267,11 @@ pub(crate) fn begin_variable_speed_payment(
     WaitingFor::NamedChoice {
         player,
         options: (min..=max).map(|value| value.to_string()).collect(),
-        choice_type: ChoiceType::NumberRange { min, max },
+        choice_type: ChoiceType::NumberRange {
+            min,
+            max,
+            distinctness: crate::types::ability::NumberDistinctness::Repeatable,
+        },
         source_id: None,
         persist_player: None,
     }

@@ -94,12 +94,13 @@ use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
     ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DoubleTarget, Duration, Effect, EffectScope, FilterProp, GameRestriction, IntensityScope,
-    IterationKindBinding, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    ObjectProperty, ObjectScope, OriginConstraint, PlayerFilter, PlayerRelation, PlayerScope,
-    PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
+    DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction,
+    GuessSubject, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
+    ManaSpendPermission, MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope,
+    OriginConstraint, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
     SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
@@ -372,6 +373,149 @@ fn apply_outer_condition_to_clause(outer: &AbilityCondition, clause: &mut Clause
         .take()
         .or_else(|| clause.parsed.condition.clone());
     clause.condition = Some(merge_clause_conditions(outer.clone(), inner));
+}
+
+/// CR 608.2c: Propagate the committed `ChoiceType` from a chain's head
+/// `Effect::Choose` onto every `GuessSubject::CommittedChoice` in the assembled
+/// definition. The head `Choose` is the in-resolution authority for "the last
+/// chosen value" (CR 608.2c instructions in order within one ability, not a
+/// CR 607.2d link between two distinct printed abilities); the parse-time
+/// `ctx.pending_choice_type` threading is only a hint that may not survive the
+/// "If you do" chunk boundary, so this post-pass is the guarantee. Runs after
+/// the full definition is lowered.
+pub(super) fn propagate_committed_choice_type_to_guesses(ability: &mut AbilityDefinition) {
+    if let Some(choice_type) = find_head_committed_guess_choice_type(ability) {
+        finalize_committed_guess_choice_types(ability, Some(&choice_type));
+    } else {
+        finalize_committed_guess_choice_types(ability, None);
+    }
+}
+
+fn find_head_committed_guess_choice_type(ability: &AbilityDefinition) -> Option<ChoiceType> {
+    if let Effect::Choose { choice_type, .. } = ability.effect.as_ref() {
+        if choice_type_is_committed_guess_domain(choice_type) {
+            return Some(choice_type.clone());
+        }
+    }
+    if let Some(ct) = ability
+        .sub_ability
+        .as_ref()
+        .and_then(|sub| find_head_committed_guess_choice_type(sub))
+    {
+        return Some(ct);
+    }
+    ability
+        .else_ability
+        .as_ref()
+        .and_then(|els| find_head_committed_guess_choice_type(els))
+}
+
+fn choice_type_is_committed_guess_domain(choice_type: &ChoiceType) -> bool {
+    matches!(choice_type, ChoiceType::NumberRange { .. })
+}
+
+fn finalize_committed_guess_choice_types(
+    ability: &mut AbilityDefinition,
+    choice_type: Option<&ChoiceType>,
+) {
+    if let Effect::OpponentGuess { subject, .. } = ability.effect.as_mut() {
+        if let GuessSubject::CommittedChoice { choice_type: ct } = subject.as_mut() {
+            if is_placeholder_committed_guess_choice(ct) {
+                match choice_type {
+                    Some(choice_type) => *ct = choice_type.clone(),
+                    None => {
+                        *ability.effect = Effect::unimplemented(
+                            "opponent_guess",
+                            "opponent guess without committed choice domain",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if matches!(
+        ability.effect.as_ref(),
+        Effect::OpponentGuess {
+            guesser: ControllerRef::Opponent,
+            subject
+        } if matches!(subject.as_ref(), GuessSubject::CommittedChoice { .. })
+    ) {
+        let old_sub = ability.sub_ability.take();
+        let subject = match ability.effect.as_ref() {
+            Effect::OpponentGuess { subject, .. } => subject.as_ref().clone(),
+            _ => unreachable!("matched above"),
+        };
+        *ability.effect = Effect::Choose {
+            choice_type: ChoiceType::Opponent { restriction: None },
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        };
+        let mut guess = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::OpponentGuess {
+                guesser: ControllerRef::ChosenPlayer { index: 0 },
+                subject: Box::new(subject),
+            },
+        );
+        guess.sub_ability = old_sub;
+        ability.sub_ability = Some(Box::new(guess));
+    }
+
+    if let Effect::Choose {
+        choice_type: ChoiceType::Opponent { .. },
+        ..
+    } = ability.effect.as_ref()
+    {
+        if ability.sub_ability.as_ref().is_some_and(|sub| {
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Unimplemented { name, .. } if name == "opponent_guess"
+            )
+        }) {
+            *ability.effect = Effect::unimplemented(
+                "opponent_guess",
+                "opponent guess without committed choice domain",
+            );
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        finalize_committed_guess_choice_types(sub, choice_type);
+    }
+    if let Some(els) = ability.else_ability.as_mut() {
+        finalize_committed_guess_choice_types(els, choice_type);
+    }
+}
+
+/// CR 608.2d: A compound wrong/right branch ("they lose life ... and you draw a
+/// card") splits into a head clause gated `Guessed { outcome }` and an "and"
+/// continuation that parsed with no condition. Propagate the branch's guess
+/// condition down consecutive unconditioned continuation steps so the whole
+/// branch is gated, stopping at the next explicitly-conditioned node (e.g. the
+/// opposite-polarity "if they guessed right" branch).
+pub(super) fn propagate_guess_branch_condition_to_continuations(ability: &mut AbilityDefinition) {
+    if matches!(
+        ability.condition,
+        Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::Guessed { .. }
+        })
+    ) {
+        let cond = ability.condition.clone();
+        let mut node = ability.sub_ability.as_deref_mut();
+        while let Some(n) = node {
+            if n.condition.is_some() {
+                break;
+            }
+            n.condition = cond.clone();
+            node = n.sub_ability.as_deref_mut();
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        propagate_guess_branch_condition_to_continuations(sub);
+    }
+    if let Some(els) = ability.else_ability.as_mut() {
+        propagate_guess_branch_condition_to_continuations(els);
+    }
 }
 
 pub(super) fn rewrite_cost_paid_object_quantities_in_definition(ability: &mut AbilityDefinition) {
@@ -6219,12 +6363,40 @@ fn chain_has_card_predicate_guess(clauses: &[ClauseIr]) -> bool {
         .any(|clause| parsed_clause_has_card_predicate_guess(&clause.parsed))
 }
 
+fn chain_has_guess_outcome_authority(clauses: &[ClauseIr]) -> bool {
+    let has_choice = clauses
+        .iter()
+        .any(|clause| parsed_clause_has_choice_effect(&clause.parsed));
+    clauses
+        .iter()
+        .any(|clause| parsed_clause_has_guess_outcome_authority(&clause.parsed, has_choice))
+}
+
 fn parsed_clause_has_card_predicate_guess(clause: &ParsedEffectClause) -> bool {
     effect_is_card_predicate_guess(&clause.effect)
         || clause
             .sub_ability
             .as_deref()
             .is_some_and(ability_has_card_predicate_guess)
+}
+
+fn parsed_clause_has_guess_outcome_authority(
+    clause: &ParsedEffectClause,
+    has_choice: bool,
+) -> bool {
+    effect_has_guess_outcome_authority(&clause.effect, has_choice)
+        || clause
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| ability_has_guess_outcome_authority(sub, has_choice))
+}
+
+fn parsed_clause_has_choice_effect(clause: &ParsedEffectClause) -> bool {
+    matches!(clause.effect, Effect::Choose { .. })
+        || clause
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_choice_effect)
 }
 
 fn ability_has_card_predicate_guess(def: &AbilityDefinition) -> bool {
@@ -6237,6 +6409,53 @@ fn ability_has_card_predicate_guess(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(ability_has_card_predicate_guess)
+}
+
+fn ability_has_guess_outcome_authority(def: &AbilityDefinition, has_choice: bool) -> bool {
+    effect_has_guess_outcome_authority(def.effect.as_ref(), has_choice)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| ability_has_guess_outcome_authority(sub, has_choice))
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(|els| ability_has_guess_outcome_authority(els, has_choice))
+}
+
+fn ability_has_choice_effect(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::Choose { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_choice_effect)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_has_choice_effect)
+}
+
+fn effect_has_guess_outcome_authority(effect: &Effect, has_choice: bool) -> bool {
+    match effect {
+        Effect::OpponentGuess { subject, .. } => match subject.as_ref() {
+            GuessSubject::Proposition { .. } => true,
+            GuessSubject::CommittedChoice { choice_type } => {
+                has_choice || !is_placeholder_committed_guess_choice(choice_type)
+            }
+        },
+        _ => false,
+    }
+}
+
+fn is_placeholder_committed_guess_choice(choice_type: &ChoiceType) -> bool {
+    matches!(
+        choice_type,
+        ChoiceType::NumberRange {
+            min: 0,
+            max: 0,
+            distinctness: NumberDistinctness::Repeatable,
+        }
+    )
 }
 
 fn effect_is_card_predicate_guess(effect: &Effect) -> bool {
@@ -6566,6 +6785,38 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
     if let Some(clause) = try_parse_player_draws_and_gains_control(text, ctx) {
         return clause;
+    }
+
+    // CR 608.2d + CR 608.2e: "an opponent guesses ..." / "defending player
+    // guesses ..." — the opponent-guess interactive primitive. Dispatched before
+    // the generic imperative fallback (which would emit `Unimplemented`).
+    if let Some(clause) = try_parse_guess_clause(text, ctx) {
+        return clause;
+    }
+
+    // CR 608.2d: "[then you] reveal the number you chose" — revealing the
+    // secretly-committed value. The engine models the secret as a redacted
+    // `ChosenAttribute::Number` (visibility.rs) that becomes public the moment
+    // the guess is answered, so the explicit reveal is an engine-level
+    // consequence with no separate effect — a no-op at the AST layer.
+    {
+        let lower = text.to_ascii_lowercase();
+        let body = opt(value((), tag::<_, _, OracleError<'_>>("you ")))
+            .parse(lower.as_str())
+            .map(|(rest, _)| rest)
+            .unwrap_or(lower.as_str());
+        if alt((
+            value(
+                (),
+                tag::<_, _, OracleError<'_>>("reveal the number you chose"),
+            ),
+            value((), tag::<_, _, OracleError<'_>>("reveal the chosen number")),
+        ))
+        .parse(body)
+        .is_ok()
+        {
+            return parsed_clause(Effect::NoOp);
+        }
     }
 
     // CR 810: the "two target creatures your team controls each deal damage equal
@@ -19201,6 +19452,197 @@ fn parse_creature_type_enumeration(rest: &str) -> Option<Vec<String>> {
 
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
+/// CR 608.2d + CR 608.2e: Parse an "an opponent guesses ..." / "defending player
+/// guesses ..." clause into `Effect::OpponentGuess`. Nom-only dispatch.
+///
+/// `CommittedChoice` ("guesses which number you chose") reuses the committed
+/// `ChoiceType` threaded forward in `ctx.pending_choice_type`; without a
+/// preceding `Choose` the clause fails (honest `Unimplemented` gap).
+/// `Proposition` ("guesses whether <comparison>") delegates to the shared
+/// condition combinator, with a referent-subject fallback for "that card's
+/// <property>" LHS phrasings the generic combinator cannot reach.
+fn try_parse_guess_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_ascii_lowercase();
+    let (rest, guesser) = alt((
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>("an opponent guesses "),
+        ),
+        value(
+            ControllerRef::DefendingPlayer,
+            tag("defending player guesses "),
+        ),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+
+    if all_consuming(parse_top_card_predicate_guess)
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return None;
+    }
+
+    // CR 608.2c: "guesses which [value] you chose" — committed-choice guess. The
+    // committed domain must come from a preceding `Effect::Choose` in the same
+    // resolution. When the chunk-local context cannot see it yet ("If you do"
+    // sentence boundary), emit a private placeholder that
+    // `propagate_committed_choice_type_to_guesses` must either replace with the
+    // real domain or downgrade to `Unimplemented` before runtime.
+    if let Ok((_, ())) = value((), tag::<_, _, OracleError<'_>>("which ")).parse(rest) {
+        let choice_type = ctx
+            .pending_choice_type
+            .clone()
+            .unwrap_or(ChoiceType::NumberRange {
+                min: 0,
+                max: 0,
+                distinctness: NumberDistinctness::Repeatable,
+            });
+        let subject = GuessSubject::CommittedChoice { choice_type };
+        if matches!(
+            subject,
+            GuessSubject::CommittedChoice {
+                choice_type: ChoiceType::NumberRange {
+                    min: 0,
+                    max: 0,
+                    distinctness: NumberDistinctness::Repeatable
+                }
+            }
+        ) {
+            return Some(parsed_clause(Effect::OpponentGuess {
+                guesser,
+                subject: Box::new(subject),
+            }));
+        }
+        return Some(opponent_guess_clause(guesser, subject));
+    }
+
+    // CR 608.2d: "guesses whether [proposition]" — yes/no proposition guess.
+    if let Ok((body, ())) = value((), tag::<_, _, OracleError<'_>>("whether ")).parse(rest) {
+        let subject = parse_guess_proposition(body)?;
+        return Some(opponent_guess_clause(guesser, subject));
+    }
+
+    None
+}
+
+fn opponent_guess_clause(guesser: ControllerRef, subject: GuessSubject) -> ParsedEffectClause {
+    if guesser != ControllerRef::Opponent {
+        return parsed_clause(Effect::OpponentGuess {
+            guesser,
+            subject: Box::new(subject),
+        });
+    }
+
+    // CR 608.2d + CR 102.3: "an opponent" requires the controller to choose one
+    // eligible opponent in multiplayer. Reuse the existing named-choice pipeline
+    // so the chosen player is threaded to the dependent guess as a
+    // same-resolution `ChosenPlayer`.
+    let mut clause = parsed_clause(Effect::Choose {
+        choice_type: ChoiceType::Opponent { restriction: None },
+        persist: false,
+        selection: TargetSelectionMode::Chosen,
+    });
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::OpponentGuess {
+            guesser: ControllerRef::ChosenPlayer { index: 0 },
+            subject: Box::new(subject),
+        },
+    )));
+    clause
+}
+
+/// CR 608.2d: Parse the proposition body of a "guesses whether ..." clause into
+/// `GuessSubject::Proposition`. Delegates to the shared `parse_inner_condition`
+/// combinator first; falls back to a referent-subject comparison
+/// ("that card's mana value is greater than <quantity>") that the generic
+/// combinator cannot represent (its general comparison requires a literal "x").
+fn parse_guess_proposition(body: &str) -> Option<GuessSubject> {
+    use super::oracle_nom::condition as nom_condition;
+
+    // Delegation first.
+    if let Ok((
+        _,
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        },
+    )) = nom_condition::parse_inner_condition(body)
+    {
+        return Some(GuessSubject::Proposition {
+            lhs,
+            comparator,
+            rhs,
+        });
+    }
+
+    // Fallback: "that card's <property> [is] <comparator> <quantity>".
+    let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("that card's "))
+        .parse(body)
+        .ok()?;
+    let (rest, lhs_ref) = alt((
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target,
+            },
+            tag::<_, _, OracleError<'_>>("mana value "),
+        ),
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+            tag("power "),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::Target,
+            },
+            tag("toughness "),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    // Optional copula "is ".
+    let (rest, _) = opt(value((), tag::<_, _, OracleError<'_>>("is ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, comparator) = nom_condition::parse_life_total_comparator(rest).ok()?;
+    let (_rest, rhs) = nom_quantity::parse_quantity(rest).ok()?;
+    Some(GuessSubject::Proposition {
+        lhs: QuantityExpr::Ref { qty: lhs_ref },
+        comparator,
+        rhs,
+    })
+}
+
+/// CR 609.3: detect a trailing "...that hasn't been chosen" distinctness clause
+/// on a "choose a number" prompt. Returns `DistinctFromSourceHistory` when the
+/// committed value must differ from prior commits on the source, else
+/// `Repeatable`. `tail` is the text following the parsed number.
+fn parse_number_distinctness(tail: &str) -> NumberDistinctness {
+    let tail = tail.trim_start();
+    let parsed: Result<(&str, NumberDistinctness), nom::Err<()>> = alt((
+        value(
+            NumberDistinctness::DistinctFromSourceHistory,
+            tag::<_, _, ()>("that hasn't been chosen this game"),
+        ),
+        value(
+            NumberDistinctness::DistinctFromSourceHistory,
+            tag::<_, _, ()>("that hasn't been chosen"),
+        ),
+        value(
+            NumberDistinctness::DistinctFromSourceHistory,
+            tag::<_, _, ()>("that hasn't been named"),
+        ),
+    ))
+    .parse(tail);
+    parsed
+        .map(|(_, d)| d)
+        .unwrap_or(NumberDistinctness::Repeatable)
+}
+
 pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("choose "),
@@ -19251,33 +19693,38 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     {
         Some(ChoiceType::CardName)
     } else if let Ok((range_rest, _)) = tag::<_, _, E>("a number between ").parse(rest) {
-        // "choose a number between 0 and 13"
+        // "choose a number between 1 and 5 [that hasn't been chosen]"
         let mut parts = range_rest.splitn(3, ' ');
         let min = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
         let and = parts.next();
-        let max = parts
-            .next()
-            .and_then(|s| {
-                s.trim_end_matches(|c: char| !c.is_ascii_digit())
-                    .parse::<u8>()
-                    .ok()
-            })
-            .unwrap_or(20);
+        // Split the leading max digits from any trailing distinctness clause
+        // ("...5 that hasn't been chosen") with a nom digit combinator so the
+        // clause is detected (CR 609.3), not silently dropped.
+        let max_token = parts.next().unwrap_or("");
+        let (max, tail) = match nom::character::complete::digit1::<_, ()>(max_token) {
+            Ok((rest_after, digits)) => (digits.parse::<u8>().unwrap_or(20), rest_after),
+            Err(_) => (20, ""),
+        };
+        let distinctness = parse_number_distinctness(tail);
         if and == Some("and") {
-            Some(ChoiceType::NumberRange { min, max })
+            Some(ChoiceType::NumberRange {
+                min,
+                max,
+                distinctness,
+            })
         } else {
             None
         }
     } else if let Ok((gt_rest, _)) = tag::<_, _, E>("a number greater than ").parse(rest) {
         // "choose a number greater than 0" — open-ended, cap at 20
-        let n = gt_rest
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(0);
+        let (n, tail) = match nom::character::complete::digit1::<_, ()>(gt_rest.trim_start()) {
+            Ok((rest_after, digits)) => (digits.parse::<u8>().unwrap_or(0), rest_after),
+            Err(_) => (0, ""),
+        };
         Some(ChoiceType::NumberRange {
             min: n + 1,
             max: 20,
+            distinctness: parse_number_distinctness(tail),
         })
     } else if tag::<_, _, E>("a number").parse(rest).is_ok() {
         // Generic "choose a number" (default range 0-20). A bare-prefix `tag`,
@@ -19287,7 +19734,15 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // produced no choice. The bounded "a number between" / "a number greater
         // than" forms are consumed by the earlier branches, so this arm is reached
         // only for a bare "a number".
-        Some(ChoiceType::NumberRange { min: 0, max: 20 })
+        let tail = tag::<_, _, ()>("a number")
+            .parse(rest)
+            .map(|(tail, _)| tail)
+            .unwrap_or("");
+        Some(ChoiceType::NumberRange {
+            min: 0,
+            max: 20,
+            distinctness: parse_number_distinctness(tail),
+        })
     } else if alt((tag::<_, _, E>("a land type"), tag("a nonbasic land type")))
         .parse(rest)
         .is_ok()
@@ -22572,6 +23027,13 @@ pub(crate) fn parse_effect_chain_ir(
     // made in earlier chunks. Seeded into each `chunk_ctx` and read back after.
     let mut chain_chosen_player_count: u8 = 0;
     let mut chain_chosen_player_scope: Option<ControllerRef> = None;
+    // CR 608.2c: Chain-spanning committed `ChoiceType` from a "secretly choose a
+    // [value]" producer, carried to a following "an opponent guesses which
+    // [value] you chose" clause so the guess embeds the printed domain. Both
+    // clauses resolve in the one ability (CR 608.2c in-order instructions), not
+    // two distinct printed abilities (CR 607.2d). Seeded into each `chunk_ctx`
+    // and read back after, mirroring `chain_chosen_player_count`.
+    let mut chain_pending_choice_type: Option<ChoiceType> = None;
     // CR 601.2c + CR 608.2c: Chain-spanning registry of target slots declared by
     // a "Choose target X and target Y" head clause, carried to later clauses so
     // their definite anaphors ("that Equipment", "the chosen creature", "the
@@ -23696,7 +24158,55 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        let (condition, text) = strip_additional_cost_conditional(normalized_text);
+        let has_card_predicate_guess = chain_has_card_predicate_guess(&clauses);
+        let (predicate_guess_cond, predicate_guess_text) = if has_card_predicate_guess {
+            conditions::strip_card_predicate_guess_result_conditional(normalized_text)
+                .map(|(cond, body)| (Some(cond), body))
+                .unwrap_or((None, normalized_text.to_string()))
+        } else {
+            (None, normalized_text.to_string())
+        };
+        if has_card_predicate_guess
+            && predicate_guess_cond.is_none()
+            && conditions::is_card_predicate_guess_result_conditional(normalized_text)
+        {
+            clauses.push(unimplemented_clause_ir(
+                "card_predicate_guess_result_condition",
+                normalized_text,
+                chunk.boundary_after,
+            ));
+            continue;
+        }
+
+        let has_guess_outcome_authority = chain_has_guess_outcome_authority(&clauses);
+        if predicate_guess_cond.is_none()
+            && !has_guess_outcome_authority
+            && matches!(
+                strip_guess_outcome_conditional(normalized_text),
+                (Some(_), _)
+            )
+        {
+            clauses.push(unimplemented_clause_ir(
+                "guess_result_condition",
+                normalized_text,
+                chunk.boundary_after,
+            ));
+            continue;
+        }
+        // CR 608.2d: "if they guessed wrong/right, ..." — the OpponentGuess
+        // outcome branch. Card-predicate guesses use the revealed-card condition
+        // above; other guess classes use the generic outcome signal here only
+        // after a supported `OpponentGuess` clause has been parsed.
+        let (condition, text) = match predicate_guess_cond {
+            Some(cond) => (Some(cond), predicate_guess_text),
+            None if has_guess_outcome_authority => {
+                match strip_guess_outcome_conditional(normalized_text) {
+                    (Some(guess_cond), body) => (Some(guess_cond), body),
+                    (None, _) => strip_additional_cost_conditional(normalized_text),
+                }
+            }
+            None => strip_additional_cost_conditional(normalized_text),
+        };
         // CR 205.3m + CR 607.2d + CR 608.2h: target-declaring leading-if that
         // gates the ability's target on the source's chosen creature type
         // ("If target attacking creature token is the chosen type, <body>",
@@ -23721,27 +24231,6 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text)
         };
         let condition = condition.or(leading_cond);
-        let has_card_predicate_guess =
-            condition.is_none() && chain_has_card_predicate_guess(&clauses);
-        let (predicate_guess_cond, text) = if has_card_predicate_guess {
-            conditions::strip_card_predicate_guess_result_conditional(&text)
-                .map(|(cond, body)| (Some(cond), body))
-                .unwrap_or((None, text))
-        } else {
-            (None, text)
-        };
-        if has_card_predicate_guess
-            && predicate_guess_cond.is_none()
-            && conditions::is_card_predicate_guess_result_conditional(&text)
-        {
-            clauses.push(unimplemented_clause_ir(
-                "card_predicate_guess_result_condition",
-                normalized_text,
-                chunk.boundary_after,
-            ));
-            continue;
-        }
-        let condition = condition.or(predicate_guess_cond);
         // CR 608.2c + CR 708.7: a generic "if you can't" rider attached to a
         // preceding `TurnFaceUp` must read the performed-signal, not the
         // zone-change ledger (a successful turn-up changes no zone). See the
@@ -24373,6 +24862,8 @@ pub(crate) fn parse_effect_chain_ir(
             // clauses already finalized — supplies the next `ChosenPlayer`
             // index.
             chosen_player_count: chain_chosen_player_count,
+            // CR 608.2c: propagate the committed `ChoiceType` to the guess clause.
+            pending_choice_type: chain_pending_choice_type.clone(),
             // CR 303.4 + CR 702.103: propagate the enclosing card's typed host
             // self-reference so a `"that creature"` copy-token anaphor in any
             // chunk of an Aura/bestow card remaps to the enchanted host.
@@ -25533,6 +26024,9 @@ pub(crate) fn parse_effect_chain_ir(
         // `relative_player_scope` to the chosen scope; thread both into the
         // chain-spanning loop-locals so the following sentence sees them.
         chain_chosen_player_count = chunk_ctx.chosen_player_count;
+        // CR 608.2c: carry the committed `ChoiceType` forward to the next chunk
+        // (the "If you do, an opponent guesses ..." sentence parses separately).
+        chain_pending_choice_type = chunk_ctx.pending_choice_type.clone();
         if let Some(scope @ ControllerRef::ChosenPlayer { .. }) = &chunk_ctx.relative_player_scope {
             chain_chosen_player_scope = Some(scope.clone());
         }

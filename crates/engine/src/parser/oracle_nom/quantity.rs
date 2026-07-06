@@ -557,9 +557,30 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
 ///
 /// Matches phrases like "the number of creatures you control", "its power",
 /// "your life total", "cards in your hand", etc.
+/// CR 608.2d: "the number they guessed" — the value the guesser named in a
+/// preceding `Effect::OpponentGuess`. Carried in `state.last_named_choice` by the
+/// guess answer handler and read at resolution via `QuantityRef::Variable` (a
+/// non-`"X"` variable). Used by The Toymaker's Trap's "they lose life equal to
+/// the number they guessed".
+fn parse_guessed_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::Variable {
+            name: "guessed".to_string(),
+        },
+        alt((
+            tag("the number they guessed"),
+            tag("the number that player guessed"),
+        )),
+    )
+    .parse(input)
+}
+
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        parse_object_count_by_shared_quality,
+        alt((
+            parse_guessed_number_ref,
+            parse_object_count_by_shared_quality,
+        )),
         parse_the_number_of,
         parse_object_property_aggregate_ref,
         parse_distinct_card_types_exiled_with_source,
