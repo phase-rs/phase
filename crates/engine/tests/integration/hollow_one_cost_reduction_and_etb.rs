@@ -53,7 +53,10 @@ fn hollow_one_cost() -> ManaCost {
     ManaCost::generic(5)
 }
 
-fn build_hollow_one(scenario: &mut GameScenario, controller: engine::types::player::PlayerId) -> ObjectId {
+fn build_hollow_one(
+    scenario: &mut GameScenario,
+    controller: engine::types::player::PlayerId,
+) -> ObjectId {
     scenario
         .add_creature_to_hand(controller, "Hollow One", 4, 4)
         .with_mana_cost(hollow_one_cost())
