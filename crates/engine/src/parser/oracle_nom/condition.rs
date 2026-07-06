@@ -2389,6 +2389,17 @@ pub(crate) fn parse_spell_target_has_superlative(
     let (rest, aggregate) = parse_superlative_adjective(input)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
     let (rest, property) = parse_property_keyword(rest)?;
+    // CR 608.2c: consume an optional "or is tied for <same superlative> <same
+    // property>" tail (Wretched Banquet: "the least power or is tied for least
+    // power among creatures on the battlefield"). In this spell-target form the
+    // aggregate population INCLUDES the target itself, so the Min/Max comparison
+    // below already uses LE/GE (ties allowed) -- the tail is redundant text,
+    // discarded here so the shared "among <filter>" clause still parses. The
+    // trigger-anchored `parse_subject_has_superlative_form` instead READS this
+    // tail's comparator to relax its strict GT/LT, because it excludes the
+    // trigger object from the population. Agreement of the tail's superlative and
+    // property with the leading clause is enforced by the shared combinator.
+    let (rest, _) = parse_optional_tied_for_tail(rest, aggregate, property)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" among ").parse(rest)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
