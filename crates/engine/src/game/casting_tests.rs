@@ -11871,6 +11871,168 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
     );
 }
 
+fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let witherbloom_id = create_object(
+        state,
+        CardId(2300),
+        player,
+        "Witherbloom, the Balancer".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&witherbloom_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.static_definitions = vec![StaticDefinition {
+            mode: StaticMode::CastWithKeyword {
+                keyword: Keyword::Affinity(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+            },
+            affected: Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Instant],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Sorcery],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                ],
+            }),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(
+                "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
+            ),
+            attack_defended: None,
+            source_controller: None,
+        }]
+        .into();
+    }
+    witherbloom_id
+}
+
+#[test]
+fn witherbloom_recomputes_affinity_after_declared_additional_mana() {
+    let mut state = setup_game_at_main_phase();
+    add_witherbloom_affinity_source(&mut state, PlayerId(0));
+
+    for i in 0u64..2 {
+        let id = create_object(
+            &mut state,
+            CardId(2400 + i),
+            PlayerId(0),
+            format!("Bear {i}"),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+    }
+
+    let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+    {
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.name = "Capsize".to_string();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 1,
+        };
+    }
+
+    let base = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+    let ability = ResolvedAbility::new(Effect::NoOp, vec![], spell_id, PlayerId(0));
+    let mut pending = PendingCast::new(spell_id, CardId(2500), ability, base.clone());
+    pending.base_cost = Some(base);
+    pending.declared_mana_additions.push(ManaCost::generic(3));
+
+    let total = recompute_pending_mana_total(&state, PlayerId(0), &pending, None);
+    let ManaCost::Cost { generic, shards } = total else {
+        panic!("expected concrete mana cost after recompute");
+    };
+    assert_eq!(
+        generic, 1,
+        "CR 601.2f: buyback-like {{3}} must be added before Witherbloom affinity reduces the total generic cost"
+    );
+    assert_eq!(
+        shards,
+        vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        "affinity must not reduce colored buyback/base shards"
+    );
+}
+
+#[test]
+fn witherbloom_affinity_counts_buyback_during_full_cast_pipeline() {
+    let mut scenario = crate::game::scenario::GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_witherbloom_affinity_source(&mut scenario.state, PlayerId(0));
+
+    for i in 0u64..2 {
+        scenario.add_creature(PlayerId(0), &format!("Bear {i}"), 2, 2);
+    }
+
+    let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Capsize", true);
+    let spell_id = builder.id();
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        generic: 1,
+    });
+    builder.with_keyword(Keyword::Buyback(crate::types::keywords::BuybackCost::Mana(
+        ManaCost::generic(3),
+    )));
+    builder.with_additional_cost(AdditionalCost::Optional {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::generic(3),
+        },
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+    });
+    builder.with_ability(Effect::NoOp);
+
+    add_mana(&mut scenario.state, PlayerId(0), ManaType::Blue, 2);
+    add_mana(&mut scenario.state, PlayerId(0), ManaType::Colorless, 1);
+
+    let mut runner = scenario.build();
+    let commit = runner.cast(spell_id).accept_optional().commit();
+
+    assert_eq!(
+        commit.state().players[0].mana_pool.total(),
+        0,
+        "CR 601.2f + CR 702.27a: Buyback {{3}} must be added before Witherbloom affinity reduces the total generic cost"
+    );
+    let StackEntryKind::Spell {
+        ability: Some(ability),
+        actual_mana_spent,
+        ..
+    } = &commit.state().stack[0].kind
+    else {
+        panic!("expected paid buyback spell on the stack");
+    };
+    assert!(ability.context.additional_cost_paid);
+    assert_eq!(*actual_mana_spent, 3);
+
+    let outcome = commit.resolve();
+    assert_eq!(
+        outcome.zone_of(spell_id),
+        Zone::Hand,
+        "CR 702.27a: paying Buyback through the real cast pipeline must return the spell to hand"
+    );
+}
+
 /// CR 702.9b (Flying) + CR 702.2b (Deathtouch): Hardening guard for the
 /// Witherbloom-the-Balancer commander used in the X-cost / granted-Affinity
 /// regression suite. Witherbloom is a `Legendary Creature — Elder Dragon`
@@ -12543,6 +12705,107 @@ fn granted_self_cost_encore_surfaces_graveyard_ability_at_card_mana_cost() {
             .any(|c| matches!(c, AbilityCost::Mana { cost } if *cost == card_cost)),
         "encore mana sub-cost must equal the card's mana cost, got {costs:?}"
     );
+}
+
+/// CR 702.97a: Varolz-class grant, but *filter-scoped* rather than
+/// `SpecificObject` — the shape a real continuous static ability actually
+/// uses ("Each creature card in your graveyard has scavenge"), which no
+/// existing test exercised through to activation. Two graveyard creatures
+/// with different mana costs must each surface their OWN scavenge cost from
+/// the SAME granting effect, proving the off-zone grant pipeline resolves
+/// `SelfManaCost` per-recipient rather than once for the whole filter.
+#[test]
+fn filter_scoped_scavenge_grant_resolves_per_object_cost_for_every_match() {
+    let mut state = setup_game_at_main_phase();
+
+    let grantor = create_object(
+        &mut state,
+        CardId(9600),
+        PlayerId(0),
+        "Varolz, the Scar-Striped".to_string(),
+        Zone::Battlefield,
+    );
+    let cheap_cost = ManaCost::Cost {
+        generic: 1,
+        shards: vec![],
+    };
+    let expensive_cost = ManaCost::Cost {
+        generic: 3,
+        shards: vec![ManaCostShard::Green],
+    };
+    let cheap_creature = create_object(
+        &mut state,
+        CardId(9601),
+        PlayerId(0),
+        "Cheap Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let expensive_creature = create_object(
+        &mut state,
+        CardId(9602),
+        PlayerId(0),
+        "Expensive Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    for (id, cost) in [
+        (cheap_creature, cheap_cost.clone()),
+        (expensive_creature, expensive_cost.clone()),
+    ] {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = cost;
+    }
+
+    state.add_transient_continuous_effect(
+        grantor,
+        PlayerId(0),
+        crate::types::ability::Duration::UntilEndOfTurn,
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+        ),
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Scavenge(ManaCost::SelfManaCost),
+        }],
+        None,
+    );
+
+    for (id, expected_cost) in [
+        (cheap_creature, cheap_cost),
+        (expensive_creature, expensive_cost),
+    ] {
+        let abilities = activated_ability_definitions(&state, id);
+        // CR 702.97a: identify the scavenge ability by its distinctive
+        // Composite{Mana, Exile(SelfRef, Graveyard)} cost shape (there is no
+        // dedicated `Effect::Scavenge` marker — it lowers to `Effect::PutCounter`,
+        // shared with every other +1/+1-counter effect).
+        let (_, scavenge) = abilities
+            .iter()
+            .find(|(_, a)| {
+                a.activation_zone == Some(Zone::Graveyard)
+                    && matches!(
+                        &a.cost,
+                        Some(AbilityCost::Composite { costs })
+                            if costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. }))
+                    )
+            })
+            .unwrap_or_else(|| {
+                panic!("{id:?}: filter-scoped grant must surface scavenge, got {abilities:?}")
+            });
+        let Some(AbilityCost::Composite { costs }) = &scavenge.cost else {
+            unreachable!("filtered above");
+        };
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Mana { cost } if *cost == expected_cost)),
+            "{id:?}: scavenge mana sub-cost must equal THIS card's own mana cost, got {costs:?}"
+        );
+    }
 }
 
 /// CR 702.74a + CR 604.1: End-to-end composition of the two evoke work items.

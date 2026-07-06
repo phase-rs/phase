@@ -881,6 +881,7 @@ pub fn candidate_actions_broad_with_probe(
             vehicle_id,
             crew_power,
             eligible_creatures,
+            ..
         } => crew_vehicle_candidates(state, *player, *vehicle_id, *crew_power, eligible_creatures),
         // CR 702.184a: Offer each eligible creature as the station cost payer.
         WaitingFor::StationTarget {
@@ -894,6 +895,7 @@ pub fn candidate_actions_broad_with_probe(
             mount_id,
             saddle_power,
             eligible_creatures,
+            ..
         } => saddle_mount_candidates(state, *player, *mount_id, *saddle_power, eligible_creatures),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
@@ -1262,6 +1264,51 @@ pub fn candidate_actions_broad_with_probe(
                 })
                 .collect()
         }
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — enumerate each
+        // single object (copy first only) plus representative first+second pairs
+        // when a second object may be chosen. Ordered: index 0 is copied, index 1
+        // scales the copy.
+        WaitingFor::EachPlayerCopyChosenSelection {
+            player,
+            eligible,
+            min,
+            max,
+            ..
+        } => {
+            let mut actions: Vec<CandidateAction> = Vec::new();
+            if *min <= 1 {
+                for e in eligible {
+                    actions.push(candidate(
+                        GameAction::SelectTargets {
+                            targets: vec![e.clone()],
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    ));
+                }
+            }
+            if *max >= 2 {
+                'outer: for first in eligible {
+                    for second in eligible {
+                        if first == second {
+                            continue;
+                        }
+                        actions.push(candidate(
+                            GameAction::SelectTargets {
+                                targets: vec![first.clone(), second.clone()],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        ));
+                        // Cap to avoid combinatorial explosion on wide boards.
+                        if actions.len() >= 64 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            actions
+        }
         WaitingFor::KeepWithinTotalPowerChoice {
             player,
             eligible,
@@ -1304,6 +1351,7 @@ pub fn candidate_actions_broad_with_probe(
             options,
             choice_type,
             source_id,
+            ..
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
         // CR 601.2b + CR 701.4a: pre-choice behold type prompt — one ChooseOption
         // per FEASIBLE creature type (options already exclude unpayable types).
@@ -5601,6 +5649,7 @@ mod tests {
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
             source_id: Some(source),
+            persist_player: None,
         };
 
         let actions = candidate_actions(&state);

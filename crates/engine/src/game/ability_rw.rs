@@ -1346,6 +1346,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::GrantingObject
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -2215,6 +2216,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::GrantingObject
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -2267,6 +2269,9 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         }
         FilterProp::AnyOf { props } => props.iter().any(legacy_filter_prop),
         FilterProp::Not { prop } => legacy_filter_prop(prop),
+        // CR 607.2d / CR 607.2m (by analogy): player-anchor labels are live
+        // per-player state, not one of the frozen-12 event-context refs.
+        FilterProp::ControllerChoseLabel { .. } => false,
         // Resolution-chain tracked-set membership (leaf; only a `TrackedSetId`) —
         // not one of the frozen-12 event-context refs. Member-boundness is handled
         // in `member_bound_filter_prop`.
@@ -2440,6 +2445,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::Controller
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -2503,6 +2509,9 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         }
         FilterProp::AnyOf { props } => props.iter().any(member_bound_filter_prop),
         FilterProp::Not { prop } => member_bound_filter_prop(prop),
+        // CR 607.2d / CR 607.2m (by analogy): this reads durable per-player anchor
+        // state keyed by controller, not per-source member-bound storage.
+        FilterProp::ControllerChoseLabel { .. } => false,
         // CR 603.10a (PR-6.75 c5): membership in the active resolution-chain tracked
         // set — the property form of the member-bound `TargetFilter::TrackedSet`
         // selector (chain-first via `chain_tracked_set_id`). Per-source published
@@ -2620,6 +2629,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -2863,11 +2873,19 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::PutChosenCounter { target, count } => {
             legacy_quantity_expr(count) || legacy_target_filter(target)
         }
+        Effect::ChooseCounterAdjustment { count, .. } => legacy_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             legacy_effect(replacement_effect)
         }
         // Payload-less keyword action (planar chaos, CR 311.7) — no tag-bearing field.
         Effect::ChaosEnsues => false,
+        // Payload-less keyword action (reverse turn order, CR 103.1) — no
+        // tag-bearing field and reads no per-object state.
+        Effect::ReverseTurnOrder => false,
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => false,
         Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } => {
             legacy_target_filter(attachment) || legacy_target_filter(target)
         }
@@ -2947,6 +2965,18 @@ fn legacy_effect(x: &Effect) -> bool {
             legacy_target_filter(choose_filter)
                 || legacy_target_filter(sacrifice_filter)
                 || oqe(total_power_cap)
+        }
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min: _,
+            max: _,
+            copy_modifications,
+            scale: _,
+        } => {
+            legacy_target_filter(choose_filter)
+                || copy_modifications
+                    .iter()
+                    .any(legacy_continuous_modification)
         }
         Effect::ChangeSpeed {
             player_scope,
@@ -3884,6 +3914,15 @@ fn rw_effect(
             p.merge(rw_quantity_expr(count));
             (p, sc)
         }
+        // CR 122.1 + CR 608.2d: slot-less counter adjustment reads/writes the
+        // propagated parent target at resolution, then delegates through a
+        // runtime-built ChooseOneOf. Until this profiler can recover that parent
+        // target scope, model it conservatively.
+        Effect::ChooseCounterAdjustment { count, .. } => {
+            let mut p = RwProfile::conservative();
+            p.merge(rw_quantity_expr(count));
+            (p, None)
+        }
         // CR 614.1a + CR 611.2c + CR 603.7 (PR-6.75): a floating planeswalk
         // replacement is a deferred body — descend reads, drop writes (resolves in a
         // future scope). Mirrors CreateDrawReplacement.
@@ -3895,6 +3934,8 @@ fn rw_effect(
         // CR 311.7 + CR 901.9b: fire the active plane's chaos trigger (mirrors
         // Planeswalk / VentureIntoDungeon).
         Effect::ChaosEnsues => (ext_write(StateKind::Other), None),
+        // CR 103.1: reverse turn order writes global turn-direction state.
+        Effect::ReverseTurnOrder => (ext_write(StateKind::Other), None),
 
         // ---- Hand / library ----
         Effect::Draw { count, target: _ } => {
@@ -5176,6 +5217,10 @@ fn rw_effect(
             }
             (p, None)
         }
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => (ext_write(StateKind::Other), None),
 
         // ---- Histogram-absent ⇒ fail-closed conservative ----
         Effect::StartYourEngines { .. }
@@ -5192,6 +5237,10 @@ fn rw_effect(
         | Effect::SetClassLevel { .. }
         | Effect::FreeCastFromZones { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        // CR 101.4 + CR 707.2 + CR 122.1: this APNAP walk creates token copies
+        // and may add counters from a live property read. Fail closed until the
+        // copy/counter sub-steps have a precise profile.
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
@@ -5838,6 +5887,15 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
 // Filter / player / scope reads.
 // ---------------------------------------------------------------------------
 
+fn filter_prop_reads_player_choice_label(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::ControllerChoseLabel { .. } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_reads_player_choice_label),
+        FilterProp::Not { prop } => filter_prop_reads_player_choice_label(prop),
+        _ => false,
+    }
+}
+
 /// A filter used as a READ carrier (target_chooser, nested filters). Selectors
 /// are read-free; event-context refs contribute event reads (and D5 flags for
 /// the 12 tags). Composite filters descend to catch nested event refs.
@@ -5874,13 +5932,25 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
             }
             p
         }
+        // CR 607.2d / CR 607.2m (by analogy): durable per-player anchor-label reads.
+        TargetFilter::PlayerWhoChoseLabel { label: _ } => reads_player_of(StateKind::Other),
+        TargetFilter::Typed(tf) => {
+            if tf
+                .properties
+                .iter()
+                .any(filter_prop_reads_player_choice_label)
+            {
+                reads_player_of(StateKind::Other)
+            } else {
+                RwProfile::empty()
+            }
+        }
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
-        | TargetFilter::Typed(..)
         | TargetFilter::StackAbility { .. }
         // CR 201.5a: a bare object reference is a read-free selector (mirrors
         // `SpecificObject`); the member-bound bit is added by the trailing

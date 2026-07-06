@@ -29,6 +29,19 @@ use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 
+/// CR 101.4 + CR 616.1: In a Prevented replacement-resume arm, resume a parked
+/// `EachPlayerCopyChosen` walk once its inner copy/counter primitive has fully
+/// drained and state is back at Priority. No-op if nothing is parked.
+fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_each_player_copy_chosen.is_some()
+        && state.pending_copy_token_resolution.is_none()
+        && state.pending_counter_additions.is_none()
+    {
+        effects::each_player_copy_chosen::drain_pending(state, events);
+    }
+}
+
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
 /// sacrifice replacement — a `Moved` (ETB-style) event whose post-effect is a
 /// `Sacrifice` over a `Typed`/`Any` scope filter (the chooser-driven "sacrifice
@@ -726,6 +739,24 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 101.4 + CR 616.1: An `EachPlayerCopyChosen` per-player step
+            // paused on a replacement choice for its inner token copy or its
+            // +1/+1 counter placement. Both primitives drained above (copy at the
+            // copy-token block, counters at the counter-additions block); this
+            // hook then drives the counter step (copy-pause resume) or advances
+            // the APNAP walk (counter-pause resume). The `drain_pending` guards
+            // re-park if either primitive re-paused under a second replacement.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_each_player_copy_chosen.is_some()
+                && state.pending_copy_token_resolution.is_none()
+                && state.pending_counter_additions.is_none()
+            {
+                effects::each_player_copy_chosen::drain_pending(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             // CR 616.1e + CR 703.4q: An EmptyManaPool resume may leave more
             // players in the APNAP queue. Drain the next player(s); the
             // drain may itself pause on another CR 616.1 choice, in which
@@ -866,6 +897,9 @@ pub(super) fn handle_replacement_choice(
                 {
                     effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 }
+                // CR 101.4 + CR 616.1: resume an `EachPlayerCopyChosen` walk whose
+                // counter placement was prevented — advance to the next player.
+                maybe_drain_each_player_copy_chosen(state, events);
                 return Ok(state.waiting_for.clone());
             }
             if pending_was_counter_move {
@@ -893,6 +927,9 @@ pub(super) fn handle_replacement_choice(
                     player: state.active_player,
                 };
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
+                // CR 101.4 + CR 616.1: resume an `EachPlayerCopyChosen` walk whose
+                // inner token copy was prevented — drive the counter step.
+                maybe_drain_each_player_copy_chosen(state, events);
                 return Ok(state.waiting_for.clone());
             }
             // CR 603.10a + CR 616.1: the paused batch object's event was

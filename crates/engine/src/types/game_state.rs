@@ -9,11 +9,12 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, Comparator, ContinuousModification, ControlWindow, CostPaidObjectSnapshot,
-    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
-    KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
+    ChosenAttribute, Comparator, ContinuousModification, ControlWindow, CopyScale,
+    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
+    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerCondition,
+    TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -25,7 +26,7 @@ use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
-use super::phase::{Phase, PhaseStop};
+use super::phase::{Phase, PhaseStop, TurnDirection};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
 use super::replacements::ReplacementEvent;
@@ -1221,6 +1222,60 @@ pub struct PendingCopyTokenResolution {
     pub source_id: ObjectId,
 }
 
+/// CR 616.1: Which pausing primitive of an `EachPlayerCopyChosen` per-player
+/// step is currently mid-flight, so the drain resumes at the right point
+/// (neither re-reading a stale token nor double-placing counters).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyChosenStage {
+    /// The inner `CopyTokenOf` paused on a replacement choice; on resume, the
+    /// created token(s) are now recorded in `last_created_token_ids` and the
+    /// counter step must be driven.
+    AwaitingCopy,
+    /// The copy completed and the +1/+1 counter placement was initiated and
+    /// paused (2+ counter-modifying replacements needed ordering); on resume,
+    /// the counters have finished — advance to the next player.
+    AwaitingCounters,
+}
+
+/// CR 101.4: One player's completed ordered choice for
+/// [`Effect::EachPlayerCopyChosen`]. `chosen[0]` is copied and `chosen[1]`, when
+/// present, scales the copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyChosenSelection {
+    pub player: PlayerId,
+    pub chosen: Vec<ObjectId>,
+}
+
+/// CR 101.4 + CR 616.1: Resume state for a single player's copy+counter step of
+/// `EachPlayerCopyChosen` that paused on a CR 616.1 replacement choice. `stage`
+/// disambiguates which primitive paused; `chosen[0]` was copied and `chosen[1]`
+/// (if present) scales the copy; `remaining_choices` + the effect params
+/// continue the already-collected action walk after this player's step completes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEachPlayerCopyChosen {
+    pub stage: CopyChosenStage,
+    pub player: PlayerId,
+    /// `[0]` copied, `[1]` (optional) scales the copy.
+    pub chosen: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining_choices: Vec<CopyChosenSelection>,
+    // Effect params for the remainder of the walk.
+    pub choose_filter: TargetFilter,
+    pub min: u32,
+    pub max: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy_modifications: Vec<ContinuousModification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<CopyScale>,
+    pub source_id: ObjectId,
+    pub source_controller: PlayerId,
+    /// APNAP-ordered scoped player set (for a mid-choice save/reload).
+    #[serde(default)]
+    pub scoped_players: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<crate::types::events::GameEvent>,
+}
+
 /// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
 /// (`RepeatContinuation`) paused when an iteration's process entered an
 /// interactive `WaitingFor` state.
@@ -1910,6 +1965,12 @@ pub struct PendingCast {
     /// base, so `Option` is the only safe sentinel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_cost: Option<ManaCost>,
+    /// CR 601.2b + CR 601.2f: Mana components of additional costs the caster
+    /// has declared for this spell (Buyback, Splice, Spree mode costs, etc.).
+    /// Recomputed totals start from `base_cost`, add these declarations, then
+    /// apply cost modifiers and floors in total-cost order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_mana_additions: Vec<ManaCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1955,6 +2016,11 @@ pub struct PendingCast {
     /// selection resumes payment.
     #[serde(default)]
     pub additional_cost_source: SpellCostSource,
+    /// CR 601.2f/h: Tap-payment mode contributed by an additional-cost mana
+    /// component (currently Waterbend). Stored on the pending cast so composite
+    /// costs can pay residual non-mana pieces before entering mana payment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_cost_payment_mode: Option<ConvokeMode>,
     /// CR 601.2b + CR 700.2a: Modal spells with kicker-dependent mode caps
     /// announce kicker intent before choosing modes, but pay those costs later
     /// in the normal cost-payment step.
@@ -2052,6 +2118,7 @@ impl PendingCast {
             ability,
             cost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -2063,6 +2130,7 @@ impl PendingCast {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -2089,6 +2157,8 @@ impl PendingCast {
 pub enum CollectEvidenceResume {
     Casting {
         pending_cast: Box<PendingCast>,
+        #[serde(default)]
+        source: SpellCostSource,
     },
     Effect {
         pending_ability: Box<ResolvedAbility>,
@@ -3302,6 +3372,14 @@ pub enum WaitingFor {
         crew_power: u32,
         /// Untapped creatures the player controls (excluding the Vehicle itself).
         eligible_creatures: Vec<ObjectId>,
+        /// CR 702.122a: each eligible creature's crew-power contribution
+        /// (`object_crew_power_contribution`), aligned index-for-index with
+        /// `eligible_creatures`. The engine owns this computation — "as though its
+        /// power were N greater" (Pilot tokens) and "using its toughness" (Giant
+        /// Ox) mean the contribution differs from the creature's printed power, so
+        /// the UI MUST sum these values, not raw power, when gating the selection.
+        #[serde(default)]
+        contributions: Vec<i32>,
     },
     /// CR 702.184a: Player must pick another untapped creature they control
     /// to tap as the station ability's cost. The chosen creature's power
@@ -3321,6 +3399,10 @@ pub enum WaitingFor {
         saddle_power: u32,
         /// Untapped creatures the player controls (excluding the Mount itself).
         eligible_creatures: Vec<ObjectId>,
+        /// CR 702.171a: each eligible creature's saddle-power contribution,
+        /// aligned index-for-index with `eligible_creatures`.
+        #[serde(default)]
+        contributions: Vec<i32>,
     },
     ScryChoice {
         player: PlayerId,
@@ -3677,6 +3759,15 @@ pub enum WaitingFor {
         /// their value there; transient prompts use this as source context.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
+        /// CR 607.2d / CR 607.2m (by analogy): when set, this choice's answer is a
+        /// PER-PLAYER persistent anchor label — the answer binds
+        /// `ChosenAttribute::Label` onto `state.players[persist_player]`
+        /// (`chosen_attributes`) instead of onto `source_id`'s object. Set during
+        /// a `player_scope: All` fan-out of a persisting `Effect::Choose` to the
+        /// fanned per-player value (`ability.scoped_player`). `None` preserves the
+        /// object-scoped binding used by Khans Sieges and every other named choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persist_player: Option<PlayerId>,
     },
     /// Alchemy "draft a card from [card]'s spellbook": `player` chooses one card
     /// name from `options` (the source card's spellbook list); the chosen card is
@@ -4492,6 +4583,39 @@ pub enum WaitingFor {
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
+    /// CR 101.4 + CR 707.2: One player selects an ordered `min..=max` objects for
+    /// [`Effect::EachPlayerCopyChosen`]. `order` is load-bearing: index 0 is
+    /// copied, index 1 (if present) scales the copy. The effect params + walk
+    /// state are threaded so the continuation can recompute eligibility and drive
+    /// each subsequent player in APNAP order.
+    EachPlayerCopyChosenSelection {
+        player: PlayerId,
+        /// The choosing player's own eligible objects (public battlefield info).
+        eligible: Vec<TargetRef>,
+        min: u32,
+        max: u32,
+        choose_filter: TargetFilter,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        copy_modifications: Vec<ContinuousModification>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<CopyScale>,
+        source_id: ObjectId,
+        source_controller: PlayerId,
+        /// Players still to choose after the current one (APNAP order).
+        remaining_players: Vec<PlayerId>,
+        /// CR 101.4: choices already made by earlier players. Actions are not
+        /// performed until this contains the complete APNAP choice set.
+        #[serde(default)]
+        all_choices: Vec<CopyChosenSelection>,
+        /// CR 101.4: the APNAP-ordered scoped player set. Empty only on a
+        /// mid-resolution save/reload (`#[serde(default)]`).
+        #[serde(default)]
+        scoped_players: Vec<PlayerId>,
+        /// CR 608.2: triggering event of the phenomenon trigger, restored around
+        /// the continuation so resolution-scoped reads resolve correctly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<crate::types::events::GameEvent>,
+    },
     /// CR 107.1c + CR 701.21a (Slaughter the Strong): `player` keeps any number of
     /// `target_player`'s `eligible` creatures whose combined power is at most
     /// `cap`, then the rest are sacrificed. Entered only when keeping all eligible
@@ -4872,6 +4996,7 @@ impl WaitingFor {
             WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
@@ -5002,6 +5127,7 @@ impl WaitingFor {
             | WaitingFor::AssistChoosePlayer { player, .. }
             | WaitingFor::ChooseObjectsSelection { player, .. }
             | WaitingFor::CategoryChoice { player, .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { player, .. }
             | WaitingFor::KeepWithinTotalPowerChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
@@ -5097,7 +5223,7 @@ impl WaitingFor {
                 CostResume::ManaAbility { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
-                CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
+                CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
@@ -5130,7 +5256,7 @@ impl WaitingFor {
                 CostResume::ManaAbility { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
-                CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
+                CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
@@ -6570,6 +6696,22 @@ pub struct GameState {
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
+    /// CR 500.8 + CR 501.1: LIFO stack of anchor phases for inserted beginning
+    /// phases (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus)
+    /// currently in progress. When such a phase's draw step ends, the turn
+    /// resumes at the anchor's natural successor (or runs the next queued
+    /// beginning phase for the same anchor) rather than at the draw step's
+    /// default successor. Empty outside inserted beginning phases.
+    /// `#[serde(default)]` so saved games load unchanged.
+    #[serde(default)]
+    pub extra_phase_resume: Vec<Phase>,
+
+    /// CR 103.1: The current turn-order direction. Durable — persists across
+    /// turns until an effect reverses it again. Default `Normal` is the game's
+    /// clockwise turn order (CR 103.1). `#[serde(default)]` for save compat.
+    #[serde(default)]
+    pub turn_direction: TurnDirection,
+
     /// CR 508.1c + CR 506.1: When the current combat phase was scheduled with an
     /// attacker restriction (Last Night Together / Bumi), only creatures matching
     /// this filter may be declared as attackers. Set on entering that
@@ -7205,6 +7347,14 @@ pub struct GameState {
     /// replacement choice creates the accepted copy token(s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_copy_token_resolution: Option<PendingCopyTokenResolution>,
+
+    /// CR 101.4 + CR 616.1: Deferred resume state for `EachPlayerCopyChosen` when
+    /// the current player's inner token copy OR its +1/+1 counter placement
+    /// paused on a replacement choice. Drained by
+    /// `each_player_copy_chosen::drain_pending` after the copy/counter drains in
+    /// `engine_replacement.rs`, once state is back at Priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_each_player_copy_chosen: Option<PendingEachPlayerCopyChosen>,
 
     /// CR 705.1 + CR 614.1a: Pending multi-flip coin resolver paused mid-loop
     /// for a Krark's Thumb keep-1 choice. Stashes the full resolution context +
@@ -8351,6 +8501,8 @@ impl GameState {
             ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
+            extra_phase_resume: Vec::new(),
+            turn_direction: TurnDirection::Normal,
             current_combat_attacker_restriction: None,
             current_combat_attacker_restriction_source: None,
             seat_order,
@@ -8443,6 +8595,7 @@ impl GameState {
             devour_eligible_snapshot: None,
             merged_card_component_route: None,
             pending_copy_token_resolution: None,
+            pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
@@ -8991,6 +9144,8 @@ impl PartialEq for GameState {
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
+            && self.extra_phase_resume == other.extra_phase_resume
+            && self.turn_direction == other.turn_direction
             && self.current_combat_attacker_restriction
                 == other.current_combat_attacker_restriction
             && self.current_combat_attacker_restriction_source
@@ -9098,6 +9253,7 @@ impl PartialEq for GameState {
             // is serialized whenever `Some` — see `skip_serializing_if` above —
             // so a mid-prompt save/resume keeps the constraint intact).
             && self.pending_copy_token_resolution == other.pending_copy_token_resolution
+            && self.pending_each_player_copy_chosen == other.pending_each_player_copy_chosen
             && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
@@ -9825,6 +9981,7 @@ mod tests {
                 ),
                 cost: ManaCost::NoCost,
                 base_cost: None,
+                declared_mana_additions: Vec::new(),
                 activation_cost: None,
                 activation_ability_index: None,
                 target_constraints: vec![],
@@ -9836,6 +9993,7 @@ mod tests {
                 deferred_required_additional_cost: None,
                 additional_cost_queue: Vec::new(),
                 additional_cost_source: SpellCostSource::Other,
+                additional_cost_payment_mode: None,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
                 chosen_modes: Vec::new(),
@@ -10168,6 +10326,7 @@ mod tests {
             ),
             cost: ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],
@@ -10179,6 +10338,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -10368,6 +10528,30 @@ mod tests {
         assert_eq!(wf, deserialized);
         // Verify tag format
         assert!(json.contains("\"TriggerTargetSelection\""));
+    }
+
+    #[test]
+    fn crew_vehicle_legacy_missing_contributions_deserializes() {
+        let json = r#"{
+            "type":"CrewVehicle",
+            "data":{
+                "player":0,
+                "vehicle_id":30,
+                "crew_power":3,
+                "eligible_creatures":[10]
+            }
+        }"#;
+        let wf: WaitingFor = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            wf,
+            WaitingFor::CrewVehicle {
+                player: PlayerId(0),
+                vehicle_id: ObjectId(30),
+                crew_power: 3,
+                eligible_creatures: vec![ObjectId(10)],
+                contributions: Vec::new(),
+            }
+        );
     }
 
     #[test]

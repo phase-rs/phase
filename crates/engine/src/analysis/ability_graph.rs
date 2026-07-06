@@ -901,6 +901,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -940,6 +941,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -957,6 +959,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GivePlayerCounter { .. }
         | Effect::LoseAllPlayerCounters { .. }
@@ -1009,6 +1012,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         // CR 608.2d + CR 122.1: interactive counter-kind choice + its consume
         // add no static resource seed (the magnitude is one counter, gated on a
         // runtime choice) — Unmodeled, like the other choice effects.

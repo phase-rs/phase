@@ -460,6 +460,7 @@ fn redundancy_delta(
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -495,11 +496,14 @@ fn redundancy_delta(
         // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
         // triggered ability — it has no target and no static redundancy signal.
         | Effect::ChaosEnsues
+        // CR 103.1: ReverseTurnOrder has no target and no static redundancy signal.
+        | Effect::ReverseTurnOrder
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }
@@ -585,6 +589,10 @@ fn redundancy_delta(
         // branches — redundancy would require evaluating each branch in turn,
         // which is beyond this policy's scope. Fall through to None.
         | Effect::ChooseOneOf { .. }
+        // CR 122.1 + CR 608.2d: ChooseCounterAdjustment is the choose-one-kind
+        // sibling of ChooseOneOf — the counter kind and add/remove operation are
+        // chosen at resolution, so there is no static redundancy signal to score.
+        | Effect::ChooseCounterAdjustment { .. }
         // CR 614.1a + CR 514.2: AddTargetReplacement registers a one-shot
         // replacement on the resolved target (e.g., "if that creature would
         // die this turn, exile it instead"). Its value depends on whether the

@@ -7613,6 +7613,62 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: Wretched Banquet's spell-target gate carries a redundant
+    /// "or is tied for least power" tail before "among <filter>". In the
+    /// spell-target superlative form the target is itself part of the aggregate
+    /// population, so the comparison is already non-strict (LE for "least") and
+    /// the tail adds nothing — it must be consumed, not swallowed. The trailing
+    /// "on the battlefield" zone qualifier is folded into the aggregate filter.
+    #[test]
+    fn strip_superlative_target_conditional_least_power_or_tied_for_least() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty};
+
+        let (condition, body) = strip_superlative_target_conditional(
+            "Destroy target creature if it has the least power or is tied for least power among creatures on the battlefield.",
+        );
+        assert_eq!(body, "Destroy target creature");
+        let Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }) = condition
+        else {
+            panic!("expected QuantityCheck, got {condition:?}");
+        };
+        // "least ... or is tied for least" stays a non-strict comparison.
+        assert_eq!(comparator, Comparator::LE);
+        assert_eq!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                }
+            }
+        );
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = rhs
+        else {
+            panic!("expected Aggregate rhs, got {rhs:?}");
+        };
+        assert_eq!(function, AggregateFunction::Min);
+        assert_eq!(property, ObjectProperty::Power);
+        // The "on the battlefield" qualifier rides the aggregate population.
+        assert!(
+            matches!(&filter, TargetFilter::Typed(tf)
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InZone { zone: Zone::Battlefield }
+            ))),
+            "aggregate filter should be creatures on the battlefield, got {filter:?}"
+        );
+    }
+
     #[test]
     fn strip_superlative_target_conditional_plural_subject() {
         use crate::types::ability::{AggregateFunction, ObjectProperty};

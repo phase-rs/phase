@@ -54,6 +54,7 @@ pub mod chaos_ensues;
 pub mod choose;
 pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
+pub mod choose_counter_adjustment;
 pub mod choose_counter_kind;
 pub mod choose_damage_source;
 pub mod choose_from_zone;
@@ -84,6 +85,7 @@ pub mod discover;
 pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
+pub mod each_player_copy_chosen;
 pub mod effect;
 pub mod encore;
 pub mod end_combat_phase;
@@ -173,6 +175,7 @@ pub mod reveal_from_hand;
 pub mod reveal_hand;
 pub mod reveal_top;
 pub mod reveal_until;
+pub mod reverse_turn_order;
 pub mod ring;
 pub mod ripple;
 pub mod roll_die;
@@ -202,6 +205,7 @@ pub mod turn_face_up;
 mod spellbook_tests;
 pub mod surveil;
 pub mod suspect;
+pub mod swap_chosen_labels;
 pub mod switch_pt;
 pub mod tap_untap;
 pub mod time_travel;
@@ -1945,6 +1949,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
             | WaitingFor::KeepWithinTotalPowerChoice { .. }
             | WaitingFor::LearnChoice { .. }
             // Digital-only Alchemy spellbook choice pauses resolution; stash
@@ -3163,6 +3168,7 @@ pub fn resolve_effect(
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::SwapChosenLabels { .. } => swap_chosen_labels::resolve(state, ability, events),
         Effect::ChooseCounterKind { .. } => choose_counter_kind::resolve(state, ability, events),
         Effect::PutChosenCounter { .. } => put_chosen_counter::resolve(state, ability, events),
         Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
@@ -3235,6 +3241,9 @@ pub fn resolve_effect(
         }
         Effect::ChooseAndSacrificeRest { .. } => {
             choose_and_sacrifice_rest::resolve(state, ability, events)
+        }
+        Effect::EachPlayerCopyChosen { .. } => {
+            each_player_copy_chosen::resolve(state, ability, events)
         }
         Effect::Exploit { .. } => exploit::resolve(state, ability, events),
         Effect::GainEnergy { .. } => energy::resolve_gain(state, ability, events),
@@ -3328,6 +3337,7 @@ pub fn resolve_effect(
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
         Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
+        Effect::ReverseTurnOrder => reverse_turn_order::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
@@ -3348,6 +3358,9 @@ pub fn resolve_effect(
         Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
+        Effect::ChooseCounterAdjustment { .. } => {
+            choose_counter_adjustment::resolve(state, ability, events)
+        }
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -5845,10 +5858,15 @@ fn resolve_chain_body(
     // `WaitingFor::CategoryChoice` continuation. It must receive `player_scope`
     // intact and must NOT be fanned out here, or every opponent's invocation
     // would re-sweep the whole table. See `choose_and_sacrifice_rest::resolve`.
-    let driver_scope = ability
-        .player_scope
-        .as_ref()
-        .filter(|_| !matches!(ability.effect, Effect::ChooseAndSacrificeRest { .. }));
+    // EXCEPTION (same category): `EachPlayerCopyChosen` is likewise a
+    // self-iterating APNAP effect — it seeds its own per-player continuation and
+    // must receive `player_scope` intact rather than being fanned out here.
+    let driver_scope = ability.player_scope.as_ref().filter(|_| {
+        !matches!(
+            ability.effect,
+            Effect::ChooseAndSacrificeRest { .. } | Effect::EachPlayerCopyChosen { .. }
+        )
+    });
     if let Some(scope) = driver_scope {
         let scoped_events_before = events.len();
         let controller = ability.controller;

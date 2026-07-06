@@ -44,6 +44,22 @@ pub enum Phase {
     Cleanup,
 }
 
+/// CR 103.1 + CR 101.4: The direction turns and APNAP ordering proceed around
+/// the table. `Normal` is the game's default turn order, which "begins with the
+/// starting player and proceeds clockwise" (CR 103.1). `Reversed` flips turn
+/// progression, APNAP ordering (CR 101.4), and priority passing (CR 117.3d); it
+/// does NOT change physical seating, so left/right neighbor resolution
+/// (`players::neighbor`, Pramikon-style effects) is unaffected. Toggled by
+/// `Effect::ReverseTurnOrder` (Temple of Atropos, Aeon Engine, Time Distortion).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TurnDirection {
+    /// CR 103.1: the default clockwise turn order.
+    #[default]
+    Normal,
+    /// The turn order runs counterclockwise (opposite the default).
+    Reversed,
+}
+
 impl Phase {
     /// CR 506.1: The combat phase has five steps: beginning of combat, declare
     /// attackers, declare blockers, combat damage, and end of combat.
@@ -156,6 +172,15 @@ mod tests {
     #[test]
     fn phase_default_is_untap() {
         assert_eq!(Phase::default(), Phase::Untap);
+    }
+
+    #[test]
+    fn turn_direction_default_is_normal_and_roundtrips() {
+        assert_eq!(TurnDirection::default(), TurnDirection::Normal);
+        let json = serde_json::to_string(&TurnDirection::Reversed).unwrap();
+        assert_eq!(json, "\"Reversed\"");
+        let back: TurnDirection = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, TurnDirection::Reversed);
     }
 
     #[test]

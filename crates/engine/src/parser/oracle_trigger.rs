@@ -9,7 +9,7 @@ use nom::Parser;
 
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
-    try_parse_exile_top_each_library_with_collection_counter,
+    try_parse_each_player_copy_chosen, try_parse_exile_top_each_library_with_collection_counter,
     try_parse_grant_graveyard_keyword_to_target,
 };
 use super::oracle_ir::context::ParseContext;
@@ -1159,6 +1159,16 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // whole two-sentence shape parses, so a card with an unparsed
                 // target filter stays an honest Unimplemented rather than misparsing.
                 try_parse_grant_graveyard_keyword_to_target(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
+            .or_else(|| {
+                // CR 101.4 + CR 707.2 + CR 122.1: whole-body "each player chooses …
+                // creates a token copy of the first … (then scales by the second)"
+                // (WHO phenomena). Fail-closed multi-sentence detector; sees the
+                // full pre-split body. Placed before the terminal
+                // `parse_effect_chain_ir` fallthrough so an unparsed shape stays an
+                // honest Unimplemented rather than misparsing.
+                try_parse_each_player_copy_chosen(&effect_for_parse, AbilityKind::Spell)
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
@@ -11568,7 +11578,15 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     {
         def.valid_target = Some(TargetFilter::SourceChosenPlayer);
     }
-    if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
+    // CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
+    // names one unique step — the starting player's first upkeep — so the trigger
+    // fires exactly once. Modeled as OncePerGame: the source (a plane/scheme or
+    // other permanent present at game start) fires the first time its upkeep
+    // trigger is checked and never again. Checked before the "each turn" arm
+    // because "of the game" and "each turn" are mutually exclusive phrasings.
+    if scan_contains(phase_text, "first upkeep of the game") {
+        def.constraint = Some(TriggerConstraint::OncePerGame);
+    } else if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
         def.constraint = Some(TriggerConstraint::MaxTimesPerTurn { max: 1 });
     }
     // "each player's upkeep" / "each upkeep" / "the end step" → no constraint (fires every turn)

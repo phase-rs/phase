@@ -236,6 +236,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::ChooseCard { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::ChooseCounterKind { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
@@ -268,6 +269,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Double { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Encore
         | Effect::EndCombatPhase
@@ -339,6 +341,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::RevealUntil { .. }
+        | Effect::ReverseTurnOrder
         | Effect::RingTemptsYou
         | Effect::Ripple { .. }
         | Effect::RollDie { .. }
@@ -356,6 +359,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SolveCase
         | Effect::Specialize
         | Effect::StartYourEngines { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::SwitchPT { .. }
         | Effect::TakeTheInitiative
         | Effect::TargetOnly { .. }
@@ -854,6 +858,7 @@ pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarit
         ContinuousModification::AddDynamicPower { .. }
         | ContinuousModification::AddDynamicToughness { .. } => EffectPolarity::Beneficial,
         ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddColor { .. }

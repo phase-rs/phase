@@ -238,6 +238,7 @@ fn random_card_predicate_guess(
         choice_type,
         options,
         source_id: Some(source_id),
+        persist_player: _,
     } = &state.waiting_for
     else {
         return None;
@@ -1244,6 +1245,21 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
             targets: Vec::new(),
         }),
+
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — an empty pick is
+        // illegal (min >= 1), so pick the first `min` eligible objects.
+        WaitingFor::EachPlayerCopyChosenSelection { eligible, min, .. } => {
+            let targets: Vec<_> = eligible
+                .iter()
+                .take((*min).max(1) as usize)
+                .cloned()
+                .collect();
+            if targets.is_empty() {
+                None
+            } else {
+                Some(GameAction::SelectTargets { targets })
+            }
+        }
 
         // Copy retarget: keep copied targets when all slots already have a
         // current value; freshly cast prepare/paradigm copies start empty, so
@@ -4569,6 +4585,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let mut saw_land = false;
@@ -4610,6 +4627,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut rng = SmallRng::seed_from_u64(1);
 

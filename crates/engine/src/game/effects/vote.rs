@@ -709,25 +709,26 @@ fn resolve_starting_voter(
     }
 }
 
-/// CR 101.4: Build a turn-order voter sequence beginning with `start`, walking
-/// forward through PlayerId order and skipping eliminated players. Supports
-/// arbitrary player counts (multiplayer).
+/// CR 101.4 + CR 103.1: Build a turn-order voter sequence beginning with
+/// `start`, walking in the current turn-order direction and skipping eliminated
+/// players. Supports arbitrary player counts (multiplayer).
 fn apnap_order_from(state: &GameState, start: PlayerId) -> Vec<PlayerId> {
-    let n = state.players.len();
+    let seat_order = &state.seat_order;
+    let n = seat_order.len();
     if n == 0 {
         return Vec::new();
     }
     let start_idx = state
-        .players
+        .seat_order
         .iter()
-        .position(|p| p.id == start)
+        .position(|&id| id == start)
         .unwrap_or(0);
     (0..n)
-        .map(|offset| (start_idx + offset) % n)
-        .filter_map(|i| {
-            let p = &state.players[i];
-            (!p.is_eliminated).then_some(p.id)
+        .map(|offset| {
+            crate::game::players::turn_order_index(start_idx, offset, n, state.turn_direction)
         })
+        .map(|idx| seat_order[idx])
+        .filter(|&player| crate::game::players::is_alive(state, player))
         .collect()
 }
 
@@ -1063,6 +1064,36 @@ mod tests {
                 assert_eq!(remaining_voters.len(), 1);
                 assert_ne!(remaining_voters[0].0, controller);
                 assert_ne!(remaining_voters[0].0, player);
+            }
+            other => panic!("expected VoteChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 101.4 + CR 103.1 + CR 701.38a: Vote order follows the current
+    /// turn-order direction. After turn order is reversed, a three-player
+    /// vote starting with P0 proceeds P0, P2, P1.
+    #[test]
+    fn vote_order_reverses_with_turn_direction() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        let controller = state.players[0].id;
+        let ability = make_vote_ability(
+            controller,
+            VoterScope::AllPlayers,
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("vote resolves");
+
+        match state.waiting_for {
+            WaitingFor::VoteChoice {
+                player,
+                ref remaining_voters,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(remaining_voters, &vec![(PlayerId(2), 1), (PlayerId(1), 1)]);
             }
             other => panic!("expected VoteChoice, got {:?}", other),
         }

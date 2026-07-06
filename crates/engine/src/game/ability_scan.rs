@@ -365,6 +365,10 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(recipient));
             acc
         }
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => Axes::CONSERVATIVE,
         Effect::EachSourceDealsDamage {
             sources,
             amount,
@@ -512,6 +516,17 @@ fn scan_effect(x: &Effect) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(amount));
             acc = acc.or(scan_player_filter(player_filter));
+            acc
+        }
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min: _,
+            max: _,
+            copy_modifications: _,
+            scale: _,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(choose_filter));
             acc
         }
         Effect::DestroyAll {
@@ -1513,10 +1528,15 @@ fn scan_effect(x: &Effect) -> Axes {
             destination: _,
             tapped: _,
         } => Axes::NONE,
+        Effect::ChooseCounterAdjustment {
+            adjustment: _,
+            count,
+        } => scan_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             scan_effect(replacement_effect)
         }
         Effect::ChaosEnsues => Axes::NONE,
+        Effect::ReverseTurnOrder => Axes::NONE,
         Effect::ChooseOneOf { .. } => Axes::CONSERVATIVE,
         Effect::Unimplemented {
             name: _,
@@ -2443,6 +2463,7 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             projected: false,
         },
         TargetFilter::SourceChosenPlayer => Axes::NONE,
+        TargetFilter::PlayerWhoChoseLabel { label: _ } => Axes::NONE,
         TargetFilter::OriginalController => Axes::NONE,
         TargetFilter::PostReplacementSourceController => Axes {
             event: true,
@@ -3399,6 +3420,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -3419,6 +3441,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::PumpAll { .. }
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::DestroyAll { .. }
         | Effect::ChangeZone { .. }
         | Effect::ChangeZoneAll { .. }
@@ -3608,8 +3631,10 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
         | Effect::Unimplemented { .. } => ResolutionChoiceFreedom::MayPrompt,
     }

@@ -11,7 +11,8 @@ use nom::Parser;
 
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
-    parse_effect_chain, parse_effect_chain_with_context, try_parse_named_choice,
+    parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
+    try_parse_named_choice,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
@@ -297,6 +298,19 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     //       "If a nontoken creature an opponent controls would die, exile it instead." (Valentin)
     //       "If a creature an opponent controls would die, exile it instead." (Vren)
     if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &normalized) {
+        return Some(def);
+    }
+
+    // --- "If a [filter] would enter and it wasn't cast, exile it instead" ---
+    // CR 614.1a + CR 614.1d + CR 614.12: A permanent-static ETB replacement
+    // that exiles creatures which enter without having been cast. E.g.
+    // Containment Priest:
+    //   "If a nontoken creature would enter and it wasn't cast, exile it instead."
+    // Only the clean, always-on static form is handled here; the duration-scoped
+    // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) and the
+    // self-referential form ("if this creature would enter ...": Primeval Spawn)
+    // are deliberately excluded (see the guards inside).
+    if let Some(def) = parse_creature_enter_wasnt_cast_exile_replacement(&norm_lower, &normalized) {
         return Some(def);
     }
 
@@ -1652,6 +1666,89 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     )
 }
 
+/// CR 608.2d + CR 608.2c + CR 701.20e: For a leading "look at an opponent's hand"
+/// inside an as-enters replacement, front an explicit `Choose(Opponent)` step and
+/// rebind the look to the chosen opponent. Returns
+/// `Some((choose_opponent_effect, rewritten_reveal_effect))` IFF `reveal` is a
+/// `RevealHand` whose look-target is a NON-targeted "an opponent" player filter —
+/// `TargetFilter::Typed(tf)` with `tf.controller == Some(ControllerRef::Opponent)`.
+/// `controller` is the sole player-authority axis on `TypedFilter`, so matching it
+/// exactly is the full "no other player authority" check.
+///
+/// CORRECTION 1 — why the shared `Typed(Opponent)` shape is safe to rewrite here:
+/// this helper runs ONLY inside `parse_as_enters_choose`. An as-enters *replacement*
+/// applies as the permanent enters the battlefield with NOTHING on the stack
+/// (CR 614.1c) and announces its choices at that moment (CR 608.2d). "Look at
+/// **target** opponent's hand" is a targeted effect that requires a spell/ability on
+/// the stack to declare a target (CR 601.2c) — it is UNREACHABLE in this as-enters
+/// composition. The predicate deliberately matches the `Typed(Opponent)` shape
+/// regardless of whether the Oracle article was "an" or "target" (both `an opponent's
+/// hand` and `target opponent's hand` lower to the identical `Typed(Opponent)` via
+/// `parse_hand_possessive_target`); it is NOT claiming that a targeted variant is
+/// handled by targeting — the "target" variant simply never reaches this seam.
+///
+/// The rewrite yields `ControllerRef::ChosenPlayer { index: 0 }` (NOT
+/// `SourceChosenPlayer`, which `collect_player_targets` fails-closed on →
+/// `MissingParam`). Index 0 because the fronted `Choose(Opponent)` is the only
+/// player-choice in this chain; `set_chosen_players_recursive` copies the resolved
+/// `[opponent]` down the sub-abilities, so the rebound `RevealHand` reads
+/// `chosen_players[0]` at resolution.
+fn front_opponent_choice_for_nontargeted_look(reveal: &Effect) -> Option<(Effect, Effect)> {
+    // Only a non-targeted opponent-hand look qualifies: `Typed` filter controlled
+    // by `Opponent`. A real targeted `RevealHand` (Thoughtseize) carries a
+    // `TargetRef::Player` slot and a non-`Typed` target, so it is not matched here.
+    match reveal {
+        Effect::RevealHand {
+            target: TargetFilter::Typed(tf),
+            ..
+        } if tf.controller == Some(ControllerRef::Opponent) => {}
+        _ => return None,
+    }
+
+    // Rebind the look to the opponent the fronted choice selects.
+    let mut rewritten_reveal = reveal.clone();
+    if let Effect::RevealHand {
+        target: TargetFilter::Typed(tf),
+        ..
+    } = &mut rewritten_reveal
+    {
+        // CR 608.2c: "that player" — the dependent look and its card-name choice
+        // bind to the single opponent chosen by the fronted `Choose(Opponent)`.
+        tf.controller = Some(ControllerRef::ChosenPlayer { index: 0 });
+    }
+
+    // CORRECTION 2 — `persist: true` is REQUIRED (not cosmetic): it makes
+    // `bind_named_choice` receive `source_id = Some`, which is the precondition for
+    // `capture_deferred_entry_events_if_mid_entry_choice` (engine_replacement.rs)
+    // to defer this permanent's entry event across the choice so ETB observers are
+    // not dropped (issue #830). KNOWN BENIGN SIDE EFFECT: with `source_id = Some`,
+    // `bind_named_choice` also pushes a `ChosenAttribute::Player(chosen_opponent)`
+    // onto the source (via `ChosenAttribute::from_choice`) that is NOT cleared
+    // afterward — only `Keyword`/`Counter`/`Direction` kinds are retain-filtered
+    // (choose.rs). This is harmless here: Anointed Peacekeeper's / Sorcerous
+    // Spyglass's two cost-tax statics read `ChosenAttribute::CardName` BY KIND, not
+    // `Player`, so the stray `Player` attribute co-exists without affecting them.
+    // The 3-player integration test asserts this co-existence explicitly.
+    //
+    // CORRECTION 3 — deferred-entry replay ordering (honest imperfection): the
+    // fronted `Choose(Opponent)` is where the entry is deferred, so ETB observers
+    // are replayed at `engine_resolution_choices.rs` (the
+    // `replay_deferred_entry_events` arm, currently ~lines 3690-3722) AFTER the
+    // opponent is chosen but BEFORE the card name is named. This is benign for the
+    // covered class: neither Anointed Peacekeeper nor Sorcerous Spyglass has its own
+    // ETB trigger, and no battlefield observer reads the chosen card name of the
+    // entering permanent, so replaying observers before the name is bound changes no
+    // observable outcome.
+    let choose_opponent = Effect::Choose {
+        // CR 608.2d + CR 102.3: the controller chooses one opponent.
+        choice_type: ChoiceType::Opponent { restriction: None },
+        persist: true,
+        // Same controller-choice selection mode as the fronted card-name choice.
+        selection: crate::types::ability::TargetSelectionMode::Chosen,
+    };
+    Some((choose_opponent, rewritten_reveal))
+}
+
 /// Parse "As ~ enters, choose a [type]" into a Moved replacement with persisted Choose.
 /// Skips lines that also contain shock land markers (handled by parse_shock_land).
 fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
@@ -1673,7 +1770,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     }
 
     // Extract the "choose a ..." clause — scan_split_at_phrase returns (prefix, rest_starting_at_match)
-    let (_, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+    let (prefix_lower, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
     let choice_type = try_parse_named_choice(choose_text)?;
@@ -1686,6 +1783,51 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
     );
+
+    // CR 614.1c + CR 614.1d: Some "as ~ enters" replacements carry a leading
+    // imperative before the choice (Anointed Peacekeeper: "As ~ enters the
+    // battlefield, look at an opponent's hand, then choose any card name."). We
+    // extract that middle clause by anchoring on the LAST enters-frame in the
+    // pre-"choose" prefix: this drops the whole "as <subject> enters[ the
+    // battlefield], " head AND any earlier enters-tapped sentence (Thriving
+    // Grove's first "enters"), leaving only the interposed instruction.
+    // Iterating `scan_preceded` retains the final frame match rather than
+    // `str::rfind` on raw text. All work is on `norm_lower` (lowercased) — its
+    // byte offsets do NOT map to `original_text` because `~` substitution
+    // changed the length, so the extracted slice is fed to `parse_effect_clause`
+    // (which accepts lowercased text) rather than recovered from the original.
+    // Include the enters-tapped frames so a leading imperative that follows an
+    // "enters tapped," head is still captured and threaded through `core` below
+    // (the enters_tapped branch composes `SetTapState.sub_ability(core)`).
+    // Without these alts, an "enters tapped, <imperative>, then choose" line
+    // would leave `middle_lower` empty and silently drop the imperative while
+    // still parsing "supported" — a coverage-honesty violation. Longer frames
+    // first so the "... tapped, " variants win over their comma-less bases.
+    fn frame(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((
+            tag::<_, _, OracleError<'_>>("enters the battlefield tapped, "),
+            tag("enters the battlefield, "),
+            tag("enters tapped, "),
+            tag("enters, "),
+        ))
+        .parse(i)
+    }
+    let mut middle_lower = "";
+    let mut cursor = prefix_lower;
+    while let Some((_, _, rest)) = nom_primitives::scan_preceded(cursor, frame) {
+        middle_lower = rest;
+        cursor = rest;
+    }
+    let middle_lower = middle_lower.trim();
+    // Structural trailing-connector cleanup (not parsing dispatch): "..., then" /
+    // "... then" / "...," → bare instruction. `strip_suffix` is sanctioned for
+    // structural, non-dispatch string normalization.
+    let middle_lower = middle_lower
+        .strip_suffix(", then") // allow-noncombinator: structural trailing-connector cleanup on the pre-extracted clause, not parsing dispatch
+        .or_else(|| middle_lower.strip_suffix(" then")) // allow-noncombinator: structural trailing-connector cleanup, not parsing dispatch
+        .or_else(|| middle_lower.strip_suffix(',')) // allow-noncombinator: structural trailing-connector cleanup, not parsing dispatch
+        .unwrap_or(middle_lower)
+        .trim();
 
     // CR 614.1c + CR 614.1d: The Thriving land cycle ("This land enters tapped.
     // As it enters, choose a color other than <C>.") layers TWO replacement
@@ -1703,6 +1845,59 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         && !has_phrase("unless")
         && !has_phrase("if you control");
 
+    // Compose the leading imperative (if any) ahead of the persisted choice.
+    // With no middle clause this is `choose` unchanged (every existing plain
+    // `Choose` / `SetTapState.sub_ability(Choose)` anchor still parses identically).
+    let core = if middle_lower.is_empty() {
+        choose
+    } else {
+        let leading = parse_effect_clause(middle_lower, &mut ParseContext::default());
+        // Compose the middle ahead of the choice ONLY when it is a genuine,
+        // cleanly-parsed leading ACTION. A middle that doesn't parse
+        // (Unimplemented) or carries peeled structural slots we don't thread
+        // here (duration / sub_ability / distribute / multi_target / condition /
+        // optional / unless_pay) is almost always a subject/quantifier phrase —
+        // e.g. "you and an opponent each" (Null Chamber), "you and target
+        // opponent each secretly" (Power Level Analyzer) — NOT an action.
+        // In that case fall back to the bare choice: the pre-existing parse,
+        // which already ignored the prefix. This never drops a previously
+        // supported `Moved` replacement (zero regression), while still composing
+        // real leading actions (Anointed Peacekeeper / Sorcerous Spyglass:
+        // "look at an opponent's hand, then choose any card name").
+        let composable = !matches!(leading.effect, Effect::Unimplemented { .. })
+            && leading.duration.is_none()
+            && leading.sub_ability.is_none()
+            && leading.distribute.is_none()
+            && leading.multi_target.is_none()
+            && leading.condition.is_none()
+            && !leading.optional
+            && leading.unless_pay.is_none();
+        if composable {
+            // CR 608.2d + CR 608.2c + CR 701.20e: A non-targeted "look at an
+            // opponent's hand" (Anointed Peacekeeper / Sorcerous Spyglass) lowers
+            // to `RevealHand { target: Typed(controller=Opponent), reveal:false }`,
+            // which fans out across every opponent — `reveal_hand::resolve` then
+            // takes `.first()`. That is a multiplayer bug: in a 3+ player game the
+            // controller MUST choose which opponent to look at (CR 608.2d), and the
+            // subsequent card-name choice binds to *that* opponent's hand
+            // (CR 608.2c "that player"). Front an explicit `Choose(Opponent)` and
+            // rebind the look to the chosen opponent so the fan-out collapses to a
+            // single, controller-selected opponent.
+            if let Some((choose_opponent, rewritten_reveal)) =
+                front_opponent_choice_for_nontargeted_look(&leading.effect)
+            {
+                AbilityDefinition::new(AbilityKind::Spell, choose_opponent).sub_ability(
+                    AbilityDefinition::new(AbilityKind::Spell, rewritten_reveal)
+                        .sub_ability(choose),
+                )
+            } else {
+                AbilityDefinition::new(AbilityKind::Spell, leading.effect).sub_ability(choose)
+            }
+        } else {
+            choose
+        }
+    };
+
     let execute = if enters_tapped {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -1712,9 +1907,9 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
                 state: TapStateChange::Tap,
             },
         )
-        .sub_ability(choose)
+        .sub_ability(core)
     } else {
-        choose
+        core
     };
 
     Some(
@@ -4320,6 +4515,121 @@ fn parse_creature_die_exile_replacement(
         def = def.condition(cond);
     }
     Some(def)
+}
+
+/// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
+/// cast, exile it instead." (Containment Priest). A static ETB replacement
+/// gated on the entering object not having been cast. Only the always-on,
+/// non-self form is recognized here — duration-scoped ("Until end of turn, ...")
+/// and self-referential ("if this creature would enter ...") variants return
+/// `None`.
+///
+/// The "wasn't cast" gate is expressed as `Not(WasPlayed)` on the valid-card
+/// filter: `WasPlayed` is `played_from_zone.is_some() || cast_from_zone.is_some()`
+/// (see `game/filter.rs`), and a nontoken creature only ever enters via casting
+/// or via an effect that puts it onto the battlefield, so `Not(WasPlayed)` is
+/// exactly "entered without being cast." Because a cast Containment Priest sets
+/// `cast_from_zone`, this gate also stops the replacement from exiling the
+/// permanent's own casting — the reported bug in issue #4761.
+fn parse_creature_enter_wasnt_cast_exile_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Grammar: "if" <subject> "would enter" ["the battlefield"] "and it wasn't
+    // cast," "exile it instead". Composed from nom combinators (parser seam
+    // rule R1) rather than string scanning. `norm_lower` is lower-cased but not
+    // apostrophe-normalized, so the gate accepts both the ASCII and typographic
+    // apostrophe.
+    let (after_subject, subject) = preceded(
+        tag::<_, _, OracleError<'_>>("if "),
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" would enter"),
+            tag(" would enter"),
+        ),
+    )
+    .parse(norm_lower)
+    .ok()?;
+
+    // Require the "wasn't cast" gate and the exile-instead outcome, tolerating an
+    // optional "the battlefield" between "would enter" and the gate.
+    all_consuming((
+        preceded(
+            opt(tag::<_, _, OracleError<'_>>(" the battlefield")),
+            preceded(
+                alt((
+                    tag(" and it wasn't cast"),
+                    tag(" and it wasn\u{2019}t cast"),
+                )),
+                preceded(tag(", "), tag("exile it instead")),
+            ),
+        ),
+        opt(tag(".")),
+        multispace0,
+    ))
+    .parse(after_subject)
+    .ok()?;
+
+    let subject = subject.trim();
+
+    // Exclude the self-referential form ("if this creature would enter ...",
+    // Primeval Spawn) and any `~` self-reference — those are handled elsewhere.
+    if tag::<_, _, OracleError<'_>>("this ").parse(subject).is_ok()
+        || take_until::<_, _, OracleError<'_>>("~")
+            .parse(subject)
+            .is_ok()
+    {
+        return None;
+    }
+
+    // Strip the leading article ("a"/"an"/"the") and parse the creature filter.
+    let subject = nom_primitives::parse_article
+        .parse(subject)
+        .map_or(subject, |(rest, _)| rest)
+        .trim();
+    let (filter, subject_rest) = parse_type_phrase(subject);
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
+        return None;
+    }
+
+    // Attach the "wasn't cast" gate as `Not(WasPlayed)` on the entering object.
+    let filter = match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::Not {
+                prop: Box::new(FilterProp::WasPlayed),
+            });
+            TargetFilter::Typed(tf)
+        }
+        _ => return None,
+    };
+
+    // Exile the entering object. SelfRef refers to the object whose ETB event is
+    // being replaced (same convention as the die-exile / ETB-tapped replacements).
+    let exile_self = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin: None,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(exile_self)
+            .valid_card(filter)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
 }
 
 fn split_dealt_damage_subject_condition(
@@ -11083,6 +11393,184 @@ mod tests {
         );
     }
 
+    // CR 608.2d + CR 608.2c + CR 701.20e: Anointed Peacekeeper's ETB carries a
+    // leading "look at an opponent's hand" before the persisted card-name choice.
+    // Because "an opponent" is a CR 608.2d choice the controller announces while
+    // the permanent enters (fatal in 3+ player games if the look fans across every
+    // opponent), the composed Moved replacement must FRONT an explicit
+    // `Choose(Opponent)`, rebind the look to that chosen opponent
+    // (`ChosenPlayer { index: 0 }`), and ride the persisted `Choose(CardName)`
+    // beneath the look. Nesting: Choose(Opponent) -> RevealHand(chosen) ->
+    // Choose(CardName). Reverting the fronting collapses the outer effect back to a
+    // bare `RevealHand { Typed(Opponent) }`, flipping every assertion below.
+    #[test]
+    fn as_enters_look_at_hand_then_choose_composes_reveal_and_choice() {
+        let def = parse_replacement_line(
+            "As Anointed Peacekeeper enters the battlefield, look at an opponent's hand, then choose any card name.",
+            "Anointed Peacekeeper",
+        )
+        .expect("look-at-hand + choose ETB must produce a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        let execute = def.execute.as_ref().unwrap();
+        // Outer: the fronted opponent choice (CR 608.2d).
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent { restriction: None },
+                    persist: true,
+                    ..
+                }
+            ),
+            "outer effect must be the fronted Choose(Opponent), got {:?}",
+            execute.effect
+        );
+        // Middle: the private hand look, rebound to the chosen opponent (CR 608.2c).
+        let look = execute
+            .sub_ability
+            .as_ref()
+            .expect("the opponent-hand look must ride beneath the opponent choice");
+        assert!(
+            matches!(
+                &*look.effect,
+                Effect::RevealHand { reveal: false, target: TargetFilter::Typed(tf), .. }
+                    if tf.controller == Some(ControllerRef::ChosenPlayer { index: 0 })
+            ),
+            "the look must be a private hand look bound to the chosen opponent, got {:?}",
+            look.effect
+        );
+        // Inner: the persisted card-name choice (CR 201.4).
+        let sub = look
+            .sub_ability
+            .as_ref()
+            .expect("the persisted card-name choice must ride beneath the look");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName,
+                    persist: true,
+                    ..
+                }
+            ),
+            "innermost must be a persisted CardName choice, got {:?}",
+            sub.effect
+        );
+    }
+
+    // A non-action middle — a subject/quantifier phrase like "you and an
+    // opponent each" (Null Chamber) or "you and target opponent each secretly"
+    // (Power Level Analyzer) — is NOT composed. parse_as_enters_choose falls back
+    // to the bare choice (the pre-existing parse that ignored the prefix), rather
+    // than bailing (which would drop a previously-supported `Moved` replacement)
+    // or wrapping the subject as a leading action. Regression guard for Null
+    // Chamber / Power Level Analyzer, surfaced by the coverage parse-diff.
+    #[test]
+    fn as_enters_non_action_middle_falls_back_to_bare_choice() {
+        let def = parse_as_enters_choose(
+            "as ~ enters, you and an opponent each choose a card name.",
+            "As ~ enters, you and an opponent each choose a card name.",
+        )
+        .expect("a supported as-enters choice must still produce a Moved replacement");
+        let execute = def.execute.as_ref().unwrap();
+        // The bare persisted choice is the primary effect — the subject phrase is
+        // neither wrapped as a leading action nor allowed to drop the Moved node.
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName,
+                    persist: true,
+                    ..
+                }
+            ),
+            "non-action middle must fall back to the bare persisted choice, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "no leading action should be composed for a subject-phrase middle, got {:?}",
+            execute.sub_ability
+        );
+    }
+
+    // CR 614.1c + CR 614.1d: the enters-tapped frame must also capture a leading
+    // imperative, so an "enters tapped, <action>, then choose" line composes
+    // tap + action + choice rather than silently dropping the action. No printed
+    // card carries this shape yet; this guards the building block's coverage
+    // honesty (the frame `alt` must not leave the imperative unthreaded).
+    #[test]
+    fn as_enters_tapped_with_leading_imperative_composes_tap_action_and_choice() {
+        let def = parse_as_enters_choose(
+            "as ~ enters the battlefield tapped, look at an opponent's hand, then choose any card name.",
+            "As ~ enters the battlefield tapped, look at an opponent's hand, then choose any card name.",
+        )
+        .expect("tapped + leading imperative + choose must compose, not drop the imperative");
+        let execute = def.execute.as_ref().unwrap();
+        // Outer: the enter-tapped event modifier.
+        assert!(
+            matches!(&*execute.effect, Effect::SetTapState { .. }),
+            "outer effect must be the enter-tapped modifier, got {:?}",
+            execute.effect
+        );
+        // Middle: the leading imperative (private opponent-hand look) — NOT dropped.
+        // Middle: the fronted opponent choice (CR 608.2d) — the leading hand-look
+        // is a non-targeted "an opponent's hand" look, so it is fronted with an
+        // explicit `Choose(Opponent)` before the look itself, exactly as the
+        // non-tapped Anointed Peacekeeper composition. The point of THIS test is
+        // that the leading imperative is threaded (not dropped) through the
+        // enters-tapped frame; it is still threaded, now beneath the choice.
+        let mid = execute
+            .sub_ability
+            .as_ref()
+            .expect("tap must carry the composed core");
+        assert!(
+            matches!(
+                &*mid.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent { restriction: None },
+                    persist: true,
+                    ..
+                }
+            ),
+            "the fronted opponent choice must ride beneath the tap, got {:?}",
+            mid.effect
+        );
+        // The private hand look, rebound to the chosen opponent (CR 608.2c).
+        let look = mid
+            .sub_ability
+            .as_ref()
+            .expect("the opponent-hand look must ride beneath the opponent choice");
+        assert!(
+            matches!(
+                &*look.effect,
+                Effect::RevealHand { reveal: false, target: TargetFilter::Typed(tf), .. }
+                    if tf.controller == Some(ControllerRef::ChosenPlayer { index: 0 })
+            ),
+            "the leading hand-look must be threaded and bound to the chosen opponent, got {:?}",
+            look.effect
+        );
+        // Inner: the persisted card-name choice.
+        let choose = look
+            .sub_ability
+            .as_ref()
+            .expect("the persisted choice must ride the look");
+        assert!(
+            matches!(
+                *choose.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName,
+                    persist: true,
+                    ..
+                }
+            ),
+            "innermost must be the persisted CardName choice, got {:?}",
+            choose.effect
+        );
+    }
+
     #[test]
     fn enters_tapped_then_choose_color_composes_tap_and_choice() {
         // CR 614.1c + CR 614.1d: Thriving land text ("This land enters
@@ -12452,6 +12940,98 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn containment_priest_enter_wasnt_cast_exile_replacement() {
+        // Issue #4761: "If a nontoken creature would enter and it wasn't cast,
+        // exile it instead." must parse as a ChangeZone→Battlefield replacement
+        // that exiles the entering object — NOT as a Spell effect exiling the
+        // card itself (the regression that made casting Containment Priest exile
+        // itself).
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.",
+            "Containment Priest",
+            &["Flash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+        // The bogus self-exile Spell ability must be gone.
+        assert!(
+            parsed.abilities.is_empty(),
+            "no spell ability should be produced, got {:?}",
+            parsed.abilities
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected one ETB replacement, got {:?}",
+            parsed.replacements
+        );
+        let def = &parsed.replacements[0];
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        // valid_card = nontoken creature gated on "wasn't cast" (Not(WasPlayed)).
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::NonToken));
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Not { prop } if matches!(**prop, FilterProp::WasPlayed)
+                    )),
+                    "expected Not(WasPlayed) gate, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_wasnt_cast_exile_excludes_duration_and_self_variants() {
+        // Duration-scoped ("Until end of turn, ...") and self-referential
+        // ("if this creature would enter ...") variants must NOT be captured by
+        // the Containment Priest static arm — they need separate handling.
+        assert!(
+            parse_replacement_line(
+                "Until end of turn, if a creature would enter and it wasn't cast, exile it instead.",
+                "Hallowed Moonlight",
+            )
+            .filter(|d| d.event == ReplacementEvent::ChangeZone
+                && d.destination_zone == Some(Zone::Battlefield))
+            .is_none(),
+            "duration-scoped variant must not match the static enter-exile arm"
+        );
+        assert!(
+            parse_replacement_line(
+                "If this creature would enter and it wasn't cast or no mana was spent to cast it, exile it instead.",
+                "Primeval Spawn",
+            )
+            .filter(|d| matches!(&d.valid_card, Some(TargetFilter::Typed(tf))
+                if tf.properties.iter().any(|p| matches!(p, FilterProp::Not { prop } if matches!(**prop, FilterProp::WasPlayed)))))
+            .is_none(),
+            "self-referential variant must not match the static enter-exile arm"
+        );
+        assert!(
+            parse_replacement_line(
+                "If a nontoken creature would enter and it wasn't cast, exile it instead, draw a card.",
+                "Trailing Rider Guard",
+            )
+            .filter(|d| d.event == ReplacementEvent::ChangeZone
+                && d.destination_zone == Some(Zone::Battlefield))
+            .is_none(),
+            "static enter-exile arm must not swallow trailing riders after instead"
+        );
     }
 
     #[test]

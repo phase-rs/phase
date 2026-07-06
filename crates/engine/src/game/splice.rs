@@ -146,13 +146,16 @@ pub(crate) fn resolve_offer(
     })?;
     let card_name = obj.name.clone();
 
-    // CR 702.47b: the splice cost is an additional cost. Spliced cards never
-    // carry {X}, so folding the fixed mana into both the working cost and the
-    // tax/X base keeps the eventual concrete-cost recompute correct.
-    pending.cost = pending.cost.plus(splice_cost);
-    if let Some(base) = pending.base_cost.as_mut() {
-        *base = base.plus(splice_cost);
-    }
+    // CR 702.47b + CR 601.2f: the splice cost is an additional cost. Preserve
+    // the host spell's tax-inclusive base and record splice mana as a declared
+    // addition so later total-cost recomputes apply reductions to base + splice.
+    pending.declared_mana_additions.push(splice_cost.clone());
+    pending.cost = crate::game::casting::recompute_pending_mana_total(
+        state,
+        player,
+        &pending,
+        pending.ability.chosen_x,
+    );
 
     // CR 702.47c: copy the card's text box onto the host spell. The cloned
     // ability is sourced to the host spell object and controlled by the caster

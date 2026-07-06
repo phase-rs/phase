@@ -3015,6 +3015,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "<type> cards in your hand [without <kw>] have <kw>. Its <kw> cost is
+    // equal to its mana cost reduced by {N}." (CR 702.143d + CR 702 alt-cost
+    // off-zone family) — Singing Towers of Darillium grants foretell with a
+    // per-recipient derived cost.
+    if let Some(def) = parse_hand_cards_have_derived_cost_keyword(&text) {
+        return Some(def);
+    }
+
     // --- "can block an additional creature [as long as|if <cond>]" / "can block any number" ---
     // CR 509.1c + CR 611.3a: an extra-blocker grant may carry a trailing "as long
     // as <cond>" / "if <cond>" gate (Entourage of Trest: "This creature can block

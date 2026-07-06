@@ -462,6 +462,9 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        // Derived-cost keyword grant: its cost is derived from the recipient's
+        // mana cost, not a `QuantityExpr` magnitude — no dynamic value here.
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }

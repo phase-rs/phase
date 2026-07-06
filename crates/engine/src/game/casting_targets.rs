@@ -87,15 +87,23 @@ pub(crate) fn handle_select_modes(
     // costs layered on top of the base cost. `restrictions::add_mana_cost` treats `NoCost`/
     // zero as identity, so a cast-without-paying path (`pending.cost == zero`) yields exactly
     // the additional costs — alternative-cost permissions never waive them.
-    let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
+    let mut total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
     let mut pending = pending;
     // CR 601.2b + CR 601.2f: Fold the chosen modal mode costs (Spree / Entwine
-    // cost increases, computed against a zero base) into the captured base so
-    // any later post-X cost recompute (`concrete_cost_for_x`) includes them.
-    // Without a captured base (legacy / activated) leave it `None`.
-    if let Some(base) = pending.base_cost.as_ref() {
+    // cost increases, computed against a zero base) into the declared mana
+    // additions so any later pending recompute includes them without rewriting
+    // the tax-inclusive base.
+    if pending.base_cost.is_some() {
         let modal_only = compute_modal_total_cost(&ManaCost::zero(), &modal, &indices);
-        pending.base_cost = Some(restrictions::add_mana_cost(base, &modal_only));
+        if !modal_only.is_without_paying_mana() {
+            pending.declared_mana_additions.push(modal_only);
+            total_cost = super::casting::recompute_pending_mana_total(
+                state,
+                controller,
+                &pending,
+                pending.ability.chosen_x,
+            );
+        }
     }
     if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
     {
@@ -121,6 +129,7 @@ pub(crate) fn handle_select_modes(
         let mut pending_x =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
         pending_x.base_cost = pending.base_cost.clone();
+        pending_x.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_x.target_constraints = pending.target_constraints;
         pending_x.casting_variant = pending.casting_variant;
         pending_x.cast_timing_permission = pending.cast_timing_permission;
@@ -196,6 +205,7 @@ pub(crate) fn handle_select_modes(
         let mut pending_sel =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
         pending_sel.base_cost = pending.base_cost.clone();
+        pending_sel.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
         pending_sel.origin_zone = pending.origin_zone;
