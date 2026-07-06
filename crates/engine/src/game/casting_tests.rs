@@ -11916,6 +11916,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
                 "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
         }]
         .into();
     }
