@@ -556,7 +556,7 @@ fn do_eliminate(
                 if players::is_alive(state, state.active_player) && state.active_player != player {
                     state.active_player
                 } else {
-                    players::next_player(state, player)
+                    players::next_player_in_turn_order(state, player)
                 };
             state.monarch = Some(new_monarch);
             events.push(GameEvent::MonarchChanged {
@@ -565,7 +565,7 @@ fn do_eliminate(
         }
     }
 
-    // CR 725.4: If the player who has the initiative leaves the game,
+    // CR 726.4: If the player who has the initiative leaves the game,
     // the active player takes the initiative. If the active player is
     // also leaving, the next living player in turn order gets it.
     if state.initiative == Some(player) {
@@ -581,7 +581,7 @@ fn do_eliminate(
                 if players::is_alive(state, state.active_player) && state.active_player != player {
                     state.active_player
                 } else {
-                    players::next_player(state, player)
+                    players::next_player_in_turn_order(state, player)
                 };
             state.initiative = Some(new_holder);
             events.push(GameEvent::InitiativeTaken {
@@ -1375,7 +1375,30 @@ mod tests {
         assert!(state.eliminated_players.contains(&PlayerId(1)));
     }
 
-    // --- Initiative transfer on elimination (CR 725.4) ---
+    // --- Monarch transfer on elimination (CR 725.4) ---
+
+    #[test]
+    fn monarch_transfers_to_next_turn_order_player_when_active_leaving_and_reversed() {
+        let mut state = setup_three_player();
+        state.active_player = PlayerId(0);
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        state.monarch = Some(PlayerId(0));
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        // CR 725.4 + CR 103.1: active player is leaving, so reversed turn
+        // order gives the monarch designation to P2, not physical-next P1.
+        assert_eq!(state.monarch, Some(PlayerId(2)));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::MonarchChanged {
+                player_id: PlayerId(2)
+            }
+        )));
+    }
+
+    // --- Initiative transfer on elimination (CR 726.4) ---
 
     #[test]
     fn initiative_transfers_on_elimination() {
@@ -1386,7 +1409,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
-        // CR 725.4: Active player (P0) takes the initiative.
+        // CR 726.4: Active player (P0) takes the initiative.
         assert_eq!(state.initiative, Some(PlayerId(0)));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1410,7 +1433,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut events);
 
-        // CR 725.4: Active player is leaving, so next living player in turn order gets it.
+        // CR 726.4: Active player is leaving, so next living player in turn order gets it.
         // P1 is next after P0 in a 3-player game.
         assert_eq!(state.initiative, Some(PlayerId(1)));
         assert!(events.iter().any(|e| matches!(
@@ -1430,7 +1453,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut events);
 
-        // CR 725.4: P1 is still alive, so they get initiative (game ends immediately after).
+        // CR 726.4: P1 is still alive, so they get initiative (game ends immediately after).
         assert_eq!(state.initiative, Some(PlayerId(1)));
         assert!(matches!(
             state.waiting_for,
@@ -1438,6 +1461,27 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
+    }
+
+    #[test]
+    fn initiative_transfers_to_next_turn_order_player_when_active_leaving_and_reversed() {
+        let mut state = setup_three_player();
+        state.active_player = PlayerId(0);
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        state.initiative = Some(PlayerId(0));
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        // CR 726.4 + CR 103.1: active player is leaving, so reversed turn
+        // order gives the initiative to P2, not physical-next P1.
+        assert_eq!(state.initiative, Some(PlayerId(2)));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::InitiativeTaken {
+                player_id: PlayerId(2)
+            }
+        )));
     }
 
     // --- CR 800.4a: control effects end when a player leaves the game ---

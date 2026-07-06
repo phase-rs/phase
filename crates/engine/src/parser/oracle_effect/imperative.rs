@@ -8224,6 +8224,26 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues));
     }
 
+    // CR 103.1 + CR 101.4: "reverse the game's turn order" / "reverse the turn
+    // order" (Temple of Atropos chaos, Aeon Engine activated ability, Time
+    // Distortion phenomenon). Whole-phrase imperative with no target; anchored
+    // nom production mirroring the "chaos ensues" parse so unrelated clauses
+    // cannot accidentally match it. The "(For example …)" reminder is stripped
+    // upstream, and the apostrophe reaching the parser is straight. The two
+    // surface forms are a single `alt()` axis (compose, don't enumerate).
+    if all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("reverse the game's turn order"),
+            tag("reverse the turn order"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::ReverseTurnOrder));
+    }
+
     // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
     // of Mortality). The subject ("two target players") precedes the verb, so
     // `first_word` is "two"/"target"/"have" rather than a verb keyword —
@@ -8296,6 +8316,25 @@ pub(super) fn parse_imperative_family_ast(
             target: TargetFilter::Controller,
             phase: Phase::End,
             after: Phase::End,
+            followed_by: vec![],
+            count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
+        }));
+    }
+    // CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+    // phase" (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus). The
+    // beginning phase is untap → upkeep → draw (CR 501.1). `phase: Untap` is the
+    // self-documenting marker the resolver keys the beginning-phase schedule on
+    // (untap begins only the beginning phase, CR 502) — no other AdditionalPhase
+    // producer emits `phase: Untap`. `after`/`followed_by` are unused for this
+    // shape: the resolver derives the anchor from the phase this ability resolves
+    // in ("this phase", CR 500.8) via `last_step_of_phase`, and resumes the turn
+    // at that phase's natural successor. `after` is a don't-care sentinel.
+    if nom_primitives::scan_contains(lower, "additional beginning phase") {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::Untap,
+            after: Phase::PostCombatMain,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
             attacker_restriction: None,

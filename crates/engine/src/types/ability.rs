@@ -11021,6 +11021,12 @@ pub enum Effect {
     /// ensues" triggered ability triggers. Payload-less resolving keyword action
     /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
     ChaosEnsues,
+    /// CR 103.1 + CR 101.4: Reverse the game's turn order (Temple of Atropos,
+    /// Aeon Engine, Time Distortion). Flips `state.turn_direction`; turn
+    /// progression, APNAP, and priority passing follow the new direction, while
+    /// physical seating is unchanged. Payload-less resolving keyword action
+    /// (mirrors `Effect::ChaosEnsues`). RUNTIME: reverse_turn_order::resolve.
+    ReverseTurnOrder,
     /// CR 701.51b: Open N Attractions by putting cards from the top of your
     /// Attraction deck onto the battlefield.
     OpenAttractions {
@@ -13306,6 +13312,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
             | Effect::AssembleContraptions { .. }
@@ -13676,6 +13683,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -13926,6 +13934,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -14088,6 +14097,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::Planeswalk => "Planeswalk",
         Effect::ChaosEnsues => "ChaosEnsues",
+        Effect::ReverseTurnOrder => "ReverseTurnOrder",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::AssembleContraptions { .. } => "AssembleContraptions",
@@ -14329,6 +14339,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     Planeswalk,
     ChaosEnsues,
+    ReverseTurnOrder,
     OpenAttractions,
     RollToVisitAttractions,
     AssembleContraptions,
@@ -14587,6 +14598,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
+            Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::AssembleContraptions { .. } => EffectKind::AssembleContraptions,

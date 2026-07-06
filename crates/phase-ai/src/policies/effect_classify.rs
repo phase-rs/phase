@@ -342,6 +342,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::RevealUntil { .. }
+        | Effect::ReverseTurnOrder
         | Effect::RingTemptsYou
         | Effect::Ripple { .. }
         | Effect::RollDie { .. }

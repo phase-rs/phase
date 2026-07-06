@@ -26,7 +26,7 @@ use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
-use super::phase::{Phase, PhaseStop};
+use super::phase::{Phase, PhaseStop, TurnDirection};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
 use super::replacements::ReplacementEvent;
@@ -6720,6 +6720,22 @@ pub struct GameState {
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
+    /// CR 500.8 + CR 501.1: LIFO stack of anchor phases for inserted beginning
+    /// phases (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus)
+    /// currently in progress. When such a phase's draw step ends, the turn
+    /// resumes at the anchor's natural successor (or runs the next queued
+    /// beginning phase for the same anchor) rather than at the draw step's
+    /// default successor. Empty outside inserted beginning phases.
+    /// `#[serde(default)]` so saved games load unchanged.
+    #[serde(default)]
+    pub extra_phase_resume: Vec<Phase>,
+
+    /// CR 103.1: The current turn-order direction. Durable — persists across
+    /// turns until an effect reverses it again. Default `Normal` is the game's
+    /// clockwise turn order (CR 103.1). `#[serde(default)]` for save compat.
+    #[serde(default)]
+    pub turn_direction: TurnDirection,
+
     /// CR 508.1c + CR 506.1: When the current combat phase was scheduled with an
     /// attacker restriction (Last Night Together / Bumi), only creatures matching
     /// this filter may be declared as attackers. Set on entering that
@@ -8509,6 +8525,8 @@ impl GameState {
             ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
+            extra_phase_resume: Vec::new(),
+            turn_direction: TurnDirection::Normal,
             current_combat_attacker_restriction: None,
             current_combat_attacker_restriction_source: None,
             seat_order,
@@ -9150,6 +9168,8 @@ impl PartialEq for GameState {
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
+            && self.extra_phase_resume == other.extra_phase_resume
+            && self.turn_direction == other.turn_direction
             && self.current_combat_attacker_restriction
                 == other.current_combat_attacker_restriction
             && self.current_combat_attacker_restriction_source

@@ -1770,13 +1770,17 @@ pub(crate) fn is_sorcery_speed_window(
 }
 
 fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
-    // CR 723: compare the active player against the semantic priority *seat*, not
-    // `priority_player` (the authorized submitter). Under turn-control these
-    // diverge, so the raw field would never equal `active_player` during a
-    // controlled turn and wrongly close this window. Behavior is identical
-    // without turn-control, where the seat and submitter are the same player.
-    super::turn_control::priority_seat(state) == state.active_player
-        && matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
+    // CR 508.1 + CR 508.2: attackers are declared as the first turn-based action
+    // of the declare-attackers step, BEFORE any player receives priority. So
+    // "before attackers are declared" is a pure PHASE property — we are strictly
+    // before that step — independent of which player currently holds priority.
+    // This is deliberately not priority-gated: a non-active player casting an
+    // instant during the active player's pre-combat (Siren's Call, Master
+    // Warcraft) is correctly inside the window, and turn-control (CR 723) can't
+    // affect a check that never reads priority. Turn-qualified cards (the
+    // `DuringYourTurn` activations) remain pinned to the active player by their
+    // own restriction, which is AND-composed with this one.
+    matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
 }
 
 fn is_before_combat_damage(phase: Phase) -> bool {
@@ -3870,5 +3874,103 @@ mod tests {
         // proving the assertion above is not vacuous.
         assert!(place_blocking(&mut state, blocker, normally_blocked));
         assert!(is_source_blocked(&state, normally_blocked));
+    }
+
+    // CR 508.1 + CR 508.2: "before attackers are declared" is a phase property,
+    // independent of which player holds priority — so a NON-active player casting
+    // an instant during the active player's pre-combat (Master Warcraft, Siren's
+    // Call) is inside the window. Fails on revert of the phase-only fix (the old
+    // `priority_seat == active_player` clause rejected the non-active seat).
+    #[test]
+    fn before_attackers_window_admits_non_active_caster() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let active = PlayerId(0);
+        let non_active = PlayerId(1);
+        let src = ObjectId(10);
+        let restr = [CastingRestriction::BeforeAttackersDeclared];
+
+        for phase in [Phase::PreCombatMain, Phase::BeginCombat] {
+            state.active_player = active;
+            state.phase = phase;
+            // The non-active player holds priority to cast the instant — exactly
+            // the state the old priority_seat clause wrongly rejected.
+            state.priority_player = non_active;
+            state.waiting_for = WaitingFor::Priority { player: non_active };
+
+            assert!(
+                check_casting_restrictions(&state, non_active, src, &restr).is_ok(),
+                "non-active player must be inside the before-attackers window in {phase:?}"
+            );
+            // Reach-guard: the active player is also inside the window, so the
+            // assertion above is not vacuously true.
+            assert!(
+                check_casting_restrictions(&state, active, src, &restr).is_ok(),
+                "active player must also be inside the window in {phase:?}"
+            );
+        }
+    }
+
+    // CR 508.1/508.2: the window is strictly before the declare-attackers step;
+    // it must be closed once attackers are (or could have been) declared.
+    #[test]
+    fn before_attackers_window_closes_at_and_after_declaration() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let p = PlayerId(0);
+        let src = ObjectId(10);
+        let restr = [CastingRestriction::BeforeAttackersDeclared];
+        state.active_player = p;
+        state.priority_player = p;
+        state.waiting_for = WaitingFor::Priority { player: p };
+
+        for phase in [
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::PostCombatMain,
+        ] {
+            state.phase = phase;
+            assert!(
+                check_casting_restrictions(&state, p, src, &restr).is_err(),
+                "the window must be closed in {phase:?} (attackers already declared)"
+            );
+        }
+        // Reach-guard: open before declaration.
+        state.phase = Phase::BeginCombat;
+        assert!(check_casting_restrictions(&state, p, src, &restr).is_ok());
+    }
+
+    // Non-regression: `[DuringYourTurn, BeforeAttackersDeclared]` cards (King's
+    // Assassin and the Portal Three Kingdoms tap-ability cycle) must stay pinned
+    // to the active player. Widening the before-attackers window to phase-only
+    // must NOT let a non-active player activate them — DuringYourTurn (AND-composed)
+    // still gates, across the whole widened window (both PreCombatMain and BeginCombat).
+    #[test]
+    fn during_your_turn_before_attackers_stays_active_player_gated() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let src = ObjectId(10);
+        let restr = [
+            ActivationRestriction::DuringYourTurn,
+            ActivationRestriction::BeforeAttackersDeclared,
+        ];
+
+        for phase in [Phase::PreCombatMain, Phase::BeginCombat] {
+            // Controller's OWN turn: legal.
+            state.active_player = controller;
+            state.phase = phase;
+            state.priority_player = controller;
+            state.waiting_for = WaitingFor::Priority { player: controller };
+            assert!(
+                check_activation_restrictions(&state, controller, src, 0, &restr).is_ok(),
+                "own turn {phase:?} must be legal"
+            );
+            // Opponent's turn: illegal (DuringYourTurn fails) — proves phase-only
+            // did not widen these cards to opponents' turns.
+            state.active_player = opponent;
+            assert!(
+                check_activation_restrictions(&state, controller, src, 0, &restr).is_err(),
+                "opponent's turn {phase:?} must be illegal (DuringYourTurn gate)"
+            );
+        }
     }
 }
