@@ -39,7 +39,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
+    CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
     ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
     RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition,
@@ -48,7 +48,8 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::PlayerActionKind;
+use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
@@ -1029,7 +1030,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // Extract intervening-if condition from effect text first — a
                 // leading "if X, " can hide the "you may " optional marker behind
                 // the if-clause.
-                let (without_if, cond) = extract_if_condition(&effect_text);
+                let (without_if, cond) =
+                    extract_if_condition_with_card_name(&effect_text, card_name);
                 (without_if, cond, None)
             }
         };
@@ -1771,6 +1773,98 @@ fn constrain_triggering_spell_with_nth_filter(def: &mut TriggerDefinition) {
             filters: vec![existing, filter],
         },
     });
+}
+
+/// CR 601.2a + CR 603.4: Recognize the disjunctive "first-of-type this turn"
+/// intervening-if — "if it's the first instant spell, the first sorcery spell,
+/// or the first Otter spell other than ~ you've cast this turn". Each disjunct
+/// binds the triggering spell to its type AND to the ordinal-of-type count via a
+/// composed `And(TriggeringSpellMatchesFilter(filter),
+/// QuantityComparison(SpellsCastThisTurn{Controller, filter} == ordinal))`,
+/// collected into `TriggerCondition::Or`. Requires >= 2 disjuncts so a
+/// single-disjunct card (Vengevine, the NthSpellThisTurn constraint class) falls
+/// through to the untouched fire-time `TriggerConstraint::NthSpellThisTurn` path.
+fn parse_disjunctive_first_spell_intervening_if<'a>(
+    input: &'a str,
+    card_name: &str,
+) -> OracleResult<'a, TriggerCondition> {
+    let (mut rest, _) = alt((tag("if it's the "), tag("if it is the "))).parse(input)?;
+    let mut disjuncts = Vec::new();
+    loop {
+        let (next, disjunct) = parse_first_spell_disjunct(rest, card_name)?;
+        disjuncts.push(disjunct);
+        rest = next;
+        // Disjunct separator: ", the " / ", or the " continues to the next filter.
+        match alt((tag::<_, _, OracleError<'_>>(", or the "), tag(", the "))).parse(rest) {
+            Ok((next, _)) => rest = next,
+            Err(_) => break,
+        }
+    }
+    // Only a genuine >= 2-way OR belongs here; a single disjunct is the
+    // constraint path's (NthSpellThisTurn) job.
+    if disjuncts.len() < 2 {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" you've cast this turn"),
+        tag(" you cast this turn"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(rest)?;
+    Ok((
+        rest,
+        TriggerCondition::Or {
+            conditions: disjuncts,
+        },
+    ))
+}
+
+/// One disjunct of the disjunctive first-of-type intervening-if:
+/// "first [type] spell" optionally followed by " other than ~". The self-name
+/// exclusion emits `Not(Named{card_name})` on the filter — the oracle normalizes
+/// the card's own name to "~", and spell-history / spell-object name matching
+/// keys on the full card name (CR 201.2). The same filter appears in both the
+/// `TriggeringSpellMatchesFilter` anchor and the `SpellsCastThisTurn` count.
+fn parse_first_spell_disjunct<'a>(
+    input: &'a str,
+    card_name: &str,
+) -> OracleResult<'a, TriggerCondition> {
+    let (n, rest) = parse_ordinal(input).ok_or_else(|| oracle_err(input))?;
+    let (rest, type_text) = take_until(" spell").parse(rest)?;
+    let (rest, _) = tag(" spell").parse(rest)?;
+    let (rest, exclusion) = opt(tag::<_, _, OracleError<'_>>(" other than ~")).parse(rest)?;
+    let base = type_only_filter(type_text.trim()).ok_or_else(|| oracle_err(type_text))?;
+    let filter = match exclusion {
+        Some(_) => TargetFilter::And {
+            filters: vec![
+                base,
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Named {
+                        name: card_name.to_string(),
+                    }),
+                },
+            ],
+        },
+        None => base,
+    };
+    let disjunct = TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::TriggeringSpellMatchesFilter {
+                filter: filter.clone(),
+            },
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(filter),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: n as i32 },
+            },
+        ],
+    };
+    Ok((rest, disjunct))
 }
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
@@ -3684,12 +3778,28 @@ fn parse_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerC
 /// Extract an intervening-if condition from effect text.
 /// Returns (cleaned effect text, optional condition).
 ///
+/// Card-name-agnostic wrapper for the trigger-condition unit tests, which don't
+/// carry the self-name. The self-name is only needed by the disjunctive
+/// first-of-type recognizer's "other than ~" self-exclusion, which never fires
+/// for these single-condition inputs; production trigger parsing routes through
+/// [`extract_if_condition_with_card_name`] with the real card name.
+#[cfg(test)]
+fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
+    extract_if_condition_with_card_name(text, "")
+}
+
+/// Extract an intervening-if condition from effect text.
+/// Returns (cleaned effect text, optional condition).
+///
 /// Architecture: delegates to `parse_inner_condition` (the shared nom combinator)
 /// via the `static_condition_to_trigger_condition` bridge for ALL game-state
 /// conditions. Only source-referential patterns that require the trigger source
 /// as context ("if you cast it", "if it's attacking", ninjutsu costs, "if it was a
 /// [type]", defending player) are handled directly here.
-fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
+fn extract_if_condition_with_card_name(
+    text: &str,
+    card_name: &str,
+) -> (String, Option<TriggerCondition>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -3718,6 +3828,23 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         if lower[..first_if].contains(". ") {
             return (text.to_string(), None);
         }
+    }
+
+    // CR 601.2a + CR 603.4: disjunctive "if it's the first [type] spell, the first
+    // [type] spell, or the first [type] spell other than ~ you've cast this turn"
+    // intervening-if (Alania, Divergent Storm). Each disjunct lowers to
+    // And(TriggeringSpellMatchesFilter(type), SpellsCastThisTurn{You,type} == n),
+    // collected into `TriggerCondition::Or`. The ≥2-disjunct guard inside the
+    // recognizer keeps single-disjunct cards (Vengevine + the NthSpellThisTurn
+    // constraint class) on the untouched fire-time `TriggerConstraint` path.
+    if let Some((prefix, condition, rest)) = scan_preceded(&lower, |i| {
+        parse_disjunctive_first_spell_intervening_if(i, card_name)
+    }) {
+        let clause_len = lower.len() - prefix.len() - rest.len();
+        return (
+            strip_condition_clause(text, prefix.len(), clause_len),
+            Some(condition),
+        );
     }
 
     // --- Source-referential patterns (cannot be StaticConditions) ---
@@ -3888,6 +4015,22 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     owner: None,
                 }),
             }),
+        );
+    }
+
+    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" — intervening-if
+    // on discard triggers whose subject is the discarded card (Anje Falkenrath: "if it has
+    // madness"). MUST precede the zone-change-object "if it " arms below, which would
+    // otherwise mis-route this predicate.
+    if let Some((before, condition, rest)) = scan_preceded(
+        &lower,
+        parse_event_object_has_alt_cost_keyword_intervening_if,
+    ) {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
         );
     }
 
@@ -4331,6 +4474,26 @@ fn parse_zone_change_object_token_contraction_intervening_if(
     let (rest, _) = tag("if it's not a ").parse(input)?;
     let (rest, _) = tag("token").parse(rest)?;
     Ok((rest, zone_change_object_token_condition(true)))
+}
+
+/// CR 603.4 + CR 701.9a + CR 702.35a: Build an event-object intervening-if
+/// filter for a named alt-cost keyword on the triggering object.
+fn event_object_has_alt_cost_keyword_condition(keyword: KeywordKind) -> TriggerCondition {
+    TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::HasKeywordKind { value: keyword }]),
+        ),
+    }
+}
+
+/// CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" on
+/// event-object intervening-ifs (e.g. discard triggers: "if it has madness").
+fn parse_event_object_has_alt_cost_keyword_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if it has ").parse(input)?;
+    let (rest, keyword) = nom_primitives::parse_alt_cost_keyword_name_to_kind.parse(rest)?;
+    Ok((rest, event_object_has_alt_cost_keyword_condition(keyword)))
 }
 
 /// CR 603.4 + CR 603.6a + CR 208.1: Entering-object intervening-if comparing the
@@ -12387,17 +12550,46 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 701.30b-c: "whenever you clash" fires when the controller of the
     // trigger source is either player participating in a clash.
     // Cards: Entangling Trap, Rebellion of the Flamekin.
-    if all_consuming(preceded(
+    //
+    // CR 701.30d + CR 603.4: an optional "...and win" tail (Sylvan Echoes)
+    // narrows the trigger so it fires ONLY when the controller won the clash.
+    // The win requirement rides on `clash_result` into trigger MATCHING (checked
+    // when the clash event occurs), so a lost or tied clash never creates a
+    // pending trigger — rather than gating the effect at resolution.
+    if let Ok((tail, ())) = preceded(
         alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
         value((), (tag("you"), space1, tag("clash"))),
-    ))
+    )
     .parse(lower)
-    .is_ok()
     {
-        let mut def = make_base();
-        def.mode = TriggerMode::Clashed;
-        def.valid_target = Some(TargetFilter::Controller);
-        return Some((TriggerMode::Clashed, def));
+        // Empty residual = plain "you clash" (any outcome). A " and win" residual
+        // = the win-required shape (Sylvan Echoes). Any other residual is a
+        // different clause we decline so a later dispatcher can try it.
+        let clash_result = if tail.is_empty() {
+            Some(None)
+        } else if all_consuming(value(
+            (),
+            (
+                space1,
+                tag::<_, _, OracleError<'_>>("and"),
+                space1,
+                tag("win"),
+            ),
+        ))
+        .parse(tail)
+        .is_ok()
+        {
+            Some(Some(ClashResult::Won))
+        } else {
+            None
+        };
+        if let Some(clash_result) = clash_result {
+            let mut def = make_base();
+            def.mode = TriggerMode::Clashed;
+            def.valid_target = Some(TargetFilter::Controller);
+            def.clash_result = clash_result;
+            return Some((TriggerMode::Clashed, def));
+        }
     }
 
     // CR 701.30: "whenever a player clashes" — fires for any clashing player.

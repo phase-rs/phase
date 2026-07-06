@@ -7160,31 +7160,82 @@ mod tests {
     }
 
     /// CR 708.2a + CR 708.3 (issue #2923 review): a face-down `ChangeZone` entry
-    /// that PAUSES on a per-permanent replacement-ordering / as-enters choice must
-    /// resume FACE DOWN with the same profile — not face up. The face-down profile
-    /// must ride the `PendingChangeZoneIteration` resume carrier (mirroring
-    /// `enter_tapped`/`enter_transformed`/`enters_under_player`), so the drain's
-    /// mover (`process_one_zone_move`) applies it on resume.
+    /// that PAUSES on a per-permanent replacement-ordering choice must resume FACE
+    /// DOWN with the same profile — not face up. The face-down profile must ride
+    /// the `PendingChangeZoneIteration` resume carrier (mirroring `enter_tapped`/
+    /// `enter_transformed`/`enters_under_player`), so the drain's mover
+    /// (`process_one_zone_move`) applies it on resume.
     ///
     /// Discriminator: pre-fix the carrier dropped `face_down_profile`, so the
     /// resumed object entered face up — exposing its real creature characteristics
-    /// the Yedora-style effect was supposed to hide. Both shock-style targets pause
-    /// (each carries a `Moved` MayCost replacement), so BOTH resume through the
-    /// stash/drain path and BOTH must end up face-down Forest lands.
+    /// the Yedora-style effect was supposed to hide.
+    ///
+    /// CR 708.2a: the pause is forced by EXTERNAL replacements, not the entrant's
+    /// own text. A face-down permanent has no own text, so its own self-replacement
+    /// cannot fire face down (`object_replacement_candidate_applies` suppresses it);
+    /// two opposite-direction enter-tap-state `Moved` effects on OTHER permanents
+    /// (`is_entering == false`, guard inert) collide (CR 616.1e/f, last-applied-wins)
+    /// and park each entering target — the same rules-valid mechanism as the morph
+    /// sibling `paused_face_down_morph_entry_resumes_face_down`. Both targets pause,
+    /// so BOTH resume through the stash/drain path and BOTH must end up face-down
+    /// Forest lands. (The resume action is now replacement-ordering rather than a
+    /// MayCost decline; both stay `ChooseReplacement`.)
     #[test]
     fn paused_face_down_change_zone_resumes_face_down_with_profile() {
         use crate::game::engine::apply_as_current;
         use crate::types::ability::{FaceDownBody, FaceDownProfile};
 
         let mut state = GameState::new_two_player(42);
-        // Two shock-style cards: each forces a per-permanent replacement choice on
-        // ETB, so the targeted loop pauses (stash → drain) for each.
+        // Two creatures in library: the ChangeZone targets. Their own shock
+        // self-replacement is inert on a face-down entry (CR 708.2a — no own text),
+        // so clear it; the pause is driven purely by the EXTERNAL collision below.
         let shock_a = add_shock_in_library_for_test(&mut state, 701, PlayerId(0));
         let shock_b = add_shock_in_library_for_test(&mut state, 702, PlayerId(0));
         for id in [shock_a, shock_b] {
             let obj = state.objects.get_mut(&id).unwrap();
             obj.card_types.core_types = vec![CoreType::Creature];
             obj.base_card_types = obj.card_types.clone();
+            obj.replacement_definitions = Default::default();
+        }
+
+        // EXTERNAL replacement-ordering collision (mirrors the morph sibling): two
+        // opposite-direction enter-tap-state `Moved` effects on OTHER permanents.
+        // `valid_card == None` (type-agnostic) matches every battlefield entrant;
+        // `is_entering == false` (source ≠ entrant) so the CR 708.2a face-down
+        // guard is inert and they still apply, colliding (CR 616.1e/f,
+        // last-applied-wins) to park each entering target on a ReplacementChoice.
+        {
+            use crate::game::game_object::GameObject;
+            use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+            use crate::types::replacements::ReplacementEvent;
+            for (offset, name, tap) in [
+                (0u64, "Frozen Aether", TapStateChange::Tap),
+                (1, "Spelunking", TapStateChange::Untap),
+            ] {
+                let oid = ObjectId(9100 + offset);
+                let mut src = GameObject::new(
+                    oid,
+                    CardId(9100 + offset),
+                    PlayerId(1),
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                src.replacement_definitions =
+                    vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::SetTapState {
+                                target: TargetFilter::SelfRef,
+                                scope: EffectScope::Single,
+                                state: tap,
+                            },
+                        ))
+                        .destination_zone(Zone::Battlefield)
+                        .description(name.to_string())]
+                    .into();
+                state.objects.insert(oid, src);
+                state.battlefield.push_back(oid);
+            }
         }
 
         state.active_player = PlayerId(0);

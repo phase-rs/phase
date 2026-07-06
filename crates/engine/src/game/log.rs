@@ -113,6 +113,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
         | GameEvent::CreatureExerted { .. }
         | GameEvent::CreatureEnlisted { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
@@ -576,6 +577,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 segs.push(card_seg(state, *attacker));
             }
             segs
+        }
+
+        // CR 509.1h: an effect made an attacker become blocked (no blockers).
+        GameEvent::AttackerBecameBlockedByEffect { attacker } => {
+            vec![card_seg(state, *attacker), text(" becomes blocked")]
         }
 
         GameEvent::CombatDamageDealtToPlayer {

@@ -12,6 +12,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
@@ -248,7 +249,56 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
             }
             AbilityCost::TapCreatures { .. } => last_verb = Some(PrecedingVerb::TapCreatures),
             AbilityCost::Unimplemented { description } if last_verb.is_some() => {
+                if description.trim().is_empty() {
+                    continue;
+                }
+                let verb = last_verb.unwrap();
                 let lower = description.to_lowercase();
+                // CR 601.2b/f + #2343 (Mechtitan Core): a continuation that names an
+                // explicit count of two or more objects ("four other artifact
+                // creatures and/or Vehicles you control") must recover that true
+                // count and the full (possibly disjunctive) filter — the historical
+                // `count: 1` + `parse_target` path dropped both. Scope the recovery
+                // to explicit counts >= 2 so single-object continuations keep their
+                // previous parse unchanged (this fix moves no parser surface outside
+                // the explicit-multi-count class). `parse_type_phrase` (the exile
+                // arm's own consumption-aware primitive) must consume the whole
+                // object phrase into a concrete filter, so an unsupported rider
+                // stays an honest `Unimplemented` rather than a false-green cost.
+                if let Some((count, rest)) = parse_number(&lower).filter(|(n, _)| *n >= 2) {
+                    let filter_text = strip_count_article_prefix(rest.trim())
+                        .trim_end_matches('.')
+                        .trim();
+                    let (filter, remainder) = parse_type_phrase(filter_text);
+                    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+                        costs[i] = match verb {
+                            PrecedingVerb::Sacrifice => {
+                                AbilityCost::Sacrifice(SacrificeCost::count(filter, count))
+                            }
+                            PrecedingVerb::Exile { zone } => AbilityCost::Exile {
+                                count,
+                                zone: extract_filter_zone(&filter).or(zone),
+                                filter: Some(filter),
+                            },
+                            PrecedingVerb::TapCreatures => AbilityCost::TapCreatures {
+                                requirement: TapCreaturesRequirement::count(count),
+                                filter,
+                            },
+                        };
+                    }
+                    // An explicit-count continuation is terminal: only the
+                    // full-consumption/non-`Any` branch above may rehydrate it. If
+                    // that did not fire (an unmodeled rider left a remainder, or an
+                    // `Any` filter), leave the continuation as an honest
+                    // `Unimplemented` — never fall through to the article/count-1
+                    // fallback below, which would emit a broad `count: 1` cost that
+                    // both drops the unmodeled rider and loses the real count.
+                    continue;
+                }
+                // Baseline single-object rehydration (unchanged pre-existing
+                // behavior): a bare "<article> <type>" continuation of the verb
+                // ("Sacrifice a green creature, a white creature, and a blue
+                // creature"). Left exactly as before so this fix does not move it.
                 let stripped = strip_article(description, &lower);
                 if stripped.is_empty() {
                     continue;
@@ -257,24 +307,20 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 if matches!(filter, TargetFilter::Any) {
                     continue;
                 }
-                match last_verb.unwrap() {
+                costs[i] = match verb {
                     PrecedingVerb::Sacrifice => {
-                        costs[i] = AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
+                        AbilityCost::Sacrifice(SacrificeCost::count(filter, 1))
                     }
-                    PrecedingVerb::Exile { zone } => {
-                        costs[i] = AbilityCost::Exile {
-                            count: 1,
-                            zone,
-                            filter: Some(filter),
-                        };
-                    }
-                    PrecedingVerb::TapCreatures => {
-                        costs[i] = AbilityCost::TapCreatures {
-                            requirement: TapCreaturesRequirement::count(1),
-                            filter,
-                        };
-                    }
-                }
+                    PrecedingVerb::Exile { zone } => AbilityCost::Exile {
+                        count: 1,
+                        zone,
+                        filter: Some(filter),
+                    },
+                    PrecedingVerb::TapCreatures => AbilityCost::TapCreatures {
+                        requirement: TapCreaturesRequirement::count(1),
+                        filter,
+                    },
+                };
             }
             _ => {
                 last_verb = None;
@@ -592,11 +638,20 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     {
         let rest = rest.trim();
         let rest_lower = rest.to_lowercase();
-        let is_self = nom_on_lower(rest, &rest_lower, |i| {
-            value((), alt((tag("~"), tag("cardname"), tag("this ")))).parse(i)
+        // CR 201.5 / CR 201.5a / CR 701.21a: "Sacrifice <self>". The shared cost
+        // self-ref combinator distinguishes the host (`~`/"cardname"/"this X" →
+        // SelfRef) from a granted body's by-name reference to its granting object
+        // (GRANTING_SELF_PLACEHOLDER → GrantingObject, e.g. Deconstruction
+        // Hammer's "Sacrifice Deconstruction Hammer").
+        let self_filter = nom_on_lower(rest, &rest_lower, |i| {
+            alt((
+                parse_cost_self_reference,
+                value(TargetFilter::SelfRef, tag("this ")),
+            ))
+            .parse(i)
         });
-        if is_self.is_some() {
-            return AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        if let Some((filter, _)) = self_filter {
+            return AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
         }
         // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
         // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
@@ -800,13 +855,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("exile ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        // CR 112.3: Self-exile costs — "Exile this card from your graveyard/hand"
-        // or "Exile this artifact/creature/enchantment/land"
-        if let Some(zone) = try_parse_self_exile_cost(&rest_lower) {
+        // CR 701.13a: Self-exile costs — "Exile this card from your
+        // graveyard/hand", "Exile this artifact/creature/enchantment/land", or a
+        // granted body naming its granting object ("Exile The Dominion Bracelet"
+        // → GrantingObject).
+        if let Some((filter, zone)) = try_parse_self_exile_cost(&rest_lower) {
             return AbilityCost::Exile {
                 count: 1,
                 zone,
-                filter: Some(TargetFilter::SelfRef),
+                filter: Some(filter),
             };
         }
         // "Exile the top card of your library" / "Exile the top N cards of your library"
@@ -1487,25 +1544,31 @@ fn try_parse_exile_with_aggregate_cost(lower: &str) -> Option<AbilityCost> {
     })
 }
 
-/// CR 112.3: Parse self-exile cost patterns like "this card from your graveyard",
-/// "this artifact", "this creature from your hand". Returns the zone (if specified).
-/// Also handles `~` (normalized card name) variants.
-fn try_parse_self_exile_cost(rest: &str) -> Option<Option<Zone>> {
+/// CR 701.13a: Parse self-exile cost patterns like "this card from
+/// your graveyard", "this artifact", "this creature from your hand". Returns the
+/// self-reference filter (`SelfRef` for the host; `GrantingObject` when a
+/// granted body names its granting object — The Dominion Bracelet's "Exile The
+/// Dominion Bracelet") and the zone (if specified). Also handles `~`
+/// (normalized card name) variants.
+fn try_parse_self_exile_cost(rest: &str) -> Option<(TargetFilter, Option<Zone>)> {
     let rest = rest.trim().trim_end_matches('.');
+    // Bare "~" / "cardname" / granter placeholder means exile the referenced
+    // object itself (from the battlefield, implicit zone).
+    if let Some((filter, tail)) = nom_on_lower(rest, rest, parse_cost_self_reference) {
+        if tail.trim().is_empty() {
+            return Some((filter, None));
+        }
+    }
     let is_self = nom_on_lower(rest, rest, |i| {
         value((), alt((tag("this "), tag("~ ")))).parse(i)
     })
     .is_some();
-    // Bare "~" means exile self (normalized card name)
-    if rest == "~" {
-        return Some(None);
-    }
     // "<self> from your <zone>" / "<self> in your <zone>" — delegate the trailing zone
     // phrase to the shared scanner so hand/graveyard/library/exile are all supported
     // via one combinator with word-boundary safety (rejects "from your graveyardkeeper").
     if is_self {
         if let Some((zone, _ctrl, _props)) = super::oracle_target::scan_zone_phrase(rest) {
-            return Some(Some(zone));
+            return Some((TargetFilter::SelfRef, Some(zone)));
         }
     }
     // "this artifact" / "this creature" / "this enchantment" / "this land" / "this permanent"
@@ -1515,7 +1578,7 @@ fn try_parse_self_exile_cost(rest: &str) -> Option<Option<Zone>> {
             after_this,
             "artifact" | "creature" | "enchantment" | "land" | "permanent" | "card" | "vehicle"
         ) {
-            return Some(None); // battlefield (implicit)
+            return Some((TargetFilter::SelfRef, None)); // battlefield (implicit)
         }
     }
     None
@@ -1586,32 +1649,35 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
-    // "~" is the self-reference placeholder. Preserve it as an explicit
-    // SelfRef so the runtime does not treat an unconstrained filter as "any
-    // permanent you control".
-    if nom_on_lower(filter_text, filter_text, |i| {
-        value(
-            (),
-            alt((
-                tag("~"),
-                tag("this card"),
-                tag("this creature"),
-                tag("this artifact"),
-                tag("this equipment"),
-                tag("this land"),
-                tag("this permanent"),
-                tag("this enchantment"),
-            )),
-        )
+    // CR 201.5 / CR 201.5a: "~" / "this X" is the host self-reference; the
+    // granter placeholder is a granted body's by-name reference to its granting
+    // object. Preserve the explicit filter so the runtime does not treat an
+    // unconstrained filter as "any permanent you control".
+    if let Some((filter, rest)) = nom_on_lower(filter_text, filter_text, |i| {
+        alt((
+            parse_cost_self_reference,
+            value(
+                TargetFilter::SelfRef,
+                alt((
+                    tag("this card"),
+                    tag("this creature"),
+                    tag("this artifact"),
+                    tag("this equipment"),
+                    tag("this land"),
+                    tag("this permanent"),
+                    tag("this enchantment"),
+                )),
+            ),
+        ))
         .parse(i)
-    })
-    .is_some_and(|((), rest)| rest.trim().is_empty())
-    {
-        return Some(AbilityCost::ReturnToHand {
-            count: 1,
-            filter: Some(TargetFilter::SelfRef),
-            from_zone: None,
-        });
+    }) {
+        if rest.trim().is_empty() {
+            return Some(AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(filter),
+                from_zone: None,
+            });
+        }
     }
     let target_text = format!("target {filter_text}");
     let (filter, rem) = parse_target(&target_text);
@@ -1772,8 +1838,8 @@ fn parse_mana_cost_nom(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ControllerRef, DiscardSelfScope, ObjectScope, QuantityExpr, SharedQuality, TypeFilter,
-        TypedFilter,
+        ControllerRef, DiscardSelfScope, FilterProp, ObjectScope, QuantityExpr,
+        SacrificeRequirement, SharedQuality, TypeFilter, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -1781,6 +1847,165 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    #[test]
+    fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
+        // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
+        // phrase carries an unmodeled rider that `parse_type_phrase` cannot fully
+        // consume ("… that were dealt damage this turn") must stay honest
+        // `Unimplemented` — it must NOT fall through to the count-1 fallback,
+        // which would emit a broad supported cost that drops both the rider and
+        // the real count.
+        match parse_oracle_cost(
+            "Sacrifice a creature and two artifacts that were dealt damage this turn",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs
+                        .iter()
+                        .any(|c| matches!(c, AbilityCost::Unimplemented { .. })),
+                    "explicit-count continuation with an unmodeled rider must stay \
+                     Unimplemented, got {costs:#?}"
+                );
+                assert_eq!(
+                    costs
+                        .iter()
+                        .filter(|c| matches!(c, AbilityCost::Sacrifice(_)))
+                        .count(),
+                    1,
+                    "must not rehydrate the unsupported continuation as a count-1 \
+                     sacrifice, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_single_object_continuation_keeps_count_one_baseline() {
+        // Scope guard: a single-object continuation ("a creature") is NOT touched
+        // by the multi-count recovery — it keeps its historical `count: 1` parse,
+        // so this fix moves no parser surface outside the explicit-multi-count
+        // class (only counts >= 2 are recovered).
+        match parse_oracle_cost("Sacrifice this creature and a creature you control") {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Sacrifice(sc)
+                            if matches!(sc.requirement, SacrificeRequirement::Count { count: 1 })
+                                && matches!(&sc.target, TargetFilter::Typed(t)
+                                    if t.controller == Some(ControllerRef::You))
+                    )),
+                    "single-object continuation must stay count 1, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_exile_self_and_count_other_you_control_recovers_count_and_filter() {
+        // CR 601.2f: Mechtitan Core — "Exile this Vehicle and four other artifact
+        // creatures and/or Vehicles you control" is one exile cost split across a
+        // conjunction. The continuation must recover count 4 and the disjunctive
+        // "you control" filter, not collapse to `count: 1` with an empty filter.
+        match parse_oracle_cost(
+            "{5}, Exile this Vehicle and four other artifact creatures and/or Vehicles you control",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Exile {
+                            count: 1,
+                            filter: Some(TargetFilter::SelfRef),
+                            ..
+                        }
+                    )),
+                    "expected the self-exile conjunct, got {costs:#?}"
+                );
+                let other = costs
+                    .iter()
+                    .find_map(|c| match c {
+                        AbilityCost::Exile {
+                            count,
+                            filter: Some(f),
+                            ..
+                        } if *count == 4 => Some(f),
+                        _ => None,
+                    })
+                    .expect("expected an Exile with count 4 for the continuation");
+                match other {
+                    TargetFilter::Or { filters } => {
+                        assert_eq!(filters.len(), 2);
+                        assert!(filters.iter().all(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.controller == Some(ControllerRef::You)
+                                    && t.properties.contains(&FilterProp::Another)
+                        )));
+                        // Both disjunction legs preserve their concrete types
+                        // through the "and/or" continuation, not just an empty
+                        // filter: "artifact creatures" and "Vehicles".
+                        assert!(filters.iter().any(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.type_filters == [TypeFilter::Artifact, TypeFilter::Creature]
+                        )));
+                        assert!(filters.iter().any(|f| matches!(
+                            f,
+                            TargetFilter::Typed(t)
+                                if t.type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+                        )));
+                    }
+                    other => panic!("expected a disjunctive continuation filter, got {other:#?}"),
+                }
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_and_count_other_continuation_recovers_count() {
+        // CR 601.2b/f: the same split-conjunction pattern for the sacrifice verb.
+        // "Sacrifice a creature and two other artifacts you control" must recover
+        // count 2 with the "other … you control" filter, not collapse to count 1.
+        match parse_oracle_cost("Sacrifice a creature and two other artifacts you control") {
+            AbilityCost::Composite { costs } => {
+                assert!(
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Sacrifice(sc)
+                            if matches!(sc.requirement, SacrificeRequirement::Count { count: 2 })
+                                && matches!(&sc.target, TargetFilter::Typed(t)
+                                    if t.controller == Some(ControllerRef::You)
+                                        && t.properties.contains(&FilterProp::Another))
+                    )),
+                    "expected a count-2 'other artifacts you control' sacrifice, got {costs:#?}"
+                );
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_article_continuations_stay_count_one() {
+        // Regression: "A, B, and C" article continuations must still each parse as
+        // independent count-1 sacrifices — the fix must not inflate their count.
+        match parse_oracle_cost("Sacrifice a green creature, a white creature, and a blue creature")
+        {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 3);
+                assert!(costs.iter().all(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice(sc)
+                        if matches!(sc.requirement, SacrificeRequirement::Count { count: 1 })
+                )));
+            }
+            other => panic!("expected Composite, got {other:#?}"),
+        }
     }
 
     // CR 702.24a: `parse_or_separated_mana_costs` building-block tests.

@@ -407,6 +407,7 @@ fn redundancy_delta(
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
@@ -474,6 +475,7 @@ fn redundancy_delta(
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
@@ -561,6 +563,9 @@ fn redundancy_delta(
         // CR 702.171b: a permanent cannot become saddled if already saddled; no
         // static redundancy signal — leave to the resolver.
         | Effect::BecomeSaddled { .. }
+        // CR 509.1h: "becomes blocked" has no static redundancy signal (the
+        // target's blocked state is combat-scoped) — leave it to the resolver.
+        | Effect::BecomeBlocked { .. }
         // CR 702.95c-d: PairWith mutates the source/target pair relationship;
         // redundancy depends on trigger timing and revalidation, so this policy
         // leaves it to the resolver.

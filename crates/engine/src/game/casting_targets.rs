@@ -219,6 +219,35 @@ pub(crate) fn handle_select_modes(
     finish_pending_cast_cost_or_pay(state, controller, pending, resolved, total_cost, events)
 }
 
+/// CR 601.2d: After targets are committed on a pending cast, pause for
+/// `WaitingFor::DistributeAmong` when the spell divides a fixed pool among
+/// those targets. Shared by bulk `SelectTargets` and slot-by-slot
+/// `ChooseTarget` completion paths — the client drives the latter.
+fn maybe_pause_for_cast_distribution(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    ability: &ResolvedAbility,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(unit) = &pending.distribute else {
+        return Ok(None);
+    };
+    let Some(total) = extract_distribution_total(state, ability, &ability.effect) else {
+        // X-spell: distribution deferred to after mana payment.
+        return Ok(None);
+    };
+    let assigned_targets = distribution_targets(ability);
+    let mut pending_dist = pending.clone();
+    pending_dist.ability = ability.clone();
+    state.pending_cast = Some(Box::new(pending_dist));
+    Ok(Some(WaitingFor::DistributeAmong {
+        player,
+        total,
+        targets: assigned_targets,
+        unit: unit.clone(),
+    }))
+}
+
 /// Handle target selection for a pending cast.
 pub(crate) fn handle_select_targets(
     state: &mut GameState,
@@ -252,43 +281,9 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
-    // CR 601.2d: If this spell requires distribution among targets, trigger
-    // WaitingFor::DistributeAmong. For non-X spells, extract the fixed total now.
-    // For X-spells, distribution is deferred to after mana payment (engine.rs).
-    if let Some(ref unit) = pending.distribute {
-        if let Some(total) = extract_distribution_total(state, &ability, &ability.effect) {
-            // CR 601.2c + CR 601.2d: Divide only among the distributing effect's
-            // own targets; sibling-effect targets became targets already and are
-            // not part of the division.
-            let assigned_targets = distribution_targets(&ability);
-            // Store ability + targets on pending_cast for post-distribution resumption.
-            let mut pending_dist = PendingCast::new(
-                pending.object_id,
-                pending.card_id,
-                ability,
-                pending.cost.clone(),
-            );
-            pending_dist.base_cost = pending.base_cost.clone();
-            pending_dist.casting_variant = pending.casting_variant;
-            pending_dist.distribute = Some(unit.clone());
-            pending_dist.origin_zone = pending.origin_zone;
-            pending_dist.additional_cost_flow = pending.additional_cost_flow.clone();
-            pending_dist.deferred_target_selection = pending.deferred_target_selection;
-            pending_dist.chosen_modes = pending.chosen_modes.clone();
-            pending_dist.additional_cost_decided = pending.additional_cost_decided;
-            pending_dist.declared_kickers_to_pay = pending.declared_kickers_to_pay.clone();
-            pending_dist.declined_kickers = pending.declined_kickers.clone();
-            state.pending_cast = Some(Box::new(pending_dist));
-            return Ok(WaitingFor::DistributeAmong {
-                player,
-                total,
-                targets: assigned_targets,
-                unit: unit.clone(),
-            });
-        }
-        // X-spell: distribution deferred to after mana payment.
-        // Propagate distribute flag through to pending_cast for the
-        // (ManaPayment, PassPriority) handler.
+    if let Some(waiting_for) = maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
+    {
+        return Ok(waiting_for);
     }
 
     if let Some(ability_index) = pending.activation_ability_index {
@@ -404,6 +399,12 @@ pub(crate) fn handle_choose_target(
         TargetSelectionAdvance::Complete(selected_slots) => {
             let mut ability = pending.ability.clone();
             assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
+
+            if let Some(waiting_for) =
+                maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
+            {
+                return Ok(waiting_for);
+            }
 
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(waiting_for) = pay_activation_costs_after_target_selection(

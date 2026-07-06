@@ -12,9 +12,10 @@ use crate::types::counter::parse_counter_type;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CounterAddedRecord, CounterMoveChoice, DelayedTrigger, GameState, PendingCounterAddition,
-    PendingCounterAdditionQueue, PendingCounterMove, PendingCounterMoveQueue,
-    PendingCounterPostAction, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
+    CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice, DelayedTrigger, GameState,
+    PendingCounterAddition, PendingCounterAdditionQueue, PendingCounterMove,
+    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemovalQueue,
+    PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -1961,6 +1962,25 @@ pub fn resolve_remove(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 107.1c + CR 608.2d: "remove any number of counters" is a resolution-time
+    // interactive choice; the parser encodes it as `UpTo { Fixed{-1} }`.
+    // Discriminate on the peel FLAG (never on the scalar): if the count wrapper is
+    // present, route to the interactive per-type selection. We MUST NOT numerically
+    // resolve the inner `Fixed{-1}` — the board-derived per-type `available` counts
+    // ARE the legal domain (each type 0..=available; total 0..=Σ, incl. zero,
+    // CR 107.1c). Resolving the scalar would collapse into the non-interactive
+    // "remove all" branch below and skip the player's choice.
+    if let Effect::RemoveCounter {
+        count,
+        counter_type,
+        ..
+    } = &ability.effect
+    {
+        if count.is_up_to() {
+            return resolve_remove_interactive(state, ability, counter_type.clone(), events);
+        }
+    }
+
     let (counter_type, raw_count) = match &ability.effect {
         Effect::RemoveCounter {
             counter_type,
@@ -2049,6 +2069,178 @@ pub fn resolve_remove(
     });
 
     Ok(())
+}
+
+/// CR 107.1c + CR 608.2d: Resolve "remove any number of counters from [source]"
+/// as a resolution-time interactive choice. Derives the public per-type counter
+/// budget from the single removal source (the ability's target for Rhys, the
+/// Evermore; `SelfRef` for Tetravus) and raises `WaitingFor::RemoveCountersChoice`
+/// so the controller picks any per-type subset (0..=available, incl. the empty
+/// set). When no counters are available the only legal selection is empty, so we
+/// resolve immediately with `last_effect_count = Some(0)` (CR 608.2h) and no
+/// prompt.
+///
+/// ponytail: single-source only — multi-source "from among" removals (Galloping
+/// Lizrog, Eventide's Shadow) are out of scope and keep hitting the parser's
+/// existing paths.
+fn resolve_remove_interactive(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    counter_type: Option<CounterType>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Some(source_id) = resolve_defined_or_targets(state, ability)
+        .into_iter()
+        .next()
+    else {
+        // No legal source (target left the battlefield, etc.) — finish cleanly.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+
+    // CR 122.1: derive the public per-type counts on the source, honoring the
+    // effect's counter-type filter (`Some` → that single type; `None` → every
+    // type present, e.g. Rhys "any number of counters").
+    let available: Vec<(CounterType, u32)> = state
+        .objects
+        .get(&source_id)
+        .map(|obj| {
+            obj.counters
+                .iter()
+                .filter(|(ct, &v)| {
+                    v > 0 && counter_type.as_ref().is_none_or(|filter| filter == *ct)
+                })
+                .map(|(ct, &v)| (ct.clone(), v))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // CR 107.1c: "any number" includes zero — an empty board means the only legal
+    // choice is the empty set. Resolve without a prompt and stamp 0 so a
+    // downstream "create that many" rider (Tetravus) reads 0, not a stale count.
+    if available.is_empty() {
+        state.last_effect_count = Some(0);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    state.waiting_for = WaitingFor::RemoveCountersChoice {
+        player: ability.controller,
+        source_id,
+        counter_type,
+        available,
+        pending_effect: Box::new(ability.clone()),
+    };
+    Ok(())
+}
+
+/// CR 107.1c: Validate a submitted "remove any number of counters" selection
+/// against the per-type `available` budget and return the total requested.
+///
+/// Shared single authority for the per-type constraints of both the effect-path
+/// handler (`RemoveCountersChoice`) and the cost-path handler
+/// (`handle_remove_counter_distribution_for_cost`, which projects its per-object
+/// distribution to per-type first). Enforces: every selected type exists in
+/// `available`, per entry `count <= available[type]`, positive counts, and no
+/// duplicate type. The empty selection (remove zero) is legal, and omitting an
+/// available type is legal.
+pub(crate) fn validate_counter_selection(
+    available: &[(CounterType, u32)],
+    selections: &[CounterRemoveChoice],
+) -> Result<u32, EffectError> {
+    let mut seen = HashSet::new();
+    let mut total = 0u32;
+    for selection in selections {
+        if selection.count == 0 {
+            return Err(EffectError::InvalidParam(
+                "counter removal selections must have positive counts".to_string(),
+            ));
+        }
+        if !seen.insert(selection.counter_type.clone()) {
+            return Err(EffectError::InvalidParam(
+                "counter removal selections must have distinct counter types".to_string(),
+            ));
+        }
+        let available_count = available
+            .iter()
+            .find(|(ct, _)| *ct == selection.counter_type)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        if selection.count > available_count {
+            return Err(EffectError::InvalidParam(
+                "counter removal request exceeds available counters".to_string(),
+            ));
+        }
+        total = total.saturating_add(selection.count);
+    }
+    Ok(total)
+}
+
+/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and stash the
+/// per-type removals into `pending_counter_removals` for
+/// `drain_pending_counter_removals` to apply. Mirrors
+/// `validate_and_queue_counter_move_distribution` so the `apply()` handler stays
+/// a thin dispatcher.
+pub(crate) fn validate_and_queue_counter_removal(
+    state: &mut GameState,
+    selections: &[CounterRemoveChoice],
+    source_id: ObjectId,
+    available: &[(CounterType, u32)],
+    pending_effect: &ResolvedAbility,
+) -> Result<(), EffectError> {
+    let total = validate_counter_selection(available, selections)?;
+    let remaining: Vec<(CounterType, u32)> = selections
+        .iter()
+        .map(|s| (s.counter_type.clone(), s.count))
+        .collect();
+    state.pending_counter_removals = Some(PendingCounterRemovalQueue {
+        remaining,
+        source_id,
+        effect_kind: EffectKind::from(&pending_effect.effect),
+        source_ability_id: pending_effect.source_id,
+        total,
+    });
+    Ok(())
+}
+
+/// CR 107.1c + CR 608.2h: Drain the pending "remove any number of counters"
+/// selection one `(counter_type, count)` entry at a time through the
+/// single-authority remove pipeline so prevention/modification replacements
+/// apply. Mirrors `drain_pending_counter_moves`: re-parks the queue (returning
+/// early) when a per-removal replacement surfaces a `ReplacementChoice`, and when
+/// the queue empties stamps `last_effect_count = total` BEFORE emitting
+/// `EffectResolved` so a downstream "create that many" / "add that much" rider
+/// reading `QuantityRef::EventContextAmount` picks up the removed count.
+pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    while let Some(mut queue) = state.pending_counter_removals.take() {
+        let Some((counter_type, count)) = queue.remaining.first().cloned() else {
+            // CR 608.2h: ordering invariant — stamp the total removed before the
+            // terminating EffectResolved (and thus before the continuation drains).
+            state.last_effect_count = Some(queue.total as i32);
+            events.push(GameEvent::EffectResolved {
+                kind: queue.effect_kind,
+                source_id: queue.source_ability_id,
+            });
+            continue;
+        };
+        queue.remaining.remove(0);
+        let source_id = queue.source_id;
+        state.pending_counter_removals = Some(queue);
+        // CR 614.1: single-authority remove pipeline (applies prevention /
+        // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
+        remove_counter_with_replacement(state, source_id, counter_type, count, events);
+        // If a replacement needs a player choice, suspend — the ReplacementChoice
+        // resume path re-invokes this drain to finish the remaining removals.
+        if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

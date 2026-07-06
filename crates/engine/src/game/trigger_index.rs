@@ -593,6 +593,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
         GameEvent::AttackersDeclared { .. } => push(TriggerEventKey::Attacks),
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
+        // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
+        // "whenever ~ becomes blocked" triggers are indexed for it.
+        GameEvent::AttackerBecameBlockedByEffect { .. } => push(TriggerEventKey::Blocks),
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {}
         GameEvent::BecomesTarget { .. } => push(TriggerEventKey::BecomesTarget),
         GameEvent::VehicleCrewed { .. }
@@ -762,6 +765,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
+        | EffectKind::Behold
         | EffectKind::Vote
         | EffectKind::SeparateIntoPiles
         | EffectKind::SwitchPT
@@ -813,6 +817,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ReduceNextSpellCost
         | EffectKind::GrantNextSpellAbility
         | EffectKind::AddPendingETBCounters
+        | EffectKind::AddPendingEntersModifications
         | EffectKind::CreateEmblem
         | EffectKind::PayCost
         | EffectKind::CastFromZone
@@ -894,6 +899,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SetDayNight
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
+        // CR 509.3c: the "becomes blocked" trigger from an effect-block is keyed
+        // off the `AttackerBecameBlockedByEffect` GameEvent (see the event→key
+        // map above), not off `EffectResolved`, so this kind emits no key here.
+        | EffectKind::BecomeBlocked
         | EffectKind::Conjure
         | EffectKind::Intensify
         | EffectKind::ApplyPerpetual

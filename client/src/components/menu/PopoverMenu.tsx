@@ -4,7 +4,9 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type MouseEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
 
@@ -19,12 +21,28 @@ interface PopoverMenuStyle {
   maxHeight: number;
 }
 
+interface PopoverMenuTriggerArgs {
+  /** Attach to the trigger element — drives positioning + Escape refocus. */
+  ref: RefObject<HTMLButtonElement | null>;
+  open: boolean;
+  /** Toggle the menu; stops propagation so a card/list-row click doesn't fire. */
+  toggle: (event: MouseEvent) => void;
+}
+
 interface PopoverMenuProps {
   ariaLabel: string;
   /** Menu panel width in px — the menu is wider than the kebab trigger. */
   menuWidthPx?: number;
-  /** Extra classes on the kebab trigger button. */
+  /** Extra classes on the default kebab trigger button (ignored when
+   *  `renderTrigger` is supplied). */
   triggerClassName?: string;
+  /** Custom trigger in place of the default kebab (⋯). The returned element
+   *  MUST attach `ref` and call `toggle`. Used by the stack yield control to
+   *  keep its labeled pill while reusing this portaled-popover authority. */
+  renderTrigger?: (args: PopoverMenuTriggerArgs) => ReactNode;
+  /** Notified when the menu opens/closes — e.g. to dismiss a hover preview
+   *  that would otherwise sit behind the portaled menu. */
+  onOpenChange?: (open: boolean) => void;
   /** Render the menu items; call `close` after an action runs. */
   children: (close: () => void) => ReactNode;
 }
@@ -40,6 +58,8 @@ export function PopoverMenu({
   ariaLabel,
   menuWidthPx = 224,
   triggerClassName,
+  renderTrigger,
+  onOpenChange,
   children,
 }: PopoverMenuProps) {
   const [open, setOpen] = useState(false);
@@ -52,7 +72,23 @@ export function PopoverMenu({
     maxHeight: 320,
   });
 
-  const close = useCallback(() => setOpen(false), []);
+  // Single authority for open transitions so `onOpenChange` fires on every
+  // path (toggle, outside-click, Escape) — never as a bare `setOpen`.
+  const changeOpen = useCallback(
+    (next: boolean) => {
+      setOpen(next);
+      onOpenChange?.(next);
+    },
+    [onOpenChange],
+  );
+  const close = useCallback(() => changeOpen(false), [changeOpen]);
+  const toggle = useCallback(
+    (event: MouseEvent) => {
+      event.stopPropagation();
+      changeOpen(!open);
+    },
+    [changeOpen, open],
+  );
 
   const position = useCallback(() => {
     const trigger = triggerRef.current;
@@ -107,25 +143,26 @@ export function PopoverMenu({
 
   return (
     <>
-      <button
-        ref={triggerRef}
-        type="button"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={ariaLabel}
-        onClick={(event) => {
-          event.stopPropagation();
-          setOpen((prev) => !prev);
-        }}
-        className={
-          triggerClassName ??
-          "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-black/35 text-gray-400 transition-colors hover:bg-white/15 hover:text-white"
-        }
-      >
-        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="h-4 w-4">
-          <path d="M8 4a1.25 1.25 0 1 0 0-2.5A1.25 1.25 0 0 0 8 4Zm0 5.25a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5ZM9.25 13.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z" />
-        </svg>
-      </button>
+      {renderTrigger ? (
+        renderTrigger({ ref: triggerRef, open, toggle })
+      ) : (
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={ariaLabel}
+          onClick={toggle}
+          className={
+            triggerClassName ??
+            "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-black/35 text-gray-400 transition-colors hover:bg-white/15 hover:text-white"
+          }
+        >
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="h-4 w-4">
+            <path d="M8 4a1.25 1.25 0 1 0 0-2.5A1.25 1.25 0 0 0 8 4Zm0 5.25a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5ZM9.25 13.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z" />
+          </svg>
+        </button>
+      )}
 
       {open &&
         createPortal(
@@ -133,6 +170,15 @@ export function PopoverMenu({
             ref={menuRef}
             role="menu"
             aria-label={ariaLabel}
+            // Seal the whole pointer/click family so a menu interaction never
+            // leaks through the React tree to whatever ancestor rendered this
+            // menu. The portal escapes the DOM subtree, but React synthetic
+            // events still bubble up the component tree — without this, a
+            // pointerdown on an option reaches the host's handlers (e.g. a
+            // card's long-press → card preview) even though the click alone
+            // was already stopped. Bubble-phase only; the outside-click
+            // dismissal listens in the capture phase, so it is unaffected.
+            onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
             style={{
               top: style.top,

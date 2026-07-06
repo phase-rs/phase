@@ -867,6 +867,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::NoOp
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
@@ -919,6 +920,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard
@@ -1002,6 +1004,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }

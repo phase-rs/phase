@@ -283,7 +283,21 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                             .get(&link.source_id)
                             .is_some_and(|src| can_view_private_for_player(src.controller))
                 });
-                !(foretell_ok || hideaway_lookable_by_viewer)
+                // CR 406.3a + CR 406.3b: a player who holds an active
+                // play-from-exile grant for this face-down card may look at it —
+                // the grant that lets them cast it is the same authority that
+                // lets them look (single source:
+                // `casting::player_may_look_at_facedown_exile`). Scoped by the
+                // grant's `granted_to`, so a face-down card exiled by a different
+                // source (no grant to this viewer) stays redacted, and the
+                // targeted opponent (no grant) cannot see the cards either.
+                let play_from_exile_lookable = state.players.iter().any(|pl| {
+                    can_view_private_for_player(pl.id)
+                        && crate::game::casting::player_may_look_at_facedown_exile(
+                            state, obj, pl.id,
+                        )
+                });
+                !(foretell_ok || hideaway_lookable_by_viewer || play_from_exile_lookable)
             })
         })
         .collect();
@@ -536,6 +550,26 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2 + CR 701.4a: A pending `BeholdChoice` carries the choosing player's
+    // mixed-zone candidate set (battlefield-you-control ∪ HAND). The hand leg is a
+    // hidden zone — exposing the raw candidate ids to an opponent would leak which
+    // of the controller's hand cards are matching (e.g. which Dragons) BEFORE they
+    // choose. Redact the candidate list to opaque placeholders for viewers who
+    // cannot see the controller's private zones. The post-choice reveal of the
+    // single chosen card flows through the separate `CardsRevealed` pipeline.
+    if let WaitingFor::BeholdChoice {
+        player,
+        ref choices,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::BeholdChoice {
+                player,
+                choices: choices.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
+    }
+
     // CR 400.2: Hand is a hidden zone. `FreeCastWindow` (Invoke Calamity) is the
     // first `CastOffer` kind whose `candidates` reference cards in the
     // controller's HAND (as well as the public graveyard). Exposing the raw
@@ -751,6 +785,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
         .may_trigger_auto_choices
         .retain(|record| record.key.player == viewer);
+    filtered.priority_yields.retain(|y| y.player == viewer);
     filtered
         .lands_tapped_for_mana
         .retain(|pid, _| *pid == viewer);
@@ -1209,6 +1244,7 @@ mod tests {
             player,
             source_id,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -1437,6 +1473,28 @@ mod tests {
 
         assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
         assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
+    }
+
+    /// CR 117.3d: priority yields are private preference state — a viewer sees
+    /// only their own, never an opponent's.
+    #[test]
+    fn filters_other_players_priority_yields() {
+        let mut state = GameState::new_two_player(42);
+        state.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies { card_id: CardId(9) },
+        );
+        state.add_priority_yield(
+            PlayerId(1),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(10),
+            },
+        );
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(filtered.priority_yields.len(), 1);
+        assert_eq!(filtered.priority_yields[0].player, PlayerId(0));
     }
 
     #[test]

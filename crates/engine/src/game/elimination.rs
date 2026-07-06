@@ -413,6 +413,31 @@ fn do_eliminate(
     // CR 800.4a: Remove spells they control from the stack
     state.stack.retain(|entry| entry.controller != player);
 
+    // CR 800.4a + CR 800.4b: A control-another-player effect (CR 723, e.g.
+    // Mindslaver / Secret of Bloodbending) ends when EITHER party leaves the
+    // game — the leaving player's control effects end (CR 800.4a) and a player
+    // can't be controlled by someone who has left (CR 800.4b). Drop every
+    // scheduled control where the leaving player is the controller or the target,
+    // routing each removal through the single release authority. Covers both
+    // windows and closes a latent gap that also affected Mindslaver's full-turn
+    // control.
+    let leaving = super::topology::normalize_shared_turn_recipient(state, player);
+    while let Some(idx) = state
+        .scheduled_turn_controls
+        .iter()
+        .position(|scheduled| scheduled.controller == player || scheduled.target_player == leaving)
+    {
+        super::turn_control::release_control_at(state, idx);
+    }
+    // CR 800.4b: If the controlled active player just left, `turn_decision_controller`
+    // still points at the (living) controller of a now-departed player — stale;
+    // clear it so the departed seat isn't piloted by anyone.
+    if state.turn_decision_controller.is_some()
+        && super::topology::normalize_shared_turn_recipient(state, state.active_player) == leaving
+    {
+        state.turn_decision_controller = None;
+    }
+
     // CR 800.4a: A paused triggered ability on the stack is "an object on the
     // stack not represented by a card" and ceases to exist when its controller
     // leaves the game. The stack retain above drops that entry, but a trigger
@@ -487,11 +512,7 @@ fn do_eliminate(
     if state.pending_replacement.is_some() && state.waiting_for.acting_player() == Some(player) {
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
-        state.post_replacement_continuation = None;
-        state.post_replacement_source = None;
-        state.post_replacement_event_source = None;
-        state.post_replacement_event_target = None;
-        state.pending_connive_reentry = None;
+        super::replacement::abandon_post_replacement_continuation(state);
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
@@ -704,7 +725,7 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
-    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+    use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -1090,6 +1111,14 @@ mod tests {
         state.post_replacement_source = Some(o);
         state.post_replacement_event_source = Some(o);
         state.post_replacement_event_target = Some(TargetRef::Object(o));
+        // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
+        // seed, owned by this same abandoned continuation, must be abandoned
+        // alongside its siblings — this field was added after the teardown
+        // block below was written and was missed until this regression.
+        state.post_replacement_token_choice_applied = Some(HashSet::from([ReplacementId {
+            source: o,
+            index: 0,
+        }]));
         state.pending_connive_reentry = Some(PendingConniveReentry {
             conniver: o,
             count: 1,
@@ -1130,6 +1159,11 @@ mod tests {
         assert!(state.post_replacement_source.is_none());
         assert!(state.post_replacement_event_source.is_none());
         assert!(state.post_replacement_event_target.is_none());
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "abandoning the parked chooser's continuation must also clear the token-choice \
+             applied seed, not just its established siblings (issue #4886, review #6)"
+        );
         assert!(state.pending_connive_reentry.is_none());
         assert!(
             state.pending_spell_resolution.is_none(),
@@ -1752,6 +1786,65 @@ mod tests {
         assert!(
             !state.exile.contains(&o),
             "survivor-owned phased-out permanent must not be exiled by the step-4 sweep"
+        );
+    }
+
+    // CR 800.4a + CR 800.4b (test 7.4 — 4c controller leaves): a live control
+    // (CR 723) ends when the controlling player leaves the game. Eliminating the
+    // controller clears `turn_decision_controller` and drops their scheduled
+    // control, while an UNRELATED control by a different controller survives (the
+    // non-vacuous reach-guard). Revert-to-red: without the `do_eliminate` control
+    // cleanup, `turn_decision_controller` stays `Some(controller)` and the entry
+    // persists.
+    #[test]
+    fn controller_leaving_ends_scheduled_control() {
+        let mut state = setup_three_player();
+        let controller = PlayerId(0);
+        let owner = PlayerId(1);
+        let other_controller = PlayerId(1);
+        let other_owner = PlayerId(2);
+        state.active_player = owner;
+        // C actively pilots O's turn (CR 723).
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: owner,
+                controller,
+                grant_extra_turn_after: false,
+                window: crate::types::ability::ControlWindow::NextTurn,
+            });
+        state.turn_decision_controller = Some(controller);
+        // An unrelated control by a different controller (reach-guard: proves the
+        // cleanup is scoped to the leaving player, not a blanket wipe).
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: other_owner,
+                controller: other_controller,
+                grant_extra_turn_after: false,
+                window: crate::types::ability::ControlWindow::NextTurn,
+            });
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, controller, &mut events);
+
+        assert_eq!(
+            state.turn_decision_controller, None,
+            "the departed controller's live control ends"
+        );
+        assert!(
+            !state
+                .scheduled_turn_controls
+                .iter()
+                .any(|s| s.controller == controller),
+            "the departed controller's scheduled control is dropped"
+        );
+        assert!(
+            state
+                .scheduled_turn_controls
+                .iter()
+                .any(|s| s.controller == other_controller && s.target_player == other_owner),
+            "an unrelated control by a living controller survives (non-vacuous)"
         );
     }
 }

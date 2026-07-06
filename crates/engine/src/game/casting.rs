@@ -562,6 +562,39 @@ fn is_blocked_by_cast_only_from_zones(
         })
 }
 
+/// CR 116.2a + CR 305.1 + CR 601.2a: A `ProhibitPlayFromZone { zone }`
+/// restriction prevents the affected player from playing (casting OR playing as
+/// a land) a card located in `zone`. Consulted by BOTH the spell-cast gate and
+/// the play-land gate (`handle_play_land`) so the deny covers plays that are not
+/// casts (Memory Vessel: "they can't play cards from their hand"). The object's
+/// current zone is the discriminator, so a card that has left the prohibited
+/// zone (e.g. now in exile) is unaffected.
+pub(crate) fn is_blocked_by_prohibit_play_from_zone(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    state
+        .restrictions
+        .iter()
+        .any(|restriction| match restriction {
+            GameRestriction::ProhibitActivity {
+                source,
+                affected_players,
+                activity: ProhibitedActivity::ProhibitPlayFromZone { zone },
+                ..
+            } => {
+                let source_controller = state
+                    .objects
+                    .get(source)
+                    .map(|source_obj| source_obj.controller);
+                restriction_scope_matches_player(source_controller, affected_players, player)
+                    && obj.zone == *zone
+            }
+            _ => false,
+        })
+}
+
 /// CR 101.2: Check if a CantCastSpells restriction prevents the given player
 /// from casting any spells. E.g., Silence: "Your opponents can't cast spells this turn."
 fn is_blocked_by_cant_cast_spells(
@@ -783,6 +816,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             state.objects.get(obj_id).is_some_and(|obj| {
                 !is_blocked_by_cast_only_from_zones(state, obj, player)
                     && !is_blocked_by_cant_cast_spells(state, player, Some(obj))
+                    && !is_blocked_by_prohibit_play_from_zone(state, obj, player)
             })
         })
         .collect()
@@ -1907,6 +1941,34 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
         })
 }
 
+// CR 205.1b + CR 613.1d: read the enters-with type-grant rider ("… is a [type]
+// in addition to its other types") from the *consumed* cast-this-way permission
+// only (the one supporting THIS cast), not any permission carrying modifications,
+// so a non-consumed sibling permission's rider cannot leak onto this cast
+// (CR 608.2c). Mirrors `selected_exile_alt_cost_permission_enters_with_counter`.
+pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> Vec<crate::types::ability::ContinuousModification> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    obj.casting_permissions
+        .iter()
+        .find(|permission| {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        })
+        .map(|permission| match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                enters_with_modifications,
+                ..
+            } => enters_with_modifications.clone(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
 // CR 614.1a + CR 608.2n: read the graveyard-redirect rider ("if that spell would
 // be put into a graveyard, exile it / put it on the bottom of its owner's library
 // / return it to its owner's hand instead") from the *consumed* cast permission
@@ -2056,6 +2118,26 @@ pub(crate) fn play_from_exile_permission_source(
         }
         _ => None,
     })
+}
+
+/// CR 406.3a + CR 406.3b: The single authority for "may `player` look at this
+/// face-down card in exile?". A card exiled face down has no characteristics
+/// and can't be examined by any player (CR 406.3a), *except* that the spell or
+/// ability that exiled it may permit it — and CR 406.3b lets a player cast such
+/// a card only if they're allowed to look at it. An active
+/// [`CastingPermission::PlayFromExile`] grant for `player` is exactly that
+/// permission (Outrageous Robbery / Heist / the impulse-exile class): the grant
+/// that lets them play the card is the same authority that lets them look at it,
+/// so look- and play-permission cannot diverge. Routing through
+/// [`play_from_exile_permission_source`] also inherits its `card_filter` /
+/// `single_use` / per-turn gating, so a look is granted only where a cast would
+/// be. Consumed by `visibility.rs` face-down-exile redaction.
+pub(crate) fn player_may_look_at_facedown_exile(
+    state: &GameState,
+    obj: &GameObject,
+    player: PlayerId,
+) -> bool {
+    play_from_exile_permission_source(state, obj, player, state.turn_number).is_some()
 }
 
 /// CR 601.2f: The printed mana-cost increase a spell incurs when it is cast via
@@ -4087,6 +4169,15 @@ fn prepare_spell_cast_with_variant_override_inner(
     if mode == CastingMode::Actual && is_blocked_by_cast_only_from_zones(state, obj, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents casting from this zone".to_string(),
+        ));
+    }
+
+    // CR 116.2a + CR 601.2a: A `ProhibitPlayFromZone` deny prevents casting a
+    // spell from the named zone (Memory Vessel: "can't play cards from their
+    // hand" — the cast half of "play").
+    if mode == CastingMode::Actual && is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents playing cards from this zone".to_string(),
         ));
     }
 
@@ -8405,6 +8496,7 @@ pub(super) fn initiate_cast_during_resolution(
                 duration: None,
                 graveyard_replacement: graveyard_replacement.clone(),
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
                 mana_spend_permission,
             });
         // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
@@ -9588,6 +9680,11 @@ fn announce_spell_on_stack(
     prepared: &PreparedSpellCast,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 400.7: A new cast announcement is a new casting event — discard any
+    // stale behold creature-type choice left on the spell object from a prior
+    // resolution (#5051; cancel rewind uses the same clear in handle_cancel_cast).
+    clear_cast_scoped_creature_type_choice(state, prepared.object_id);
+
     stack::push_to_stack(
         state,
         StackEntry {
@@ -11333,6 +11430,21 @@ pub(super) fn can_feasibly_pay_mana_cost(
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
     can_feasibly_pay_mana_cost_with_probe(state, player, source_id, cost, None)
+}
+
+pub(super) fn has_manual_mana_ability_for_spell_payment(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let spell_meta = build_spell_meta(state, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+        state,
+        player,
+        Some(source_id),
+        spell_ctx.as_ref(),
+    )
 }
 
 pub(super) fn can_feasibly_pay_mana_cost_with_probe(
@@ -14285,6 +14397,17 @@ pub fn handle_activate_ability(
 /// reversion is needed — the object is already in its origin zone.
 /// Activated-ability casts never placed an object on the stack during target
 /// selection, so no stack rollback is needed for them.
+/// CR 400.7 + CR 601.2: Cast-scoped behold creature-type choices must not
+/// survive across casting events. A resolved spell that later re-enters the
+/// cast pipeline (flashback, retrace, hand re-cast, etc.) is a new object for
+/// game purposes and must re-prompt (#5051).
+fn clear_cast_scoped_creature_type_choice(state: &mut GameState, object_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.chosen_attributes
+            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
+    }
+}
+
 pub fn handle_cancel_cast(
     state: &mut GameState,
     pending: &PendingCast,
@@ -14301,10 +14424,7 @@ pub fn handle_cancel_cast(
     // (`casting_costs::pay_additional_cost_with_source`) would skip the type
     // prompt on the next cast attempt and silently reuse the stale type — so
     // remove it here and let a re-cast re-prompt from a clean slate.
-    if let Some(obj) = state.objects.get_mut(&pending.object_id) {
-        obj.chosen_attributes
-            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
-    }
+    clear_cast_scoped_creature_type_choice(state, pending.object_id);
 
     let convoked_creatures = if pending.convoked_creatures.is_empty() {
         state

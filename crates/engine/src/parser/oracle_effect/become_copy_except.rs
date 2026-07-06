@@ -728,7 +728,9 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModifica
 /// and CR 205.1a subtype correlation are applied downstream when the
 /// modification resolves. The optional `with "<ability>"` clause is granted via
 /// the shared quoted-ability parser, mirroring `parse_it_has_quoted_ability`.
-fn parse_its_a_type_loses_others(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+pub(super) fn parse_its_a_type_loses_others(
+    input: &str,
+) -> Option<(&str, Vec<ContinuousModification>)> {
     let (after_article, _) = alt((
         tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),

@@ -317,14 +317,26 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
         }
 
         obj.casting_permissions.retain(|p| match p {
+            // CR 514.2 + CR 611.2a: "until your next turn" expires at the
+            // *granting effect's controller's* next untap step. For a normal
+            // impulse grant `granted_to == exiled_by_ability_controller ==
+            // controller`, so this is unchanged. For a per-owner grant
+            // (`PermissionGrantee::ObjectOwner`) where each card's `granted_to`
+            // is its own owner but "your" refers to the activator (Memory
+            // Vessel: "Until your next turn, players may play cards they exiled
+            // this way"), the expiry must key on the activator, carried by
+            // `exiled_by_ability_controller`. This mirrors the identical
+            // controller-keyed expiry the End-step prune already applies to
+            // `UntilNextStepOf { End }` grants (Rocco, Street Chef).
             CastingPermission::PlayFromExile {
                 duration:
                     Duration::UntilNextTurnOf {
                         player: PlayerScope::Controller,
                     },
                 granted_to,
+                exiled_by_ability_controller,
                 ..
-            } => *granted_to != active_player,
+            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
             // CR 513.1 + CR 611.2a/b: `UntilNextStepOf { step: End }` is
             // expired by `prune_end_step_casting_permissions` at the end
             // step, NOT at the untap step. Retain here.
@@ -1188,6 +1200,8 @@ fn evaluate_condition_with_context(
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::CostPaidObject
             | crate::types::ability::ObjectScope::Anaphoric
+            // Never produced for a duration tap condition; fails safely.
+            | crate::types::ability::ObjectScope::OtherRevealedCard
             | crate::types::ability::ObjectScope::Demonstrative => false,
         },
         // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
@@ -4140,6 +4154,45 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
     }
 }
 
+/// CR 611.2c + CR 109.5: True when a granted `MustBeBlockedByAll` /
+/// `MustBeBlocked` static carries a controller-relative blocker filter
+/// (`ControllerRef::You`/`Opponent`/… — "your opponents", "you control").
+/// When such a static is grafted onto a TARGET permanent by a one-shot effect
+/// (You Look Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter
+/// relative to the target's controller. This gate is the condition under which
+/// the installing player must be snapshotted as the anchor (mirrors
+/// `static_mode_uses_chosen_color`).
+fn static_mode_uses_controller_relative_blocker_filter(
+    mode: &crate::types::statics::StaticMode,
+) -> bool {
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::MustBeBlockedByAll {
+            blockers: Some(filter),
+        }
+        | StaticMode::MustBeBlocked { by: Some(filter) } => {
+            target_filter_controller_is_relative(filter)
+        }
+        _ => false,
+    }
+}
+
+/// CR 109.5: True when a `TargetFilter` constrains the controller of matched
+/// objects via a `ControllerRef` slot (any variant qualifies — none is a
+/// concrete-player anchor). Recurses through `And`/`Or`/`Not`, modeled on
+/// `ability_utils::filter_references_target_player`.
+fn target_filter_controller_is_relative(filter: &TargetFilter) -> bool {
+    use crate::types::ability::TypedFilter;
+    match filter {
+        TargetFilter::Typed(TypedFilter { controller, .. }) => controller.is_some(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_controller_is_relative)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_is_relative(filter),
+        _ => false,
+    }
+}
+
 /// CR 509.1b + CR 105.4 (issue #327): Walk a `TargetFilter` looking for
 /// `FilterProp::IsChosenColor`. Mirrors the chosen-ref detection pattern in
 /// `effects::prevent_damage::resolve_source_filter`.
@@ -4977,8 +5030,16 @@ fn apply_continuous_effect_filtered(
             // or from multiple sources granting the same ability — must not
             // stack. Structural equality dedup keeps the grant idempotent.
             ContinuousModification::GrantAbility { definition } => {
-                if !obj.abilities.iter().any(|a| a == definition.as_ref()) {
-                    Arc::make_mut(&mut obj.abilities).push(*definition.clone());
+                // CR 201.5a + CR 613.1f: concretize any granter by-name
+                // self-reference (`GrantingObject`) in the cloned body to the
+                // live granting object (`effect.source_id`) before dedup/push,
+                // so "Exile/Sacrifice/Return <granter-name>" acts on the
+                // equipment/aura, not on the host it was granted to. Re-minted
+                // each layer pass (CR 613.1f). Dedup on the concretized value.
+                let mut granted = *definition.clone();
+                super::ability_utils::concretize_granting_object(&mut granted, effect.source_id);
+                if !obj.abilities.iter().any(|a| a == &granted) {
+                    Arc::make_mut(&mut obj.abilities).push(granted);
                 }
             }
             // CR 613.1f: Handled entirely at continuous-effect collection time —
@@ -4994,12 +5055,17 @@ fn apply_continuous_effect_filtered(
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
-                if !obj
-                    .trigger_definitions
-                    .iter_all()
-                    .any(|t| t == trigger.as_ref())
-                {
-                    obj.trigger_definitions.push(*trigger.clone());
+                // CR 201.5a + CR 613.1f: concretize a granter by-name
+                // self-reference inside the granted trigger's execute chain
+                // (e.g. "you may sacrifice <granter>") to the live granting
+                // object before dedup/push. Re-minted each layer pass (CR 613.1f).
+                let mut granted = *trigger.clone();
+                super::ability_utils::concretize_granting_object_in_trigger(
+                    &mut granted,
+                    effect.source_id,
+                );
+                if !obj.trigger_definitions.iter_all().any(|t| t == &granted) {
+                    obj.trigger_definitions.push(granted);
                 }
             }
             // CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
@@ -5029,13 +5095,28 @@ fn apply_continuous_effect_filtered(
                 // chosen-color attribute of its own; resolving at apply time
                 // bakes the granting source's choice into the live filter.
                 let resolved_mode = resolve_static_mode_chosen_color(mode, chosen_color);
-                let def =
+                let mut def =
                     StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
-                if !obj
-                    .static_definitions
-                    .iter_all()
-                    .any(|sd| sd.mode == resolved_mode)
-                {
+                // CR 611.2c + CR 109.5: A controller-relative blocker filter
+                // ("your opponents") grafted onto a TARGET permanent would
+                // otherwise resolve "you" as the target's controller. Snapshot
+                // the installing player (`effect.controller`, the single
+                // authority) so combat re-derives the filter context from the
+                // spell controller — the continuous effect's anchor is locked at
+                // materialization. `None` anchor (permanent-static lures) still
+                // resolves from the carrier.
+                if static_mode_uses_controller_relative_blocker_filter(&resolved_mode) {
+                    def = def.source_controller(effect.controller);
+                }
+                // CR 611.2c + CR 509.1c: Idempotency is keyed on the FULL grafted
+                // definition, not just `mode`. Two different casters can install
+                // the same controller-relative lure mode on one permanent with
+                // distinct `source_controller` anchors (each a separate CR 509.1c
+                // requirement — one per opponent-set); a mode-only guard would
+                // silently drop the second caster's requirement. Full-def equality
+                // still collapses the same effect re-applied across layer passes
+                // (identical anchor), so no grant is multiplied.
+                if !obj.static_definitions.iter_all().any(|sd| sd == &def) {
                     obj.static_definitions.push(def);
                 }
             }

@@ -691,11 +691,12 @@ pub fn activate_ninjutsu(
                 .ok_or("Specified creature is not an attacker")?
                 .clone();
 
-            let is_blocked = combat
-                .blocker_assignments
-                .get(&creature_to_return)
-                .is_some_and(|blockers| !blockers.is_empty());
-            if is_blocked {
+            // CR 702.49a: ninjutsu returns an UNBLOCKED attacking creature.
+            // CR 509.1h: "blocked" is the attacker's `blocked` flag — a creature
+            // made blocked by an effect (with no blocker assignments) is blocked
+            // and thus ineligible, and one stays blocked even if its blockers are
+            // gone. Reading the flag (not `blocker_assignments`) closes both gaps.
+            if attacker_info.blocked {
                 return Err("Attacker is blocked".to_string());
             }
 
@@ -2282,7 +2283,9 @@ mod tests {
     fn ninjutsu_fails_if_attacker_is_blocked() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
 
-        // Add a blocker assignment
+        // CR 509.1h: a declared block sets the attacker's `blocked` flag (this is
+        // what `place_blocking` / blocker declaration does in production). Ninjutsu
+        // reads that flag, so mark the attacker blocked and record the blocker.
         let blocker_id = create_object(
             &mut state,
             CardId(3),
@@ -2290,16 +2293,65 @@ mod tests {
             "Wall".to_string(),
             crate::types::zones::Zone::Battlefield,
         );
-        state
-            .combat
-            .as_mut()
-            .unwrap()
-            .blocker_assignments
-            .insert(attacker_id, vec![blocker_id]);
+        {
+            let combat = state.combat.as_mut().unwrap();
+            combat
+                .blocker_assignments
+                .insert(attacker_id, vec![blocker_id]);
+            combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == attacker_id)
+                .unwrap()
+                .blocked = true;
+        }
 
         let mut events = Vec::new();
         let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail when attacker is blocked");
+    }
+
+    #[test]
+    fn ninjutsu_fails_if_attacker_blocked_by_effect_without_assignments() {
+        // CR 702.49a + CR 509.1h: ninjutsu returns an UNBLOCKED attacker. An
+        // attacker made blocked purely by an effect (blocked flag set, NO
+        // blocker_assignments) is ineligible. This fails if keywords.rs reverts to
+        // the old `blocker_assignments`-non-empty check.
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+        crate::game::combat::mark_attacker_blocked(&mut state, attacker_id);
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_assignments
+                .is_empty(),
+            "reach-guard: an effect-block has no blocker assignments"
+        );
+
+        let mut events = Vec::new();
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
+        assert!(
+            result.is_err(),
+            "ninjutsu must reject an effect-blocked attacker (CR 702.49a + 509.1h)"
+        );
+
+        // Reach-guard: the SAME scenario with an unblocked attacker succeeds,
+        // proving the rejection above is caused by the blocked flag, not an
+        // unrelated failure.
+        let (mut ok_state, ok_attacker, ok_ninja) = setup_ninjutsu_scenario();
+        let mut ok_events = Vec::new();
+        let ok = activate_ninjutsu(
+            &mut ok_state,
+            PlayerId(0),
+            ok_ninja,
+            ok_attacker,
+            &mut ok_events,
+        );
+        assert!(
+            ok.is_ok(),
+            "unblocked attacker must be ninjutsu-eligible: {ok:?}"
+        );
     }
 
     #[test]

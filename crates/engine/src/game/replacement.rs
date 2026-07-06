@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::types::ability::{
@@ -268,6 +268,7 @@ fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
     source: ObjectId,
+    applied: HashSet<ReplacementId>,
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
 ) {
@@ -276,8 +277,56 @@ fn stash_post_replacement_continuation(
     }
     state.post_replacement_continuation = Some(continuation);
     state.post_replacement_source = Some(source);
+    state.post_replacement_applied = applied;
     state.post_replacement_event_source = event_source;
     state.post_replacement_event_target = event_target;
+}
+
+fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
+    let effect_creates_tokens = match &*def.effect {
+        Effect::Token { .. } => true,
+        Effect::ChooseOneOf { branches, .. } => branches.iter().any(ability_tree_creates_tokens),
+        _ => false,
+    };
+    effect_creates_tokens || {
+        def.sub_ability
+            .as_deref()
+            .is_some_and(ability_tree_creates_tokens)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(ability_tree_creates_tokens)
+    }
+}
+
+// CR 614.12a + issue #4886 (review #6): must classify the WHOLE ability tree,
+// not just the ChooseOneOf's branches — `ability_tree_creates_tokens` already
+// walks `def.sub_ability`/`def.else_ability`, so a token created by a tail
+// chained after the choice (`ChooseOneOf(non-token branches).sub_ability(Token)`)
+// is caught too. A branches-only check (the previous bug) missed that shape
+// entirely, so the tail token was never seeded and could re-prompt the
+// originating replacement.
+fn is_token_replacement_choice(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::ChooseOneOf { .. }) && ability_tree_creates_tokens(def)
+}
+
+/// CR 614.12a: Single authority for ABANDONING a live post-replacement
+/// continuation (as opposed to draining it normally via
+/// `apply_pending_post_replacement_effect`, which only clears
+/// `post_replacement_source` itself once the continuation is dispatched).
+/// Every field here is tightly coupled to the continuation's lifetime — a
+/// caller that clears a subset by hand risks stranding a sibling field when a
+/// new one is added later. `post_replacement_token_choice_applied` (issue
+/// #4886, review #6) was missed by the one pre-existing abandonment path
+/// (player elimination mid-resolution, `elimination.rs`) precisely because it
+/// was hand-listed there instead of routed through one function.
+pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
+    state.post_replacement_continuation = None;
+    state.post_replacement_source = None;
+    state.post_replacement_event_source = None;
+    state.post_replacement_event_target = None;
+    state.post_replacement_token_choice_applied = None;
+    state.pending_connive_reentry = None;
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -2613,6 +2662,17 @@ fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
     matches!(event, ProposedEvent::CreateToken { .. })
 }
 
+fn is_choose_token_substitution(def: &AbilityDefinition) -> bool {
+    let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() else {
+        return false;
+    };
+    !branches.is_empty()
+        && branches.iter().all(|branch| {
+            EventModifiers::first_non_modifier_ability(Some(branch))
+                .is_some_and(|work| matches!(work.effect.as_ref(), Effect::Token { .. }))
+        })
+}
+
 fn create_token_applier(
     event: ProposedEvent,
     rid: ReplacementId,
@@ -2626,6 +2686,7 @@ fn create_token_applier(
         ensure_specs,
         owner_redirect,
         substitute_effect,
+        choose_token_substitution,
         source_controller,
     ) = state
         .objects
@@ -2648,10 +2709,13 @@ fn create_token_applier(
                     .as_deref()
                     .map(|ability| (*ability.effect).clone())
                     .filter(|effect| matches!(effect, Effect::Token { .. })),
+                def.execute
+                    .as_deref()
+                    .is_some_and(is_choose_token_substitution),
                 controller,
             )
         })
-        .unwrap_or((None, None, None, None, None, PlayerId(0)));
+        .unwrap_or((None, None, None, None, None, false, PlayerId(0)));
 
     if let ProposedEvent::CreateToken {
         owner,
@@ -2704,6 +2768,22 @@ fn create_token_applier(
             Some(QuantityModification::Prevent) => return ApplyResult::Prevented,
             None => count,
         };
+
+        // CR 614.1a + CR 608.2d: An interactive token substitution (Jinnie
+        // Fay class) replaces the original token event with the token event
+        // from the branch the player chooses. The branch runs later as a
+        // post-replacement continuation and inherits this event's applied set;
+        // the original batch is therefore suppressed here.
+        if choose_token_substitution {
+            return ApplyResult::Modified(ProposedEvent::CreateToken {
+                owner,
+                spec,
+                copy,
+                enter_tapped,
+                count: 0,
+                applied,
+            });
+        }
 
         // CR 614.1a + CR 111.1: Full token substitution (Divine Visitation —
         // "that many 4/4 white Angel creature tokens … are created instead").
@@ -3965,10 +4045,10 @@ fn evaluate_replacement_condition(
             let turn_ok = match active_player_req {
                 Some(ControllerRef::You) => state.active_player == controller,
                 Some(ControllerRef::Opponent) => state.active_player != controller,
-                // CR 109.4: TargetPlayer active-player gate is nonsensical at
-                // replacement-check time (no ability context). Fail closed.
+                // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
+                // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
@@ -4003,10 +4083,10 @@ fn evaluate_replacement_condition(
             let turn_ok = match active_player_req {
                 Some(ControllerRef::You) => state.active_player == controller,
                 Some(ControllerRef::Opponent) => state.active_player != controller,
-                // CR 109.4: TargetPlayer active-player gate is nonsensical at
-                // replacement-check time (no ability context). Fail closed.
+                // CR 109.4: TargetPlayer / TargetOpponent active-player gate is
+                // nonsensical at replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::ScopedPlayer) => false,
-                Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
@@ -4174,6 +4254,7 @@ fn evaluate_replacement_condition(
                 ControllerRef::Opponent => event_source_controller != controller,
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
+                | ControllerRef::TargetOpponent
                 | ControllerRef::ParentTargetController
                 | ControllerRef::ParentTargetOwner
                 | ControllerRef::DefendingPlayer
@@ -4523,6 +4604,24 @@ fn object_replacement_candidate_applies(
     if repl_def.is_consumed {
         return false;
     }
+    // CR 708.3 + CR 708.2a: An object put onto the battlefield FACE DOWN is turned
+    // face down BEFORE it enters (CR 708.3), so it enters as a 2/2 with no text
+    // (CR 708.2a) — its OWN text-derived "As ~ enters" replacement has no effect.
+    // `is_entering` is true only when this candidate's source IS the entering
+    // object (obj.id == rid.source), so this suppresses ONLY the object's own
+    // self-replacement. EXTERNAL replacements (another permanent's enters-tapped)
+    // have `is_entering == false` (source ≠ entrant) and still apply.
+    if is_entering
+        && matches!(
+            event,
+            ProposedEvent::ZoneChange {
+                face_down_profile: Some(_),
+                ..
+            }
+        )
+    {
+        return false;
+    }
     // CR 614.12: off-battlefield entering/discarded objects only apply their
     // own self-replacement effects.
     if is_entering
@@ -4652,6 +4751,9 @@ fn object_replacement_candidate_applies(
                 crate::types::ability::ControllerRef::Opponent => *owner != replacement_player,
                 crate::types::ability::ControllerRef::ScopedPlayer
                 | crate::types::ability::ControllerRef::TargetPlayer
+                // CR 109.4: TargetOpponent has no active-ability context at
+                // replacement-check time — fails closed identically to TargetPlayer.
+                | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer
@@ -5827,6 +5929,28 @@ fn apply_single_replacement(
                     }
                 }
             }
+            // CR 614.6 + CR 111.1: A CreateToken replacement whose execute is
+            // a non-Token substitute chain (Jinnie Fay's ChooseOneOf branch
+            // choice) fully replaces the original token event. Zero the
+            // surviving count here so the delivery path creates no original
+            // tokens while the substitute chain runs via the continuation.
+            if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+                let is_non_token_substitute = match ability {
+                    Some(def) => {
+                        !matches!(*def.effect, Effect::Token { .. })
+                            && !EventModifiers::has_only_event_modifier(Some(def))
+                    }
+                    None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                        !matches!(runtime.effect, Effect::Token { .. })
+                            && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+                    }),
+                };
+                if is_non_token_substitute {
+                    if let ProposedEvent::CreateToken { count, .. } = &mut proposed {
+                        *count = 0;
+                    }
+                }
+            }
             // CR 614.6: When the applier itself substitutes the event with the
             // execute's effect (Draw count-modifier via `draw_replacement_count`,
             // Scry → Draw / Scry → Scry via `scry_applier`), the work is already
@@ -5901,6 +6025,7 @@ fn apply_single_replacement(
         ProposedEvent::LifeGain { player_id, .. } => Some(TargetRef::Player(*player_id)),
         _ => None,
     };
+    let replacement_applied = proposed.applied_set().clone();
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
@@ -5962,7 +6087,14 @@ fn apply_single_replacement(
                     // CR 615.5 + CR 609.7: only the Prevented arm populates
                     // `post_replacement_event_source`; clear here so a prior
                     // prevention's source can't leak into a non-prevention stash.
-                    stash_post_replacement_continuation(state, post, rid.source, None, None);
+                    stash_post_replacement_continuation(
+                        state,
+                        post,
+                        rid.source,
+                        replacement_applied.clone(),
+                        None,
+                        None,
+                    );
                 }
                 events.push(GameEvent::ReplacementApplied {
                     source_id: rid.source,
@@ -5992,6 +6124,7 @@ fn apply_single_replacement(
                         state,
                         post,
                         rid.source,
+                        replacement_applied.clone(),
                         proposed_damage_source,
                         proposed_event_target.clone(),
                     );
@@ -6777,11 +6910,30 @@ fn continue_replacement_impl(
         // (CR 614.6: the draw never happens when fully replaced).
         if post_effect.is_some() {
             state.post_replacement_source = Some(rid.source);
+            state.post_replacement_applied = proposed.applied_set().clone();
             // CR 615.5 + CR 609.7: Optional/decline post-effects don't carry
             // prevention-event-source semantics — clear so a prior prevention
             // can't leak into a non-prevention stash.
             state.post_replacement_event_source = None;
             state.post_replacement_event_target = None;
+        } else {
+            state.post_replacement_applied.clear();
+        }
+        // CR 614.12a + CR 616.1: Seed the inherited replacement-applied set ONLY
+        // when this replacement originates a token-choice continuation (Jinnie
+        // Fay-class `CreateToken -> ChooseOneOf(Token, Token)`). The seed is
+        // owned and cleared by that originating ChooseOneOf's completion (see
+        // effects/choose_one_of.rs), NOT by the replacement pipeline. Any other
+        // replacement running here — including a NESTED one whose continuation
+        // drains while an outer token-choice is still resolving — must NOT touch
+        // the field: clobbering it would let the same token-choice replacement
+        // re-prompt on a later token sub-ability (issue #4886 loop).
+        if let (ProposedEvent::CreateToken { applied, .. }, Some(def)) =
+            (&proposed, post_effect.as_deref())
+        {
+            if is_token_replacement_choice(def) {
+                state.post_replacement_token_choice_applied = Some(applied.clone());
+            }
         }
         state.post_replacement_continuation =
             post_effect.map(PostReplacementContinuation::Template);
@@ -6837,9 +6989,11 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
         ChosenAttribute, ControllerRef, Effect, EffectScope, FilterProp, OriginConstraint,
-        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
-        ReplacementPlayerScope, TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        PlayerFilter, PtValue, QuantityExpr, QuantityModification, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, TapStateChange,
+        TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{DamageRecord, ManaSpentSourceSnapshot};
     use crate::types::identifiers::{CardId, ObjectId};
@@ -13492,6 +13646,121 @@ mod tests {
         assert!(tokens
             .iter()
             .all(|t| t.power == Some(4) && t.toughness == Some(4)));
+    }
+
+    /// CR 614.1a + CR 614.5 + CR 608.2d: Optional interactive token
+    /// substitution (Jinnie Fay class) suppresses the original token event and
+    /// lets the chosen branch create the substitute token. The branch-created
+    /// token event must inherit the original event's applied replacement set so
+    /// the same replacement does not prompt again.
+    #[test]
+    fn optional_choose_token_substitution_inherits_applied_set_and_does_not_reprompt() {
+        fn token_branch(name: &str, power: i32, toughness: i32) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(power),
+                    toughness: PtValue::Fixed(toughness),
+                    types: vec!["Creature".to_string(), name.to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        }
+
+        let jinnie_replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![token_branch("Cat", 2, 2), token_branch("Dog", 3, 1)],
+                },
+            ));
+
+        let source = ObjectId(10);
+        let mut state = GameState::new_two_player(42);
+        let mut jinnie = GameObject::new(
+            source,
+            CardId(1),
+            PlayerId(0),
+            "Jinnie Fay, Jetmir's Second".to_string(),
+            Zone::Battlefield,
+        );
+        jinnie.replacement_definitions = vec![jinnie_replacement].into();
+        state.objects.insert(source, jinnie);
+        state.battlefield.push_back(source);
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(test_token_spec(PlayerId(0), CoreType::Artifact)),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let ReplacementResult::NeedsChoice(PlayerId(0)) =
+            replace_event(&mut state, proposed, &mut events)
+        else {
+            panic!("optional substitution should ask whether to apply");
+        };
+
+        let ReplacementResult::Execute(primary) = continue_replacement(&mut state, 0, &mut events)
+        else {
+            panic!("accepted substitution should execute a suppressed primary event");
+        };
+        let ProposedEvent::CreateToken { count, .. } = primary.clone() else {
+            panic!("expected CreateToken after accepting token substitution");
+        };
+        assert_eq!(count, 0, "accepted substitution suppresses original batch");
+        assert!(
+            state.post_replacement_continuation.is_some(),
+            "accepted substitution must park the branch choice as a continuation"
+        );
+
+        apply_create_token_after_replacement(&mut state, primary, &mut events);
+        let waiting = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            &mut state,
+            Some(source),
+            None,
+            Some(ReplacementEvent::CreateToken),
+            &mut events,
+        );
+        assert!(matches!(
+            waiting,
+            Some(WaitingFor::ChooseOneOfBranch { .. })
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+
+        state.priority_player = PlayerId(0);
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("choose Cat branch");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "branch-created substitute token must not re-enter the same replacement prompt"
+        );
+        let tokens: Vec<_> = state.objects.values().filter(|obj| obj.is_token).collect();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].name, "Cat");
+        assert_eq!(tokens[0].power, Some(2));
+        assert_eq!(tokens[0].toughness, Some(2));
     }
 
     /// CR 616.1: `Effect::Token` execute on a Draw event fully substitutes the

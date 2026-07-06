@@ -39,8 +39,8 @@ use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
     DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause, TypeFilter,
-    TypedFilter, ZoneRef,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause,
+    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -331,7 +331,47 @@ pub(crate) fn parse_quantity_ref_with_context(
                 return Some(QuantityRef::TrackedSetAggregate {
                     function: func,
                     property: prop,
+                    source: TrackedAnaphorSource::ChainSet,
                 });
+            }
+        }
+        // CR 608.2c + CR 603.2c + CR 603.10a: batched-dies-trigger anaphor. In a
+        // batched "whenever one or more creatures … die" trigger, "those
+        // creatures" references the triggering event batch (its dying subjects),
+        // NOT a live zone filter or a chain-published set. Matched before
+        // `parse_type_phrase_with_ctx` so the anaphor isn't mis-read as a type
+        // phrase (bare "creatures" would otherwise parse as a filter).
+        //
+        // Scoped narrowly because this parser is context-free and cannot see
+        // whether the enclosing ability is a batched *dies* trigger:
+        //   * "those creatures" ONLY (not "those cards"/"those permanents").
+        //     "those cards" is overloaded — it also names a mill set ("you mill
+        //     three cards, then … the total mana value of those cards":
+        //     Combustible Gearhulk, Palantír of Orthanc) or a chosen target set
+        //     (Command the Dreadhorde), where TriggeringBatch resolves to the
+        //     wrong/empty event set.
+        //   * Sum ("the total <prop> OF those creatures") ONLY, never Max/Min
+        //     ("the greatest <prop> AMONG those creatures"). The "greatest …
+        //     among those creatures" idiom is an ATTACK batch (Shriekwood
+        //     Devourer: "whenever you attack with one or more creatures … the
+        //     greatest power among those creatures"), whose multi-attacker
+        //     `AttackersDeclared` fan-out `extract_source_from_event` does not yet
+        //     resolve (it collapses >1 attacker to `None`). Plan §8 defers attack
+        //     batches; mapping it here would silently resolve to 0.
+        // With both gates, the sole card enabled is The Skullspore Nexus (Benthic
+        // Anomaly / Dracoplasm route their "those creatures" through the
+        // copy/"becomes" paths, not this quantity parser) — measured.
+        if matches!(func, AggregateFunction::Sum) {
+            if let Ok((anaphor_rest, _)) =
+                tag::<_, _, OracleError<'_>>("those creatures").parse(rest)
+            {
+                if anaphor_rest.trim().is_empty() {
+                    return Some(QuantityRef::TrackedSetAggregate {
+                        function: func,
+                        property: prop,
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                    });
+                }
             }
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
@@ -423,25 +463,6 @@ pub(crate) fn parse_quantity_ref_with_context(
             return Some(QuantityRef::PlayerCount {
                 filter: PlayerFilter::Opponent,
             });
-        }
-        // CR 104.3: "players who have lost the game" (Rampant Frogantua quantity form).
-        if let Ok((remainder, ())) = value(
-            (),
-            (
-                alt((
-                    tag::<_, _, OracleError<'_>>("players who have "),
-                    tag("player who has "),
-                )),
-                tag("lost the game"),
-            ),
-        )
-        .parse(rest)
-        {
-            if remainder.trim().is_empty() {
-                return Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::HasLostTheGame,
-                });
-            }
         }
         // CR 120.1 + CR 510.1: "opponents that were dealt combat damage
         // [this turn]". The trailing " this turn" suffix is optional because
@@ -2702,16 +2723,6 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
-    // CR 106.1 + CR 109.1: "color among [type-phrase]" — distinct colors among
-    // matching objects. Used by Faeburrow Elder's "+1/+1 for each color among
-    // permanents you control" and by the Converge mechanic adjacent class.
-    if let Ok((after_among, _)) = tag::<_, _, OracleError<'_>>("color among ").parse(clause) {
-        let (filter, remainder) = parse_type_phrase(after_among);
-        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Some(QuantityRef::DistinctColorsAmongPermanents { filter });
-        }
-    }
-
     if let Ok((rest, (relation, action))) = parse_optional_offer_accepted_clause(clause) {
         if rest.is_empty() {
             return Some(QuantityRef::PlayerCount {
@@ -2806,61 +2817,11 @@ fn parse_for_each_clause_with_they_controller(
         return Some(QuantityRef::TrackedSetSize);
     }
 
-    // "opponent who lost life this turn"
-    if clause.contains("opponent") && clause.contains("lost life") {
-        return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentLostLife,
-        });
-    }
-
     // CR 121.1 / CR 403.3: "opponent who drew N or more cards this turn" and
     // "opponent who had N or more [type] enter the battlefield under their
     // control this turn" (Smuggler's Share class).
     if let Some(qty) = parse_for_each_opponent_player_attribute_clause(clause) {
         return Some(qty);
-    }
-
-    // "opponent who gained life this turn"
-    if clause.contains("opponent") && clause.contains("gained life") {
-        return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentGainedLife,
-        });
-    }
-
-    // CR 104.3: "player(s) who have/has lost the game" (Rampant Frogantua).
-    if let Some(((), rest)) = nom_on_lower(clause, clause, |i| {
-        value(
-            (),
-            (
-                alt((tag("player "), tag("players "))),
-                alt((tag("who "), tag("that "))),
-                alt((tag("has "), tag("have "))),
-                tag("lost the game"),
-            ),
-        )
-        .parse(i)
-    }) {
-        if rest.is_empty() {
-            return Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            });
-        }
-    }
-
-    // CR 106.4: "unspent [color] mana you have" (Omnath, Locus of Mana) — the
-    // amount of floating mana of that color (or any color) in the controller's
-    // pool. A bare color word is optional, so "unspent mana you have" counts
-    // all colors.
-    if let Some((color, rest)) = nom_on_lower(clause, clause, |i| {
-        let (i, _) = tag::<_, _, OracleError<'_>>("unspent ").parse(i)?;
-        let (i, color) = opt(nom_primitives::parse_color).parse(i)?;
-        let (i, _) = opt(tag::<_, _, OracleError<'_>>(" ")).parse(i)?;
-        let (i, _) = tag::<_, _, OracleError<'_>>("mana you have").parse(i)?;
-        Ok((i, color))
-    }) {
-        if rest.trim().is_empty() {
-            return Some(QuantityRef::UnspentMana { color });
-        }
     }
 
     // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
@@ -4752,10 +4713,11 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: TrackedAnaphorSource::ChainSet,
                     }
                 }
             ),
-            "expected TrackedSetAggregate(Sum, ManaValue), got {qty:?}"
+            "expected TrackedSetAggregate(Sum, ManaValue, ChainSet), got {qty:?}"
         );
 
         // The "the exiled cards" anaphor variant maps to the same set.
@@ -4767,10 +4729,56 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: TrackedAnaphorSource::ChainSet,
                     }
                 }
             ),
-            "expected TrackedSetAggregate(Sum, ManaValue) for 'the exiled cards', got {qty2:?}"
+            "expected TrackedSetAggregate(Sum, ManaValue, ChainSet) for 'the exiled cards', got {qty2:?}"
+        );
+    }
+
+    #[test]
+    fn cda_quantity_total_power_of_those_creatures_is_triggering_batch_aggregate() {
+        // CR 603.2c + CR 603.10a + CR 608.2c: the batched-trigger anaphor "those
+        // creatures" aggregates the total power over the CURRENT triggering event
+        // batch (the nontoken creatures that died this trigger), NOT a live zone
+        // filter or the chain-published tracked set. Baseline was `None` (measured
+        // before this change); this drives The Skullspore Nexus's dies trigger.
+        let qty = parse_cda_quantity("the total power of those creatures")
+            .expect("'the total power of those creatures' must now parse (was None)");
+        assert!(
+            matches!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                    }
+                }
+            ),
+            "expected TrackedSetAggregate(Sum, Power, TriggeringBatch), got {qty:?}"
+        );
+
+        // Scoping guard: the overloaded "those cards" form must NOT map to the
+        // triggering batch. It also names mill sets ("you mill three cards, then
+        // … the total mana value of those cards": Combustible Gearhulk, Palantír
+        // of Orthanc) and chosen target sets (Command the Dreadhorde), where a
+        // context-free TriggeringBatch mapping is a rules-incorrect misparse.
+        // Keep it out of the batch anaphor until a trigger-context-gated pass.
+        let cards = parse_cda_quantity("the total mana value of those cards");
+        assert!(
+            !matches!(
+                cards,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                        ..
+                    }
+                })
+            ),
+            "'those cards' must NOT map to a TriggeringBatch aggregate (overloaded \
+             mill/chosen anaphor), got {cards:?}"
         );
     }
 
@@ -5813,23 +5821,6 @@ mod tests {
         );
     }
 
-    /// CR 106.1 + CR 109.1: "for each color among permanents you control" must
-    /// lower to `DistinctColorsAmongPermanents`, not `ObjectCount` over a bogus
-    /// "color" subject. Faeburrow Elder class.
-    #[test]
-    fn for_each_color_among_permanents() {
-        let qty = parse_for_each_clause("color among permanents you control").unwrap();
-        match qty {
-            QuantityRef::DistinctColorsAmongPermanents { filter } => {
-                assert!(
-                    matches!(filter, TargetFilter::Typed(_)),
-                    "expected Typed filter, got {filter:?}"
-                );
-            }
-            other => panic!("Expected DistinctColorsAmongPermanents, got {other:?}"),
-        }
-    }
-
     /// CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it"
     /// lowers to `ObjectCount` over a filter that includes `FilterProp::Counters`,
     /// not `CountersOnSelf` over a bogus counter-type string. Inspiring Call class.
@@ -6377,49 +6368,6 @@ mod tests {
                 },
             }),
             "milled card's mana value must resolve to ObjectManaValue{{CostPaidObject}}"
-        );
-    }
-
-    /// CR 119.3 + CR 700.1: "for each of your opponents who lost life this
-    /// turn" → `PlayerCount { OpponentLostLife }` (Belbe, Corrupted Observer).
-    #[test]
-    fn parse_for_each_opponents_who_lost_life() {
-        let qty = parse_for_each_clause("of your opponents who lost life this turn")
-            .expect("for-each opponent-lost-life clause must parse");
-        assert_eq!(
-            qty,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
-            }
-        );
-        let gained = parse_for_each_clause("opponents who gained life this turn")
-            .expect("for-each opponent-gained-life clause must parse");
-        assert_eq!(
-            gained,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentGainedLife,
-            }
-        );
-    }
-
-    /// CR 104.3: "for each player who has lost the game" (Rampant Frogantua).
-    #[test]
-    fn parse_for_each_player_who_has_lost_the_game() {
-        let qty = parse_for_each_clause("player who has lost the game")
-            .expect("lost-game for-each clause must parse");
-        assert_eq!(
-            qty,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            }
-        );
-        let number = parse_quantity_ref("the number of players who have lost the game")
-            .expect("lost-game number-of clause must parse");
-        assert_eq!(
-            number,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            }
         );
     }
 

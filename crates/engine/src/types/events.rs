@@ -116,6 +116,36 @@ pub enum ClashResult {
     Tied,
 }
 
+impl ClashResult {
+    /// CR 701.30d: A clash's `result` is stated from the clash controller's
+    /// perspective (the player who initiated the clash). Re-express it from
+    /// `player`'s perspective, returning `None` if `player` did not participate.
+    /// The controller sees `self`; the opponent sees the mirror (Won ⇄ Lost, Tied
+    /// unchanged).
+    ///
+    /// Single source of truth shared by resolution-time "if you won" gating
+    /// (`event_outcome_was_won_by_controller`) and trigger MATCHING
+    /// (`match_clash`'s `clash_result` gate) so both agree on who won.
+    pub fn for_player(
+        self,
+        clash_controller: PlayerId,
+        opponent: PlayerId,
+        player: PlayerId,
+    ) -> Option<ClashResult> {
+        if player == clash_controller {
+            Some(self)
+        } else if player == opponent {
+            Some(match self {
+                ClashResult::Won => ClashResult::Lost,
+                ClashResult::Lost => ClashResult::Won,
+                ClashResult::Tied => ClashResult::Tied,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// CR 103.1 / CR 706: one round of the starting-player d20 roll-off.
 /// `rolls` are in seat order; round 1 contains every seat, and each later
 /// round contains exactly the previous round's tied-max group (CR 103.1
@@ -497,6 +527,15 @@ pub enum GameEvent {
     },
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
+    },
+    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
+    /// an unblocked creature at that time — the precondition for "becomes blocked"
+    /// triggers to fire from an effect-block.
+    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
+    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
+    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
+    AttackerBecameBlockedByEffect {
+        attacker: ObjectId,
     },
     /// CR 508.1h + CR 509.1d: The aggregate combat tax was paid; the declaration
     /// proceeds with every declared creature intact.

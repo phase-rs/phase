@@ -380,10 +380,12 @@ pub(crate) fn resolve_restrictions(
             // fail-closed: no production path casts a spell face down, so the gate
             // never over-permits.
             ManaSpendRestriction::FaceDownSpell => Some(ManaRestriction::OnlyForFaceDownSpell),
-            // CR 106.6 + CR 116.2b + CR 702.37e: Lower the turn-face-up
-            // special-action leaf into the runtime gate. No payment site emits
-            // `PaymentContext::SpecialAction(TurnFaceUp)` yet, so the gate is
-            // conservatively unsatisfiable — honest-deferred, never over-permitted.
+            // CR 106.6 + CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: Lower
+            // the turn-face-up special-action leaf into the runtime gate checked by
+            // `allows_special_action`. The `GameAction::TurnFaceUp` handler pays the
+            // morph/disguise/manifest cost through
+            // `PaymentContext::SpecialAction(TurnFaceUp)`, so this gate is live —
+            // spendable for a turn-up and rejected for any other context.
             ManaSpendRestriction::TurnPermanentFaceUp => {
                 Some(ManaRestriction::OnlyForSpecialAction(
                     crate::types::mana::SpecialAction::TurnFaceUp,

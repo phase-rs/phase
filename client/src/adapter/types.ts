@@ -290,6 +290,16 @@ export type Phase =
   | "End"
   | "Cleanup";
 
+/** Turn-direction scope for a phase stop (mirrors engine `PhaseStopScope`). */
+export type PhaseStopScope = "AllTurns" | "OwnTurn" | "OpponentsTurns";
+
+/** A single phase stop: the phase to pause at plus its turn-direction scope
+ *  (mirrors engine `PhaseStop`). */
+export interface PhaseStop {
+  phase: Phase;
+  scope: PhaseStopScope;
+}
+
 export type Zone =
   | "Library"
   | "Hand"
@@ -567,6 +577,12 @@ export type CounterMoveChoice = {
 
 export type CounterCostChoice = {
   object_id: ObjectId;
+  counter_type: CounterType;
+  count: number;
+};
+
+// CR 107.1c: one per-type entry of a "remove any number of counters" selection.
+export type CounterRemoveChoice = {
   counter_type: CounterType;
   count: number;
 };
@@ -954,6 +970,15 @@ export interface ResolvedAbility {
   sub_ability?: ResolvedAbility;
   else_ability?: ResolvedAbility;
   description?: string;
+  /**
+   * CR 400.7 identity latch + CR 704.5d token cessation: the source's card
+   * identity snapshotted at trigger push, so an `AllCopies` priority yield can
+   * be matched by card identity after the source object has ceased to exist (a
+   * token that left the battlefield is removed from `objects` before priority is
+   * next offered). Set only for triggered abilities; absent otherwise (serde
+   * `skip_serializing_if`).
+   */
+  source_card_id?: CardId;
 }
 
 // ── Stack ────────────────────────────────────────────────────────────────
@@ -1049,6 +1074,9 @@ export type TargetSelectionConstraint =
   | { type: "DifferentTargetPlayers" }
   // CR 115.1 + CR 601.2c: object targets must be controlled by different players.
   | { type: "DifferentObjectControllers" }
+  // CR 115.1 + CR 601.2c + CR 400.1: object targets must come from the same
+  // player-owned zone of the given kind.
+  | { type: "SameZoneOwner"; zone: Zone }
   // CR 202.3 + CR 601.2c: the chosen target set's combined mana value must satisfy
   // `comparator` against `value`. `value` is an engine `QuantityExpr` (internally
   // tagged); the frontend never evaluates it — legality is delivered via
@@ -1310,7 +1338,9 @@ export type WaitingFor =
   | { type: "AssignBlockerDamage"; data: { player: PlayerId; blocker_id: ObjectId; total_damage: number; attackers: ObjectId[] } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
+  | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
+  | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
       cards: ObjectId[];
@@ -1602,6 +1632,26 @@ export type DebugAction =
     }
   | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
 
+// CR 117.3d: priority-yield preference types, mirroring the engine's
+// `YieldScope` / `YieldTarget` / `PriorityYieldOp` / `PriorityYield`. The
+// frontend never constructs an incarnation or card_id — it names a stack source
+// and scope for `Add`, and echoes a stored `YieldTarget` verbatim for `Remove`.
+export type YieldScope = "ThisObject" | "AllCopies";
+
+export type YieldTarget =
+  | { ThisObject: { source_id: ObjectId; incarnation: number } }
+  | { AllCopies: { card_id: CardId } };
+
+export type PriorityYieldOp =
+  | { type: "Add"; data: { source_id: ObjectId; scope: YieldScope } }
+  | { type: "Remove"; data: { target: YieldTarget } }
+  | { type: "ClearAll" };
+
+export interface PriorityYield {
+  player: PlayerId;
+  target: YieldTarget;
+}
+
 export type GameAction =
   | { type: "PassPriority" }
   | { type: "RollPlanarDie" }
@@ -1696,15 +1746,24 @@ export type GameAction =
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
-  | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
+  | {
+      type: "SetAutoPass";
+      data: {
+        mode:
+          | { type: "UntilStackEmpty" }
+          | { type: "UntilTurnBoundary"; until: TurnBoundary };
+      };
+    }
   | { type: "CancelAutoPass" }
-  | { type: "SetPhaseStops"; data: { stops: Phase[] } }
+  | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
+  | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
   | { type: "ChooseRemoveCounterCostDistribution"; data: { distribution: CounterCostChoice[] } }
   | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
+  | { type: "ChooseCountersToRemove"; data: { selections: CounterRemoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
   | { type: "ChooseDungeon"; data: { dungeon: DungeonId } }
@@ -2129,6 +2188,27 @@ export interface GameState {
   max_lands_per_turn: number;
   priority_pass_count: number;
   /**
+   * Mirrors `engine::types::game_state::GameState::unimplemented_oracle_ids`.
+   * Oracle ids (fallback: object names) of cards whose abilities hit an
+   * unimplemented effect at resolution this game. Diagnostics only — forwarded
+   * verbatim to the `game_end` telemetry event. Distinct from the per-object
+   * `unimplemented_mechanics` static parse-coverage projection. Absent when the
+   * set is empty (serde `skip_serializing_if`).
+   */
+  unimplemented_oracle_ids?: string[];
+  /**
+   * Mirrors `engine::types::game_state::GameState::pending_trigger_abandons`.
+   * Descriptors (source name + dead stack-entry id) of push-first triggered
+   * abilities whose in-construction stack entry vanished before selection
+   * completed, forcing the engine to abandon construction. Diagnostics only —
+   * records recovery from an unidentified state-coherence defect (a dangling
+   * push-first construction cursor) that previously panicked and poisoned the
+   * WASM engine. Forwarded to the `game_end` telemetry event; an `Array` (not a
+   * set) because the raw occurrence count matters. Absent when empty (serde
+   * `skip_serializing_if`).
+   */
+  pending_trigger_abandons?: string[];
+  /**
    * Engine-authored derived projections, attached by adapters from the
    * wire-format `ClientGameState.derived` sibling field. Optional because
    * some wire paths (legacy cached state, older server builds) may not
@@ -2209,7 +2289,9 @@ export interface GameState {
   day_night?: DayNight | null;
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
-  phase_stops?: Record<number, Phase[]>;
+  phase_stops?: Record<number, PhaseStop[]>;
+  /** CR 117.3d: the viewer's standing priority-yield preferences. */
+  priority_yields?: PriorityYield[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
     target_player: PlayerId;
@@ -2222,9 +2304,11 @@ export interface GameState {
   loop_detection?: LoopDetectionMode;
 }
 
+export type TurnBoundary = "EndOfCurrentTurn" | "MyNextTurnStart";
+
 export type AutoPassMode =
   | { type: "UntilStackEmpty"; initial_stack_len: number }
-  | { type: "UntilEndOfTurn" };
+  | { type: "UntilTurnBoundary"; until: TurnBoundary };
 
 /**
  * CR 732.2a: user-controllable opt-in gate for the live combo (infinite-loop)
@@ -2373,6 +2457,17 @@ export const AdapterErrorCode = {
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
+  /**
+   * The engine's actor-authorization guards (`check_actor_authorization` /
+   * priority checks, CR 117 priority / CR 500 turn structure) rejected the
+   * action because the submitting seat is no longer the authorized submitter
+   * (`EngineError::WrongPlayer`) or no longer holds priority
+   * (`EngineError::NotYourPriority`). Both are the same benign race — a click
+   * lands in the same tick that priority/turn shifts — not a bug: the engine
+   * correctly refused a stale action. Dispatch treats it as a no-op rather
+   * than surfacing it as a crash.
+   */
+  STALE_ACTION: "STALE_ACTION",
 } as const;
 
 /**
@@ -2382,6 +2477,18 @@ export const AdapterErrorCode = {
  */
 export function isStateLostMessage(message: string): boolean {
   return message.startsWith("NOT_INITIALIZED:");
+}
+
+/**
+ * Detect the engine's actor-authorization rejections. `submit_action` in
+ * `engine-wasm/src/lib.rs` formats `EngineError::WrongPlayer` (Display: "Wrong
+ * player") and `EngineError::NotYourPriority` (Display: "Not your priority")
+ * as `Engine error: <display>`. Match the exact strings — these are the benign
+ * stale-action race (see `AdapterErrorCode.STALE_ACTION`), never a state-loss
+ * or panic.
+ */
+export function isStaleActionMessage(message: string): boolean {
+  return message === "Engine error: Wrong player" || message === "Engine error: Not your priority";
 }
 
 /**

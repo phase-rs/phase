@@ -377,7 +377,23 @@ function resolveNameLookupKey(name: string): string {
   if (!scryfallDataResolved) return normalized;
   if (scryfallDataResolved[normalized]) return normalized;
   const folded = foldDiacritics(normalized);
-  return scryfallFoldedNameIndex?.get(folded) ?? normalized;
+  const foldedHit = scryfallFoldedNameIndex?.get(folded);
+  if (foldedHit) return foldedHit;
+  // A combined multi-face name ("Front // Back", or a hand-typed glued
+  // "Front//Back") is not itself an export key — multi-face cards are keyed by
+  // oracle id, spaced display name, and front-face name. When the combined form
+  // misses, fall back to the front face so the card still resolves to its
+  // entry. A single card whose own name contains "//" (e.g. "SP//dr, Piloted by
+  // Peni") is a primary key and already returned above, so it never splits here.
+  if (normalized.includes("//")) {
+    const frontFace = normalized.split("//")[0].trim();
+    if (frontFace && frontFace !== normalized) {
+      if (scryfallDataResolved[frontFace]) return frontFace;
+      const frontFolded = scryfallFoldedNameIndex?.get(foldDiacritics(frontFace));
+      if (frontFolded) return frontFolded;
+    }
+  }
+  return normalized;
 }
 
 function lookupEntryByName(name: string): ScryfallDataEntry | undefined {

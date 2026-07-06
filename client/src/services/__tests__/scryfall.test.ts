@@ -218,6 +218,84 @@ describe("fetchCardData", () => {
   });
 });
 
+describe("fetchCardData — combined multi-face names", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // A two-face card keyed the way the export does it: by front-face name and by
+  // the spaced display name, but NOT by the glued combined form.
+  function makeDfcDataMap(): Response {
+    const dfc = {
+      oracle_id: "peter-oracle",
+      face_names: ["peter parker", "the amazing spider-man"],
+      faces: [
+        { normal: "https://img.example/peter-front.jpg", art_crop: "https://img.example/peter-front-art.jpg" },
+        { normal: "https://img.example/peter-back.jpg", art_crop: "https://img.example/peter-back-art.jpg" },
+      ],
+      layout: "transform",
+      name: "Peter Parker // The Amazing Spider-Man",
+      mana_cost: "{1}{W}",
+      cmc: 2,
+      type_line: "Legendary Creature — Human Hero",
+      colors: ["W"],
+      color_identity: ["W"],
+      keywords: [],
+    };
+    const map: Record<string, unknown> = {
+      "peter parker": dfc,
+      "peter parker // the amazing spider-man": dfc,
+      // A single-faced card whose own printed name contains "//" (issue #4790).
+      "sp//dr, piloted by peni": {
+        oracle_id: "spdr-oracle",
+        face_names: ["sp//dr, piloted by peni"],
+        faces: [{ normal: "https://img.example/spdr.jpg", art_crop: "https://img.example/spdr-art.jpg" }],
+        name: "SP//dr, Piloted by Peni",
+        mana_cost: "{3}{W}{U}",
+        cmc: 5,
+        type_line: "Legendary Artifact Creature — Spider Hero",
+        colors: ["W", "U"],
+        color_identity: ["W", "U"],
+        keywords: [],
+      },
+    };
+    return new Response(JSON.stringify(map), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("resolves a hand-typed glued double-faced name via the front face", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Peter Parker//The Amazing Spider-Man");
+
+    expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves the canonical spaced double-faced name directly", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Peter Parker // The Amazing Spider-Man");
+
+    expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
+  });
+
+  it("does not mis-split a single-faced card whose name contains \"//\" (issue #4790)", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("SP//dr, Piloted by Peni");
+
+    // Its own name is a primary key, so the exact match wins before any split.
+    expect(card.name).toBe("SP//dr, Piloted by Peni");
+    expect(card.type_line).toContain("Spider Hero");
+  });
+});
+
 describe("fetchCardImageUrl", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

@@ -38,8 +38,10 @@ pub mod animate;
 pub mod attach;
 pub mod attractions;
 pub mod awaken;
+pub mod become_blocked;
 pub mod become_copy;
 pub mod become_monarch;
+pub mod behold;
 pub mod blight;
 pub mod bolster;
 pub mod bounce;
@@ -361,6 +363,18 @@ pub(crate) fn matches_player_scope(
                             && state
                                 .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
+                    // CR 508.6 + CR 102.2 + CR 508.1b: opponent of the controller
+                    // who is attacking the enchanted/defending player this combat.
+                    // The "that player" anchor is the trigger source's AttachedTo
+                    // host (the aura source is never itself an attacker, so it can
+                    // never appear in `combat.attackers` for `DefendingPlayer`),
+                    // resolved via the shared event-context target resolver.
+                    PlayerFilter::OpponentAttackingEnchantedPlayer => {
+                        p.id != controller
+                            && enchanted_player_anchor(state, source_id).is_some_and(|enchanted| {
+                                state.player_attacked_player_this_combat(p.id, enchanted)
+                            })
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -485,6 +499,27 @@ pub(crate) fn matches_player_scope(
                     }
                 }
         })
+}
+
+/// CR 301.5 + CR 303.4 + CR 508.6: Resolve the "that player" anchor for the
+/// Commander 2017 curse cycle's "each opponent attacking that player" rider —
+/// the enchanted/defending player the "whenever enchanted player is attacked"
+/// trigger fired on. The trigger source is an Aura attached to that player, so
+/// the anchor is the source's `AttachedTo` host. Routed through the shared
+/// event-context target resolver (rather than reading `attached_to` inline) so
+/// the aura host resolution stays in one authoritative place. Returns `None`
+/// when the source isn't attached to a player (defensive — the parser only
+/// stamps `OpponentAttackingEnchantedPlayer` on the curse cycle's aura riders).
+pub(crate) fn enchanted_player_anchor(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    match crate::game::targeting::resolve_event_context_target_for_event_or_state(
+        state,
+        &TargetFilter::AttachedTo,
+        source_id,
+        state.current_trigger_event.as_ref(),
+    )? {
+        TargetRef::Player(pid) => Some(pid),
+        TargetRef::Object(_) => None,
+    }
 }
 
 /// CR 109.4 + CR 109.5: Evaluate the controlled-permanent count predicate of
@@ -615,6 +650,7 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// event is never silently dropped.
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     counters::drain_pending_counter_moves(state, events);
+    counters::drain_pending_counter_removals(state, events);
     counters::drain_pending_counter_additions(state, events);
     if waits_for_resolution_choice(&state.waiting_for) {
         return;
@@ -679,6 +715,22 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         && state.pending_repeat_iteration.is_none()
     {
         drain_pending_repeat_until(state);
+    }
+    // CR 614.12a + issue #4886 (review #4): the originating token-choice
+    // applied seed must outlive EVERY drain in this function — including
+    // `drain_pending_repeat_until`, which re-enters `resolve_ability_chain`
+    // (lines 721 / 744) and can emit further token proposals. Clearing before
+    // that drain (the previous bug) wiped the seed before a repeated token
+    // proposal, reopening the self-replacement loop. Clear ONLY at true
+    // full-drain: back at priority with no pending continuation, no pending
+    // repeat iteration, AND no pending repeat-until frame. By this point no
+    // ability is still resolving, so no token proposal can still need the seed.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_continuation.is_none()
+        && state.pending_repeat_iteration.is_none()
+        && state.pending_repeat_until.is_none()
+    {
+        state.post_replacement_token_choice_applied = None;
     }
 }
 
@@ -1866,6 +1918,12 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CopyRetarget { .. }
             | WaitingFor::DistributeAmong { .. }
             | WaitingFor::MoveCountersDistribution { .. }
+            // CR 608.2c + CR 608.2h: a "remove any number of counters" prompt
+            // pauses resolution; Tetravus's chained "create that many ... tokens"
+            // sub-ability must run only after the removal count is known, so
+            // stash it as a continuation here (drained after the removal stamps
+            // `last_effect_count`).
+            | WaitingFor::RemoveCountersChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
@@ -1883,6 +1941,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             // the printed tail until SubmitSpellbookDraft resumes the chain.
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::BeholdChoice { .. }
     )
 }
 
@@ -2122,6 +2181,10 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
             | Effect::Clash
             | Effect::RollDie { .. }
             | Effect::Dig { .. }
+            // CR 701.4a + CR 608.2c: behold computes its own performed outcome
+            // (whiff → `cost_payment_failed_flag`; beheld → the rider fires), so
+            // the mandatory-rider seed must not race it.
+            | Effect::Behold { .. }
     )
 }
 
@@ -2440,7 +2503,14 @@ fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,
         _ => return false,
     };
-    matches!(scope, ObjectScope::Demonstrative | ObjectScope::Anaphoric)
+    // CR 608.2c: `OtherRevealedCard` is a per-player object referent too — the
+    // cross-reader reads it by exclusion FROM `effect_context_object` (the
+    // iteration's own revealed card), so the lose clause is a per-player-referent
+    // consumer that must run inside the same fan-out iteration as the reveal.
+    matches!(
+        scope,
+        ObjectScope::Demonstrative | ObjectScope::Anaphoric | ObjectScope::OtherRevealedCard
+    )
 }
 
 fn filter_is_parent_object_anaphor(filter: &TargetFilter) -> bool {
@@ -3026,6 +3096,7 @@ pub fn resolve_effect(
         Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
+        Effect::Behold { .. } => behold::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
         Effect::Vote { .. } => vote::resolve(state, ability, events),
         // CR 700.3 + CR 608: Pile-separation primitive — see effects/separate_piles.rs.
@@ -3098,6 +3169,9 @@ pub fn resolve_effect(
             prepare::resolve_become_unprepared(state, ability, events)
         }
         Effect::BecomeSaddled { .. } => saddle::resolve(state, ability, events),
+        Effect::BecomeBlocked { .. } => {
+            become_blocked::resolve_become_blocked(state, ability, events)
+        }
         Effect::SetClassLevel { .. } => set_class_level::resolve(state, ability, events),
         Effect::CreateDelayedTrigger { .. } => delayed_trigger::resolve(state, ability, events),
         Effect::AddTargetReplacement { .. } => {
@@ -3112,6 +3186,9 @@ pub fn resolve_effect(
         }
         Effect::AddPendingETBCounters { .. } => {
             resolve_add_pending_etb_counters(state, ability, events)
+        }
+        Effect::AddPendingEntersModifications { .. } => {
+            resolve_add_pending_enters_modifications(state, ability, events)
         }
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
@@ -3264,6 +3341,18 @@ pub fn resolve_effect(
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
+            // Diagnostics: record the source card so the telemetry `game_summary`
+            // surface can report which cards hit an unimplemented effect this game.
+            // Oracle id when available; object name fallback covers tokens/emblems
+            // (`printed_ref == None`).
+            if let Some(obj) = state.objects.get(&ability.source_id) {
+                let id = obj
+                    .printed_ref
+                    .as_ref()
+                    .map(|p| p.oracle_id.clone())
+                    .unwrap_or_else(|| obj.name.clone());
+                state.unimplemented_oracle_ids.insert(id);
+            }
             Ok(())
         }
     }
@@ -4774,19 +4863,26 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
         }
     }
 
-    // Subject-anchored SearchLibrary: prompt the library owner / searcher.
+    // CR 608.2c (issue #822): Subject-anchored SearchLibrary — "its controller
+    // may search their library" (Erode, Path to Exile) — prompts the parent
+    // target's controller. Route through the same LKI-aware central resolver
+    // the `Sacrifice` branch above uses instead of reading `obj.controller`
+    // directly: Destroy/Exile always moves the target off the battlefield
+    // before this optional gate is evaluated, and `reset_for_battlefield_exit`
+    // resets `base_controller` to the object's owner at that point, so a live
+    // lookup silently prompts the owner instead of the controller whenever a
+    // stolen/control-changed creature is the one destroyed or exiled.
     if let Effect::SearchLibrary {
         target_player: Some(TargetFilter::ParentTargetController),
         ..
     } = &ability.effect
     {
-        if let Some(parent_obj_id) = ability.targets.iter().find_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            _ => None,
-        }) {
-            if let Some(obj) = state.objects.get(&parent_obj_id) {
-                return obj.controller;
-            }
+        if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ParentTargetController,
+        ) {
+            return player;
         }
     }
 
@@ -5434,6 +5530,110 @@ fn resolve_chain_body(
     // REPLACE, not an append) — both leave `is_some()` true. Comparing the full
     // value catches the replace case correctly (issue #491).
     let pending_continuation_before = state.pending_continuation.clone();
+
+    // CR 608.2c + CR 701.20b + CR 603.3d: A multi-target reveal-all producer whose
+    // per-target referent (the revealed card) is consumed by later co-instructions
+    // ("each lose … the card revealed by the other player", "each put the card they
+    // revealed"). Instruction order (CR 608.2c) requires ALL reveals to complete
+    // before ANY consumer runs — the reveal is therefore NOT interleaved with the
+    // per-player consumer fan-out (unlike the whole-chain §5472 path below). Keys
+    // on `effect_introduces_per_player_object_referent` (RevealTop only) +
+    // `multi_target` + a >=2 Player-target guard, so it fires only for "target
+    // players each reveal" cards (Parker Luck). `RevealTop.target_filter()` is now
+    // `Some(Player)` (so the two players ARE selected), which the §5472 fan-out
+    // below also keys on — the safety here is ORDERING, not filter disjointness:
+    // this branch is placed BEFORE §5472 and returns early, so a multi_target
+    // RevealTop never double-dispatches through the whole-chain §5472 path.
+    if ability.multi_target.is_some()
+        && effect_introduces_per_player_object_referent(&ability.effect)
+        && ability
+            .targets
+            .iter()
+            .filter(|t| matches!(t, TargetRef::Player(_)))
+            .count()
+            >= 2
+    {
+        // 1. Reveal-all: resolve ONLY the producer effect once with targets left
+        //    wide. `reveal_top::resolve` reveals every targeted player's top card
+        //    (§2.4a) and fills `state.last_revealed_ids` with the full set.
+        resolve_effect(state, ability, events)?;
+
+        // A bare "two target players each reveal" with no consumer is fully
+        // resolved by the reveal-all above.
+        let Some(sub_template) = ability.sub_ability.as_ref() else {
+            return Ok(());
+        };
+
+        // 2. Fan out the sub-chain per chosen player in APNAP order (CR 101.4).
+        let chosen_players: Vec<PlayerId> = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .collect();
+        let fanout_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
+            .into_iter()
+            .filter(|pid| chosen_players.contains(pid))
+            .collect();
+
+        // Pre-build every player's narrowed sub-chain, binding each iteration's OWN
+        // revealed card OWNER-KEYED (CR 108.3: a top-of-library reveal is in its
+        // owner's library, so owner == revealer). `effect_context_object` drives
+        // the "put the card they revealed" (`ChangeZone { ParentTarget }`, via the
+        // inherited Object target) and is the by-exclusion anchor for the
+        // OtherRevealedCard cross-loss. Snapshotting up front freezes each own card
+        // before any lose/put mutates state (MV is zone-independent, CR 202.3).
+        let mut narrowed_subs: Vec<ResolvedAbility> = Vec::with_capacity(fanout_players.len());
+        for pid in &fanout_players {
+            let own_id: Option<ObjectId> = state
+                .last_revealed_ids
+                .iter()
+                .copied()
+                .find(|id| state.objects.get(id).map(|obj| obj.owner) == Some(*pid));
+            let own_snapshot = own_id.and_then(|id| {
+                state.objects.get(&id).map(|obj| CostPaidObjectSnapshot {
+                    object_id: id,
+                    lki: obj.snapshot_for_mana_spent(),
+                })
+            });
+            let mut sub = sub_template.as_ref().clone();
+            // The directed life loss reads the `Player` target; the put reads the
+            // inherited `Object` target. Absent an own card (empty library /
+            // illegal target, CR 608.2b) only the `Player` target is present — the
+            // put no-ops and the cross-loss fails closed to 0.
+            let mut targets = vec![TargetRef::Player(*pid)];
+            if let Some(id) = own_id {
+                targets.push(TargetRef::Object(id));
+            }
+            sub.targets = targets;
+            sub.multi_target = None;
+            apply_parent_chain_context(&mut sub, ability, own_snapshot.as_ref(), state);
+            narrowed_subs.push(sub);
+        }
+
+        // Resolve in APNAP order. On an interactive pause (defensive — the lose/put
+        // pair does not itself pause), stash the untouched remainder as a
+        // continuation, mirroring the §5472 pending-continuation stash pattern.
+        let initial_waiting_for = state.waiting_for.clone();
+        for (i, sub) in narrowed_subs.iter().enumerate() {
+            resolve_ability_chain(state, sub, events, depth + 1)?;
+            if state.waiting_for != initial_waiting_for {
+                let mut tail: Option<Box<ResolvedAbility>> = None;
+                for remaining in narrowed_subs[i + 1..].iter().rev() {
+                    let mut remaining = remaining.clone();
+                    if let Some(prev) = tail {
+                        super::ability_utils::append_to_sub_chain(&mut remaining, *prev);
+                    }
+                    tail = Some(Box::new(remaining));
+                }
+                append_to_pending_continuation(state, tail);
+                break;
+            }
+        }
+        return Ok(());
+    }
 
     // CR 603.3d + CR 601.2c: Multi-target-over-`Player` resolution fan-out.
     // An "any number of target players each <verb>" trigger/spell announces a
@@ -7654,6 +7854,7 @@ pub(crate) fn evaluate_condition(
             crate::types::ability::ObjectScope::Recipient
             | crate::types::ability::ObjectScope::EventSource
             | crate::types::ability::ObjectScope::CostPaidObject
+            | crate::types::ability::ObjectScope::OtherRevealedCard
             | crate::types::ability::ObjectScope::EventTarget => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
@@ -7847,6 +8048,7 @@ pub(crate) fn evaluate_condition(
                 crate::types::ability::ObjectScope::Recipient
                 | crate::types::ability::ObjectScope::EventSource
                 | crate::types::ability::ObjectScope::CostPaidObject
+                | crate::types::ability::ObjectScope::OtherRevealedCard
                 | crate::types::ability::ObjectScope::EventTarget => None,
             };
             object_id
@@ -8298,6 +8500,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentDealtCombatDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -8317,16 +8520,18 @@ fn scoped_player_matches_filter(
 
 fn event_outcome_was_won_by_controller(event: &GameEvent, controller: PlayerId) -> bool {
     match event {
+        // CR 701.30d: reuse the shared controller-relative clash-outcome
+        // resolution so resolution-time "if you won" gating and trigger-matching
+        // (`match_clash`) agree on who won.
         GameEvent::Clash {
             controller: clash_controller,
             opponent,
             result,
             ..
-        } => match result {
-            crate::types::events::ClashResult::Won => *clash_controller == controller,
-            crate::types::events::ClashResult::Lost => *opponent == controller,
-            crate::types::events::ClashResult::Tied => false,
-        },
+        } => {
+            result.for_player(*clash_controller, *opponent, controller)
+                == Some(crate::types::events::ClashResult::Won)
+        }
         GameEvent::CoinFlipped { player_id, won } => *player_id == controller && *won,
         _ => false,
     }
@@ -8638,6 +8843,28 @@ fn resolve_add_pending_etb_counters(
 
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::AddPendingETBCounters,
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
+/// CR 611.2a + CR 205.1b: `AddPendingEntersModifications` is consumed only as
+/// `CastFromZone` permission metadata (lifted in `cast_from_zone::grant_lingering_permissions`,
+/// applied as a `TransientContinuousEffect` at cast finalization). It never
+/// resolves standalone — a standalone resolve means the rider was mis-lowered
+/// outside a `CastFromZone` chain, so fail loudly (warn) and no-op rather than
+/// silently dropping the type grant, mirroring `resolve_add_pending_etb_counters`.
+fn resolve_add_pending_enters_modifications(
+    _state: &mut GameState,
+    ability: &crate::types::ability::ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), crate::types::ability::EffectError> {
+    tracing::warn!(
+        "AddPendingEntersModifications resolved standalone — only valid as \
+         CastFromZone permission metadata; no-op"
+    );
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::AddPendingEntersModifications,
         source_id: ability.source_id,
     });
     Ok(())
@@ -9112,6 +9339,62 @@ mod tests {
         let mut events = Vec::new();
         let result = resolve_effect(&mut state, &ability, &mut events);
         assert!(result.is_ok());
+    }
+
+    /// Telemetry `game_summary` surface: resolving an `Effect::Unimplemented`
+    /// records the source card's oracle id in `unimplemented_oracle_ids`
+    /// (name fallback for tokens/emblems with no `printed_ref`), and dedups on
+    /// repeated resolution. Diagnostics plumbing only — no rules behavior.
+    #[test]
+    fn unimplemented_effect_records_source_in_game_summary() {
+        let mut state = GameState::new_two_player(42);
+
+        // Card object with a printed oracle id.
+        let mut card = crate::game::game_object::GameObject::new(
+            ObjectId(7),
+            CardId(700),
+            PlayerId(0),
+            "Fancy Card".to_string(),
+            Zone::Stack,
+        );
+        card.printed_ref = Some(crate::types::card::PrintedCardRef {
+            oracle_id: "oracle-abc-123".to_string(),
+            face_name: "Fancy Card".to_string(),
+        });
+        state.objects.insert(ObjectId(7), card);
+
+        // Token object with no printed_ref — must fall back to the name.
+        let token = crate::game::game_object::GameObject::new(
+            ObjectId(8),
+            CardId(0),
+            PlayerId(0),
+            "Goblin Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(8), token);
+
+        let unimplemented = |source: ObjectId| {
+            ResolvedAbility::new(
+                Effect::unimplemented("SomeEffect", "some fragment"),
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let mut events = Vec::new();
+
+        // Oracle-id path: resolves and records the oracle id.
+        resolve_effect(&mut state, &unimplemented(ObjectId(7)), &mut events).unwrap();
+        assert!(state.unimplemented_oracle_ids.contains("oracle-abc-123"));
+
+        // Dedup: a second resolution of the same source adds no new entry.
+        resolve_effect(&mut state, &unimplemented(ObjectId(7)), &mut events).unwrap();
+        assert_eq!(state.unimplemented_oracle_ids.len(), 1);
+
+        // Name-fallback path: a token with no printed_ref records its name.
+        resolve_effect(&mut state, &unimplemented(ObjectId(8)), &mut events).unwrap();
+        assert!(state.unimplemented_oracle_ids.contains("Goblin Token"));
+        assert_eq!(state.unimplemented_oracle_ids.len(), 2);
     }
 
     fn optional_gain_life(
@@ -12828,6 +13111,332 @@ mod tests {
             .any(|effect| effect.affected == TargetFilter::SpecificObject { id: opponent }));
     }
 
+    fn haste_last_created_followup(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::LastCreated)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])],
+                duration: Some(Duration::Permanent),
+                target: Some(TargetFilter::LastCreated),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    fn outer_target_only_granted_static_followup(source: ObjectId) -> ResolvedAbility {
+        let granted_static = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter::creature()))
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::creature()))
+                    .modifications(vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(granted_static),
+                    }])],
+                duration: Some(Duration::Permanent),
+                target: Some(TargetFilter::LastCreated),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 608.2c + CR 707.2 + CR 611.2c: Helm of the Host's follow-up
+    /// "That token gains haste" binds to the copy token created by the parent
+    /// instruction, not the equipped creature that served as the copy source.
+    #[test]
+    fn copy_token_chain_grants_haste_to_created_token_not_copy_source() {
+        let mut state = GameState::new_two_player(42);
+        let equipped = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Equipped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipped).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let helm = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Helm of the Host".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&helm).unwrap().attached_to = Some(equipped.into());
+
+        let copy = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Object(equipped)],
+            helm,
+            PlayerId(0),
+        )
+        .sub_ability(haste_last_created_followup(helm));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &copy, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let token = state.last_created_token_ids[0];
+        assert!(
+            state.objects[&token].has_keyword(&Keyword::Haste),
+            "created copy token must gain haste"
+        );
+        assert!(
+            !state.objects[&equipped].has_keyword(&Keyword::Haste),
+            "copied source creature must not receive the token's haste grant"
+        );
+        assert!(state.transient_continuous_effects.iter().any(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: token }
+                && effect.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }
+                    )
+                })
+        }));
+        assert!(!state.transient_continuous_effects.iter().any(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: equipped }
+                && effect.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }
+                    )
+                })
+        }));
+    }
+
+    /// CR 608.2c + CR 707.2 + CR 611.2c: A `LastCreated` copy-token follow-up
+    /// applies to every token just created by the parent copy instruction while
+    /// keeping the copied source objects distinct from the produced-token set.
+    #[test]
+    fn copy_token_chain_grants_haste_to_all_created_tokens_not_sources() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Copy Spell".to_string(),
+            Zone::Stack,
+        );
+        let mut copied_sources = Vec::new();
+        for (card_id, name) in [(1, "First Creature"), (2, "Second Creature")] {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            copied_sources.push(id);
+        }
+
+        let copy = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            copied_sources
+                .iter()
+                .copied()
+                .map(TargetRef::Object)
+                .collect(),
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(haste_last_created_followup(source));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &copy, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(state.last_created_token_ids.len(), 2);
+        for token in &state.last_created_token_ids {
+            assert!(
+                state.objects[token].has_keyword(&Keyword::Haste),
+                "created token {token:?} must gain haste"
+            );
+        }
+        for copied_source in copied_sources {
+            assert!(
+                !state.objects[&copied_source].has_keyword(&Keyword::Haste),
+                "copy source {copied_source:?} must not receive the token grant"
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 611.2c: If a token follow-up grants the token a static
+    /// ability whose own `affected` filter names another object set, the outer
+    /// `GenericEffect.target` is the only token-recipient slot. Runtime must
+    /// bind that outer `LastCreated` target to the copy token, not to the copied
+    /// source carried by the parent effect's targets.
+    #[test]
+    fn copy_token_chain_outer_target_only_grant_binds_created_token_not_source() {
+        let mut state = GameState::new_two_player(42);
+        let copied_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Copied Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&copied_source).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Stack,
+        );
+        let copy = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Object(copied_source)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(outer_target_only_granted_static_followup(source));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &copy, &mut events, 0).unwrap();
+
+        let token = state.last_created_token_ids[0];
+        assert!(state.transient_continuous_effects.iter().any(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: token }
+                && effect.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::GrantStaticAbility { .. }
+                    )
+                })
+        }));
+        assert!(!state.transient_continuous_effects.iter().any(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: copied_source }
+                && effect.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::GrantStaticAbility { .. }
+                    )
+                })
+        }));
+    }
+
+    /// CR 608.2c: If a copy-token parent creates no tokens, it clears the
+    /// `LastCreated` ledger before the follow-up resolves so a stale token id
+    /// from an earlier resolution cannot receive the new grant.
+    #[test]
+    fn copy_token_chain_no_created_tokens_clears_stale_last_created_before_followup() {
+        let mut state = GameState::new_two_player(42);
+        let stale = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Old Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&stale).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            obj.is_token = true;
+        }
+        state.last_created_token_ids = vec![stale];
+
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Stack,
+        );
+        let copy = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(haste_last_created_followup(source));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &copy, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert!(state.last_created_token_ids.is_empty());
+        assert!(
+            !state.objects[&stale].has_keyword(&Keyword::Haste),
+            "stale last-created token must not receive a grant from a no-op copy"
+        );
+        assert!(!state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| { effect.affected == TargetFilter::SpecificObject { id: stale } }));
+    }
+
     #[test]
     fn empty_targets_record_empty_tracked_set_for_downstream_context() {
         let mut state = GameState::new_two_player(42);
@@ -13066,6 +13675,7 @@ mod tests {
 
                         graveyard_replacement: None,
                         enters_with_counter: None,
+                        enters_with_modifications: Vec::new(),
                         mana_spend_permission: None,
                     },
                     target: TargetFilter::TrackedSet {
@@ -13164,6 +13774,7 @@ mod tests {
 
                         graveyard_replacement: None,
                         enters_with_counter: None,
+                        enters_with_modifications: Vec::new(),
                         mana_spend_permission: None,
                     },
                     target: TargetFilter::TrackedSet {
@@ -13236,6 +13847,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 },
                 target: TargetFilter::TrackedSet {
@@ -21221,6 +21833,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 2 },
                 destination: None,
                 keep_count: Some(0),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
