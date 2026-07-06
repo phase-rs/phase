@@ -19806,6 +19806,59 @@ fn cant_be_activated_pithing_needle_chosen_name_with_mana_exemption() {
 }
 
 #[test]
+fn cant_be_activated_chosen_name_typographic_apostrophe_keeps_mana_exemption() {
+    // CR 605.1a (issue #4999): MTGJSON oracle text carries the U+2019 apostrophe.
+    // With the straight-apostrophe-only predicate/suffix, a U+2019 printing dropped
+    // the "unless they're mana abilities" carve-out (or failed to parse entirely),
+    // wrongly blocking mana abilities. Both the predicate ("can't be activated")
+    // and the exemption suffix ("unless they're …") must accept the typographic
+    // glyph. Revert-failing: restore the straight-only tags and this parses to
+    // `None` (predicate) or `ActivationExemption::None` (suffix).
+    let def = parse_static_line(
+        "Activated abilities of sources with the chosen name can\u{2019}t be activated \
+         unless they\u{2019}re mana abilities.",
+    )
+    .expect("U+2019 Pithing Needle Oracle text should parse");
+    match def.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+        } => {
+            assert_eq!(who, ProhibitionScope::AllPlayers);
+            assert_eq!(source_filter, TargetFilter::HasChosenName);
+            assert_eq!(
+                exemption,
+                ActivationExemption::ManaAbilities,
+                "U+2019 exemption suffix must still carve out mana abilities"
+            );
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+}
+
+#[test]
+fn mana_ability_exemption_suffix_accepts_both_apostrophes() {
+    // CR 605.1a (issue #4999): the shared exemption-suffix combinator — the single
+    // authority all "can't be activated" / "cost {N} more to activate" sites route
+    // through — must match either apostrophe glyph and reject a non-mana carve-out.
+    for input in [
+        " unless they're mana abilities",
+        " unless they\u{2019}re mana abilities",
+    ] {
+        let (rest, ()) = super::shared::parse_mana_ability_exemption_suffix(input)
+            .unwrap_or_else(|_| panic!("{input:?} should match the mana-ability exemption"));
+        assert!(rest.is_empty(), "{input:?} should fully consume");
+    }
+    // A non-mana exemption must not match (no false positive).
+    assert!(
+        super::shared::parse_mana_ability_exemption_suffix(" unless they're loyalty abilities")
+            .is_err(),
+        "only the mana-ability carve-out should match"
+    );
+}
+
+#[test]
 fn cant_be_activated_phyrexian_revoker_chosen_name_no_exemption_suffix() {
     // CR 602.5 + CR 603.2a: Phyrexian Revoker — MTGJSON Oracle text omits the
     // "unless they're mana abilities" suffix on this card. Same source filter

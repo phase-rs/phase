@@ -735,6 +735,28 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
     None
 }
 
+/// CR 605.1a: Match the mana-ability exemption suffix " unless they're mana
+/// abilities" with either the ASCII (`'`) or typographic (U+2019) apostrophe.
+///
+/// MTGJSON oracle text carries the U+2019 form, and there is no global apostrophe
+/// normalization in the parser pipeline — which is exactly why the `can't be
+/// activated` predicate combinators already dual-branch (see
+/// `parse_activation_compound_tail` and `evasion::try_split_and_cant_activate_abilities`).
+/// The exemption suffix must accept both glyphs too, or a U+2019 printing silently
+/// loses the carve-out and the runtime wrongly blocks mana abilities that CR 605.1a
+/// requires to stay activatable. Single authority shared by every "can't be
+/// activated" / "cost {N} more to activate" exemption site.
+pub(crate) fn parse_mana_ability_exemption_suffix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag(" unless they're "), tag(" unless they\u{2019}re "))),
+            tag("mana abilities"),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 602.5: Parses the activation-prohibition tail of compound static text.
 fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
     value(
@@ -746,7 +768,7 @@ fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
                 tag("activated abilities can't be activated"),
                 tag("activated abilities can\u{2019}t be activated"),
             )),
-            opt((tag(" unless they're "), tag("mana abilities"))),
+            opt(parse_mana_ability_exemption_suffix),
             opt(tag(".")),
         ),
     )

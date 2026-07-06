@@ -2850,7 +2850,9 @@ pub(crate) fn parse_static_line_inner(
                 value(CostModifyMode::Raise, tag("more to activate")),
             ))
             .parse(i)?;
-            let (i, suffix_exempt) = opt(tag(" unless they're mana abilities")).parse(i)?;
+            // CR 605.1a: dual-apostrophe exemption suffix (Suppression Field class).
+            let (i, suffix_exempt) =
+                opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
             let exemption = if prefix_exempt || suffix_exempt.is_some() {
                 ActivationExemption::ManaAbilities
             } else {
