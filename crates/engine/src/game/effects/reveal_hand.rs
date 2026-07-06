@@ -58,14 +58,21 @@ pub fn resolve(
             TargetRef::Player(pid) => Some(*pid),
             _ => None,
         })
-        // CR 608.2d: "an opponent" is a choice the controller announces while
-        // resolving the effect; resolving the first
-        // opponent is exact in two-player and a known multiplayer simplification
-        // (no interactive opponent choice yet). Only reached for non-targeted
-        // LookAt shapes (e.g. Anointed Peacekeeper's "look at an opponent's
-        // hand") that carry a `Controller`/`Typed` player filter rather than an
-        // explicit player target slot. `TargetFilter::Any` (RevealAll/
-        // RevealPartial) hits `collect_player_targets`' empty arm → still
+        // CR 608.2d + CR 608.2c: "an opponent" is a choice the controller
+        // announces while resolving the effect. For the as-enters look-at-hand
+        // class (Anointed Peacekeeper, Sorcerous Spyglass), the parser's as-enters
+        // composition (`parse_as_enters_choose` →
+        // `front_opponent_choice_for_nontargeted_look`) now FRONTS an explicit
+        // `Choose(Opponent)` step and rebinds this look's player filter to
+        // `ControllerRef::ChosenPlayer { index: 0 }` (CR 608.2c "that player").
+        // So by the time control reaches here, `collect_player_targets` resolves
+        // that filter to exactly the single chosen opponent — a 1-element vec — and
+        // `.first()` is EXACT, not a multiplayer simplification (CR 608.2d
+        // satisfied by the fronted choice, not by picking the first opponent here).
+        // Any residual non-fronted `Typed`/`Controller` opponent filter that still
+        // reaches this arm (a hand-look shape outside the as-enters seam) falls
+        // back to the first opponent, exact in two-player. `TargetFilter::Any`
+        // (RevealAll/RevealPartial) hits `collect_player_targets`' empty arm → still
         // `MissingParam`, so those reveals are unchanged.
         .or_else(|| {
             crate::game::ability_utils::collect_player_targets(state, ability, &target)
