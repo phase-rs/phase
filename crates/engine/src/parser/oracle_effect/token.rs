@@ -585,6 +585,8 @@ fn parse_token_description_with_context(
             );
         }
     }
+    bind_bare_token_x_pt_to_cost_x(&mut power);
+    bind_bare_token_x_pt_to_cost_x(&mut toughness);
 
     if let Some(count_expression) = extract_token_count_expression(suffix) {
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
@@ -689,6 +691,19 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
     })
+}
+
+fn bind_bare_token_x_pt_to_cost_x(value: &mut Option<PtValue>) {
+    // CR 107.3a + CR 107.3i + CR 111.3: a bare X in token P/T shares the
+    // spell or ability's chosen X unless an explicit "where X is" clause
+    // already rebound it above.
+    if matches!(value, Some(PtValue::Variable(alias)) if alias == "X") {
+        *value = Some(PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }));
+    }
 }
 
 fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
@@ -1423,6 +1438,108 @@ mod tests {
         );
         assert_eq!(colors, vec![ManaColor::Green]);
         assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+    }
+
+    #[test]
+    fn bare_x_x_token_pt_lowers_to_cost_x_quantity_shape() {
+        let txt = "Create an X/X green Ooze creature token.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            types,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "bare X power must bind to cost X"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "bare X toughness must bind to cost X"
+        );
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Ooze"),
+            "types must include Creature and Ooze, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn variable_count_and_bare_x_x_token_pt_share_cost_x_shape() {
+        let txt = "Create X X/X green Ooze creature tokens.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            types,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(count, expected_x.clone(), "token count must bind to cost X");
+        let expected_pt = PtValue::Quantity(expected_x);
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "bare X power must bind to cost X"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "bare X toughness must bind to cost X"
+        );
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Ooze"),
+            "types must include Creature and Ooze, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn where_x_token_pt_keeps_explicit_greatest_power_quantity_shape() {
+        let txt = "Create an X/X green Ooze creature token, where X is the greatest power among creatures you control.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power, toughness, ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected = crate::parser::oracle_quantity::parse_cda_quantity(
+            "the greatest power among creatures you control",
+        )
+        .expect("greatest-power quantity must parse");
+        let expected_pt = PtValue::Quantity(expected);
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "where-X power must keep the explicit greatest-power quantity"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "where-X toughness must keep the explicit greatest-power quantity"
+        );
     }
 
     #[test]

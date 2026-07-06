@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource, GameObject};
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
@@ -545,8 +545,7 @@ pub fn resolve(
             &fallback_keywords,
             &fallback_supertypes,
             state,
-            ability.controller,
-            ability.source_id,
+            ability,
         )
     });
 
@@ -665,13 +664,8 @@ fn build_token_spec(
         } else {
             // No parsed attrs — resolve fallback P/T, and defer type/color
             // inference to the apply path's creature-only fallback branch.
-            let rp = resolve_pt_value(fallback_power, state, ability.controller, ability.source_id);
-            let rt = resolve_pt_value(
-                fallback_toughness,
-                state,
-                ability.controller,
-                ability.source_id,
-            );
+            let rp = resolve_pt_value(fallback_power, state, ability);
+            let rt = resolve_pt_value(fallback_toughness, state, ability);
             let (p, t, core) = if rp != 0 || rt != 0 {
                 (Some(rp), Some(rt), vec![CoreType::Creature])
             } else {
@@ -1669,16 +1663,7 @@ pub(crate) fn resolve_token_spec(
 
     let parsed = parse_token_script(name).or_else(|| {
         build_token_attrs_from_effect(
-            name,
-            power,
-            toughness,
-            types,
-            colors,
-            keywords,
-            supertypes,
-            state,
-            ability.controller,
-            ability.source_id,
+            name, power, toughness, types, colors, keywords, supertypes, state, ability,
         )
     });
 
@@ -1807,8 +1792,7 @@ fn build_token_attrs_from_effect(
     keywords: &[Keyword],
     supertypes: &[Supertype],
     state: &GameState,
-    controller: crate::types::player::PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
+    ability: &ResolvedAbility,
 ) -> Option<TokenAttrs> {
     if types.is_empty()
         && colors.is_empty()
@@ -1833,8 +1817,8 @@ fn build_token_attrs_from_effect(
         }
     }
 
-    let resolved_power = resolve_pt_value(power, state, controller, source_id);
-    let resolved_toughness = resolve_pt_value(toughness, state, controller, source_id);
+    let resolved_power = resolve_pt_value(power, state, ability);
+    let resolved_toughness = resolve_pt_value(toughness, state, ability);
     if core_types.is_empty() && (resolved_power != 0 || resolved_toughness != 0) {
         core_types.push(CoreType::Creature);
     }
@@ -1856,16 +1840,11 @@ fn build_token_attrs_from_effect(
     })
 }
 
-fn resolve_pt_value(
-    value: &PtValue,
-    state: &GameState,
-    controller: crate::types::player::PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
-) -> i32 {
+fn resolve_pt_value(value: &PtValue, state: &GameState, ability: &ResolvedAbility) -> i32 {
     match value {
         PtValue::Fixed(n) => *n,
         PtValue::Variable(_) => 0,
-        PtValue::Quantity(expr) => resolve_quantity(state, expr, controller, source_id),
+        PtValue::Quantity(expr) => resolve_quantity_with_targets(state, expr, ability),
     }
 }
 
