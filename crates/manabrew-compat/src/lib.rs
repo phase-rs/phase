@@ -2848,10 +2848,10 @@ mod tests {
     use std::collections::HashSet;
 
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{ChoiceType, Effect, ResolvedAbility, TargetFilter};
     use engine::types::game_state::{
-        MulliganBottomEntry, MulliganDecisionEntry, PendingCast, TargetSelectionProgress,
-        TargetSelectionSlot,
+        CombatTaxPending, MulliganBottomEntry, MulliganDecisionEntry, PendingCast,
+        TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use pretty_assertions::assert_eq;
