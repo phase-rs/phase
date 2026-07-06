@@ -23828,12 +23828,35 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        let has_card_predicate_guess = chain_has_card_predicate_guess(&clauses);
+        let (predicate_guess_cond, predicate_guess_text) = if has_card_predicate_guess {
+            conditions::strip_card_predicate_guess_result_conditional(normalized_text)
+                .map(|(cond, body)| (Some(cond), body))
+                .unwrap_or((None, normalized_text.to_string()))
+        } else {
+            (None, normalized_text.to_string())
+        };
+        if has_card_predicate_guess
+            && predicate_guess_cond.is_none()
+            && conditions::is_card_predicate_guess_result_conditional(normalized_text)
+        {
+            clauses.push(unimplemented_clause_ir(
+                "card_predicate_guess_result_condition",
+                normalized_text,
+                chunk.boundary_after,
+            ));
+            continue;
+        }
+
         // CR 608.2d: "if they guessed wrong/right, ..." — the OpponentGuess
-        // outcome branch. Highest priority so it is not mis-parsed by the generic
-        // leading-conditional stripper.
-        let (condition, text) = match strip_guess_outcome_conditional(normalized_text) {
-            (Some(guess_cond), body) => (Some(guess_cond), body),
-            (None, _) => strip_additional_cost_conditional(normalized_text),
+        // outcome branch. Card-predicate guesses use the revealed-card condition
+        // above; other guess classes use the generic outcome signal here.
+        let (condition, text) = match predicate_guess_cond {
+            Some(cond) => (Some(cond), predicate_guess_text),
+            None => match strip_guess_outcome_conditional(normalized_text) {
+                (Some(guess_cond), body) => (Some(guess_cond), body),
+                (None, _) => strip_additional_cost_conditional(normalized_text),
+            },
         };
         // CR 205.3m + CR 607.2d + CR 608.2h: target-declaring leading-if that
         // gates the ability's target on the source's chosen creature type
@@ -23859,27 +23882,6 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text)
         };
         let condition = condition.or(leading_cond);
-        let has_card_predicate_guess =
-            condition.is_none() && chain_has_card_predicate_guess(&clauses);
-        let (predicate_guess_cond, text) = if has_card_predicate_guess {
-            conditions::strip_card_predicate_guess_result_conditional(&text)
-                .map(|(cond, body)| (Some(cond), body))
-                .unwrap_or((None, text))
-        } else {
-            (None, text)
-        };
-        if has_card_predicate_guess
-            && predicate_guess_cond.is_none()
-            && conditions::is_card_predicate_guess_result_conditional(&text)
-        {
-            clauses.push(unimplemented_clause_ir(
-                "card_predicate_guess_result_condition",
-                normalized_text,
-                chunk.boundary_after,
-            ));
-            continue;
-        }
-        let condition = condition.or(predicate_guess_cond);
         // CR 608.2c + CR 708.7: a generic "if you can't" rider attached to a
         // preceding `TurnFaceUp` must read the performed-signal, not the
         // zone-change ledger (a successful turn-up changes no zone). See the
