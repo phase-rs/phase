@@ -7829,10 +7829,24 @@ fn production_override_for_option(
         | crate::types::ability::ManaProduction::AnyInCommandersColorIdentity { .. } => Some(
             crate::types::game_state::ProductionOverride::SingleColor(option.mana_type),
         ),
+        // CR 605.3b + CR 106.1a-b: fixed-alternative chosen-color producers
+        // (Thriving lands / Gates) expose one concrete row per legal mana type
+        // during auto-tap; replay the selected row into immediate resolution.
+        crate::types::ability::ManaProduction::ChosenColor {
+            fixed_alternative: Some(_),
+            ..
+        } => Some(crate::types::game_state::ProductionOverride::SingleColor(
+            option.mana_type,
+        )),
         crate::types::ability::ManaProduction::Fixed { .. }
         | crate::types::ability::ManaProduction::Colorless { .. }
         | crate::types::ability::ManaProduction::Mixed { .. }
-        | crate::types::ability::ManaProduction::ChosenColor { .. }
+        // CR 106.5: a pure chosen-color producer with no chosen value must
+        // still produce no mana, even if preview code enumerates colors.
+        | crate::types::ability::ManaProduction::ChosenColor {
+            fixed_alternative: None,
+            ..
+        }
         | crate::types::ability::ManaProduction::ChoiceAmongCombinations { .. }
         | crate::types::ability::ManaProduction::DistinctColorsAmongPermanents { .. }
         | crate::types::ability::ManaProduction::TriggerEventManaType => None,

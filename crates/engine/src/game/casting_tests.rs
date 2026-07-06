@@ -57,6 +57,132 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
     }
 }
 
+fn create_tap_mana_source(state: &mut GameState, name: &str, produced: ManaProduction) -> ObjectId {
+    let source = create_object(
+        state,
+        CardId(9_010),
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&source).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    Arc::make_mut(&mut obj.abilities).push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap),
+    );
+    source
+}
+
+#[test]
+fn fixed_alternative_chosen_color_auto_tap_replays_selected_fixed_color() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_generic_creature_in_hand(&mut state, 9_011, PlayerId(0), "Blue Spell", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 1,
+    };
+
+    let thriving = create_tap_mana_source(
+        &mut state,
+        "Thriving Isle",
+        ManaProduction::ChosenColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            contribution: ManaContribution::Base,
+            fixed_alternative: Some(ManaColor::Blue),
+        },
+    );
+    state
+        .objects
+        .get_mut(&thriving)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Black));
+    create_tap_mana_source(
+        &mut state,
+        "Mountain",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        },
+    );
+
+    assert!(
+        can_feasibly_pay_mana_cost_with_probe(
+            &state,
+            PlayerId(0),
+            Some(spell),
+            &state.objects[&spell].mana_cost,
+            None,
+        ),
+        "auto-tap must replay Thriving Isle's selected fixed blue row, not its saved chosen black"
+    );
+}
+
+#[test]
+fn pure_chosen_color_without_choice_does_not_auto_pay_from_preview_colors() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_generic_creature_in_hand(&mut state, 9_012, PlayerId(0), "Green Spell", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 0,
+    };
+
+    let source = create_tap_mana_source(
+        &mut state,
+        "Unchosen Color Source",
+        ManaProduction::ChosenColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            contribution: ManaContribution::Base,
+            fixed_alternative: None,
+        },
+    );
+    let options =
+        crate::game::mana_sources::activatable_land_mana_options(&state, source, PlayerId(0));
+    assert!(
+        options
+            .iter()
+            .any(|option| option.mana_type == ManaType::Green),
+        "preview should expose possible colors before a color is chosen"
+    );
+    assert!(
+        !can_feasibly_pay_mana_cost_with_probe(
+            &state,
+            PlayerId(0),
+            Some(spell),
+            &state.objects[&spell].mana_cost,
+            None,
+        ),
+        "CR 106.5: undefined chosen-color production must not pay from preview colors"
+    );
+
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Green));
+    assert!(
+        can_feasibly_pay_mana_cost_with_probe(
+            &state,
+            PlayerId(0),
+            Some(spell),
+            &state.objects[&spell].mana_cost,
+            None,
+        ),
+        "once a color is chosen, the same source can pay that chosen color"
+    );
+}
+
 fn install_optional_discard_replacement(state: &mut GameState) -> ObjectId {
     let replacement_source = create_object(
         state,
