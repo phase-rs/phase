@@ -458,7 +458,6 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_source_qualified_mana_spent_threshold,
         parse_mana_spent_vs_source_pt,
         parse_mana_spent_threshold,
-        parse_cast_for_mana_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
         parse_unless_pay_condition,
@@ -5005,58 +5004,6 @@ fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> 
             },
             comparator,
             rhs: QuantityExpr::Fixed { value: n as i32 },
-        },
-    ))
-}
-
-/// CR 106.3 + CR 601.2h: "[subject] was cast for {N} [or more|or less]" —
-/// brace-notation, subject-first mana-spent threshold. Sibling to
-/// `parse_mana_spent_threshold` (word/digit-number, subject-last form: "N
-/// mana was spent to cast X"). Hollow One: "if it was cast for {5} or less,
-/// sacrifice it."
-///
-/// CR 400.7d: the subject anaphora selects the scope — "it"/"this spell" on a
-/// resolving spell is `SelfObject`; "that spell" stays `TriggeringSpell`.
-fn parse_cast_for_mana_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    use crate::types::mana::ManaCost;
-
-    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(input)?;
-    let (rest, _) = tag(" was cast for ").parse(rest)?;
-    let (rest, mana_cost) = parse_mana_cost(rest)?;
-    // CR 118.7a: reject colored-shard amounts — this combinator only handles a
-    // pure-generic threshold; no printed card uses a colored-shard "cast for
-    // {N}{color} or less" phrasing in this shape.
-    let ManaCost::Cost { shards, generic } = mana_cost else {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    };
-    if !shards.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more")),
-        value(Comparator::LE, tag(" or less")),
-        value(Comparator::LE, tag(" or fewer")),
-    ))
-    .parse(rest)?;
-    Ok((
-        rest,
-        StaticCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ManaSpentToCast {
-                    scope,
-                    metric: CastManaSpentMetric::Total,
-                },
-            },
-            comparator,
-            rhs: QuantityExpr::Fixed {
-                value: generic as i32,
-            },
         },
     ))
 }
@@ -13550,57 +13497,6 @@ mod tests {
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
         }
-    }
-
-    /// CR 106.3 + CR 601.2h: Hollow One's brace-notation, subject-first
-    /// "it was cast for {5} or less" lowers to a `SelfObject` total-mana-spent
-    /// `<= 5` threshold. Sibling surface form to the word/digit subject-last
-    /// "N mana was spent to cast it" family above.
-    #[test]
-    fn test_parse_cast_for_mana_threshold_or_less() {
-        let (rest, c) = parse_condition("if it was cast for {5} or less").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            c,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::ManaSpentToCast {
-                        scope: crate::types::ability::CastManaObjectScope::SelfObject,
-                        metric: crate::types::ability::CastManaSpentMetric::Total,
-                    },
-                },
-                comparator: Comparator::LE,
-                rhs: QuantityExpr::Fixed { value: 5 },
-            }
-        );
-    }
-
-    /// "or more" inverse form produces GE comparator with the same SelfObject
-    /// total-mana-spent shape.
-    #[test]
-    fn test_parse_cast_for_mana_threshold_or_more() {
-        let (rest, c) = parse_condition("if it was cast for {3} or more").unwrap();
-        assert_eq!(rest, "");
-        match c {
-            StaticCondition::QuantityComparison {
-                comparator, rhs, ..
-            } => {
-                assert_eq!(comparator, Comparator::GE);
-                assert_eq!(rhs, QuantityExpr::Fixed { value: 3 });
-            }
-            other => panic!("expected QuantityComparison, got {other:?}"),
-        }
-    }
-
-    /// CR 118.7a: a colored-shard amount ("{3}{R}") must be rejected by the
-    /// pure-generic `parse_cast_for_mana_threshold` combinator — no printed card
-    /// uses a colored-shard "cast for {N}{color}" threshold in this shape.
-    #[test]
-    fn test_parse_cast_for_mana_threshold_rejects_colored_shard() {
-        assert!(
-            parse_cast_for_mana_threshold("it was cast for {3}{R} or less").is_err(),
-            "colored-shard threshold must not parse via the pure-generic combinator"
-        );
     }
 
     // ── CR 122.1: `parse_source_has_counters` ──────────────────────────

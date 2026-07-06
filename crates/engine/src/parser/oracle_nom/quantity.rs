@@ -503,13 +503,13 @@ fn parse_number_of_cards_discarded_this_turn(input: &str) -> OracleResult<'_, Qu
             PlayerScope::Target,
             tag("target opponent discarded this turn"),
         ),
-        // CR 701.9 + CR 702.29 (Cycling — pays a discard cost, so a cycled card
-        // already counts toward "discarded this turn" via the shared
-        // restrictions::record_discard counter; exact CR sub-letter should be
-        // grep-verified against docs/MagicCompRules.txt once available — not
-        // possible in this session):
-        // "you've cycled or discarded this turn" / "you've discarded or cycled
-        // this turn" (Hollow One).
+        // CR 701.9 + CR 702.29a + CR 702.29d: Cycling's cost is "[Cost], Discard
+        // this card" (702.29a), so a cycled card is discarded as part of paying
+        // that cost and already counts toward "discarded this turn" via the
+        // shared restrictions::record_discard counter (702.29d is the
+        // cycle-or-discard once-only trigger rule confirming the two aren't
+        // double-counted). "you've cycled or discarded this turn" / "you've
+        // discarded or cycled this turn" (Hollow One).
         value(
             PlayerScope::Controller,
             preceded(
