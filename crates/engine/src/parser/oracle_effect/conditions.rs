@@ -20,7 +20,7 @@ use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_wo
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::{ContinuationAst, PutCount};
+use crate::parser::oracle_ir::ast::ContinuationAst;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
@@ -1467,6 +1467,136 @@ fn parse_target_type_membership_condition_text(text: &str) -> Option<AbilityCond
     parsed
 }
 
+/// CR 608.2c + CR 701.20a: In a top-card predicate guessing sequence, "they
+/// guessed right" means the revealed card matches the most recent opponent
+/// guess. The guess itself is lowered as `ChoiceType::CardPredicateGuess`, so
+/// this can reuse the same transient predicate filter used by "of the chosen
+/// kind" effects.
+fn parse_guessed_right_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, result) = all_consuming(parse_card_predicate_guess_result)
+        .parse(lower.as_str())
+        .ok()?;
+    match (result.subject, result.outcome) {
+        (_, CardPredicateGuessOutcome::Right) => Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![],
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            subtype_filter: None,
+        }),
+    }
+}
+
+pub(super) fn strip_card_predicate_guess_result_conditional(
+    text: &str,
+) -> Option<(AbilityCondition, String)> {
+    let (condition_fragment, body) = split_leading_conditional(text)?;
+    let cond_text = strip_guess_result_condition_prefix(&condition_fragment);
+
+    let condition = parse_guessed_right_condition_text(cond_text)?;
+    Some((condition, body))
+}
+
+pub(super) fn is_card_predicate_guess_result_conditional(text: &str) -> bool {
+    let Some((condition_fragment, _body)) = split_leading_conditional(text) else {
+        return false;
+    };
+    let parsed = all_consuming(parse_any_card_predicate_guess_result)
+        .parse(strip_guess_result_condition_prefix(&condition_fragment))
+        .is_ok();
+    parsed
+}
+
+fn strip_guess_result_condition_prefix(condition_fragment: &str) -> &str {
+    let condition_lower = condition_fragment.to_lowercase();
+    nom_on_lower(condition_fragment, &condition_lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("then, if "),
+                tag("then if "),
+                tag("if "),
+            )),
+        )
+        .parse(i)
+    })
+    .map(|((), rest)| rest)
+    .unwrap_or(condition_fragment)
+    .trim()
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct CardPredicateGuessResult {
+    subject: CardPredicateGuessSubject,
+    outcome: CardPredicateGuessOutcome,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CardPredicateGuessSubject {
+    They,
+    ThatPlayer,
+    ThatOpponent,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CardPredicateGuessOutcome {
+    Right,
+}
+
+fn parse_card_predicate_guess_result(input: &str) -> OracleResult<'_, CardPredicateGuessResult> {
+    let (input, subject) = parse_card_predicate_guess_subject(input)?;
+    let (input, _) = tag(" guessed ").parse(input)?;
+    let (input, outcome) = parse_card_predicate_guess_outcome(input)?;
+    Ok((input, CardPredicateGuessResult { subject, outcome }))
+}
+
+fn parse_any_card_predicate_guess_result(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = parse_any_card_predicate_guess_subject(input)?;
+    let (input, _) =
+        alt((tag::<_, _, OracleError<'_>>(" guessed "), tag(" guesses "))).parse(input)?;
+    let (input, _) = parse_any_card_predicate_guess_outcome(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_predicate_guess_subject(input: &str) -> OracleResult<'_, CardPredicateGuessSubject> {
+    alt((
+        value(CardPredicateGuessSubject::They, tag("they")),
+        value(CardPredicateGuessSubject::ThatPlayer, tag("that player")),
+        value(
+            CardPredicateGuessSubject::ThatOpponent,
+            tag("that opponent"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_any_card_predicate_guess_subject(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        map(parse_card_predicate_guess_subject, |_| ()),
+        value((), tag("target opponent")),
+        value((), tag("the player")),
+        value((), tag("your opponent")),
+        value((), tag("an opponent")),
+    ))
+    .parse(input)
+}
+
+fn parse_card_predicate_guess_outcome(input: &str) -> OracleResult<'_, CardPredicateGuessOutcome> {
+    value(CardPredicateGuessOutcome::Right, tag("right")).parse(input)
+}
+
+fn parse_any_card_predicate_guess_outcome(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("right"),
+            tag("wrong"),
+            tag("correctly"),
+            tag("incorrectly"),
+        )),
+    )
+    .parse(input)
+}
+
 /// Consume a target-anaphoric noun phrase used as the subject of an "instead"
 /// gating condition. `it` is a special pronoun case (the only one that
 /// contracts to `it's`); the noun-phrase forms always take a space before
@@ -2199,6 +2329,19 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
         return Some((Comparator::EQ, 0, counter_type, consumed));
     }
 
+    // CR 122.1 + CR 122.1a: an indefinite "a [type] counter" means one or more (>= 1).
+    // Placed before the numeric branch, whose `parse_number` fails fast on the
+    // article "a"/"an" (Oblivion's Hunger: "a +1/+1 counter on it").
+    if let Ok((rest, _)) = nom_primitives::parse_article(text) {
+        if let Ok((after_type, counter_type)) = nom_primitives::parse_counter_type_typed(rest) {
+            let after_type = after_type.trim_start();
+            if let Some(after_on) = parse_counter_on_suffix(after_type) {
+                let consumed = original_len - after_on.len();
+                return Some((Comparator::GE, 1, counter_type, consumed));
+            }
+        }
+    }
+
     let (rest, threshold) = nom_primitives::parse_number.parse(text).ok()?;
     let rest = rest.trim_start();
     type E<'a> = OracleError<'a>;
@@ -2222,11 +2365,12 @@ fn build_counter_condition(
     comparator: Comparator,
     threshold: i32,
     counter_type: CounterType,
+    scope: ObjectScope,
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
-                scope: ObjectScope::Source,
+                scope,
                 counter_type: Some(counter_type),
             },
         },
@@ -2235,33 +2379,70 @@ fn build_counter_condition(
     }
 }
 
-pub(super) fn strip_counter_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_counter_conditional(
+    text: &str,
+    in_trigger: bool,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // Leading form: "if it has [N] [type] counter[s] on it, [effect]". The
+    // subject here is ALWAYS the source ("it"); the demonstrative "that
+    // creature"/"that permanent"/"that card" is deliberately NOT offered in the
+    // leading position. A sentence-initial "If that creature has … counter …,
+    // [source] deals N … instead" belongs to the target-gated *replacement*
+    // class (Bring Low, Strider, Urdnan), whose honest counter/P-T gating is
+    // deferred to the inert `strip_target_keyword_instead` rider (see the CR
+    // 122.1b note there). Offering the demonstrative here would GATE OUT that
+    // deferral and over-accept those cards into a false-green additive
+    // `DealDamage` sibling (the "instead" is a replacement, not additive).
+    // CR 115.1's demonstrative-as-target is honored only in the trailing form
+    // below, where the leading-space needle can't collide with that class.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if it has ").parse(lower.as_str()) {
         if let Some((comparator, threshold, counter_type, consumed)) = parse_counter_threshold(rest)
         {
             let after = rest[consumed..].trim_start();
+            // allow-noncombinator: comma cleanup on the already-parsed remainder (the condition is parsed; not dispatch)
             let after = after.strip_prefix(',').unwrap_or(after).trim_start();
             let offset = text.len() - after.len();
             return (
-                Some(build_counter_condition(comparator, threshold, counter_type)),
+                Some(build_counter_condition(
+                    comparator,
+                    threshold,
+                    counter_type,
+                    ObjectScope::Source,
+                )),
                 text[offset..].to_string(),
             );
         }
     }
 
-    if let Some((before, after)) = tp.rsplit_around(" if it has ") {
-        if let Some((comparator, threshold, counter_type, consumed)) =
-            parse_counter_threshold(after.lower)
-        {
-            let remaining = after.lower[consumed..].trim();
-            if remaining.is_empty() || remaining == "." {
-                return (
-                    Some(build_counter_condition(comparator, threshold, counter_type)),
-                    before.original.trim_end_matches('.').trim().to_string(),
-                );
+    // Trailing form: "[effect] if {subject} has [N] [type] counter[s] on it".
+    // "it" is always offered; the demonstrative "that creature"/"that permanent"/
+    // "that card" only in non-trigger context (CR 115.1: the spell's target).
+    let mut subjects: Vec<(&str, ObjectScope)> = vec![(" if it has ", ObjectScope::Source)];
+    if !in_trigger {
+        subjects.push((" if that creature has ", ObjectScope::Target));
+        subjects.push((" if that permanent has ", ObjectScope::Target));
+        subjects.push((" if that card has ", ObjectScope::Target));
+    }
+    for (needle, scope) in subjects {
+        if let Some((before, after)) = tp.rsplit_around(needle) {
+            if let Some((comparator, threshold, counter_type, consumed)) =
+                parse_counter_threshold(after.lower)
+            {
+                let remaining = after.lower[consumed..].trim();
+                if remaining.is_empty() || remaining == "." {
+                    return (
+                        Some(build_counter_condition(
+                            comparator,
+                            threshold,
+                            counter_type,
+                            scope,
+                        )),
+                        before.original.trim_end_matches('.').trim().to_string(),
+                    );
+                }
             }
         }
     }
@@ -3610,12 +3791,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // CR 701.20e: Map the typed `PutCount` onto the Dig's keep_count/up_to.
     // `u32::MAX` is an unbounded parser sentinel; the Dig resolver clamps it
     // to the number of seen cards.
-    let (alt_keep_count, alt_up_to) = match alt_quantity {
-        PutCount::All => (Some(u32::MAX), false),
-        PutCount::AnyNumber => (Some(u32::MAX), true),
-        PutCount::Up(n) => (Some(n), true),
-        PutCount::Exactly(n) => (Some(n), false),
-    };
+    let (alt_keep_count, alt_keep_count_expr, alt_up_to) = alt_quantity.to_dig_keep();
 
     // CR 601.2f + CR 608.2c: a teamwork-gated "put ... from among them ...
     // instead" alternative reuses the preceding Dig's source; the base
@@ -3638,6 +3814,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         count: prev_count.clone(),
         destination: alt_destination,
         keep_count: alt_keep_count,
+        keep_count_expr: alt_keep_count_expr,
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),

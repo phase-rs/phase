@@ -4038,6 +4038,7 @@ mod tests {
             self_loss.then_some(DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
                 player: PlayerId(0),
+                gate: engine::types::ability::TurnGate::None,
             }),
         )
     }
@@ -4200,6 +4201,7 @@ mod tests {
             Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::Upkeep,
                 player: PlayerId(0),
+                gate: engine::types::ability::TurnGate::None,
             }),
         );
 

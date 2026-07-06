@@ -75,6 +75,154 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "dequeue_stale_for_handler")
         self.assertEqual(recommendation["reason"], "stale_approval")
 
+    def test_missing_hard_required_proof_blocks_approved_pr(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5041,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "APPROVED",
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "proof": {
+                "proof_required": True,
+                "proof_satisfied": False,
+                "proof_gap": True,
+                "risk_flags": ["verification-skipped-or-delegated"],
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "request_changes")
+        self.assertEqual(recommendation["reason"], "proof_required_missing")
+        self.assertEqual(recommendation["proof"]["risk_flags"], ["verification-skipped-or-delegated"])
+
+    def test_proof_profile_flags_agent_coauthored_incomplete_template(self) -> None:
+        profile = pr_review.proof_profile(
+            {
+                "body": (
+                    "## Summary\nFixes admin auth.\n\n"
+                    "## Test plan\n"
+                    "- [ ] Manual: verify endpoint auth\n"
+                    "- [ ] `cargo test` (no Rust toolchain in agent env)\n"
+                ),
+                "commits": [
+                    {
+                        "authors": [
+                            {"login": "RealDiligent"},
+                            {"login": "cursoragent"},
+                        ]
+                    }
+                ],
+            },
+            {"scrutiny": "maintainer_attention"},
+        )
+
+        self.assertTrue(profile["proof_gap"])
+        self.assertTrue(profile["agent_coauthored_all_commits"])
+        self.assertIn("missing-ai-contributor-template", profile["risk_flags"])
+        self.assertIn("unchecked-verification-items", profile["risk_flags"])
+        self.assertIn("verification-skipped-or-delegated", profile["risk_flags"])
+        self.assertIn("contributor-scrutiny-maintainer_attention", profile["risk_flags"])
+
+    def test_checked_test_evidence_satisfies_proof_despite_manual_items(self) -> None:
+        profile = pr_review.proof_profile(
+            {
+                "body": (
+                    "## Summary\nFixes admin auth.\n\n"
+                    "## Test plan\n"
+                    "- [x] `cargo test -p server-core draft_session`\n"
+                    "- [ ] Manual: verify endpoint auth over nginx\n"
+                ),
+                "commits": [
+                    {
+                        "authors": [
+                            {"login": "RealDiligent"},
+                            {"login": "cursoragent"},
+                        ]
+                    }
+                ],
+            },
+            {"scrutiny": "maintainer_attention"},
+        )
+
+        self.assertTrue(profile["proof_required"])
+        self.assertTrue(profile["proof_satisfied"])
+        self.assertFalse(profile["proof_gap"])
+        self.assertIn("unchecked-verification-items", profile["risk_flags"])
+        self.assertEqual(
+            profile["checked_test_evidence"],
+            ["- [x] `cargo test -p server-core draft_session`"],
+        )
+
+    def test_template_and_unchecked_items_are_tracked_not_blocking(self) -> None:
+        profile = pr_review.proof_profile(
+            {
+                "body": (
+                    "## Problem\nParser fix.\n\n"
+                    "## Implementation method (required)\n"
+                    "- [ ] Produced via the `/engine-implementer` pipeline\n"
+                ),
+                "commits": [
+                    {
+                        "authors": [
+                            {"login": "RiskyContributor"},
+                        ]
+                    }
+                ],
+            },
+            {"scrutiny": "elevated"},
+        )
+
+        self.assertFalse(profile["proof_required"])
+        self.assertFalse(profile["proof_gap"])
+        self.assertIn("missing-ai-contributor-template", profile["risk_flags"])
+        self.assertIn("unchecked-verification-items", profile["risk_flags"])
+        self.assertIn("contributor-scrutiny-elevated", profile["risk_flags"])
+        self.assertEqual(
+            profile["tracking_signals"],
+            ["ai-template-gap", "unchecked-engine-implementer"],
+        )
+        self.assertEqual(
+            profile["unchecked_items"],
+            ["- [ ] Produced via the `/engine-implementer` pipeline"],
+        )
+
+    def test_missing_template_alone_is_not_a_proof_gap(self) -> None:
+        profile = pr_review.proof_profile(
+            {"body": "## Summary\nLegacy PR body.\n", "commits": []},
+            {"scrutiny": "normal"},
+        )
+
+        self.assertFalse(profile["proof_required"])
+        self.assertFalse(profile["proof_gap"])
+        self.assertIn("missing-ai-contributor-template", profile["risk_flags"])
+
+    def test_gittensor_closed_heavy_feeds_proof_risk(self) -> None:
+        records = [
+            {"author": "Risky", "repository": f"owner/repo{i}", "prState": "CLOSED", "hotkey": "hk"}
+            for i in range(20)
+        ]
+        records += [
+            {"author": "Risky", "repository": "owner/good", "prState": "MERGED", "hotkey": "hk"}
+            for _ in range(5)
+        ]
+
+        index = pr_review.build_gittensor_index(records)
+        summary = pr_review.gittensor_summary("risky", index, None)
+        profile = pr_review.proof_profile({"body": "", "commits": []}, None, summary)
+
+        self.assertTrue(summary["present"])
+        self.assertEqual(summary["states"]["CLOSED"], 20)
+        self.assertEqual(summary["risk_flag"], "gittensor-closed-heavy")
+        self.assertIn("gittensor-closed-heavy", profile["risk_flags"])
+        self.assertTrue(profile["proof_gap"])
+
     def test_frontend_policy_defers_only_when_no_harder_blocker(self) -> None:
         packet = {
             "pr": {
@@ -119,6 +267,100 @@ class PrReviewTests(unittest.TestCase):
 
         self.assertEqual(recommendation["advisory_action"], "review")
         self.assertEqual(recommendation["reason"], "needs_review")
+
+    def test_author_followup_after_local_block_resurfaces_same_head(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5014,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "contributor",
+                        "createdAt": "2026-07-04T08:01:22Z",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "changes_requested",
+                "outcome": "changes_requested",
+                "head_sha": "head",
+                "timestamp": "2026-07-04T00:26:33Z",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "author_followup_after_local_block")
+
+    def test_local_block_without_author_followup_stays_blocked(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5014,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "changes_requested",
+                "outcome": "changes_requested",
+                "head_sha": "head",
+                "timestamp": "2026-07-04T00:26:33Z",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
+        self.assertEqual(recommendation["reason"], "local_block_current_head")
+
+    def test_parse_diff_after_local_block_resurfaces_same_head(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5019,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "changes_requested",
+                "outcome": "changes_requested",
+                "head_sha": "head",
+                "timestamp": "2026-07-04T18:14:34Z",
+            },
+            "parse_diff": {
+                "present": True,
+                "state": "no_changes",
+                "updated_at": "2026-07-04T22:45:19Z",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "parse_diff_after_local_block")
 
     def test_merged_pr_recommends_prune(self) -> None:
         packet = {

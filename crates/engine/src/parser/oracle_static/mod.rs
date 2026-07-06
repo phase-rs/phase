@@ -141,6 +141,7 @@ pub(crate) use cost_mod::{
 };
 pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
+    parse_forced_block_blocker_slot,
 };
 pub(crate) use grammar::map_keyword;
 pub(crate) use keyword_grant::{

@@ -563,6 +563,39 @@ fn is_blocked_by_cast_only_from_zones(
         })
 }
 
+/// CR 116.2a + CR 305.1 + CR 601.2a: A `ProhibitPlayFromZone { zone }`
+/// restriction prevents the affected player from playing (casting OR playing as
+/// a land) a card located in `zone`. Consulted by BOTH the spell-cast gate and
+/// the play-land gate (`handle_play_land`) so the deny covers plays that are not
+/// casts (Memory Vessel: "they can't play cards from their hand"). The object's
+/// current zone is the discriminator, so a card that has left the prohibited
+/// zone (e.g. now in exile) is unaffected.
+pub(crate) fn is_blocked_by_prohibit_play_from_zone(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    state
+        .restrictions
+        .iter()
+        .any(|restriction| match restriction {
+            GameRestriction::ProhibitActivity {
+                source,
+                affected_players,
+                activity: ProhibitedActivity::ProhibitPlayFromZone { zone },
+                ..
+            } => {
+                let source_controller = state
+                    .objects
+                    .get(source)
+                    .map(|source_obj| source_obj.controller);
+                restriction_scope_matches_player(source_controller, affected_players, player)
+                    && obj.zone == *zone
+            }
+            _ => false,
+        })
+}
+
 /// CR 101.2: Check if a CantCastSpells restriction prevents the given player
 /// from casting any spells. E.g., Silence: "Your opponents can't cast spells this turn."
 fn is_blocked_by_cant_cast_spells(
@@ -784,6 +817,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             state.objects.get(obj_id).is_some_and(|obj| {
                 !is_blocked_by_cast_only_from_zones(state, obj, player)
                     && !is_blocked_by_cant_cast_spells(state, player, Some(obj))
+                    && !is_blocked_by_prohibit_play_from_zone(state, obj, player)
             })
         })
         .collect()
@@ -1915,6 +1949,34 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
         })
 }
 
+// CR 205.1b + CR 613.1d: read the enters-with type-grant rider ("… is a [type]
+// in addition to its other types") from the *consumed* cast-this-way permission
+// only (the one supporting THIS cast), not any permission carrying modifications,
+// so a non-consumed sibling permission's rider cannot leak onto this cast
+// (CR 608.2c). Mirrors `selected_exile_alt_cost_permission_enters_with_counter`.
+pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> Vec<crate::types::ability::ContinuousModification> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    obj.casting_permissions
+        .iter()
+        .find(|permission| {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        })
+        .map(|permission| match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                enters_with_modifications,
+                ..
+            } => enters_with_modifications.clone(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
 // CR 614.1a + CR 608.2n: read the graveyard-redirect rider ("if that spell would
 // be put into a graveyard, exile it / put it on the bottom of its owner's library
 // / return it to its owner's hand instead") from the *consumed* cast permission
@@ -2064,6 +2126,26 @@ pub(crate) fn play_from_exile_permission_source(
         }
         _ => None,
     })
+}
+
+/// CR 406.3a + CR 406.3b: The single authority for "may `player` look at this
+/// face-down card in exile?". A card exiled face down has no characteristics
+/// and can't be examined by any player (CR 406.3a), *except* that the spell or
+/// ability that exiled it may permit it — and CR 406.3b lets a player cast such
+/// a card only if they're allowed to look at it. An active
+/// [`CastingPermission::PlayFromExile`] grant for `player` is exactly that
+/// permission (Outrageous Robbery / Heist / the impulse-exile class): the grant
+/// that lets them play the card is the same authority that lets them look at it,
+/// so look- and play-permission cannot diverge. Routing through
+/// [`play_from_exile_permission_source`] also inherits its `card_filter` /
+/// `single_use` / per-turn gating, so a look is granted only where a cast would
+/// be. Consumed by `visibility.rs` face-down-exile redaction.
+pub(crate) fn player_may_look_at_facedown_exile(
+    state: &GameState,
+    obj: &GameObject,
+    player: PlayerId,
+) -> bool {
+    play_from_exile_permission_source(state, obj, player, state.turn_number).is_some()
 }
 
 /// CR 601.2f: The printed mana-cost increase a spell incurs when it is cast via
@@ -4098,6 +4180,15 @@ fn prepare_spell_cast_with_variant_override_inner(
         ));
     }
 
+    // CR 116.2a + CR 601.2a: A `ProhibitPlayFromZone` deny prevents casting a
+    // spell from the named zone (Memory Vessel: "can't play cards from their
+    // hand" — the cast half of "play").
+    if mode == CastingMode::Actual && is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents playing cards from this zone".to_string(),
+        ));
+    }
+
     if obj
         .card_types
         .core_types
@@ -5186,6 +5277,7 @@ pub(super) fn apply_target_dependent_cost_modifiers(
 /// X is concrete here, so both floor channels apply (they do not self-gate on
 /// X — only the prepare-path callers gate). Selected targets come from the
 /// cloned pending `ability`; the unselected-targets case no-ops safely.
+#[cfg(test)]
 pub(super) fn concrete_cost_for_x(
     state: &GameState,
     player: PlayerId,
@@ -5203,6 +5295,68 @@ pub(super) fn concrete_cost_for_x(
     cost
 }
 
+/// CR 601.2f: Recompute a pending spell's total mana component from the
+/// announcement-time base plus declared mana additions. This is the spell-cast
+/// authority after optional/additional costs are declared: base or alternative
+/// cost, plus additional mana costs, then increases/reductions, then floors.
+pub(super) fn recompute_pending_mana_total(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    x: Option<u32>,
+) -> ManaCost {
+    let Some(base) = pending.base_cost.as_ref() else {
+        let mut cost = pending.cost.clone();
+        if let Some(x) = x {
+            cost.concretize_x(x);
+        }
+        if !casting_costs::cost_has_x(&cost) {
+            apply_cost_floor(state, player, pending.object_id, &mut cost);
+            apply_cost_floor_with_selected_targets(
+                state,
+                player,
+                pending.object_id,
+                &pending.ability,
+                &mut cost,
+            );
+        }
+        return cost;
+    };
+
+    let mut cost = base.clone();
+    if let Some(x) = x {
+        cost.concretize_x(x);
+    }
+    for addition in &pending.declared_mana_additions {
+        cost = super::restrictions::add_mana_cost(&cost, addition);
+    }
+    apply_non_floor_cost_modifiers(
+        state,
+        player,
+        pending.object_id,
+        &mut cost,
+        Some(pending.casting_variant),
+    );
+    apply_target_dependent_cost_modifiers(
+        state,
+        player,
+        pending.object_id,
+        &pending.ability,
+        &mut cost,
+    );
+    if !casting_costs::cost_has_x(&cost) {
+        apply_cost_floor(state, player, pending.object_id, &mut cost);
+        apply_cost_floor_with_selected_targets(
+            state,
+            player,
+            pending.object_id,
+            &pending.ability,
+            &mut cost,
+        );
+    }
+    cost
+}
+
 /// CR 601.2f + CR 702.41a: Build per-X total cost previews for the Choose-X UI.
 /// Each entry is `(x, concrete_cost)` after Affinity/reductions/floors. Empty
 /// when `base_cost` is unavailable or the legal range exceeds 100 values.
@@ -5213,9 +5367,9 @@ pub(super) fn build_choose_x_cost_previews(
     min: u32,
     max: u32,
 ) -> Vec<(u32, ManaCost)> {
-    let Some(base) = pending.base_cost.as_ref() else {
+    if pending.base_cost.is_none() {
         return Vec::new();
-    };
+    }
     if min > max || max.saturating_sub(min) > 100 {
         return Vec::new();
     }
@@ -5223,7 +5377,7 @@ pub(super) fn build_choose_x_cost_previews(
         .map(|x| {
             (
                 x,
-                concrete_cost_for_x(state, player, pending.object_id, &pending.ability, base, x),
+                recompute_pending_mana_total(state, player, pending, Some(x)),
             )
         })
         .collect()
@@ -5251,15 +5405,21 @@ pub(super) fn apply_post_x_cost_modifiers(
     let Some(x) = pending.ability.chosen_x else {
         return;
     };
-    let ability = pending.ability.clone();
     let new_cost = match pending.base_cost.clone() {
-        Some(base) => concrete_cost_for_x(state, caster, object_id, &ability, &base, x),
+        Some(_) => recompute_pending_mana_total(state, caster, pending, Some(x)),
         None => {
             // Legacy / in-flight saved game without a captured base: behavior
             // identical to the pre-change floor-only post-X pass.
             let mut cost = pending.cost.clone();
+            cost.concretize_x(x);
             apply_cost_floor(state, caster, object_id, &mut cost);
-            apply_cost_floor_with_selected_targets(state, caster, object_id, &ability, &mut cost);
+            apply_cost_floor_with_selected_targets(
+                state,
+                caster,
+                object_id,
+                &pending.ability,
+                &mut cost,
+            );
             cost
         }
     };
@@ -5323,8 +5483,16 @@ pub(super) fn recompute_pending_cast_cost(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<ManaCost> {
-    let obj = state.objects.get(&object_id)?;
-    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+    let pending = state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == object_id)?;
+    Some(recompute_pending_mana_total(
+        state,
+        player,
+        pending,
+        pending.ability.chosen_x,
+    ))
 }
 
 /// CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
@@ -8413,6 +8581,7 @@ pub(super) fn initiate_cast_during_resolution(
                 duration: None,
                 graveyard_replacement: graveyard_replacement.clone(),
                 enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
                 mana_spend_permission,
             });
         // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
@@ -9596,6 +9765,11 @@ fn announce_spell_on_stack(
     prepared: &PreparedSpellCast,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 400.7: A new cast announcement is a new casting event — discard any
+    // stale behold creature-type choice left on the spell object from a prior
+    // resolution (#5051; cancel rewind uses the same clear in handle_cancel_cast).
+    clear_cast_scoped_creature_type_choice(state, prepared.object_id);
+
     stack::push_to_stack(
         state,
         StackEntry {
@@ -11018,8 +11192,14 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
         cost,
         ctx,
         excluded_sources,
-        None,
+        AutoTapProbeOptions::default(),
     )
+}
+
+#[derive(Default)]
+struct AutoTapProbeOptions<'a> {
+    source_cache: Option<&'a casting_costs::AutoTapSourceCache>,
+    explicit_tap_payment_mode: Option<ConvokeMode>,
 }
 
 fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
@@ -11029,7 +11209,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     excluded_sources: &HashSet<ObjectId>,
-    source_cache: Option<&casting_costs::AutoTapSourceCache>,
+    options: AutoTapProbeOptions<'_>,
 ) -> bool {
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources_with_context_excluding_cached(
@@ -11040,7 +11220,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
         source_id,
         ctx,
         excluded_sources,
-        source_cache,
+        options.source_cache,
     );
 
     // CR 605.4a: A `TapsForMana` triggered mana ability (Leyline of Abundance /
@@ -11075,6 +11255,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
                                 cost,
                                 Some(ctx),
                                 permissions,
+                                options.explicit_tap_payment_mode,
                             )
                         })
                 })
@@ -11126,10 +11307,23 @@ fn can_pay_with_spell_tap_payments(
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     permissions: crate::types::mana::CostPermissionContext,
+    explicit_mode: Option<ConvokeMode>,
 ) -> bool {
-    let Some(mode) = spell_tap_payment_mode(state, player, source_id) else {
+    let Some(mode) = explicit_mode.or_else(|| spell_tap_payment_mode(state, player, source_id))
+    else {
         return false;
     };
+    can_pay_with_tap_payment_mode(state, player, mode, cost, ctx, permissions)
+}
+
+fn can_pay_with_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    mode: ConvokeMode,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+    permissions: crate::types::mana::CostPermissionContext,
+) -> bool {
     let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
         return false;
     };
@@ -11306,7 +11500,66 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
         cost,
         spell_ctx.as_ref(),
         &HashSet::new(),
-        source_cache,
+        AutoTapProbeOptions {
+            source_cache,
+            explicit_tap_payment_mode: None,
+        },
+    )
+}
+
+pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    tap_payment_mode: ConvokeMode,
+) -> bool {
+    if super::casting_costs::cost_has_x(cost) {
+        let mut concrete = cost.clone();
+        concrete.concretize_x(0);
+        return can_feasibly_pay_mana_cost_with_tap_payment_mode(
+            state,
+            player,
+            source_id,
+            &concrete,
+            tap_payment_mode,
+        );
+    }
+
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    let spell_meta = build_spell_meta(&simulated, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    if can_pay_mana_cost_after_auto_tap_with_context_and_cache(
+        simulated.clone(),
+        player,
+        Some(source_id),
+        cost,
+        spell_ctx.as_ref(),
+        &HashSet::new(),
+        AutoTapProbeOptions {
+            source_cache: None,
+            explicit_tap_payment_mode: Some(tap_payment_mode),
+        },
+    ) {
+        return true;
+    }
+
+    let any_color = player_can_spend_as_any_color_for_payment(
+        &simulated,
+        player,
+        Some(source_id),
+        spell_ctx.as_ref(),
+    );
+    let permissions =
+        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
+    can_pay_with_tap_payment_mode(
+        &simulated,
+        player,
+        tap_payment_mode,
+        cost,
+        spell_ctx.as_ref(),
+        permissions,
     )
 }
 
@@ -11341,6 +11594,21 @@ pub(super) fn can_feasibly_pay_mana_cost(
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
     can_feasibly_pay_mana_cost_with_probe(state, player, source_id, cost, None)
+}
+
+pub(super) fn has_manual_mana_ability_for_spell_payment(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let spell_meta = build_spell_meta(state, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+        state,
+        player,
+        Some(source_id),
+        spell_ctx.as_ref(),
+    )
 }
 
 pub(super) fn can_feasibly_pay_mana_cost_with_probe(
@@ -13771,7 +14039,11 @@ pub fn handle_activate_ability(
             pending.activation_cost = Some(cost.clone());
             pending.activation_ability_index = Some(ability_index);
             return super::effects::collect_evidence::begin_cost_payment(
-                state, player, amount, pending,
+                state,
+                player,
+                amount,
+                pending,
+                SpellCostSource::Other,
             );
         }
 
@@ -14293,6 +14565,17 @@ pub fn handle_activate_ability(
 /// reversion is needed — the object is already in its origin zone.
 /// Activated-ability casts never placed an object on the stack during target
 /// selection, so no stack rollback is needed for them.
+/// CR 400.7 + CR 601.2: Cast-scoped behold creature-type choices must not
+/// survive across casting events. A resolved spell that later re-enters the
+/// cast pipeline (flashback, retrace, hand re-cast, etc.) is a new object for
+/// game purposes and must re-prompt (#5051).
+fn clear_cast_scoped_creature_type_choice(state: &mut GameState, object_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.chosen_attributes
+            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
+    }
+}
+
 pub fn handle_cancel_cast(
     state: &mut GameState,
     pending: &PendingCast,
@@ -14309,10 +14592,7 @@ pub fn handle_cancel_cast(
     // (`casting_costs::pay_additional_cost_with_source`) would skip the type
     // prompt on the next cast attempt and silently reuse the stale type — so
     // remove it here and let a re-cast re-prompt from a clean slate.
-    if let Some(obj) = state.objects.get_mut(&pending.object_id) {
-        obj.chosen_attributes
-            .retain(|a| !matches!(a, crate::types::ability::ChosenAttribute::CreatureType(_)));
-    }
+    clear_cast_scoped_creature_type_choice(state, pending.object_id);
 
     let convoked_creatures = if pending.convoked_creatures.is_empty() {
         state

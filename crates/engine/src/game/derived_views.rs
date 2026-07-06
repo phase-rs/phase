@@ -642,6 +642,9 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
             // declare-attackers gate; it has no cast/activate HUD badge, so no
             // player-status row is produced for it.
             ProhibitedActivity::Attack { .. } => continue,
+            // CR 116.2a: "can't play cards from <zone>" is enforced at the cast
+            // and play-land gates; no dedicated HUD badge yet, so no status row.
+            ProhibitedActivity::ProhibitPlayFromZone { .. } => continue,
         };
         for pid in restriction_affected_players(state, affected_players, *source) {
             views.push(PlayerStatusView {

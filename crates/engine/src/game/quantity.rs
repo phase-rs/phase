@@ -18,8 +18,8 @@ use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
     FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, RoundingMode, StaticCondition, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter, ZoneRef,
+    ResolvedAbility, RoundingMode, StaticCondition, TargetFilter, TargetRef, TrackedAnaphorSource,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -236,7 +236,11 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | ObjectScope::EventTarget
             | ObjectScope::CostPaidObject
             | ObjectScope::Anaphoric
-            | ObjectScope::Demonstrative => true,
+            // CR 608.2c: the other revealer's card is a per-resolution referent,
+            // resolved only at resolution time (never a static CDA read).
+            | ObjectScope::OtherRevealedCard
+            | ObjectScope::Demonstrative
+            | ObjectScope::AmassedArmy => true,
         }
     }
     match expr {
@@ -2250,13 +2254,35 @@ fn resolve_ref(
         // place (mirrors the `Aggregate` extract: live object first, LKI cache
         // fallback). Drives "deals damage equal to the total mana value of those
         // exiled cards" (Ensnared by the Mara).
-        QuantityRef::TrackedSetAggregate { function, property } => {
-            let Some((_, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
-                return 0;
+        QuantityRef::TrackedSetAggregate {
+            function,
+            property,
+            source,
+        } => {
+            // The id-set to reduce depends on which anaphor the parser matched.
+            let ids: Vec<ObjectId> = match source {
+                // Chain-published tracked set ("those exiled cards"): the set the
+                // immediately-preceding chain effect published (highest id).
+                TrackedAnaphorSource::ChainSet => state
+                    .tracked_object_sets
+                    .iter()
+                    .max_by_key(|(id, _)| id.0)
+                    .map(|(_, ids)| ids.clone())
+                    .unwrap_or_default(),
+                // CR 603.2c + CR 603.10a: the current triggering event batch
+                // ("those creatures" on a batched dies trigger). The subjects are
+                // read from `state.current_trigger_events`; each died creature's
+                // power comes from its last-known info (LKI), i.e. death-time
+                // power, via `aggregate_property_over`'s live-then-LKI extract.
+                TrackedAnaphorSource::TriggeringBatch => state
+                    .current_trigger_events
+                    .iter()
+                    .filter_map(crate::game::targeting::extract_source_from_event)
+                    .collect(),
             };
             // Per-object aggregation delegated to the shared
             // `aggregate_property_over` summation authority (live-then-LKI).
-            aggregate_property_over(state, ids, *function, *property)
+            aggregate_property_over(state, &ids, *function, *property)
         }
         // CR 400.7 + CR 608.2c: Read the per-resolution counter populated by
         // ChangeZoneAll when it exiles cards from a hand. Used by "draws a card
@@ -2966,14 +2992,17 @@ fn resolve_ref(
                         Some(ControllerRef::ScopedPlayer) => {
                             snap.controller == scoped_player_or_controller(ability, controller)
                         }
-                        Some(ControllerRef::TargetPlayer) => ability
-                            .and_then(|a| {
-                                a.targets.iter().find_map(|t| match t {
-                                    crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-                                    crate::types::ability::TargetRef::Object(_) => None,
+                        // CR 109.4: TargetOpponent reads identically to TargetPlayer.
+                        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
+                            ability
+                                .and_then(|a| {
+                                    a.targets.iter().find_map(|t| match t {
+                                        crate::types::ability::TargetRef::Player(pid) => Some(*pid),
+                                        crate::types::ability::TargetRef::Object(_) => None,
+                                    })
                                 })
-                            })
-                            .is_some_and(|pid| pid == snap.controller),
+                                .is_some_and(|pid| pid == snap.controller)
+                        }
                         Some(ControllerRef::ParentTargetController) => ability
                             .and_then(|a| {
                                 crate::game::ability_utils::parent_target_controller(a, state)
@@ -3039,7 +3068,8 @@ fn damage_source_controller_matches(
         ControllerRef::You => actual == controller,
         ControllerRef::Opponent => actual != controller,
         ControllerRef::ScopedPlayer => actual == scoped_player_or_controller(ability, controller),
-        ControllerRef::TargetPlayer => ability
+        // CR 109.4: TargetOpponent reads identically to TargetPlayer.
+        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => ability
             .and_then(|ability| {
                 ability.targets.iter().find_map(|target| match target {
                     TargetRef::Player(player) => Some(*player),
@@ -3438,11 +3468,16 @@ fn object_for_scope<'a>(
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e))
             .and_then(|id| state.objects.get(&id)),
-        // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
-        // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
-        // referent) resolves to a live `GameObject` here — both are snapshot
-        // referents read through `ability` slots, not `state.objects`.
-        ObjectScope::CostPaidObject | ObjectScope::Anaphoric | ObjectScope::Demonstrative => None,
+        // CR 608.2k / CR 608.2c / CR 701.47c: object-*identity* lookup.
+        // These resolution-local referents are snapshot/ability-carried slots,
+        // not plain live-board scopes available to this ability-free helper.
+        // `OtherRevealedCard` is resolved specially in `resolve_object_mana_value`
+        // by exclusion over `last_revealed_ids`, not via this generic path.
+        ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy => None,
     }
 }
 
@@ -3486,11 +3521,16 @@ fn object_id_for_scope(
             .cloned()
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e)),
-        // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
-        // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
-        // referent) resolves to an `ObjectId` here — both are snapshot
-        // referents read through `ability` slots, not `state.objects`.
-        ObjectScope::CostPaidObject | ObjectScope::Anaphoric | ObjectScope::Demonstrative => None,
+        // CR 608.2k / CR 608.2c / CR 701.47c: object-*identity* lookup.
+        // These resolution-local referents are snapshot/ability-carried slots,
+        // not plain live-board scopes available to this ability-free helper.
+        // `OtherRevealedCard` is resolved specially in `resolve_object_mana_value`
+        // by exclusion over `last_revealed_ids`, not via this generic path.
+        ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy => None,
     }
 }
 
@@ -3646,6 +3686,24 @@ fn resolve_counters_on_scope(
         ObjectScope::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
             .map(|snapshot| counter_count_from_map(&snapshot.lki.counters, counter_type))
+            .unwrap_or(0),
+        ObjectScope::AmassedArmy => ability
+            .and_then(|ability| ability.amassed_army_object.as_ref())
+            .map(|snapshot| {
+                let live = state.objects.get(&snapshot.object_id);
+                let on_battlefield =
+                    live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
+                if on_battlefield {
+                    return live
+                        .map(|obj| counter_count_from_map(&obj.counters, counter_type))
+                        .unwrap_or(0);
+                }
+                state
+                    .lki_cache
+                    .get(&snapshot.object_id)
+                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
+                    .unwrap_or_else(|| counter_count_from_map(&snapshot.lki.counters, counter_type))
+            })
             .unwrap_or(0),
         _ => object_for_scope(state, scope, ctx, targets)
             .map(|obj| counter_count_from_map(&obj.counters, counter_type))
@@ -3937,6 +3995,18 @@ where
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
             })
             .unwrap_or(0),
+        // CR 701.47c + CR 608.2h: "the amassed Army's power/toughness" reads
+        // the Army chosen by the current amass instruction. The ability carrier
+        // provides identity plus a final snapshot fallback; the live/LKI helper
+        // keeps later same-resolution movement rules aligned with other object
+        // characteristic reads.
+        ObjectScope::AmassedArmy => ability
+            .and_then(|a| a.amassed_army_object.as_ref())
+            .and_then(|snapshot| {
+                read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
+                    .or_else(|| lki_extract(&snapshot.lki))
+            })
+            .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its power"). Shares the
         // `Demonstrative` referent chain (earlier instruction → trigger-event
         // source → cost referent), plus one extra final fallback for the
@@ -3989,6 +4059,11 @@ where
                 })
             })
             .unwrap_or(0),
+        // CR 608.2c: MV-only class today ({Parker Luck, Keen Duelist} reference
+        // only the OTHER revealed card's mana value). No card reads its power or
+        // toughness, so this is a fail-closed placeholder. Extend by mirroring the
+        // `last_revealed_ids` by-exclusion read in `resolve_object_mana_value`.
+        ObjectScope::OtherRevealedCard => 0,
     }
 }
 
@@ -4114,6 +4189,26 @@ fn resolve_object_mana_value(
                 })
             })
             .unwrap_or(0),
+        ObjectScope::AmassedArmy => ability
+            .and_then(|a| a.amassed_army_object.as_ref())
+            .map(|snapshot| {
+                state
+                    .objects
+                    .get(&snapshot.object_id)
+                    .map(|obj| {
+                        u32_to_i32_saturating(
+                            obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                        )
+                    })
+                    .or_else(|| {
+                        state
+                            .lki_cache
+                            .get(&snapshot.object_id)
+                            .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                    })
+                    .unwrap_or_else(|| u32_to_i32_saturating(snapshot.lki.mana_value))
+            })
+            .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its mana value") in a triggered
         // ability binds to the object introduced by the most recent earlier
         // *effect instruction* in the same ability (slot 1). CR 608.2k: if no
@@ -4159,6 +4254,31 @@ fn resolve_object_mana_value(
                     .map(|s| u32_to_i32_saturating(s.lki.mana_value))
             })
             .unwrap_or(0),
+        // CR 608.2c + CR 701.20b + CR 108.3 + CR 202.3: "the mana value of the
+        // card revealed by the OTHER player" in an exactly-two-target symmetric
+        // reveal. This fan-out iteration's OWN revealed card is bound as
+        // `effect_context_object` (owner-keyed, §2.4b of the plan). The other
+        // revealer's card is the single `last_revealed_ids` entry that is NOT the
+        // own card (by-exclusion). MV is printed/zone-independent (CR 202.3), so
+        // the read is stable whether or not the other card has already been put
+        // to hand. Fail-closed to 0 when no "other" entry exists — empty library
+        // or a target that became illegal on resolution (CR 608.2b).
+        ObjectScope::OtherRevealedCard => {
+            let own = ability
+                .and_then(|a| a.effect_context_object.as_ref())
+                .map(|s| s.object_id);
+            state
+                .last_revealed_ids
+                .iter()
+                .find(|id| Some(**id) != own)
+                .and_then(|id| state.objects.get(id))
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -4613,6 +4733,15 @@ pub(crate) fn resolve_player_count(
                                 && state.opponent_attacked(
                                     *subject, *scope, controller, source_id, p.id,
                                 )
+                        }
+                        // CR 508.6 + CR 102.2: opponent of the controller
+                        // attacking the enchanted/defending player this combat.
+                        // Delegates to the single-authority predicate in
+                        // `matches_player_scope` (the two copies must stay in sync).
+                        PlayerFilter::OpponentAttackingEnchantedPlayer => {
+                            crate::game::effects::matches_player_scope(
+                                state, p.id, filter, controller, source_id,
+                            )
                         }
                         PlayerFilter::All => true,
                         // CR 608.2c + CR 109.4: all players except the anchor's

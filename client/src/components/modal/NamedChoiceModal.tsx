@@ -29,7 +29,10 @@ const CHOICE_TYPE_TITLE_KEYS: Record<string, string> = {
   TwoColors: "twoColors",
   NumberRange: "numberRange",
   Labeled: "labeled",
+  CardPredicate: "cardPredicate",
+  CardPredicateGuess: "cardPredicateGuess",
   Keyword: "keyword",
+  CounterKind: "counterKind",
 };
 
 /** Extract the string key from a ChoiceType value.

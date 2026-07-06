@@ -184,7 +184,9 @@
     "importedWithPreferences_one": "Zaimportowano {{count}} talię i preferencje.",
     "importedWithPreferences_other": "Zaimportowano {{count}} talii i preferencje.",
     "skippedMalformed_one": "Pominięto {{count}} nieprawidłowy wpis.",
-    "skippedMalformed_other": "Pominięto {{count}} nieprawidłowych wpisów."
+    "skippedMalformed_other": "Pominięto {{count}} nieprawidłowych wpisów.",
+    "telemetry": "Wysyłaj anonimowe raporty o awariach i użyciu",
+    "telemetryDescription": "Pomaga naprawiać awarie i ustalać priorytety obsługi kart. Bez konta, bez danych osobowych — tylko liczniki błędów i podsumowań gier."
   },
   "resetAll": {
     "confirm": "Zresetować wszystkie preferencje do wartości domyślnych? Spowoduje to wyczyszczenie każdego ustawienia w tym oknie.",

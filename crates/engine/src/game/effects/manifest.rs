@@ -356,14 +356,19 @@ mod tests {
             excess: 0,
         });
 
-        let ability = make_manifest_ability_for_target(1, TargetFilter::TriggeringPlayer, vec![]);
+        let mut ability =
+            make_manifest_ability_for_target(1, TargetFilter::TriggeringPlayer, vec![]);
+        if let Effect::Manifest { enters_under, .. } = &mut ability.effect {
+            *enters_under = Some(crate::types::ability::ControllerRef::You);
+        }
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
         let obj = &state.objects[&opponent_card];
         assert!(obj.face_down);
         assert_eq!(obj.zone, Zone::Battlefield);
-        assert_eq!(obj.controller, damaged_player);
+        assert_eq!(obj.owner, damaged_player);
+        assert_eq!(obj.controller, caster);
     }
 
     /// CR 708.2a + CR 110.2a: Manifest with an effect-specified `profile`

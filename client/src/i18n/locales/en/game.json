@@ -16,6 +16,8 @@
     "holdCtrlFront": "Hold Ctrl for front face",
     "holdCtrlFlip": "Hold Ctrl to flip",
     "flip": "Flip",
+    "report": "Report a problem",
+    "reported": "Reported ✓",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
@@ -80,7 +82,26 @@
     "autoPassing": "Auto-Passing to End Step...",
     "resolvingStack": "Resolving Stack..."
   },
+  "cardReport": {
+    "title": "Report a card problem",
+    "subtitle": "Pick the card that isn't working correctly.",
+    "search": "Search cards…",
+    "empty": "No reportable cards in view.",
+    "zone": {
+      "Stack": "Stack",
+      "Battlefield": "Battlefield",
+      "Hand": "Hand",
+      "Graveyard": "Graveyard",
+      "Exile": "Exile",
+      "Command": "Command"
+    },
+    "emblemTag": "Emblem",
+    "allPlayers": "All",
+    "allZones": "All zones",
+    "cancel": "Cancel"
+  },
   "board": {
+    "reportCard": "Report a card problem",
     "regroupCreatures": "Regroup duplicate creature groups",
     "changeBackground": "Change background…",
     "customizeLayout": "Customize layout…",
@@ -281,6 +302,7 @@
     "confirmDistribute_other": "Declare {{count}} Attackers"
   },
   "fullControl": {
+    "label": "Control",
     "on": "Full Control On",
     "off": "Full Control Off",
     "tooltip": "Hold priority windows instead of letting quiet spots auto-pass. Shortcut: F."
@@ -319,6 +341,9 @@
     "cleanupDescription": "Damage wears off and maximum hand size is checked.",
     "tooltipStopSet": "Stop set: click to remove this auto-pass stop.",
     "tooltipNoStop": "No stop set: click to pause auto-pass here.",
+    "scopeAllTurns": "Stops on every turn.",
+    "scopeOwnTurn": "Stops only on your turns.",
+    "scopeOpponentsTurns": "Stops only on opponents' turns.",
     "tooltipCurrentPhase": "Current phase.",
     "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -594,6 +619,22 @@
     "paidKickedTimes": "kicked ×{{count}}",
     "paidAdditionalCost": "extra cost",
     "paidConvoked": "convoked ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Priority yields",
+    "menuHeader": "Auto-pass this trigger",
+    "menuExplainer": "Skip the prompt where the game stops to ask you to act each time this trigger is put on the stack. You can still respond to other things.",
+    "yieldThis": "Only this one",
+    "yieldThisHint": "Just this {{source}} — not other copies",
+    "yieldAllCopies": "All copies",
+    "allCopiesHint": "Every {{source}}, including new ones",
+    "revoke": "Revoke",
+    "revokeHint": "Go back to stopping for this trigger",
+    "clearAll": "Clear all",
+    "menuButton": "Auto-pass this trigger",
+    "menuButtonActive": "Auto-passing — change or revoke",
+    "menuButtonShort": "Auto-pass",
+    "menuButtonShortActive": "Auto-passing"
   },
   "targeting": {
     "choosePermanentToCopy": "Choose a permanent to copy",
@@ -947,7 +988,8 @@
       "title": "Choose Activation Cost"
     },
     "debug": {
-      "modeBanner": "DEBUG MODE - Click any card"
+      "modeBanner": "DEBUG MODE - Click any card",
+      "modeButtonOff": "CLICK MODE OFF"
     }
   },
   "spectator": {
@@ -1623,6 +1665,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
     "variantFallback": "Cast with {{type}}"
   },
@@ -1735,7 +1778,10 @@
       "twoColors": "Choose Two Colors",
       "numberRange": "Choose a Number",
       "labeled": "Make a Choice",
+      "cardPredicate": "Choose a card kind",
+      "cardPredicateGuess": "Guess a card kind",
       "keyword": "Choose an Ability",
+      "counterKind": "Choose a Counter",
       "fallback": "Make a Choice"
     },
     "searchSubtitle": "Type to search all cards",
@@ -1912,6 +1958,11 @@
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",
@@ -1957,6 +2008,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

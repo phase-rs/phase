@@ -98,6 +98,19 @@ pub fn resolve_unattach_all(
     let target_ids = resolved_object_ids_for_filter(state, ability, target_filter);
 
     let ctx = FilterContext::from_ability(ability);
+    // CR 608.2c + CR 701.3d: A context-ref attachment anaphor ("unattach it" →
+    // `ParentTarget`/`ParentTargetSlot`) designates the snapshot object recorded
+    // when the effect was created, not a live filter match — `matches_target_filter`
+    // returns false for positive parent-refs (filter.rs: "resolve at resolution
+    // time"). Resolve it here against the ability's target snapshot, mirroring how
+    // the sibling `resolve_attach` routes `ParentTarget` through resolution rather
+    // than object matching. Typed host filters and `SelfRef` stay on the
+    // `matches_target_filter` path.
+    let explicit_attachment_ids: Option<Vec<ObjectId>> = matches!(
+        attachment_filter,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+    )
+    .then(|| super::effect_object_targets(attachment_filter, &ability.targets));
     for target_id in target_ids {
         let attachments = state
             .objects
@@ -105,7 +118,11 @@ pub fn resolve_unattach_all(
             .map(|target| target.attachments.clone())
             .unwrap_or_default();
         for attachment_id in attachments {
-            if !matches_target_filter(state, attachment_id, attachment_filter, &ctx) {
+            let keep = match &explicit_attachment_ids {
+                Some(ids) => ids.contains(&attachment_id),
+                None => matches_target_filter(state, attachment_id, attachment_filter, &ctx),
+            };
+            if !keep {
                 continue;
             }
             if let Some(old_target) = unattach(state, attachment_id) {
@@ -357,6 +374,21 @@ fn resolve_object_filter<'a>(
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         }),
+        // CR 608.2c: a precise slot anaphor ("Attach it to the chosen creature"
+        // → attachment slot 1, target slot 0) resolves against the whole
+        // resolving chain's accumulated targets. The per-clause `ability.targets`
+        // may carry only this clause's nearest target, so route through
+        // `resolved_targets`, whose `ParentTargetSlot` arm walks the ROOT chain
+        // (CR 608.2c) — the same authority the GainControl handler falls back to.
+        // The shared `target_slots` iterator is intentionally not consumed here.
+        TargetFilter::ParentTargetSlot { index } => {
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index).and_then(
+                |target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                },
+            )
+        }
         _ => {
             let ctx = FilterContext::from_ability(ability);
             target_slots

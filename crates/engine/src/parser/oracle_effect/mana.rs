@@ -454,6 +454,10 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     color_options: all_mana_colors(),
                     contribution,
                 }
+            } else if let Some(options) =
+                parse_any_one_and_any_other_color_options(after_color.trim(), &count)
+            {
+                ManaProduction::ChoiceAmongCombinations { options }
             } else {
                 ManaProduction::AnyOneColor {
                     count,
@@ -734,6 +738,112 @@ fn try_parse_any_color_for_each_suffix(lower: &str) -> Option<(QuantityRef, Opti
     Some((qty, target))
 }
 
+// CR 106.1a: "N mana of any one color and M mana of any other color" chooses
+// two distinct colors, then produces the requested repeated-color combination.
+fn parse_any_one_and_any_other_color_options(
+    after_any_one_color: &str,
+    first_count: &QuantityExpr,
+) -> Option<Vec<Vec<ManaColor>>> {
+    let QuantityExpr::Fixed { value: first_value } = first_count else {
+        return None;
+    };
+    if *first_value <= 0 {
+        return None;
+    }
+
+    let lower = after_any_one_color.to_lowercase();
+    let (_, after_and) = nom_on_lower(after_any_one_color, &lower, |i| {
+        value((), tag("and ")).parse(i)
+    })?;
+    let (second_count, rest) = parse_mana_count_prefix(after_and)?;
+    let QuantityExpr::Fixed {
+        value: second_value,
+    } = second_count
+    else {
+        return None;
+    };
+    if second_value <= 0 {
+        return None;
+    }
+
+    let rest = rest.trim().trim_end_matches('.').trim();
+    let rest_lower = rest.to_lowercase();
+    let (_, tail) = nom_on_lower(rest, &rest_lower, |i| {
+        value((), tag("mana of any other color")).parse(i)
+    })?;
+    if !tail.trim().is_empty() {
+        return None;
+    }
+
+    let mut options = Vec::new();
+    for (first_index, first_color) in ManaColor::ALL.iter().enumerate() {
+        for (second_index, second_color) in ManaColor::ALL.iter().enumerate() {
+            if first_index == second_index {
+                continue;
+            }
+            if *first_value == second_value && second_index < first_index {
+                continue;
+            }
+            let mut option = Vec::with_capacity((*first_value + second_value) as usize);
+            for _ in 0..*first_value {
+                option.push(*first_color);
+            }
+            for _ in 0..second_value {
+                option.push(*second_color);
+            }
+            options.push(option);
+        }
+    }
+    (!options.is_empty()).then_some(options)
+}
+
+/// CR 106.4 + CR 106.1: Parse a conjunctive comma+"and" list of fixed mana
+/// groups — "{A}{A}, {B}{B}, ..., and {E}{E}" — into the flattened color list it
+/// adds (Esper Terra IV: "Add {W}{W}, {U}{U}, {B}{B}, {R}{R}, and {G}{G}").
+/// Every symbol is accumulated with NO dedup ({W}{W} contributes two White).
+///
+/// Requires >=2 groups and a terminal "and" join, and REJECTS any "or"
+/// separator, so it is disjoint from the single-run fixed path (which handles
+/// one group) and from the disjunctive `parse_mana_combinations_clause` ("or"
+/// lists → `ChoiceAmongCombinations`). Loops the single contiguous-run parser
+/// `parse_mana_production` across `", and " / " and " / ", "` separators built
+/// as one nom `alt`.
+fn parse_fixed_mana_group_list(text: &str) -> Option<Vec<ManaColor>> {
+    let mut rest = text.trim().trim_end_matches(['.', '"']).trim();
+    let mut colors: Vec<ManaColor> = Vec::new();
+    let mut groups = 0usize;
+    let mut saw_and = false;
+    loop {
+        let (group, after) = parse_mana_production(rest)?;
+        colors.extend(group);
+        groups += 1;
+        if after.trim().is_empty() {
+            break;
+        }
+        let after_lower = after.to_lowercase();
+        // Disjunctive lists belong to `parse_mana_combinations_clause` — decline
+        // so the "or" form is never shadowed.
+        if nom_on_lower(after, &after_lower, |i| {
+            value((), alt((tag(", or "), tag(" or ")))).parse(i)
+        })
+        .is_some()
+        {
+            return None;
+        }
+        let (is_and, next) = nom_on_lower(after, &after_lower, |i| {
+            alt((
+                value(true, tag(", and ")),
+                value(true, tag(" and ")),
+                value(false, tag(", ")),
+            ))
+            .parse(i)
+        })?;
+        saw_and |= is_and;
+        rest = next;
+    }
+    (groups >= 2 && saw_and && !colors.is_empty()).then_some(colors)
+}
+
 pub(super) fn parse_mana_production_clause(
     text: &str,
     contribution: ManaContribution,
@@ -749,6 +859,20 @@ pub(super) fn parse_mana_production_clause(
                 None,
             ));
         }
+    }
+
+    // CR 106.4 + CR 106.1: Conjunctive comma+"and" list of fixed mana groups —
+    // "{A}{A}, {B}{B}, ..., and {E}{E}" adds ALL listed mana (Esper Terra IV).
+    // Tried before the single-run fixed path below so the multi-group list is not
+    // cut short at the first "," (which would leave unknown trailing text → None).
+    if let Some(colors) = parse_fixed_mana_group_list(text) {
+        return Some((
+            ManaProduction::Fixed {
+                colors,
+                contribution,
+            },
+            None,
+        ));
     }
 
     if let Some((colors, remainder)) = parse_mana_production(text) {
@@ -2598,6 +2722,63 @@ mod tests {
         }
     }
 
+    /// Gap-B CR 106.4 + CR 106.1: Esper Terra IV — "Add {W}{W}, {U}{U}, {B}{B},
+    /// {R}{R}, and {G}{G}" is a CONJUNCTIVE fixed-pool list: all ten symbols are
+    /// added, two of each color (NOT deduped to five, NOT an `AnyOneColor`).
+    /// Reverting `parse_fixed_mana_group_list` makes the clause `Unimplemented`.
+    #[test]
+    fn esper_terra_conjunctive_fixed_mana_list_adds_all_ten() {
+        use ManaColor::*;
+        let effect = try_parse_add_mana_effect("Add {W}{W}, {U}{U}, {B}{B}, {R}{R}, and {G}{G}.")
+            .expect("conjunctive fixed mana list must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana, got {effect:?}");
+        };
+        let ManaProduction::Fixed {
+            colors,
+            contribution,
+        } = produced
+        else {
+            panic!("expected ManaProduction::Fixed, got {produced:?}");
+        };
+        assert_eq!(
+            colors,
+            vec![White, White, Blue, Blue, Black, Black, Red, Red, Green, Green],
+            "all ten symbols accumulate with no dedup (two of each color)"
+        );
+        assert_eq!(contribution, ManaContribution::Base);
+    }
+
+    /// Gap-B building-block: a 2-group conjunctive list with NO Oxford comma still
+    /// accumulates both groups.
+    #[test]
+    fn conjunctive_fixed_mana_two_groups_no_oxford_comma() {
+        use ManaColor::*;
+        let effect =
+            try_parse_add_mana_effect("Add {R}{R} and {G}{G}.").expect("two-group and-list parses");
+        let Effect::Mana {
+            produced: ManaProduction::Fixed { colors, .. },
+            ..
+        } = effect
+        else {
+            panic!("expected ManaProduction::Fixed, got {effect:?}");
+        };
+        assert_eq!(colors, vec![Red, Red, Green, Green]);
+    }
+
+    /// Gap-B NEG (no shadowing): a disjunctive "or" list still routes to
+    /// `ChoiceAmongCombinations` — the conjunctive arm rejects any "or" separator.
+    #[test]
+    fn disjunctive_or_list_stays_choice_among_combinations() {
+        use ManaColor::*;
+        let options = extract_combinations("Add {U}{U}, {U}{R}, or {R}{R}.")
+            .expect("or-list must stay ChoiceAmongCombinations");
+        assert_eq!(
+            options,
+            vec![vec![Blue, Blue], vec![Blue, Red], vec![Red, Red]]
+        );
+    }
+
     /// CR 106.1 + CR 202.2c: Omnath, Locus of All — "add three mana in any
     /// combination of its colors" lowers to the dynamic-color
     /// `AnyCombinationOfObjectColors { scope: Target }`, NOT the static
@@ -3144,7 +3325,9 @@ mod tests {
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected typed object-count filter, got {filter:?}");
         };
-        assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+        // CR 109.4: "target opponent controls" now lowers to the opponent-constrained
+        // ControllerRef::TargetOpponent (was the looser TargetPlayer).
+        assert_eq!(typed.controller, Some(ControllerRef::TargetOpponent));
         assert!(
             typed
                 .type_filters
@@ -3372,6 +3555,47 @@ mod tests {
             matches!(any_one_produced, ManaProduction::AnyOneColor { .. }),
             "any one color must be AnyOneColor, got {any_one_produced:?}"
         );
+    }
+
+    #[test]
+    fn any_one_color_and_any_other_color_is_combination_choice() {
+        let effect = try_parse_add_mana_effect(
+            "Add two mana of any one color and two mana of any other color.",
+        )
+        .expect("any-one-plus-any-other-color must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::ChoiceAmongCombinations { options } = produced else {
+            panic!("expected ChoiceAmongCombinations, got {produced:?}");
+        };
+        assert_eq!(options.len(), 10);
+        for option in &options {
+            assert_eq!(option.len(), 4);
+            assert_eq!(option[0], option[1]);
+            assert_eq!(option[2], option[3]);
+            assert_ne!(option[0], option[2]);
+        }
+        assert!(options.contains(&vec![
+            ManaColor::White,
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Blue,
+        ]));
+        assert!(options.contains(&vec![
+            ManaColor::Black,
+            ManaColor::Black,
+            ManaColor::Green,
+            ManaColor::Green,
+        ]));
+
+        for option in &options {
+            let duplicates = options
+                .iter()
+                .filter(|candidate| *candidate == option)
+                .count();
+            assert_eq!(duplicates, 1);
+        }
     }
 
     /// CR 605.3b + CR 106.1a: Interplanar Beacon's bare effect clause (the

@@ -44,6 +44,20 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         .parse(base)
         .map_or(base, |(rest, _)| rest);
 
+    // CR 105.1 + CR 601.2f: Compound BARE-color subject — "<color> spells and
+    // <color> spells" (the Prophecy Familiar cycle: Nightscape / Stormscape /
+    // Sunscape / Thornscape / Thunderscape Familiar). The single-subject path
+    // below maps a lone bare color via `parse_named_color`, and
+    // `parse_type_phrase` decomposes compounds whose operands carry a type noun
+    // ("Angel spells and Human spells", "red creature spells and green creature
+    // spells"). A two-BARE-color compound falls through both and yields
+    // `None` — which silently drops the color restriction and reduces EVERY
+    // spell. Recognize it here and emit the same `Or` of `HasColor` typed
+    // filters the noun-bearing compounds already produce.
+    if let Some(filter) = parse_cost_mod_compound_color_subject(base) {
+        return Some(filter);
+    }
+
     let that_split: Result<(&str, (&str, &str)), nom::Err<OracleError<'_>>> = all_consuming(alt((
         (
             take_until(" that's "),
@@ -124,6 +138,45 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         )),
     };
     filter.map(remap_cost_mod_imprint_exile_reference)
+}
+
+/// CR 105.1 + CR 601.2f: Decompose a compound BARE-color cost-mod subject —
+/// "<color>[ spells] and <color>[ spells]" — into an `Or` of `HasColor` typed
+/// filters. Each operand is a color name (`nom_primitives::parse_color`)
+/// optionally trailed by the spell noun; operands are joined by " and ".
+///
+/// The Prophecy Familiar cycle (Nightscape Familiar "Blue spells and red
+/// spells you cast cost {1} less to cast", plus Stormscape / Sunscape /
+/// Thornscape / Thunderscape Familiar) is the exemplar class. Requires two or
+/// more colors and full consumption, so a lone bare color ("Red spells …") and
+/// a noun-bearing operand ("red creature spells and …") both decline here and
+/// fall through to the single-subject path and `parse_type_phrase` respectively.
+fn parse_cost_mod_compound_color_subject(base: &str) -> Option<TargetFilter> {
+    // Operand: a bare color name, optionally followed by the spell noun. The
+    // trailing " spell[s]" is present on every operand except the last (the
+    // caller strips one trailing " spells" before this runs).
+    fn color_operand(input: &str) -> OracleResult<'_, ManaColor> {
+        let (input, color) = nom_primitives::parse_color(input)?;
+        let (input, _) = opt(alt((tag(" spells"), tag(" spell")))).parse(input)?;
+        Ok((input, color))
+    }
+
+    let (rest, colors) = separated_list1(tag::<_, _, OracleError<'_>>(" and "), color_operand)
+        .parse(base.trim())
+        .ok()?;
+    if !rest.trim().is_empty() || colors.len() < 2 {
+        return None;
+    }
+
+    let filters = colors
+        .into_iter()
+        .map(|color| {
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
+            )
+        })
+        .collect();
+    Some(TargetFilter::Or { filters })
 }
 
 /// CR 607.2a + CR 607.3: Cost-mod lines such as Semblance Anvil reference
@@ -281,6 +334,9 @@ pub(crate) fn try_parse_impose_additional_cost(
             }
             Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
+            // semantics — fall back to an untyped card filter.
+            Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -648,6 +704,9 @@ pub(crate) fn try_parse_cost_modification(
             // emit this variant for cost statics.
             Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
+            // semantics — fall back to an untyped card filter.
+            Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),

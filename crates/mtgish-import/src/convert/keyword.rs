@@ -513,6 +513,11 @@ fn convert_hexproof_filter(p: &Protectable, path: &str) -> ConvResult<HexproofFi
             // `parse_hexproof_filter` does it (keywords.rs:1536).
             ProtectableColor::Multicolored => Ok(HexproofFilter::Quality("multicolored".into())),
             ProtectableColor::Monocolored => Ok(HexproofFilter::Quality("monocolored".into())),
+            // CR 702.11d + CR 105.4: "hexproof from the chosen color" — runtime
+            // resolves via `chosen_attributes`, paralleling
+            // `ProtectionTarget::ChosenColor`. `ChooseAColorOrColorless` branch
+            // lowering (convert/action.rs) rewrites this per concrete branch.
+            ProtectableColor::TheChosenColor => Ok(HexproofFilter::ChosenColor),
             other => Err(ConversionGap::MalformedIdiom {
                 idiom: "Rule::HexproofFrom.color",
                 path: path.to_string(),

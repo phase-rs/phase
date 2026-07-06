@@ -322,22 +322,17 @@ pub enum PaymentContext<'a> {
 ///
 /// Only special actions that pay a mana cost *through the mana pool* with a
 /// restriction-aware payment context belong here. CR 116.2m / CR 709.5e door
-/// unlock is the first such action (its unlock cost routes through
-/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up's morph/disguise cost
-/// is not yet paid through a restriction-aware pool payment in this engine
-/// (`game::morph::turn_face_up` flips the permanent without charging the cost),
-/// so a `TurnFaceUp`-restricted mana's runtime gate
-/// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) can
-/// never be satisfied yet — it is honest-deferred (conservatively
-/// under-permitting) rather than silently over-permitting the mana. The variant
-/// exists so the restriction stays representable as a typed value even though
-/// the `TurnFaceUp` leaf is dead today: a card whose only spend restriction is
-/// turn-face-up (Overgrown Zealot) is left unabsorbed at the `Effect::Mana`
-/// seam and intentionally surfaces an `Effect::Unimplemented` gap (honest
-/// coverage red) via `ManaSpendRestriction::has_payable_branch`. Once the
-/// turn-face-up morph cost is routed through
-/// `PaymentContext::SpecialAction(TurnFaceUp)` the gate becomes live with no
-/// type change.
+/// unlock is one such action (its unlock cost routes through
+/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up is another: the
+/// `GameAction::TurnFaceUp` handler now derives the morph/disguise/manifest cost
+/// (`game::morph::turn_face_up_prepare`, CR 702.37e / CR 702.168d / CR 701.40b)
+/// and pays it through `PaymentContext::SpecialAction(TurnFaceUp)` before flipping
+/// the permanent, so a `TurnFaceUp`-restricted mana's runtime gate
+/// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) is live
+/// there and correctly rejected for every other context. A card whose spend
+/// restriction names only production-live branches (Overgrown Zealot;
+/// Creeping Peeper) is therefore absorbed at the `Effect::Mana` seam and
+/// supported via `ManaSpendRestriction::is_coverage_supported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialAction {
     /// CR 116.2m + CR 709.5e: Paying a locked Room half's unlock cost to give
@@ -350,11 +345,12 @@ pub enum SpecialAction {
     /// that plot cost without conflating plot with generic activated-ability
     /// cost reducers.
     Plot,
-    /// CR 116.2b + CR 702.37e: Paying a face-down permanent's morph/disguise
-    /// cost to turn it face up. No payment site emits
-    /// `PaymentContext::SpecialAction(TurnFaceUp)` yet (turn-face-up is free in
-    /// this engine), so a mana restricted to this action is conservatively
-    /// unspendable rather than over-permitted — see the type-level note above.
+    /// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: Paying a face-down
+    /// permanent's morph/disguise cost (or a manifested creature card's mana cost)
+    /// to turn it face up. The `GameAction::TurnFaceUp` handler emits
+    /// `PaymentContext::SpecialAction(TurnFaceUp)` when charging that cost, so mana
+    /// restricted to this action is spendable there and rejected elsewhere — see
+    /// the type-level note above.
     TurnFaceUp,
     /// CR 901.9 / CR 116.2i: Paying the escalating generic cost to roll the
     /// planar die as a Planechase special action.
@@ -563,10 +559,10 @@ pub enum ManaRestriction {
     /// So `SpellMeta.is_face_down` is never `true` at any `PaymentContext::Spell`
     /// payment site, and this gate never over-permits — see
     /// [`ManaRestriction::allows_spell`]. The restriction stays representable as a
-    /// typed value even though it is dead today: a card whose only spend
-    /// restriction is this is left unabsorbed at the `Effect::Mana` seam and
+    /// typed value even though it is dead today: a card whose spend restriction
+    /// includes this is left unabsorbed at the `Effect::Mana` seam and
     /// intentionally surfaces an `Effect::Unimplemented` gap (honest coverage red)
-    /// via `ManaSpendRestriction::has_payable_branch`. Once a real face-down
+    /// via `ManaSpendRestriction::is_coverage_supported`. Once a real face-down
     /// CAST routes its cost through `PaymentContext::Spell` with `is_face_down =
     /// true` the gate becomes live with no type change.
     OnlyForFaceDownSpell,

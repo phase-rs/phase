@@ -17,35 +17,35 @@
 //! `PaymentContext` — proving the produced unit is CONSUMED for a legal spend
 //! and WITHHELD for an illegal one.
 //!
-//! Two of the three restriction halves are LIVE on a production payment path and
-//! two are HONEST-DEFERRED — be precise about which is which:
+//! Three of the four restriction halves are LIVE on a production payment path
+//! and one is HONEST-DEFERRED — be precise about which is which:
 //!
 //! - LIVE: the spell-type half (`OnlyForSpellType`, Creeping Peeper's
-//!   enchantment branch) and the door-unlock half
-//!   (`OnlyForSpecialAction(UnlockDoor)`). Both reach `spend_for` through real
-//!   production sites — `can_pay_for_spell` / `pay_cost_*` for casts and
-//!   `pay_special_action_mana_cost` for door unlock — so the `spend_for`
-//!   assertion exercises the same `ManaRestriction::allows` decision a full
-//!   `apply()` cast / unlock makes.
+//!   enchantment branch), the door-unlock half
+//!   (`OnlyForSpecialAction(UnlockDoor)`), and the turn-face-up half
+//!   (`OnlyForSpecialAction(TurnFaceUp)`, Overgrown Zealot). All three reach
+//!   `spend_for` through real production sites — `can_pay_for_spell` /
+//!   `pay_cost_*` for casts, and `pay_special_action_mana_cost` for both door
+//!   unlock (CR 116.2m) and turn-face-up (CR 116.2b, emitted by the
+//!   `GameAction::TurnFaceUp` handler after `game::morph::turn_face_up_prepare`
+//!   derives the morph/disguise/manifest cost) — so the `spend_for` assertion
+//!   exercises the same `ManaRestriction::allows` decision a full `apply()`
+//!   cast / unlock / turn-up makes.
 //!
 //! - HONEST-DEFERRED: the face-down-cast half (`OnlyForFaceDownSpell`, Tin
-//!   Street Gossip) and the turn-face-up half
-//!   (`OnlyForSpecialAction(TurnFaceUp)`, Overgrown Zealot). NEITHER is reachable
-//!   on a production payment path: CR 708.4 face-down play
-//!   (`GameAction::PlayFaceDown` → `game::morph::play_face_down`) and CR 116.2b
-//!   turn-face-up (`game::morph::turn_face_up`) both move/flip the permanent via
-//!   the zone pipeline and charge NO mana, so no site ever CASTS A SPELL FACE
-//!   DOWN nor emits `PaymentContext::SpecialAction(TurnFaceUp)`. The
-//!   `OnlyForFaceDownSpell` gate is therefore fail-closed (under-permitting, not
-//!   over-permitting): `SpellMeta.is_face_down` is sourced from the cast's
-//!   face-down intent (`build_spell_meta`, hardcoded `false` today), not from
-//!   `obj.face_down`, so the gate ALSO correctly REJECTS exile-concealment casts
-//!   (foretell/hideaway) whose `obj.face_down = true` but which are cast face up
-//!   (CR 702.143c). The tests below assert that contract directly: the gate
-//!   REJECTS every production payment context, and the genuine face-down-cast
-//!   positive is checked only at the restriction level (not via a production
-//!   payment, which never sets `is_face_down = true`), matching the honest-
-//!   deferred treatment.
+//!   Street Gossip). It is not reachable on a production payment path: CR 708.4
+//!   face-down play (`GameAction::PlayFaceDown` → `game::morph::play_face_down`)
+//!   moves the permanent via the zone pipeline and charges NO mana, so no site
+//!   ever CASTS A SPELL FACE DOWN. The `OnlyForFaceDownSpell` gate is therefore
+//!   fail-closed (under-permitting, not over-permitting): `SpellMeta.is_face_down`
+//!   is sourced from the cast's face-down intent (`build_spell_meta`, hardcoded
+//!   `false` today), not from `obj.face_down`, so the gate ALSO correctly REJECTS
+//!   exile-concealment casts (foretell/hideaway) whose `obj.face_down = true` but
+//!   which are cast face up (CR 702.143c). The tests below assert that contract
+//!   directly: the gate REJECTS every production payment context, and the genuine
+//!   face-down-cast positive is checked only at the restriction level (not via a
+//!   production payment, which never sets `is_face_down = true`), matching the
+//!   honest-deferred treatment.
 //!
 //! Revert-proof: each assertion flips if the corresponding gate is reverted —
 //! see the per-test notes.
@@ -220,19 +220,17 @@ fn creeping_peeper_mana_pays_door_unlock_special_action() {
 }
 
 /// Overgrown Zealot: "spend this mana only to turn permanents face up" — the
-/// `OnlyForSpecialAction(TurnFaceUp)` gate. This special action charges no mana
-/// in this engine yet (`game::morph::turn_face_up` flips the permanent for
-/// free), so no payment site emits `PaymentContext::SpecialAction(TurnFaceUp)`.
-/// The runtime is therefore conservative: the mana is never spendable on any
-/// payment context that actually occurs (spell / activation / effect /
-/// door-unlock), and is never silently over-permitted.
+/// `OnlyForSpecialAction(TurnFaceUp)` gate. The `GameAction::TurnFaceUp` handler
+/// now charges the morph/disguise/manifest cost through
+/// `PaymentContext::SpecialAction(TurnFaceUp)` (CR 116.2b, after
+/// `game::morph::turn_face_up_prepare` derives it), so this mana is SPENDABLE on
+/// a turn-face-up and correctly WITHHELD for every other production context
+/// (spell / activation / door-unlock).
 ///
-/// This documents the honest-deferred contract: the turn-face-up gate is
-/// representable and correctly REJECTS every wrong context, but its positive
-/// case awaits routing the morph cost through the special-action payment path.
-/// If a future change starts emitting `PaymentContext::SpecialAction(TurnFaceUp)`
-/// at a real spend site, the positive assertion below flips from withheld to
-/// consumed and this test must gain a positive-payment arm.
+/// Revert-proof: the negative arms flip if `allows` for
+/// `OnlyForSpecialAction(TurnFaceUp)` started accepting the wrong context; the
+/// positive arm flips (unit no longer consumed) if the matching `TurnFaceUp`
+/// context were dropped from the gate.
 #[test]
 fn overgrown_zealot_turn_face_up_mana_rejects_every_live_context() {
     let source = ObjectId(4);
@@ -272,11 +270,93 @@ fn overgrown_zealot_turn_face_up_mana_rejects_every_live_context() {
     );
     assert_eq!(pool.total(), 1);
 
-    // The matching special action would be the only legal context (CR 116.2b);
-    // confirm the gate accepts it at the restriction level so the eventual
-    // payment wiring is a no-op for this enum.
+    // LEGAL (CR 116.2b): the matching turn-face-up special action — the unit is
+    // consumed. This is a real production payment context now that the
+    // `GameAction::TurnFaceUp` handler emits it.
+    let mut pool = make_pool();
+    let spent = pool.spend_for(
+        ManaType::Green,
+        &PaymentContext::SpecialAction(SpecialAction::TurnFaceUp),
+    );
+    assert!(
+        spent.is_some(),
+        "turn-face-up mana must pay a turn-face-up special action"
+    );
+    assert_eq!(pool.total(), 0, "the unit must be consumed");
+
+    // The gate also accepts the matching context at the restriction level.
     assert!(
         ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)
             .allows(&PaymentContext::SpecialAction(SpecialAction::TurnFaceUp))
     );
+}
+
+/// Tin Street Gossip: "spend this mana only to cast face-down spells or to turn
+/// creatures face up" — the card's EXACT lowered restriction,
+/// `OnlyForAny([OnlyForFaceDownSpell, OnlyForSpecialAction(TurnFaceUp)])`: a DEAD
+/// face-down-cast leaf sitting beside a LIVE turn-face-up leaf. The leaf-level
+/// tests above pin each half in isolation; this drives `spend_for` at TSG's
+/// whole disjunction to prove the dead leaf cannot make runtime spending
+/// over-permissive:
+///
+///   - the {R} is CONSUMED for the turn-face-up special action — the live leaf
+///     makes TSG's mana genuinely usable at runtime for that special action, and
+///   - the {R} is WITHHELD for a normal face-up creature cast — the dead
+///     `FaceDownSpell` leaf does not widen the disjunction into permitting
+///     arbitrary casts (no over-permit).
+///
+/// Combined with `face_down_spell_mana_rejects_every_production_context` (the
+/// `FaceDownSpell` leaf is fail-CLOSED at every production context — it can only
+/// under-permit, never over-permit), this is the runtime proof for the lowered OR
+/// gate. Parser coverage remains red until the face-down-cast branch is
+/// production-live. CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e.
+///
+/// Revert-proof: drop the `TurnFaceUp` leaf and the disjunction is all-dead — the
+/// turn-face-up spend (A) no longer consumes, so its assert flips; make the
+/// disjunction wrongly accept a normal cast and the withhold (B) flips.
+#[test]
+fn tin_street_gossip_disjunction_consumes_for_turn_face_up_not_cast() {
+    let source = ObjectId(5);
+    let restriction = ManaRestriction::OnlyForAny(vec![
+        ManaRestriction::OnlyForFaceDownSpell,
+        ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
+    ]);
+    // Tin Street Gossip adds {R}{G}; the restriction rides each produced unit.
+    // Drive the {R} unit — the {G} carries the identical restriction.
+    let make_pool = || {
+        let mut pool = ManaPool::default();
+        pool.add(ManaUnit::new(
+            ManaType::Red,
+            source,
+            false,
+            vec![restriction.clone()],
+        ));
+        pool
+    };
+
+    // LEGAL (A, CR 116.2b): the live turn-face-up special action — the {R} is
+    // consumed. The dead `FaceDownSpell` leaf does not interfere with the live
+    // special-action branch at runtime.
+    let mut pool = make_pool();
+    let spent = pool.spend_for(
+        ManaType::Red,
+        &PaymentContext::SpecialAction(SpecialAction::TurnFaceUp),
+    );
+    assert!(
+        spent.is_some(),
+        "Tin Street Gossip's {{R}} must pay a turn-face-up special action (live branch)"
+    );
+    assert_eq!(pool.total(), 0, "the {{R}} must be consumed");
+
+    // ILLEGAL (B): a normal face-up creature cast — the disjunction withholds the
+    // {R}. The dead `FaceDownSpell` leaf does not widen the restriction into
+    // permitting arbitrary casts (no over-permit).
+    let face_up = spell(&["Creature"], false);
+    let mut pool = make_pool();
+    assert!(
+        pool.spend_for(ManaType::Red, &PaymentContext::Spell(&face_up))
+            .is_none(),
+        "Tin Street Gossip's {{R}} must not pay a normal face-up cast"
+    );
+    assert_eq!(pool.total(), 1, "the {{R}} must remain unspent");
 }
