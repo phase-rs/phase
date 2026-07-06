@@ -4348,8 +4348,8 @@ fn parse_for_each_controlled_type_with_keyword(input: &str) -> OracleResult<'_, 
     let (rest, _) = tag(" you").parse(rest)?;
     let (rest, _) = opt(tag(" already")).parse(rest)?;
     let (rest, _) = tag(" control with ").parse(rest)?;
-    let (rest, keyword_name) = parse_keyword_name(rest)?;
-    let keyword: Keyword = keyword_name.parse().unwrap();
+    let (rest, keyword) =
+        map_res(parse_keyword_name, |s: &str| s.parse::<Keyword>()).parse(rest)?;
 
     let mut properties = Vec::new();
     if has_other.is_some() {
