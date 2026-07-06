@@ -366,6 +366,108 @@ class PrReviewTests(unittest.TestCase):
             recommendation["reason"], "author_followup_after_requested_changes_warning"
         )
 
+    def test_author_review_after_expiry_warning_resurfaces_review(self) -> None:
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 5104,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "createdAt": self._days_ago(8),
+                        "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                    }
+                ],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(20),
+                        "commit": "head",
+                    },
+                    {
+                        "author": "contributor",
+                        "state": "COMMENTED",
+                        "submittedAt": self._days_ago(1),
+                        "commit": "head",
+                    },
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_requested_changes_warning"
+        )
+
+    def test_warning_followup_with_conflict_routes_to_update_branch(self) -> None:
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 5105,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "mergeStateStatus": "DIRTY",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "createdAt": self._days_ago(8),
+                        "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                    },
+                    {
+                        "author": "contributor",
+                        "createdAt": self._days_ago(1),
+                        "body_excerpt": "Updated, but now there is a conflict.",
+                    },
+                ],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(20),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "update_branch_for_handler")
+        self.assertEqual(recommendation["reason"], "conflicting_after_author_followup")
+
     def test_proof_profile_flags_agent_coauthored_incomplete_template(self) -> None:
         profile = pr_review.proof_profile(
             {

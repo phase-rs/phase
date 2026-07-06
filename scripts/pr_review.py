@@ -1817,6 +1817,19 @@ def comment_text(comment: dict[str, Any]) -> str:
     return str(comment.get("body") or comment.get("body_excerpt") or "")
 
 
+def author_activity_after(pr: dict[str, Any], timestamp: str | None) -> bool:
+    author_login = pr.get("author_login")
+    return any(
+        comment_login(comment) == author_login
+        and timestamp_after(comment.get("createdAt"), timestamp)
+        for comment in pr.get("comments", [])
+    ) or any(
+        comment_login(review) == author_login
+        and timestamp_after(review.get("submittedAt"), timestamp)
+        for review in pr.get("reviews", [])
+    )
+
+
 def latest_requested_changes_review_timestamp(packet: dict[str, Any]) -> str | None:
     head = (packet.get("pr") or {}).get("headRefOid")
     reviews = [
@@ -1882,11 +1895,7 @@ def requested_changes_expiry_state(
     active = local_block or current_head_changes_requested
     warning = latest_requested_changes_warning(packet)
     warning_timestamp = (warning or {}).get("timestamp")
-    author_followup_after_warning = any(
-        comment_login(comment) == pr.get("author_login")
-        and timestamp_after(comment.get("createdAt"), warning_timestamp)
-        for comment in pr.get("comments", [])
-    )
+    author_followup_after_warning = author_activity_after(pr, warning_timestamp)
     blocker_timestamp = None
     if local_block:
         blocker_timestamp = (packet.get("local_current_event") or {}).get("timestamp")
@@ -1934,12 +1943,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     local_event_type = local_event.get("event_type")
     local_outcome = local_event.get("outcome")
     local_event_timestamp = local_event.get("timestamp")
-    author_login = pr.get("author_login")
-    author_followup_after_local_event = any(
-        comment.get("author") == author_login
-        and timestamp_after(comment.get("createdAt"), local_event_timestamp)
-        for comment in pr.get("comments", [])
-    )
+    author_followup_after_local_event = author_activity_after(pr, local_event_timestamp)
     parse_diff = packet.get("parse_diff") or {}
     parse_diff_after_local_event = timestamp_after(
         parse_diff.get("updated_at"), local_event_timestamp
@@ -2000,6 +2004,9 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_block and author_followup_after_local_event:
         action = "review"
         reason = "author_followup_after_local_block"
+    elif requested_changes_expiry["author_followup_after_warning"] and conflicts_with_base:
+        action = "update_branch_for_handler"
+        reason = "conflicting_after_author_followup"
     elif requested_changes_expiry["author_followup_after_warning"]:
         action = "review"
         reason = "author_followup_after_requested_changes_warning"
