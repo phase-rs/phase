@@ -184,7 +184,9 @@
     "importedWithPreferences_one": "Imported {{count}} deck and preferences.",
     "importedWithPreferences_other": "Imported {{count}} decks and preferences.",
     "skippedMalformed_one": "Skipped {{count}} malformed entry.",
-    "skippedMalformed_other": "Skipped {{count}} malformed entries."
+    "skippedMalformed_other": "Skipped {{count}} malformed entries.",
+    "telemetry": "Send anonymous crash & usage reports",
+    "telemetryDescription": "Helps fix crashes and prioritize card support. No account, no personal data — just error and game-summary counts."
   },
   "resetAll": {
     "confirm": "Reset all preferences to defaults? This clears every setting in this dialog.",

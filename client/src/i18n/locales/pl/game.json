@@ -16,6 +16,8 @@
     "holdCtrlFront": "Przytrzymaj Ctrl, aby zobaczyć przednią stronę",
     "holdCtrlFlip": "Przytrzymaj Ctrl, aby odwrócić",
     "flip": "Odwróć",
+    "report": "Zgłoś problem",
+    "reported": "Zgłoszono ✓",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -80,7 +82,26 @@
     "autoPassing": "Automatyczne przekazywanie do kroku końcowego...",
     "resolvingStack": "Rozpatrywanie stosu..."
   },
+  "cardReport": {
+    "title": "Zgłoś problem z kartą",
+    "subtitle": "Wybierz kartę, która nie działa poprawnie.",
+    "search": "Szukaj kart…",
+    "empty": "Brak widocznych kart do zgłoszenia.",
+    "zone": {
+      "Stack": "Stos",
+      "Battlefield": "Pole bitwy",
+      "Hand": "Ręka",
+      "Graveyard": "Cmentarz",
+      "Exile": "Wygnanie",
+      "Command": "Strefa dowodzenia"
+    },
+    "emblemTag": "Emblemat",
+    "allPlayers": "Wszyscy",
+    "allZones": "Wszystkie strefy",
+    "cancel": "Anuluj"
+  },
   "board": {
+    "reportCard": "Zgłoś problem z kartą",
     "regroupCreatures": "Pogrupuj zduplikowane grupy stworów",
     "changeBackground": "Zmień tło…",
     "customizeLayout": "Dostosuj układ…",
@@ -249,6 +270,7 @@
     "confirmDistribute_other": "Zadeklaruj {{count}} atakujących"
   },
   "fullControl": {
+    "label": "Kontrola",
     "on": "Pełna kontrola włączona",
     "off": "Pełna kontrola wyłączona",
     "tooltip": "Zatrzymuj okna priorytetu zamiast pozwalać na automatyczne przekazywanie w spokojnych momentach. Skrót: F."
@@ -287,6 +309,9 @@
     "cleanupDescription": "Obrażenia znikają i sprawdzany jest maksymalny rozmiar ręki.",
     "tooltipStopSet": "Zatrzymanie ustawione: kliknij, aby usunąć to zatrzymanie automatycznego przekazywania.",
     "tooltipNoStop": "Brak zatrzymania: kliknij, aby wstrzymać tutaj automatyczne przekazywanie.",
+    "scopeAllTurns": "Zatrzymuje się w każdej turze.",
+    "scopeOwnTurn": "Zatrzymuje się tylko w twoich turach.",
+    "scopeOpponentsTurns": "Zatrzymuje się tylko w turach przeciwników.",
     "tooltipCurrentPhase": "Bieżąca faza.",
     "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -562,6 +587,22 @@
     "paidKickedTimes": "kicker ×{{count}}",
     "paidAdditionalCost": "dodatkowy koszt",
     "paidConvoked": "convoke ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Rezygnacje z priorytetu",
+    "menuHeader": "Automatycznie pomijaj ten wyzwalacz",
+    "menuExplainer": "Pomija moment, w którym gra zatrzymuje się i pyta o akcję za każdym razem, gdy ten wyzwalacz trafia na stos. Nadal możesz reagować na inne rzeczy.",
+    "yieldThis": "Tylko ten",
+    "yieldThisHint": "Tylko ten {{source}} — nie inne kopie",
+    "yieldAllCopies": "Wszystkie kopie",
+    "allCopiesHint": "Każdy {{source}}, także nowe",
+    "revoke": "Cofnij",
+    "revokeHint": "Znów zatrzymuj się na tym wyzwalaczu",
+    "clearAll": "Wyczyść wszystko",
+    "menuButton": "Automatycznie pomijaj ten wyzwalacz",
+    "menuButtonActive": "Automatyczne pomijanie — zmień lub cofnij",
+    "menuButtonShort": "Auto-pomiń",
+    "menuButtonShortActive": "Pomijanie"
   },
   "targeting": {
     "choosePermanentToCopy": "Wybierz trwałego do skopiowania",
@@ -915,7 +956,8 @@
       "title": "Wybierz koszt aktywacji"
     },
     "debug": {
-      "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę"
+      "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę",
+      "modeButtonOff": "TRYB KLIKNIĘCIA WYŁĄCZONY"
     }
   },
   "gameProvider": {
@@ -1593,6 +1635,7 @@
     "variantForetell": "Rzuć z Foretell",
     "variantOverload": "Rzuć z Overload",
     "variantBestow": "Rzuć z Bestow",
+    "variantFreerunning": "Rzuć z Freerunning",
     "variantFuse": "Rzuć z Fuse",
     "variantFallback": "Rzuć z {{type}}"
   },
@@ -1705,7 +1748,10 @@
       "twoColors": "Wybierz dwa kolory",
       "numberRange": "Wybierz liczbę",
       "labeled": "Dokonaj wyboru",
+      "cardPredicate": "Wybierz rodzaj karty",
+      "cardPredicateGuess": "Zgadnij rodzaj karty",
       "keyword": "Wybierz zdolność",
+      "counterKind": "Wybierz żeton",
       "fallback": "Dokonaj wyboru"
     },
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
@@ -1882,6 +1928,11 @@
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",
@@ -1964,6 +2015,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

@@ -1101,6 +1101,23 @@ fn any_ability_has_instead_condition(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
+    // CR 609.4b + CR 608.2c: "if you cast a spell this way, you may spend mana as
+    // though it were mana of any type/color to cast it" folds onto the preceding
+    // `PlayFromExile` grant as `mana_spend_permission` (Outrageous Robbery,
+    // Brainstealer Dragon). The leading "if you cast a spell this way" is the
+    // back-reference scoping the concession to spells cast via that grant —
+    // represented by the field, not a swallowed condition.
+    if let Effect::GrantCastingPermission {
+        permission:
+            crate::types::ability::CastingPermission::PlayFromExile {
+                mana_spend_permission: Some(_),
+                ..
+            },
+        ..
+    } = &*def.effect
+    {
+        return true;
+    }
     if let Effect::Mana { grants, .. } = &*def.effect {
         if grants.iter().any(|grant| {
             matches!(
@@ -2532,6 +2549,12 @@ fn detect_condition_if(
         // CR 614.1a: AddTargetReplacement encodes the "if [target] would die"
         // gate via the carried ReplacementDefinition's event/destination_zone.
         "AddTargetReplacement",
+        // CR 614.1a + CR 901.9c: CreatePlaneswalkReplacement encodes the "if a
+        // player would planeswalk as a result of rolling the planar die,
+        // [effect] instead" gate (Fixed Point in Time). Its presence IS the
+        // conditional-replacement representation — the leading "if" is a marker,
+        // not a swallowed condition.
+        "\"type\":\"CreatePlaneswalkReplacement\"",
         // CR 508.1d / CR 509.1c / CR 506.6: must-attack and must-block "if able"
         // riders are encoded as static-mode constraints or as
         // `ForceBlock`/`ForceAttack` effects, not conditional gates.

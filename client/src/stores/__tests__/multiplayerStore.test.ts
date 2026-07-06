@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PlayerSlot } from "../../multiplayer/seatTypes";
 import { formatMetadata } from "../../data/formatRegistry";
-import { FORMAT_DEFAULTS, type HostingSettings, useMultiplayerStore } from "../multiplayerStore";
+import {
+  FORMAT_DEFAULTS,
+  migrateOfficialServerAddress,
+  type HostingSettings,
+  useMultiplayerStore,
+} from "../multiplayerStore";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -131,6 +136,30 @@ describe("multiplayerStore", () => {
         formatMetadata(metadata.format)?.default_config,
       );
     }
+  });
+
+  it("migrates official persisted server addresses to the configured deployment default", () => {
+    expect(
+      migrateOfficialServerAddress(
+        "wss://lobby.phase-rs.dev/ws",
+        "wss://selfhost.example/ws",
+      ),
+    ).toBe("wss://selfhost.example/ws");
+    expect(
+      migrateOfficialServerAddress(
+        "wss://us.phase-rs.dev/ws",
+        "wss://selfhost.example/ws",
+      ),
+    ).toBe("wss://selfhost.example/ws");
+  });
+
+  it("does not migrate custom self-hosted server addresses", () => {
+    expect(
+      migrateOfficialServerAddress(
+        "wss://play.example.com/ws",
+        "wss://selfhost.example/ws",
+      ),
+    ).toBe("wss://play.example.com/ws");
   });
 
   it("strips AI seats from team-based server host settings", async () => {

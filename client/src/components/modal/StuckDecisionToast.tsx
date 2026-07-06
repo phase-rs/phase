@@ -4,19 +4,9 @@ import type { TFunction } from "i18next";
 
 import type { StuckDecisionDiagnostic } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
+import { STUCK_DEBOUNCE_MS } from "../../constants/stuckDecision";
 
 const SESSION_SUPPRESS_KEY = "phase-rs:suppress-stuck-decision-toast";
-
-/**
- * How long the same wedged decision must persist before the toast surfaces.
- *
- * The engine can report an empty legal-action set transiently during normal
- * resolution (a decision point that is about to advance on the next store
- * update). Requiring the diagnostic to stay non-null across this debounce
- * window makes a transient blip impossible to surface — only a genuinely hung
- * game (the diagnostic never clears) trips the toast.
- */
-const STUCK_DEBOUNCE_MS = 3_000;
 
 /**
  * Non-blocking toast for a wedged (stuck) decision point.

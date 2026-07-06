@@ -10,7 +10,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter,
+    QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -329,6 +329,23 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     parse_token_description_with_context(text, &ParseContext::default())
 }
 
+/// True iff a `for each … this way` count restricts to a specific card type
+/// (Dread Summons' "creature card"), so it should override the unfiltered
+/// `TrackedSetSize`. A bare/generic "card" filter (e.g. "card discarded this
+/// way") is not restrictive and keeps `TrackedSetSize`.
+fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
+    let QuantityRef::FilteredTrackedSetSize { filter, .. } = qty else {
+        return false;
+    };
+    let TargetFilter::Typed(typed) = filter.as_ref() else {
+        return false;
+    };
+    typed
+        .type_filters
+        .iter()
+        .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
+}
+
 fn parse_token_description_with_context(
     text: &str,
     ctx: &ParseContext,
@@ -614,6 +631,18 @@ fn parse_token_description_with_context(
                     .ok()
                     .filter(|(rest, _)| rest.is_empty())
                     .map(|(_, qty)| QuantityExpr::Ref { qty })
+                    // CR 609.3 + CR 205.2a: a TYPE-restricted "for each <type> card
+                    // <verb> this way" (Dread Summons: "for each creature card put
+                    // into a graveyard this way") counts only the matching cards
+                    // moved this way — `FilteredTrackedSetSize` — not every card
+                    // moved (`TrackedSetSize`, which would create X tokens). Only a
+                    // restrictive type overrides; a bare/"card" filter keeps
+                    // `TrackedSetSize`.
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                            .filter(tracked_set_count_is_type_restricted)
+                            .map(|qty| QuantityExpr::Ref { qty })
+                    })
                 })
                 .unwrap_or(QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
@@ -1087,23 +1116,27 @@ fn extract_token_count_expression(text: &str) -> Option<String> {
 
 fn extract_token_pt_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-    for needle in [
-        "power and toughness are each equal to ",
-        "power and toughness is each equal to ",
-    ] {
-        if let Some(after) = tp.strip_after(needle) {
-            return Some(
-                after
-                    .original
-                    .trim()
-                    .trim_matches('"')
-                    .trim_end_matches('.')
-                    .to_string(),
-            );
-        }
-    }
-    None
+    // SCAN (not anchor) to the "power and toughness" P/T marker anywhere in the
+    // token suffix, then accept an optional "are "/"is " copula and the shared
+    // "each equal to " tail. `take_until` discards any leading "base " for free,
+    // so the combinator subsumes the two prior literals ("… are/is each equal
+    // to") AND Skullspore's copula-less "base power and toughness each equal to"
+    // — without an anchored `opt(tag("base "))` that would only match at position
+    // 0 and silently regress every existing mid-suffix P/T token to 0/0.
+    let (_, after) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = take_until::<_, _, OracleError<'_>>("power and toughness").parse(i)?;
+        let (i, _) = tag("power and toughness ").parse(i)?;
+        let (i, _) = opt(alt((tag("are "), tag("is ")))).parse(i)?;
+        let (i, _) = tag("each equal to ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    Some(
+        after
+            .trim()
+            .trim_matches('"')
+            .trim_end_matches('.')
+            .to_string(),
+    )
 }
 
 fn parse_token_identity(
@@ -1319,6 +1352,80 @@ mod tests {
     use crate::types::card_type::CoreType;
 
     #[test]
+    fn extract_token_pt_expression_covers_base_and_are_is_copula_classes() {
+        // Gap A regression guard (scan-not-anchor). `extract_token_pt_expression`
+        // receives the FULL token suffix, so the "power and toughness … each equal
+        // to" marker is MID-suffix. The combinator must SCAN to it, not anchor at
+        // position 0. Each input is a full suffix; each asserts the trailing
+        // expression string (non-vacuous — a bare `is_some` would pass while the
+        // anchored mis-implementation regressed the existing tokens to 0/0).
+        let cases = [
+            // NEW: "base " prefix, no copula (The Skullspore Nexus). Reverting the
+            // scan to the original two literals makes this return None.
+            (
+                "green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures",
+                "the total power of those creatures",
+            ),
+            // EXISTING "are" copula, mid-suffix. Reverting the scan to an anchored
+            // `tag("power and toughness ")` at pos 0 makes this return None.
+            (
+                "0/0 green Ooze creature token with power and toughness are each equal to the number of creatures you control",
+                "the number of creatures you control",
+            ),
+            // EXISTING "is" copula, mid-suffix.
+            (
+                "green Plant creature token with power and toughness is each equal to your life total",
+                "your life total",
+            ),
+        ];
+        for (suffix, expected) in cases {
+            assert_eq!(
+                extract_token_pt_expression(suffix).as_deref(),
+                Some(expected),
+                "full-suffix P/T marker must be scanned, not anchored: {suffix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skullspore_token_lowers_to_triggering_batch_dynamic_pt() {
+        // Gap A + Gap B composed. The Skullspore Nexus create clause (verbatim)
+        // must lower to a dynamic-P/T token whose base P/T reads the triggering
+        // batch's total power. Baseline: `Effect::Unimplemented` (measured).
+        use crate::types::ability::{AggregateFunction, ObjectProperty, TrackedAnaphorSource};
+        let txt = "Create a green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("Skullspore token must parse (was Unimplemented)");
+        let Effect::Token {
+            power,
+            toughness,
+            types,
+            colors,
+            count,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: TrackedAnaphorSource::TriggeringBatch,
+            },
+        });
+        assert_eq!(power, expected_pt.clone(), "base power must be batch sum");
+        assert_eq!(toughness, expected_pt, "base toughness must be batch sum");
+        assert!(types.iter().any(|t| t == "Creature"));
+        assert!(
+            types.iter().any(|t| t == "Fungus") && types.iter().any(|t| t == "Dinosaur"),
+            "subtypes must include Fungus and Dinosaur, got {types:?}"
+        );
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+    }
+
+    #[test]
     fn occult_epiphany_token_counts_distinct_types_of_discarded() {
         // Occult Epiphany #3307: the token count must be DISTINCT CARD TYPES
         // among the DISCARDED chain members (cause-filtered), NOT TrackedSetSize.
@@ -1357,6 +1464,33 @@ mod tests {
                 qty: QuantityRef::TrackedSetSize,
             },
             "bare 'card discarded this way' must keep TrackedSetSize"
+        );
+    }
+
+    #[test]
+    fn for_each_creature_card_this_way_counts_only_creatures() {
+        // #4746 Dread Summons: "For each creature card put into a graveyard this
+        // way, you create a … token." The token count must restrict to CREATURE
+        // cards moved this way (`FilteredTrackedSetSize`), not every card
+        // (`TrackedSetSize`, which would create X tokens for X cards milled).
+        let txt = "Create a tapped 2/2 black Zombie creature token for each creature card put into a graveyard this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize { filter, .. },
+        } = &count
+        else {
+            panic!("expected FilteredTrackedSetSize (creature-restricted), got {count:?}");
+        };
+        assert!(
+            matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Creature]
+            ),
+            "count must restrict to creature cards milled, got {filter:?}"
         );
     }
 

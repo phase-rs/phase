@@ -772,6 +772,55 @@ mod tests {
     }
 
     #[test]
+    fn single_face_name_containing_double_slash_resolves_to_itself() {
+        // "SP//dr, Piloted by Peni" is a single-faced card whose printed name
+        // literally contains "//". lookup_key must match the exact name before
+        // falling back to its "//"-split, so the card is not mistaken for a
+        // "front // back" combined name (issue #4790).
+        let mut map = HashMap::new();
+        map.insert(
+            "sp//dr, piloted by peni".to_string(),
+            test_face("SP//dr, Piloted by Peni"),
+        );
+        let json = serde_json::to_string(&map).unwrap();
+
+        let db = CardDatabase::from_json_str(&json).unwrap();
+
+        assert_eq!(
+            db.get_face_by_name("SP//dr, Piloted by Peni")
+                .map(|face| face.name.as_str()),
+            Some("SP//dr, Piloted by Peni")
+        );
+    }
+
+    #[test]
+    fn glued_combined_face_name_resolves_front_face() {
+        // A hand-typed glued combined name ("Front//Back", no spaces) resolves to
+        // the front face via lookup_key's bare-"//" split, identically to the
+        // canonical spaced form — so a deck listing a DFC either way still loads.
+        let mut map = HashMap::new();
+        map.insert("peter parker".to_string(), test_face("Peter Parker"));
+        map.insert(
+            "the amazing spider-man".to_string(),
+            test_face("The Amazing Spider-Man"),
+        );
+        let json = serde_json::to_string(&map).unwrap();
+
+        let db = CardDatabase::from_json_str(&json).unwrap();
+
+        assert_eq!(
+            db.get_face_by_name("Peter Parker//The Amazing Spider-Man")
+                .map(|face| face.name.as_str()),
+            Some("Peter Parker")
+        );
+        assert_eq!(
+            db.get_face_by_name("Peter Parker // The Amazing Spider-Man")
+                .map(|face| face.name.as_str()),
+            Some("Peter Parker")
+        );
+    }
+
+    #[test]
     fn name_lookup_resolves_card_names_without_leading_the() {
         let mut map = serde_json::Map::new();
         map.insert(

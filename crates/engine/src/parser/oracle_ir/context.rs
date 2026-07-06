@@ -60,6 +60,17 @@ pub(crate) struct ParseContext {
     /// filter ("destroy target X that player controls of their choice"). Snapshotted
     /// into the produced `ClauseIr` alongside `target_selection_mode`.
     pub target_chooser: Option<TargetFilter>,
+    /// CR 601.2c + CR 608.2c: Ordered target slots declared by the current
+    /// effect chain's "Choose target X and target Y" head. Index `i` is the
+    /// filter announced for the `i`-th `target` word (slot 0 = A, slot 1 = B,
+    /// …). Later clauses in the chain resolve definite anaphors ("that
+    /// Equipment", "the chosen creature", "the artifact card") to
+    /// `TargetFilter::ParentTargetSlot { index }` by matching the anaphor's noun
+    /// phrase against these filters. Threaded across chunks via a chain
+    /// loop-local and reset per effect chain in `parse_effect_chain_ir`
+    /// (alongside the existing per-chain resets), so slots never leak across
+    /// cards/abilities.
+    pub declared_target_slots: Vec<TargetFilter>,
     /// CR 303.4 + CR 702.103: Typed self-reference for the enclosing card's
     /// attachment host. Set to `Some(TargetFilter::AttachedTo)` only when the
     /// card being parsed is an Aura or has the Bestow keyword (i.e. it can be
@@ -91,6 +102,16 @@ pub(crate) struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
+    /// CR 608.2c: The current effect-chain chunk's MOST-RECENT prior object
+    /// referent is a just-created token (Token/CopyTokenOf/Populate), so a bare
+    /// "it" anaphor in this chunk binds to that token (`TargetFilter::LastCreated`)
+    /// rather than the ability source. Seeded only in the chunk loop via
+    /// `chain_prior_referent_is_created_token`; a later explicit typed-target
+    /// clause re-anchors "it" and clears it. Standalone and all other construction
+    /// sites default `false` (`..Default::default()`), keeping bare "it" at
+    /// `SelfRef` so non-token self-triggers ("Whenever ~ attacks, put a counter on
+    /// it") are unaffected.
+    pub token_created_in_chain: bool,
     /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
     /// like cultivate/Final-Parting split-destination detection on a search
     /// clause that does not include the put-destination phrase in its chunk.

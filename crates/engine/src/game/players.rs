@@ -197,6 +197,7 @@ pub fn apnap_order_from(
             ControllerRef::Opponent
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
             | ControllerRef::ParentTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer

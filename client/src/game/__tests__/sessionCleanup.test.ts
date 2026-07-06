@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { GameState } from "../../adapter/types";
 import { clearPromptOverlayState } from "../sessionCleanup";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
+import { buildGameState, buildManaPaymentWaitingFor } from "../../test/factories/gameStateFactory";
 
 describe("clearPromptOverlayState", () => {
   beforeEach(() => {
@@ -17,19 +17,19 @@ describe("clearPromptOverlayState", () => {
 
   it("clears convoke ManaPayment and UI dialogs without disposing the adapter", () => {
     const adapter = { dispose: () => {} };
+    const waitingFor = buildManaPaymentWaitingFor({
+      data: { player: 0, convoke_mode: "Convoke" },
+    });
     useGameStore.setState({
       adapter: adapter as never,
-      waitingFor: {
-        type: "ManaPayment",
-        data: { player: 0, convoke_mode: "Convoke" },
-      },
+      waitingFor,
       legalActions: [{ type: "PassPriority" }],
       autoPassRecommended: true,
       spellCosts: { "1": { type: "Cost", shards: ["G"], generic: 0 } },
       legalActionsByObject: { 1: [{ type: "TapForConvoke", data: { object_id: 1, mana_type: "Green" } }] },
       resolutionProgress: { resolved: 2, total: 5 },
       isResolvingAll: true,
-      gameState: { waiting_for: { type: "ManaPayment", data: { player: 0, convoke_mode: "Convoke" } } } as GameState,
+      gameState: buildGameState({ waiting_for: waitingFor }),
     });
     useUiStore.setState({
       pendingAbilityChoice: {

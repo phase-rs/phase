@@ -9,6 +9,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let Effect::ControlNextTurn {
         grant_extra_turn_after,
+        window,
         ..
     } = &ability.effect
     else {
@@ -35,6 +36,9 @@ pub fn resolve(
         target_player,
         controller: ability.controller,
         grant_extra_turn_after: *grant_extra_turn_after,
+        // CR 723.1 / CR 723.2: schedule under the parsed window regardless of
+        // window — the dedup `retain` above keeps one entry per target (CR 723.1a).
+        window: *window,
     });
 
     events.push(GameEvent::EffectResolved {
@@ -48,6 +52,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::ControlWindow;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -59,12 +64,14 @@ mod tests {
             target_player: PlayerId(1),
             controller: PlayerId(0),
             grant_extra_turn_after: false,
+            window: ControlWindow::NextTurn,
         });
 
         let ability = ResolvedAbility::new(
             Effect::ControlNextTurn {
                 target: crate::types::ability::TargetFilter::Player,
                 grant_extra_turn_after: true,
+                window: ControlWindow::NextTurn,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -81,6 +88,7 @@ mod tests {
                 target_player: PlayerId(1),
                 controller: PlayerId(1),
                 grant_extra_turn_after: true,
+                window: ControlWindow::NextTurn,
             }
         );
     }
@@ -92,6 +100,7 @@ mod tests {
             Effect::ControlNextTurn {
                 target: crate::types::ability::TargetFilter::Player,
                 grant_extra_turn_after: false,
+                window: ControlWindow::NextTurn,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -113,6 +122,7 @@ mod tests {
             Effect::ControlNextTurn {
                 target: crate::types::ability::TargetFilter::Player,
                 grant_extra_turn_after: false,
+                window: ControlWindow::NextTurn,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),

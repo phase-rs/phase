@@ -202,17 +202,27 @@ pub(crate) fn is_blocked_by_cant_be_turned_face_up(state: &GameState, object_id:
     false
 }
 
-/// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
+/// CR 702.37e / CR 702.168d / CR 701.40b: Validate a turn-face-up special action
+/// and derive the mana cost that must be paid before the permanent is flipped.
 ///
-/// Validates that the player controls the permanent and that it has morph/disguise
-/// cost data stored. Sets `face_down = false`, restores characteristics from
-/// stored `back_face`, and emits `GameEvent::TurnedFaceUp`.
-pub fn turn_face_up(
-    state: &mut GameState,
-    player: PlayerId,
+/// Shared front half of [`turn_face_up`]: checks controller, face-down state,
+/// battlefield zone, and the `CantBeTurnedFaceUp` static (CR 116.2b + CR 708.7),
+/// then extracts the cost to pay:
+/// - a morph/megamorph/disguise keyword's stored cost (CR 702.37e / CR 702.168d), or
+/// - a manifested creature card's mana cost (CR 701.40b).
+///
+/// CR 701.40b: a face-down permanent that is neither (no morph/disguise cost and
+/// not a creature card) can't be turned face up this way — returns `Err`.
+///
+/// Kept separate from the commit half so the paid `GameAction::TurnFaceUp`
+/// special-action handler can charge the returned cost through
+/// `pay_special_action_mana_cost` before `turn_face_up` flips the permanent,
+/// while the free direct callers (grant path, tests) reuse the same guards.
+pub(crate) fn turn_face_up_prepare(
+    state: &GameState,
     object_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+    player: PlayerId,
+) -> Result<ManaCost, EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -250,31 +260,62 @@ pub fn turn_face_up(
 
     let back_face = obj
         .back_face
-        .clone()
+        .as_ref()
         .ok_or_else(|| EngineError::InvalidAction("No stored face data".to_string()))?;
 
-    // Check that the card actually has a morph or disguise cost
-    let has_morph_cost = back_face.keywords.iter().any(|k| {
-        matches!(
-            k,
-            Keyword::Morph(_) | Keyword::Megamorph(_) | Keyword::Disguise(_)
-        )
-    });
+    // CR 702.37e / CR 702.168d: the morph/megamorph/disguise cost is the cost
+    // paid to turn the permanent face up. CR 701.40b: a manifested creature card
+    // is turned up by paying its mana cost; a non-creature or no-mana-cost
+    // manifest can't be turned up this way.
+    back_face
+        .keywords
+        .iter()
+        .find_map(|k| match k {
+            Keyword::Morph(c) | Keyword::Megamorph(c) | Keyword::Disguise(c) => Some(c.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            if back_face
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature)
+                && !matches!(back_face.mana_cost, ManaCost::NoCost)
+            {
+                Some(back_face.mana_cost.clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Card cannot be turned face up (no morph cost)".to_string())
+        })
+}
 
-    // For manifest: creature cards can be turned face up by paying mana cost
-    // (handled separately -- here we just need morph/disguise keywords OR
-    // we allow turning up if the card has a mana cost and is a creature)
-    let is_manifested_creature = !has_morph_cost
-        && back_face
-            .card_types
-            .core_types
-            .contains(&CoreType::Creature);
+/// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
+///
+/// Validates that the player controls the permanent and that it has morph/disguise
+/// cost data stored. Sets `face_down = false`, restores characteristics from
+/// stored `back_face`, and emits `GameEvent::TurnedFaceUp`.
+pub fn turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    // All validation + cost derivation lives in `turn_face_up_prepare` so the
+    // paid `GameAction::TurnFaceUp` special-action route and the free direct
+    // callers agree on legality. The derived cost is charged by the special-action
+    // handler before it calls this commit half; the free callers discard it.
+    turn_face_up_prepare(state, object_id, player)?;
 
-    if !has_morph_cost && !is_manifested_creature {
-        return Err(EngineError::InvalidAction(
-            "Card cannot be turned face up (no morph cost)".to_string(),
-        ));
-    }
+    // `turn_face_up_prepare` guaranteed the stored face is present; re-clone it
+    // for the commit. The immutable borrow ends before `next_timestamp` below
+    // (which takes `&mut self`).
+    let back_face = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.back_face.clone())
+        .ok_or_else(|| EngineError::InvalidAction("No stored face data".to_string()))?;
 
     // CR 613.7f: a permanent receives a new timestamp when it turns face up.
     // (Turning face DOWN in place is unreachable in the engine today — only
@@ -627,6 +668,70 @@ mod tests {
         assert!(
             obj.back_face.is_some(),
             "real face snapshot stored so turn-face-up can restore it"
+        );
+    }
+
+    /// §10.1 NO-OVER-SUPPRESSION guard (NOT a revert-tripwire): the CR 708.3/708.2a
+    /// entry guard suppresses only the ENTERING object's OWN self-replacement
+    /// (`is_entering`, i.e. `rid.source == entering object`). An EXTERNAL source's
+    /// enters-tapped replacement has `is_entering == false` and must STILL apply to
+    /// a face-down 2/2 (a face-down permanent is still a creature entering the
+    /// battlefield). Install ONE type-agnostic external "enters tapped" `Moved`
+    /// replacement (Frozen Aether class, `valid_card == None`) on a DIFFERENT
+    /// permanent — single direction, so no CR 616.1 collision/prompt — then play a
+    /// morph creature face down and assert it enters TAPPED.
+    ///
+    /// This passes WITH and WITHOUT the guard: it guards against a naive
+    /// "skip all replacements on face-down entry" broadening, not against guard
+    /// absence. The discriminator for the fix is
+    /// `warden_played_face_down_gains_zero_counters` (0 → 2 on revert).
+    #[test]
+    fn external_enters_tapped_still_applies_to_face_down_entry() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        let oid = ObjectId(9000);
+        let mut src = GameObject::new(
+            oid,
+            CardId(900),
+            PlayerId(1),
+            "Frozen Aether".to_string(),
+            Zone::Battlefield,
+        );
+        src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                crate::types::ability::Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Tap,
+                },
+            ))
+            .destination_zone(Zone::Battlefield)
+            .description("Frozen Aether".to_string())]
+        .into();
+        state.objects.insert(oid, src);
+        state.battlefield.push_back(oid);
+
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "reach-guard: the face-down entry was delivered (single-direction write, no prompt)"
+        );
+        assert!(obj.face_down, "reach-guard: entered FACE DOWN (CR 708.3)");
+        assert!(
+            obj.tapped,
+            "external (is_entering == false) enters-tapped replacement still applies to the \
+             face-down 2/2 — the guard suppresses only the entrant's OWN self-replacement"
         );
     }
 
@@ -1026,6 +1131,39 @@ mod tests {
         assert!(!obj.face_down);
         assert_eq!(obj.name, "Manifest Target");
         assert_eq!(obj.power, Some(5));
+    }
+
+    #[test]
+    fn manifested_creature_with_no_mana_cost_cannot_be_turned_face_up() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        let id = create_object(
+            &mut state,
+            CardId(10),
+            player,
+            "No Cost Creature".to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.power = Some(5);
+        obj.toughness = Some(5);
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        };
+        obj.mana_cost = ManaCost::NoCost;
+        obj.base_mana_cost = ManaCost::NoCost;
+
+        let mut events = Vec::new();
+        manifest(&mut state, player, &mut events).unwrap();
+
+        let result = turn_face_up(&mut state, player, id, &mut events);
+        assert!(
+            result.is_err(),
+            "a manifested creature with no mana cost cannot be turned face up"
+        );
     }
 
     /// Regression test for GitHub issue #2024: Controller can look at their

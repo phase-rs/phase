@@ -1625,6 +1625,174 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
     );
 }
 
+/// Builds a face-down morph({3}) creature on `player`'s battlefield via the real
+/// `play_face_down` zone pipeline, which snapshots the real face — including the
+/// morph keyword and its {3} cost — into `back_face`. Returns its `ObjectId`.
+fn setup_face_down_morph(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(4200),
+        player,
+        "Secret Beast".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Beast".to_string()],
+        };
+        obj.power = Some(4);
+        obj.toughness = Some(5);
+        obj.keywords = vec![crate::types::keywords::Keyword::Morph(ManaCost::Cost {
+            generic: 3,
+            shards: vec![],
+        })];
+    }
+    let mut events = Vec::new();
+    crate::game::morph::play_face_down(state, player, id, &mut events).unwrap();
+    assert!(
+        state.objects[&id].face_down,
+        "setup: the morph creature must be face down before the turn-up test"
+    );
+    id
+}
+
+/// Adds `count` untapped green `ManaUnit`s restricted by `restriction` to
+/// `player`'s pool — the only mana in the game, so payment must draw from exactly
+/// these units.
+fn fund_restricted_pool(
+    state: &mut GameState,
+    player: PlayerId,
+    count: usize,
+    restriction: crate::types::mana::ManaRestriction,
+) {
+    let p = state.players.iter_mut().find(|p| p.id == player).unwrap();
+    for _ in 0..count {
+        p.mana_pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(4200),
+            false,
+            vec![restriction.clone()],
+        ));
+    }
+}
+
+/// R1 — CR 116.2b + CR 702.37e + CR 106.6: turn-face-up-restricted mana funds the
+/// morph turn-up special action. Pool = 3× green restricted to
+/// `OnlyForSpecialAction(TurnFaceUp)` (the sole mana source); the {3} morph cost
+/// is paid through `PaymentContext::SpecialAction(TurnFaceUp)`, the permanent
+/// flips face up, a `TurnedFaceUp` event fires, and the pool empties. This is the
+/// positive reach-guard proving the payment routes through the real
+/// `pay_special_action_mana_cost` site, so R2/R3's negatives aren't vacuous.
+#[test]
+fn turn_face_up_restricted_mana_funds_special_action() {
+    use crate::types::mana::{ManaRestriction, SpecialAction};
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+    fund_restricted_pool(
+        &mut state,
+        PlayerId(0),
+        3,
+        ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
+    );
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph })
+        .expect("turn-face-up-restricted mana must fund the morph turn-up special action");
+
+    assert!(
+        !state.objects[&morph].face_down,
+        "the permanent must be face up after paying the morph cost"
+    );
+    assert!(
+        result.events.iter().any(|e| matches!(
+            e,
+            GameEvent::TurnedFaceUp { object_id } if *object_id == morph
+        )),
+        "a TurnedFaceUp event must fire"
+    );
+    let pool = &state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(0))
+        .unwrap()
+        .mana_pool;
+    assert_eq!(
+        pool.total(),
+        0,
+        "the {{3}} morph cost must consume all 3 restricted units"
+    );
+}
+
+/// R2 (LOAD-BEARING charge proof) — CR 116.2b + CR 702.37e: the turn-up special
+/// action now CHARGES the morph cost. With an EMPTY pool and no mana sources the
+/// {3} cost is unpayable, so `apply(TurnFaceUp)` errors and the permanent STAYS
+/// face down.
+///
+/// Revert direction: reverting Step 2 (the handler payment) makes the turn-up
+/// free — `apply` returns `Ok` and the permanent flips face up. Both assertions
+/// below flip, so this is the discriminating proof the cost is actually charged.
+#[test]
+fn turn_face_up_empty_pool_cannot_pay_and_stays_face_down() {
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    assert!(
+        result.is_err(),
+        "with no mana the {{3}} morph turn-up cost must be unpayable: {result:?}"
+    );
+    assert!(
+        state.objects[&morph].face_down,
+        "an unpaid turn-up must leave the permanent face down"
+    );
+}
+
+/// R3 (context precision, hostile) — CR 106.6 + CR 116.2b: mana restricted to a
+/// DIFFERENT special action (`UnlockDoor`) must NOT pay a turn-face-up. Pool = 3×
+/// green restricted to `OnlyForSpecialAction(UnlockDoor)`; `ManaRestriction::
+/// allows` rejects the `SpecialAction(TurnFaceUp)` context, so the {3} cost is
+/// unpayable, the permanent stays face down, and the wrong-context units are
+/// untouched.
+///
+/// Revert direction: if the turn-up emitted the wrong context (`UnlockDoor`) or
+/// the restriction ignored the action, this would pay and flip — all three
+/// assertions flip.
+#[test]
+fn turn_face_up_rejects_unlock_door_restricted_mana() {
+    use crate::types::mana::{ManaRestriction, SpecialAction};
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+    fund_restricted_pool(
+        &mut state,
+        PlayerId(0),
+        3,
+        ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor),
+    );
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    assert!(
+        result.is_err(),
+        "door-unlock-restricted mana must not pay a turn-face-up: {result:?}"
+    );
+    assert!(
+        state.objects[&morph].face_down,
+        "the permanent must stay face down when only wrong-context mana is available"
+    );
+    let pool = &state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(0))
+        .unwrap()
+        .mana_pool;
+    assert_eq!(
+        pool.total(),
+        3,
+        "unlock-restricted mana must not be consumed by a turn-up"
+    );
+}
+
 /// CR 116.2m + CR 709.5e + CR 118.7a: Inquisitive Glimmer — "Unlock costs
 /// you pay cost {1} less." Reduces the generic component of a Room door's
 /// unlock cost before payment, via the single-authority special-action
@@ -1815,7 +1983,10 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
         &mut state,
         PlayerId(0),
         GameAction::SetPhaseStops {
-            stops: vec![Phase::End],
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
         },
     );
 
@@ -1825,7 +1996,10 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
     );
     assert_eq!(
         state.phase_stops.get(&PlayerId(0)),
-        Some(&vec![Phase::End]),
+        Some(&vec![crate::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: crate::types::phase::PhaseStopScope::AllTurns,
+        }]),
         "expected actor (P0) preference to be written, not authorized submitter (P1)",
     );
     assert!(!state.phase_stops.contains_key(&PlayerId(1)));
@@ -1840,7 +2014,9 @@ fn cancel_auto_pass_routes_by_actor() {
     let mut state = setup_game_at_main_phase();
     state.auto_pass.insert(
         PlayerId(0),
-        crate::types::game_state::AutoPassMode::UntilEndOfTurn,
+        crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+            until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+        },
     );
     state.priority_player = PlayerId(1);
     state.waiting_for = WaitingFor::Priority {
@@ -1853,6 +2029,259 @@ fn cancel_auto_pass_routes_by_actor() {
     assert!(
         !state.auto_pass.contains_key(&PlayerId(0)),
         "P0's auto-pass should have been cancelled"
+    );
+}
+
+// --- GameAction::SetPriorityYield (CR 117.3d + CR 400.7 + CR 704.5d) ---
+
+/// Push a controller-owned `TriggeredAbility` entry onto the stack whose ability
+/// latched `incarnation` and `card_id` at push (the token itself is NOT inserted
+/// into `objects` — it models a ceased token per CR 704.5d).
+fn push_token_trigger(
+    state: &mut GameState,
+    source: ObjectId,
+    controller: PlayerId,
+    incarnation: Option<u64>,
+    card_id: Option<CardId>,
+) -> ObjectId {
+    let mut ability = ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        controller,
+    );
+    ability.source_incarnation = incarnation;
+    ability.source_card_id = card_id;
+    let entry_id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    state.stack.push_back(StackEntry {
+        id: entry_id,
+        source_id: source,
+        controller,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: source,
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: "Token".to_string(),
+            subject_match_count: None,
+            die_result: None,
+        },
+    });
+    entry_id
+}
+
+/// CR 400.7 identity latch: `Add` binds the target from the on-stack trigger,
+/// not from `state.objects`. A ceased token (absent from `objects`) whose
+/// dies-trigger is still on the stack must register a yield carrying the entry's
+/// latched incarnation. Reverting to an `objects`-based lookup would store
+/// nothing here.
+#[test]
+fn set_priority_yield_add_binds_from_stack_after_token_ceased() {
+    let mut state = setup_game_at_main_phase();
+    let source = ObjectId(500);
+    push_token_trigger(&mut state, source, PlayerId(0), Some(4), Some(CardId(77)));
+    assert!(
+        state.objects.get(&source).is_none(),
+        "reach-guard: the token source has ceased to exist"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::ThisObject,
+            },
+        },
+    )
+    .expect("SetPriorityYield is legal in any state");
+
+    assert_eq!(
+        state.priority_yields,
+        vec![crate::types::game_state::PriorityYield {
+            player: PlayerId(0),
+            target: crate::types::game_state::YieldTarget::ThisObject {
+                source_id: source,
+                incarnation: 4,
+            },
+        }],
+        "Add must bind the incarnation latched on the on-stack trigger",
+    );
+}
+
+/// `Add` is a benign no-op when no matching triggered entry is on the stack.
+#[test]
+fn set_priority_yield_add_no_op_without_matching_stack_entry() {
+    let mut state = setup_game_at_main_phase();
+    // A different source's trigger is on the stack (reach-guard: stack non-empty).
+    push_token_trigger(
+        &mut state,
+        ObjectId(500),
+        PlayerId(0),
+        Some(1),
+        Some(CardId(77)),
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: ObjectId(999),
+                scope: crate::types::game_state::YieldScope::ThisObject,
+            },
+        },
+    )
+    .expect("SetPriorityYield is legal in any state");
+
+    assert!(
+        state.priority_yields.is_empty(),
+        "Add for a source with no stack entry must not store a yield"
+    );
+}
+
+/// CR 400.7 None-boundary: a `ThisObject` add on a trigger with no latched
+/// incarnation no-ops, while an `AllCopies` add on the same trigger still stores.
+#[test]
+fn set_priority_yield_this_object_none_incarnation_no_ops_but_all_copies_works() {
+    let mut state = setup_game_at_main_phase();
+    let source = ObjectId(0); // synthetic game-rule trigger source
+    push_token_trigger(&mut state, source, PlayerId(0), None, Some(CardId(77)));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::ThisObject,
+            },
+        },
+    )
+    .expect("legal");
+    assert!(
+        state.priority_yields.is_empty(),
+        "ThisObject add must no-op when the trigger latched no incarnation"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::AllCopies,
+            },
+        },
+    )
+    .expect("legal");
+    assert_eq!(
+        state.priority_yields.len(),
+        1,
+        "AllCopies add stores when the card identity is present"
+    );
+}
+
+/// CR 117.3d: `SetPriorityYield` is a per-player preference routed by `actor`,
+/// so a non-priority player may register a yield stored under THEIR seat. The
+/// authorization exemption is what allows this — a non-exempt action from the
+/// same wrong player is rejected as `WrongPlayer`.
+#[test]
+fn set_priority_yield_accepted_from_non_priority_actor() {
+    let mut state = setup_game_at_main_phase();
+    // Priority is P0's; P1 is not the priority holder.
+    let source = ObjectId(500);
+    push_token_trigger(&mut state, source, PlayerId(0), Some(2), Some(CardId(77)));
+
+    // Reach-guard: a non-exempt action from P1 in P0's priority window errors.
+    let unauthorized = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+    assert!(
+        matches!(unauthorized, Err(EngineError::WrongPlayer)),
+        "a non-priority player cannot pass priority (proves the auth gate is live)"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::AllCopies,
+            },
+        },
+    )
+    .expect("SetPriorityYield is exempt from the priority-holder gate");
+
+    assert_eq!(state.priority_yields.len(), 1);
+    assert_eq!(
+        state.priority_yields[0].player,
+        PlayerId(1),
+        "the yield is stored under the acting player's seat, not the priority holder's"
+    );
+}
+
+/// CR 117.3d: an `UntilEndOfTurn` auto-pass session normally ends (Finish) when
+/// an opponent-controlled trigger tops the stack, so the player can respond.
+/// A matching yield keeps the session auto-passing (Pass) through that trigger;
+/// a non-yielded opponent trigger still Finishes.
+#[test]
+fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
+    let mut state = setup_game_at_main_phase();
+    state.auto_pass.insert(
+        PlayerId(0),
+        crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+            until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    let source = ObjectId(500);
+    push_token_trigger(&mut state, source, PlayerId(1), Some(4), Some(CardId(77)));
+
+    // Without a yield: the opponent trigger ends the session.
+    assert!(
+        matches!(
+            priority_auto_pass_decision(&state, PlayerId(0)),
+            AutoPassDecision::Finish
+        ),
+        "reach-guard: an un-yielded opponent top finishes the session"
+    );
+
+    // With a matching yield: keep auto-passing through it.
+    state.add_priority_yield(
+        PlayerId(0),
+        crate::types::game_state::YieldTarget::ThisObject {
+            source_id: source,
+            incarnation: 4,
+        },
+    );
+    assert!(
+        matches!(
+            priority_auto_pass_decision(&state, PlayerId(0)),
+            AutoPassDecision::Pass
+        ),
+        "CR 117.3d: a matching yield keeps the UntilEndOfTurn session passing"
+    );
+
+    // A different, non-yielded opponent trigger still finishes.
+    state.stack.clear();
+    push_token_trigger(
+        &mut state,
+        ObjectId(600),
+        PlayerId(1),
+        Some(9),
+        Some(CardId(88)),
+    );
+    assert!(
+        matches!(
+            priority_auto_pass_decision(&state, PlayerId(0)),
+            AutoPassDecision::Finish
+        ),
+        "a non-yielded opponent trigger still finishes the session"
     );
 }
 

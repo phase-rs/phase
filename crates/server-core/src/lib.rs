@@ -50,8 +50,11 @@ pub use legacy_deck_guard::guard_legacy_deck;
 pub use legacy_join_guard::guard_legacy_join_game;
 pub use lobby::LobbyManager;
 pub use lobby_subscriber_wire_guard::{guard_lobby_subscriber_capacity, MAX_LOBBY_SUBSCRIBERS};
-pub use p2p_backup_guard::{guard_p2p_backup, MAX_P2P_SNAPSHOT_LEN};
-pub use persist::{PersistedLobbyMeta, PersistedSession};
+pub use p2p_backup_guard::{
+    guard_p2p_backup, guard_p2p_backup_overwrite, redact_p2p_backup_snapshot_secrets,
+    MAX_P2P_SNAPSHOT_LEN,
+};
+pub use persist::{restored_draft_lobby_register_request, PersistedLobbyMeta, PersistedSession};
 pub use protocol::{
     AiSeatRequest, ClientMessage, DeckChoice, DeckData, LobbyGame, PlayerSlotInfo, SeatKind,
     SeatMutation, SeatView, ServerMessage,

@@ -11,7 +11,7 @@ use crate::game::casting;
 use crate::game::layers;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
-use crate::types::ability::{AbilityKind, CounterCostSelection};
+use crate::types::ability::{AbilityKind, CounterCostSelection, TriggerDefinition};
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
@@ -19,6 +19,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
@@ -735,27 +736,27 @@ fn activate_ability_is_meaningful_priority(
     })
 }
 
-/// True when `actions` contains a priority action that materially changes the
-/// game beyond passing or producing standalone mana.
-///
-/// Sacrifice-for-mana activations are omitted from the flat `legal_actions`
-/// list (they live in `legal_actions_by_object` only) but remain meaningful
-/// priority decisions, so during `WaitingFor::Priority` this also scans
-/// `activatable_object_mana_actions`.
-pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction]) -> bool {
-    if actions.iter().any(|action| match action {
+/// The flat-list half of [`has_meaningful_priority_action`]: any non-pass,
+/// non-standalone-mana priority action in the caller-supplied `actions` list
+/// (or a sacrifice-for-mana injected into the flat list by a test/probe).
+/// Extracted so the auto-pass gate and the CR 732.5 loop-shortcut firewall
+/// classifier consume the SAME primitive and cannot drift.
+fn flat_actions_have_meaningful_priority(state: &GameState, actions: &[GameAction]) -> bool {
+    actions.iter().any(|action| match action {
         GameAction::PassPriority => false,
         GameAction::ActivateAbility {
             source_id,
             ability_index,
         } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
         _ => true,
-    }) {
-        return true;
-    }
+    })
+}
 
-    // Issue #544: sacrifice-for-mana abilities (KCI, Phyrexian Altar, etc.) are
-    // excluded from the flat legal-actions list but must still block auto-pass.
+/// Issue #544: sacrifice-for-mana abilities (KCI, Phyrexian Altar, etc.) are
+/// grouped-only (absent from the flat `legal_actions` list) but remain a real
+/// board-changing action. Structural, state-driven scan — no downstream-use
+/// judgement here (that belongs to the auto-pass gate, not the loop firewall).
+fn has_activatable_sacrifice_for_mana(state: &GameState) -> bool {
     matches!(state.waiting_for, WaitingFor::Priority { .. })
         && activatable_object_mana_actions(state).iter().any(|action| {
             matches!(
@@ -766,6 +767,20 @@ pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction])
                 } if activate_ability_is_meaningful_priority(state, *source_id, *ability_index)
             )
         })
+}
+
+/// True when `actions` contains a priority action that materially changes the
+/// game beyond passing or producing standalone mana.
+///
+/// Sacrifice-for-mana activations are omitted from the flat `legal_actions`
+/// list (they live in `legal_actions_by_object` only) but remain meaningful
+/// priority decisions, so during `WaitingFor::Priority` this also scans
+/// `activatable_object_mana_actions`. Recomposed from the two building blocks
+/// above so the auto-pass gate reuses the identical primitives — behavior is
+/// byte-identical to the previous inline form (loop-firewall safe).
+pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction]) -> bool {
+    flat_actions_have_meaningful_priority(state, actions)
+        || has_activatable_sacrifice_for_mana(state)
 }
 
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
@@ -780,6 +795,78 @@ fn has_feasibly_castable_spell(state: &GameState, player: PlayerId) -> bool {
     crate::game::casting::spell_objects_available_to_cast(state, player)
         .iter()
         .any(|&object_id| crate::game::casting::can_cast_object_now(state, player, object_id))
+}
+
+/// CR 605.3a + CR 603.6 + CR 117.1d: A sacrifice-for-mana activation blocks
+/// frontend auto-pass ONLY when the sacrifice or its mana enables a concrete
+/// follow-up. Case (1) — a feasibly castable spell — is already resolved by the
+/// castability rungs above `auto_pass_recommended`'s sac branch (both count
+/// sac-for-mana mana via `feasible_mana_capacity`), so it is structurally
+/// `false` here and intentionally NOT re-checked (hot-path perf — re-calling
+/// `has_feasibly_castable_spell` would repeat the whole hand sweep). This gate
+/// covers the two remaining downstream channels:
+///   (2) a mana-costed non-mana activated ability the produced mana could feed, and
+///   (3) a leaves-the-battlefield / dies / sacrifice trigger (CR 603.6c) where the
+///       sacrifice itself is the payoff (aristocrats / altars).
+/// Both are conservative presence checks (hold on presence, not on proven net
+/// benefit) — they err toward HOLDING (today's behavior), so no real play is
+/// ever silently auto-passed. This is a live query over current game state; it
+/// snapshots nothing.
+fn sacrifice_for_mana_enables_followup(state: &GameState, player: PlayerId) -> bool {
+    state.battlefield.iter().any(|id| {
+        let Some(obj) = state.objects.get(id) else {
+            return false;
+        };
+        if obj.controller != player {
+            return false;
+        }
+        // Case (2): a non-mana activated ability with a mana component in its
+        // cost — the produced mana could pay it (CR 602.2: activating an ability
+        // is putting it on the stack and paying its costs).
+        let case2 = obj.abilities.iter().any(|ability| {
+            ability.kind == AbilityKind::Activated
+                && !mana_abilities::is_mana_ability(ability)
+                && mana_abilities::mana_sub_cost_of(&ability.cost).is_some()
+        });
+        // Case (3): a trigger that fires when a controlled permanent leaves the
+        // battlefield — the sacrifice is itself the payoff (CR 603.6c).
+        let case3 = obj
+            .trigger_definitions
+            .iter_all()
+            .any(trigger_fires_on_leaving_battlefield);
+        case2 || case3
+    })
+}
+
+/// CR 603.6c + CR 701.21: True when this trigger fires on a permanent moving off
+/// the battlefield (leaves / dies / sacrificed / destroyed). Bounded structural
+/// predicate over `TriggerMode` plus the zone-change source constraint.
+fn trigger_fires_on_leaving_battlefield(trigger: &TriggerDefinition) -> bool {
+    use crate::types::triggers::TriggerMode::*;
+    match trigger.mode {
+        // CR 603.6c / CR 701.21 / CR 701.8: direct leaves-the-battlefield,
+        // sacrifice, and destroy triggers always fire on a battlefield exit.
+        LeavesBattlefield | Sacrificed | SacrificedOnce | Destroyed => true,
+        // A general zone-change trigger is a battlefield-exit payoff only when
+        // its source-zone constraint admits the battlefield. `matches_from`
+        // answers "would an object leaving the battlefield satisfy this origin?"
+        // — correctly rejecting `NotEquals(Battlefield)` ("from anywhere other
+        // than the battlefield") while admitting `Any` / `Equals(Battlefield)` /
+        // `OneOf([.. Battlefield ..])` and the disjunctive `zone_change_clauses`
+        // shape (Syr Konrad: the leaves-battlefield event lives only in a clause,
+        // not the scalar `origin`/`origin_zones`).
+        ChangesZone | ChangesZoneAll => {
+            trigger.origin == Some(Zone::Battlefield)
+                || trigger.origin_zones.contains(&Zone::Battlefield)
+                || trigger
+                    .zone_change_clauses
+                    .iter()
+                    .any(|clause| clause.origin.matches_from(&Some(Zone::Battlefield)))
+        }
+        // All other modes (enters, cast, damage, attack, tap, counters, life, …)
+        // are NOT battlefield-exit events — a sacrifice does not feed them.
+        _ => false,
+    }
 }
 
 /// Determines whether the frontend should auto-pass the current priority window.
@@ -810,24 +897,81 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         _ => return false,
     };
 
-    // CR 117.1d (issue #4388): On an opponent's turn the priority player may
-    // activate their own mana abilities (Gaea's Cradle, Itlimoc, basic lands).
-    // Those actions live only in `legal_actions_by_object`, not the flat list
-    // consumed here — without this guard auto-pass fires through the window
-    // before the frontend can offer a tap.
-    if state.active_player != player && !activatable_object_mana_actions(state).is_empty() {
+    // A phase stop on the current phase (empty stack = initial priority window)
+    // means the player asked to pause here — never recommend auto-pass. Moved
+    // from the frontend so the engine is the single authority. Disjoint from the
+    // CR 117.3d yield short-circuit below, which requires a NON-empty stack
+    // (`stack.back()` is `Some`); this branch requires an EMPTY stack.
+    //
+    // Seat note: this gate keys on the `WaitingFor::Priority` player bound
+    // above; the frontend gate it replaced keyed on `state.priority_player`.
+    // CR 723.5: while controlling another player, one player makes all of that
+    // player's choices — so the priority holder and `priority_player` can be
+    // different seats. With an empty stack those two seats diverge only in that
+    // turn-control case, and this divergence is accepted (the checked seat is
+    // the one actually being asked to act).
+    if state.stack.is_empty() && state.phase_stop_hit(player) {
         return false;
     }
 
+    // CR 117.3d: A standing priority yield for the top-of-stack trigger is an
+    // explicit pre-commitment to pass. It deliberately overrides the castability
+    // and meaningful-action holds below (including the issue #4388 opponent-turn
+    // mana window) — the player has already decided not to interact with this
+    // trigger class, so recommend auto-pass regardless of what they could cast.
+    if state
+        .stack
+        .back()
+        .is_some_and(|top| state.is_priority_yielded(player, top))
+    {
+        return true;
+    }
+
+    // CR 117.1d (issue #4388): On an opponent's turn the priority player may
+    // hold to cast an instant/flash spell paid for with their own mana
+    // abilities (Gaea's Cradle, Itlimoc, basic lands). Hold ONLY when they
+    // actually have a feasibly castable spell to spend that mana on — a bare
+    // mana source with nothing castable is not a meaningful priority window, so
+    // let auto-pass fire. `has_feasibly_castable_spell` covers the full
+    // activatable-capacity space (auto-tap AND manual-float payment,
+    // game/casting.rs:11375-11461), so it subsumes the old
+    // `activatable_object_mana_actions` proxy while dropping the false HOLD.
+    // Meaningful non-mana activated abilities and issue #544 sac-for-mana on an
+    // opponent's turn are still held below by `has_meaningful_priority_action`;
+    // a dedicated `has_feasibly_activatable_ability` opponent-turn seam
+    // (the ability analogue of this predicate) is deferred as future work.
+    if state.active_player != player && has_feasibly_castable_spell(state, player) {
+        return false;
+    }
+
+    // Own-turn upkeep/draw fast path. This MUST stay above the own-turn
+    // castability rung so a routine own upkeep/draw window short-circuits here
+    // BEFORE any hand sweep (perf; preserves today's behavior). The rung above
+    // is gated on `active_player != player` and the rung below on
+    // `active_player == player`, so the two are mutually exclusive:
+    // `has_feasibly_castable_spell` runs at most once per call, and zero times
+    // on your own upkeep/draw.
     if auto_passes_initial_priority_by_default(state) {
         return true;
     }
 
-    if has_feasibly_castable_spell(state, player) {
+    if state.active_player == player && has_feasibly_castable_spell(state, player) {
         return false;
     }
 
-    if !has_meaningful_priority_action(state, actions) {
+    // A genuinely meaningful non-mana priority action always holds. A
+    // sacrifice-for-mana ability (issue #544) holds ONLY when the sacrifice or
+    // its mana enables a concrete downstream follow-up — case (1) a feasibly
+    // castable spell is already resolved by the castability rungs above, so
+    // cases (2) mana-costed activated ability and (3) leaves-battlefield trigger
+    // are checked here (CR 605.3a + CR 603.6). A bare sac-for-mana source with
+    // no downstream use is not a meaningful priority window — let auto-pass fire.
+    // Short-circuit order preserves perf: the followup scan runs only when the
+    // flat list is not already meaningful AND a sac-for-mana source is present.
+    let holds = flat_actions_have_meaningful_priority(state, actions)
+        || (has_activatable_sacrifice_for_mana(state)
+            && sacrifice_for_mana_enables_followup(state, player));
+    if !holds {
         return true;
     }
 
@@ -1268,6 +1412,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+    use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2440,12 +2585,16 @@ mod tests {
         );
     }
 
-    // Issue #544: Krark-Clan Ironworks ("Sacrifice an artifact: Add {C}{C}") is
-    // a mana ability whose cost sacrifices a permanent. Even though it is a mana
-    // ability, the sacrifice is a meaningful priority decision (CR 605.3a +
-    // 603.6), so auto-pass must NOT fire when it is the only available action.
+    // Issue #544 (narrowed): Krark-Clan Ironworks ("Sacrifice an artifact: Add
+    // {C}{C}") is a mana ability whose cost sacrifices a permanent. It remains a
+    // meaningful priority decision for the CR 732.5 loop firewall (the classifier
+    // `has_meaningful_priority_action` still returns true — the sacrifice is a
+    // board change). But with a BARE board (no castable spell, no mana-costed
+    // activated ability, no leaves-battlefield trigger) the sacrifice enables no
+    // concrete follow-up, so the frontend auto-pass recommendation now fires.
+    // Classifier and recommendation deliberately DISAGREE for this bare case.
     #[test]
-    fn auto_pass_does_not_skip_sacrifice_for_mana_ability() {
+    fn auto_pass_fires_for_bare_sac_for_mana_own_turn() {
         use crate::game::zones::create_object;
         use crate::types::ability::{
             AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
@@ -2505,13 +2654,13 @@ mod tests {
                 ability_index: 0,
             },
         ];
+        // Classifier reach-guard: the sac-for-mana is still a meaningful
+        // priority decision for the loop firewall (CR 605.3a + 603.6) — this
+        // assertion is UNCHANGED and proves the classifier and the auto-pass
+        // recommendation deliberately disagree for the bare case below.
         assert!(
             super::has_meaningful_priority_action(&state, &actions),
             "A sacrifice-for-mana ability is a meaningful priority decision (CR 605.3a + 603.6)"
-        );
-        assert!(
-            !super::auto_pass_recommended(&state, &actions),
-            "Auto-pass must not fire when only a sacrifice-for-mana ability is available (#544)"
         );
 
         // Production path: flat `legal_actions` omits mana abilities, so the
@@ -2536,25 +2685,114 @@ mod tests {
             ),
             "KCI activation must appear in legal_actions_by_object"
         );
+        // NARROWED (this task): with a bare board the grouped sac-for-mana
+        // enables no downstream follow-up, so auto-pass now FIRES even though the
+        // classifier above still counts it as meaningful. This is the flipped
+        // assertion — it fails if the narrowing is reverted.
         assert!(
-            !super::auto_pass_recommended(&state, &flat),
-            "Issue #544: auto-pass must not fire from flat legal_actions alone \
-             when grouped sacrifice-for-mana is available"
+            super::auto_pass_recommended(&state, &flat),
+            "Bare sac-for-mana with no downstream castable spell / mana-costed \
+             ability / leaves-battlefield trigger → auto-pass fires"
         );
     }
 
-    /// Issue #4388: Gaea's Cradle / Itlimoc / basic-land mana on an opponent's
-    /// turn must not be skipped by auto-pass (CR 117.1d).
+    /// Issue #4388 (narrowed): a lone mana source (Gaea's Cradle / Itlimoc /
+    /// basic land) with nothing castable to spend the mana on is NOT a
+    /// meaningful priority window — auto-pass fires even on an opponent's turn
+    /// (CR 117.1d covers *permission* to activate, not an obligation to stop).
     #[test]
-    fn auto_pass_holds_priority_for_grouped_mana_on_opponents_turn() {
+    fn auto_pass_releases_priority_for_lone_mana_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let state = runner.state();
+
+        // Reach-guard FIRST: prove the Forest's mana ability is genuinely
+        // activatable on the opponent's turn, so this test exercises the
+        // lone-mana branch rather than passing vacuously.
+        assert!(
+            !super::activatable_object_mana_actions(state).is_empty(),
+            "precondition: Forest mana is activatable"
+        );
+        assert!(
+            super::auto_pass_recommended(state, &super::flat_priority_actions(state)),
+            "lone mana source with empty hand on opponent's turn → auto-pass"
+        );
+    }
+
+    /// Issue #4388: on an opponent's turn, a feasibly castable instant paired
+    /// with the mana to cast it is a meaningful priority window — hold (CR
+    /// 117.1d + CR 601.2g: mana abilities feed the pending mana payment).
+    #[test]
+    fn auto_pass_holds_priority_for_castable_spell_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Bolt", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        // Positive reach-guard: prove the {G} instant is feasibly castable so
+        // the HOLD assertion below cannot pass vacuously.
+        assert!(
+            super::has_feasibly_castable_spell(runner.state(), P0),
+            "precondition: the {{G}} instant is feasibly castable"
+        );
+        assert!(
+            !super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "castable instant + mana on opponent's turn → hold"
+        );
+
+        // Own-turn control arm: HOLD via the own-turn castability rung (the
+        // rung below the upkeep/draw fast path), proving the two castability
+        // rungs are gated symmetrically on `active_player` (in)equality.
+        runner.state_mut().active_player = P0;
+        assert!(
+            !super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "castable instant on your own turn → hold via own-turn castability rung"
+        );
+    }
+
+    /// Issue #4388 / #544 (narrowed): on an opponent's turn a BARE sac-for-mana
+    /// ability (Krark-Clan Ironworks) with an empty hand and no downstream
+    /// follow-up enables nothing — the frontend auto-pass recommendation fires.
+    /// The classifier `has_meaningful_priority_action` still returns true (the
+    /// loop firewall must keep counting the sacrifice as a board change, CR
+    /// 605.3a + 603.6), so the two deliberately disagree for this bare case.
+    #[test]
+    fn auto_pass_fires_for_bare_sac_for_mana_opponents_turn() {
         use crate::game::zones::create_object;
-        use crate::types::ability::{
-            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction,
-        };
-        use crate::types::card_type::CoreType;
-        use crate::types::identifiers::CardId;
-        use crate::types::mana::ManaColor;
-        use crate::types::zones::Zone;
+        use crate::types::ability::TypeFilter;
 
         let mut state = GameState::new_two_player(42);
         state.phase = crate::types::phase::Phase::PreCombatMain;
@@ -2564,22 +2802,25 @@ mod tests {
             player: PlayerId(0),
         };
 
-        let land = create_object(
+        let kci = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
-            "Forest".to_string(),
+            "Krark-Clan Ironworks".to_string(),
             Zone::Battlefield,
         );
         {
-            let obj = state.objects.get_mut(&land).unwrap();
-            obj.card_types.core_types.push(CoreType::Land);
+            let obj = state.objects.get_mut(&kci).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            // Same BARE Sacrifice + Typed(Artifact) cost as the #544 test —
+            // drives the real meaningful-priority classifier.
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
-                        produced: ManaProduction::Fixed {
-                            colors: vec![ManaColor::Green],
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![ManaColor::Red],
                             contribution: ManaContribution::Base,
                         },
                         restrictions: vec![],
@@ -2588,25 +2829,594 @@ mod tests {
                         target: None,
                     },
                 )
+                .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    1,
+                ))),
+            );
+        }
+
+        // Production path: the flat `legal_actions` list omits sac-for-mana
+        // abilities (they live in `legal_actions_by_object` only, #544), so both
+        // the meaningful-priority classifier and the auto-pass gate must reach
+        // the KCI activation through the internal `activatable_object_mana_actions`
+        // scan — not through a caller-injected activation in the passed vec.
+        let (flat, _, grouped) = legal_actions_full(&state);
+        assert!(
+            !flat.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, .. } if *source_id == kci
+            )),
+            "precondition: KCI activation is grouped-only during priority, so the \
+             hold must flow through the internal sac-for-mana scan"
+        );
+        assert!(
+            bucket_has(
+                &grouped,
+                kci,
+                &GameAction::ActivateAbility {
+                    source_id: kci,
+                    ability_index: 0,
+                },
+            ),
+            "KCI activation must appear in legal_actions_by_object"
+        );
+        // Reach-guard (UNCHANGED): even with the sac-for-mana omitted from the
+        // flat list, the classifier still returns true via its internal-scan
+        // branch, so this test truly reaches the auto-pass sac rung and does not
+        // pass vacuously (CR 605.3a + 603.6).
+        assert!(
+            super::has_meaningful_priority_action(&state, &flat),
+            "precondition: sac-for-mana is a meaningful priority decision reached via the internal scan"
+        );
+        // NARROWED (this task): bare sac-for-mana on the opponent's turn with an
+        // empty hand and no downstream follow-up → auto-pass FIRES. Flipped
+        // assertion — fails if the narrowing is reverted.
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "bare sac-for-mana on opponent's turn with no downstream follow-up → auto-pass fires; \
+             classifier stays meaningful for the loop firewall, so the two deliberately disagree"
+        );
+    }
+
+    /// Sacrifice-for-mana source (KCI-proven cost shape): an artifact whose only
+    /// ability is a mana ability whose cost sacrifices an artifact — self-
+    /// satisfiable, so a lone source classifies as `ManaSourcePenalty::Sacrifices`
+    /// and is activatable. Colorless mana models the Eldrazi-Spawn/altar class.
+    fn add_sac_for_mana_source(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        let id = create_object(
+            state,
+            CardId(700),
+            controller,
+            "Sacrifice-for-Mana Altar".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                1,
+            ))),
+        );
+        id
+    }
+
+    /// V1 (repro fix): on an OPPONENT's turn, a lone sacrifice-for-mana source
+    /// with nothing castable in hand and an opponent trigger on the stack must
+    /// recommend auto-pass — the sacrifice/its mana enables no concrete follow-up
+    /// (CR 605.3a + CR 603.6 + CR 117.1d). Before the fix `auto_pass_recommended`
+    /// returned `false` (unconditional sac hold), forcing a pointless stop.
+    #[test]
+    fn auto_pass_fires_for_bare_sac_for_mana_on_opponents_turn_repro() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // P0 controls the lone sac-for-mana source; P0's hand is empty.
+        add_sac_for_mana_source(&mut state, PlayerId(0));
+
+        // Opponent (P1) spell on top of the stack — its controller != P0, so the
+        // own-stack auto-pass shortcut (`top.controller == player`) cannot be the
+        // path that fires. This isolates the narrowed sac rung as the cause.
+        let opp_spell = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Opponent Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: opp_spell,
+            source_id: opp_spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(900),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let flat = super::flat_priority_actions(&state);
+
+        // Reach-guards (non-vacuous): the sac source is genuinely activatable AND
+        // the classifier counts it meaningful, so we truly reach the sac rung.
+        assert!(
+            super::has_activatable_sacrifice_for_mana(&state),
+            "precondition: the sac-for-mana ability is activatable"
+        );
+        assert!(
+            super::has_meaningful_priority_action(&state, &flat),
+            "precondition: the classifier reaches the sac rung (loop firewall intact)"
+        );
+        // Sibling guard: the top of stack belongs to the opponent.
+        assert_ne!(
+            state.stack.back().unwrap().controller,
+            PlayerId(0),
+            "top of stack is the opponent's, so the own-stack shortcut is not under test"
+        );
+        // Nothing castable — the produced mana would feed no spell (case 1 false).
+        assert!(
+            !super::has_feasibly_castable_spell(&state, PlayerId(0)),
+            "precondition: empty hand, nothing feasibly castable"
+        );
+
+        // Flipped-on-revert assertion: fails if the narrowing is reverted.
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "bare sac-for-mana on opponent's turn with no downstream follow-up → auto-pass fires"
+        );
+    }
+
+    /// V3 (#544 case 1 preserved): a sac-for-mana source PLUS a feasibly castable
+    /// instant on an opponent's turn holds — the mana can pay the spell (CR 117.1d
+    /// + CR 601.2g). Hold flows through the castability rung above the sac rung.
+    #[test]
+    fn sac_for_mana_holds_with_downstream_castable_spell() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Bolt", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+        let mut runner = scenario.build();
+        add_sac_for_mana_source(runner.state_mut(), P0);
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        // Positive reach-guard: the {G} instant is genuinely castable, so the HOLD
+        // cannot pass vacuously.
+        assert!(
+            super::has_feasibly_castable_spell(runner.state(), P0),
+            "precondition: the {{G}} instant is feasibly castable"
+        );
+        assert!(
+            !super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "sac-for-mana + castable spell → hold (case 1 via castability rung)"
+        );
+
+        // Negative sibling — same board minus the hand spell: a lone sac-for-mana
+        // with nothing castable auto-passes.
+        let mut bare = GameScenario::new();
+        bare.at_phase(Phase::PreCombatMain);
+        bare.add_basic_land(P0, ManaColor::Green);
+        let mut bare_runner = bare.build();
+        add_sac_for_mana_source(bare_runner.state_mut(), P0);
+        {
+            let state = bare_runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        assert!(
+            !super::has_feasibly_castable_spell(bare_runner.state(), P0),
+            "precondition (negative): no castable spell on the bare board"
+        );
+        assert!(
+            super::auto_pass_recommended(
+                bare_runner.state(),
+                &super::flat_priority_actions(bare_runner.state())
+            ),
+            "negative sibling: sac-for-mana with nothing castable → auto-pass fires"
+        );
+    }
+
+    /// V4 (#544 case 2): a sac-for-mana source PLUS a mana-costed non-mana
+    /// activated ability holds — the produced mana could feed the ability
+    /// (CR 605.3a + CR 603.6). The ability is present but unaffordable-now (no
+    /// floating mana), so it is absent from the flat list — proving the hold
+    /// flows through the case-2 followup gate, not the flat meaningful-action path.
+    #[test]
+    fn sac_for_mana_holds_with_downstream_mana_costed_activated_ability() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        add_sac_for_mana_source(&mut state, PlayerId(0));
+
+        // Separate permanent with "{1}: Draw a card" — a non-mana activated
+        // ability with a mana component in its cost.
+        let engine = create_object(
+            &mut state,
+            CardId(710),
+            PlayerId(0),
+            "Mana-Costed Engine".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&engine).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                }),
+            );
+        }
+
+        let flat = super::flat_priority_actions(&state);
+        // Reach-guard: the flat list carries no meaningful action (the {1} ability
+        // is unaffordable now), so the hold MUST come from the case-2 gate.
+        assert!(
+            !super::flat_actions_have_meaningful_priority(&state, &flat),
+            "precondition: the mana-costed ability is unaffordable-now, absent from the flat list"
+        );
+        assert!(
+            super::has_activatable_sacrifice_for_mana(&state),
+            "precondition: the sac-for-mana source is activatable (we reach the sac rung)"
+        );
+        assert!(
+            super::sacrifice_for_mana_enables_followup(&state, PlayerId(0)),
+            "precondition: case 2 fires on the mana-costed activated ability"
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "sac-for-mana + mana-costed activated ability → hold (case 2)"
+        );
+
+        // Negative sibling: replace the mana cost with a bare {T} cost (no mana
+        // component) and tap the permanent so it stays out of the flat list. Case
+        // 2 requires a mana-consuming cost, so it no longer fires → auto-pass.
+        {
+            let obj = state.objects.get_mut(&engine).unwrap();
+            obj.tapped = true;
+            Arc::make_mut(&mut obj.abilities).clear();
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
                 .cost(AbilityCost::Tap),
+            );
+        }
+        let flat = super::flat_priority_actions(&state);
+        assert!(
+            !super::flat_actions_have_meaningful_priority(&state, &flat),
+            "precondition (negative): the tapped {{T}} ability is absent from the flat list"
+        );
+        assert!(
+            !super::sacrifice_for_mana_enables_followup(&state, PlayerId(0)),
+            "negative: a non-mana ({{T}}) cost does not satisfy case 2"
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "negative sibling: no mana-component ability → case 2 fails → auto-pass fires"
+        );
+    }
+
+    /// V5 (#544 case 3, aristocrat): a sac-for-mana source PLUS a
+    /// leaves-the-battlefield trigger on a SEPARATE controlled permanent (Blood
+    /// Artist shape: `ChangesZone` origin battlefield → graveyard) holds — the
+    /// sacrifice is itself the payoff (CR 603.6c). Multi-authority: the trigger
+    /// lives on a different permanent, proving the scan sweeps all permanents.
+    #[test]
+    fn sac_for_mana_holds_with_beneficial_death_trigger() {
+        use crate::types::ability::TriggerDefinition;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let sac = add_sac_for_mana_source(&mut state, PlayerId(0));
+
+        // Separate Blood-Artist-shaped permanent: "whenever a creature dies" =
+        // ChangesZone from battlefield to graveyard.
+        let blood_artist = create_object(
+            &mut state,
+            CardId(720),
+            PlayerId(0),
+            "Blood Artist".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&blood_artist).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard),
+            );
+        }
+
+        let flat = super::flat_priority_actions(&state);
+        assert_ne!(
+            sac, blood_artist,
+            "the trigger lives on a separate permanent from the sac source"
+        );
+        assert!(
+            !super::flat_actions_have_meaningful_priority(&state, &flat),
+            "precondition: no flat meaningful action; the hold must come from case 3"
+        );
+        assert!(
+            super::has_activatable_sacrifice_for_mana(&state),
+            "precondition: the sac-for-mana source is activatable"
+        );
+        assert!(
+            super::sacrifice_for_mana_enables_followup(&state, PlayerId(0)),
+            "precondition: case 3 fires on the separate leaves-battlefield trigger"
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "sac-for-mana + leaves-battlefield trigger → hold (case 3)"
+        );
+    }
+
+    /// V5b (disjunctive-clause LTB): a Syr-Konrad-shaped trigger whose
+    /// leaves-the-battlefield event lives ONLY in a `zone_change_clauses` clause
+    /// (not the scalar `origin`/`origin_zones`) must ALSO hold — the case-3 scan
+    /// consults the clause origins. Preserves the "always errs toward holding"
+    /// invariant for disjunctive dies/leaves triggers.
+    #[test]
+    fn sac_for_mana_holds_with_disjunctive_leaves_battlefield_clause_trigger() {
+        use crate::types::ability::{OriginConstraint, TriggerDefinition, ZoneChangeClause};
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        add_sac_for_mana_source(&mut state, PlayerId(0));
+
+        let konrad = create_object(
+            &mut state,
+            CardId(730),
+            PlayerId(0),
+            "Syr Konrad, the Grim".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&konrad).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Disjunctive trigger: scalar origin is None; the battlefield-exit
+            // event lives only in a clause.
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone).zone_change_clauses(vec![
+                    ZoneChangeClause {
+                        origin: OriginConstraint::Equals(Zone::Battlefield),
+                        destination: None,
+                        destination_constraint: OriginConstraint::Any,
+                        valid_card: None,
+                    },
+                    ZoneChangeClause {
+                        origin: OriginConstraint::NotEquals(Zone::Battlefield),
+                        destination: Some(Zone::Graveyard),
+                        destination_constraint: OriginConstraint::Any,
+                        valid_card: None,
+                    },
+                ]),
             );
         }
 
         let flat = super::flat_priority_actions(&state);
         assert!(
-            !super::auto_pass_recommended(&state, &flat),
-            "auto-pass must hold priority on opponent's turn when grouped mana is available"
+            super::sacrifice_for_mana_enables_followup(&state, PlayerId(0)),
+            "precondition: case 3 fires on the disjunctive battlefield-exit clause"
         );
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "sac-for-mana + disjunctive leaves-battlefield clause trigger → hold (case 3)"
+        );
+    }
 
-        // Control: on the active player's own turn, standalone mana still auto-passes.
-        state.active_player = PlayerId(0);
+    /// V6 (case 3 negative): a sac-for-mana source PLUS only an enters-battlefield
+    /// / spell-cast trigger enables nothing when the permanent is sacrificed, so
+    /// auto-pass fires. Boundary: `ChangesZone` with a non-battlefield origin and
+    /// `SpellCast` must NOT match `trigger_fires_on_leaving_battlefield`.
+    #[test]
+    fn sac_for_mana_auto_passes_with_only_non_leaving_trigger() {
+        use crate::types::ability::TriggerDefinition;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
         state.priority_player = PlayerId(0);
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
+
+        add_sac_for_mana_source(&mut state, PlayerId(0));
+
+        let etb = create_object(
+            &mut state,
+            CardId(740),
+            PlayerId(0),
+            "Enters-Trigger Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&etb).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Enters-the-battlefield: ChangesZone from library → battlefield.
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .origin(Zone::Library)
+                    .destination(Zone::Battlefield),
+            );
+            // A spell-cast trigger is likewise not a battlefield-exit payoff.
+            obj.trigger_definitions
+                .push(TriggerDefinition::new(TriggerMode::SpellCast));
+        }
+
+        let flat = super::flat_priority_actions(&state);
+        assert!(
+            super::has_activatable_sacrifice_for_mana(&state),
+            "precondition: the sac-for-mana source is activatable (we reach the sac rung)"
+        );
+        assert!(
+            !super::sacrifice_for_mana_enables_followup(&state, PlayerId(0)),
+            "precondition: neither the enters nor the spell-cast trigger satisfies case 3"
+        );
         assert!(
             super::auto_pass_recommended(&state, &flat),
-            "auto-pass should still fire on your turn when only mana is available"
+            "sac-for-mana with only non-leaving triggers → auto-pass fires"
+        );
+    }
+
+    /// V6b (predicate boundary): direct unit coverage of
+    /// `trigger_fires_on_leaving_battlefield`, pinning the `OriginConstraint`
+    /// semantics for the disjunctive-clause arm (CR 603.6c).
+    #[test]
+    fn trigger_fires_on_leaving_battlefield_predicate_boundary() {
+        use crate::types::ability::{OriginConstraint, TriggerDefinition, ZoneChangeClause};
+        use crate::types::triggers::TriggerMode;
+
+        // Direct battlefield-exit modes always fire.
+        for mode in [
+            TriggerMode::LeavesBattlefield,
+            TriggerMode::Sacrificed,
+            TriggerMode::SacrificedOnce,
+            TriggerMode::Destroyed,
+        ] {
+            assert!(
+                super::trigger_fires_on_leaving_battlefield(&TriggerDefinition::new(mode.clone())),
+                "{mode:?} is a battlefield-exit event"
+            );
+        }
+        // ChangesZone with a scalar battlefield origin fires.
+        assert!(super::trigger_fires_on_leaving_battlefield(
+            &TriggerDefinition::new(TriggerMode::ChangesZone).origin(Zone::Battlefield)
+        ));
+        // Disjunctive clause whose origin includes the battlefield fires.
+        assert!(super::trigger_fires_on_leaving_battlefield(
+            &TriggerDefinition::new(TriggerMode::ChangesZone).zone_change_clauses(vec![
+                ZoneChangeClause {
+                    origin: OriginConstraint::Equals(Zone::Battlefield),
+                    destination: None,
+                    destination_constraint: OriginConstraint::Any,
+                    valid_card: None,
+                },
+            ])
+        ));
+        // "from anywhere other than the battlefield" does NOT fire.
+        assert!(!super::trigger_fires_on_leaving_battlefield(
+            &TriggerDefinition::new(TriggerMode::ChangesZone).zone_change_clauses(vec![
+                ZoneChangeClause {
+                    origin: OriginConstraint::NotEquals(Zone::Battlefield),
+                    destination: Some(Zone::Graveyard),
+                    destination_constraint: OriginConstraint::Any,
+                    valid_card: None,
+                },
+            ])
+        ));
+        // Enters-battlefield (origin Library) and SpellCast do NOT fire.
+        assert!(!super::trigger_fires_on_leaving_battlefield(
+            &TriggerDefinition::new(TriggerMode::ChangesZone).origin(Zone::Library)
+        ));
+        assert!(!super::trigger_fires_on_leaving_battlefield(
+            &TriggerDefinition::new(TriggerMode::SpellCast)
+        ));
+    }
+
+    /// V7 (Mana Leak / Daze non-interference): `auto_pass_recommended` must never
+    /// suppress a non-`Priority` decision prompt. A "counter unless you pay {1}"
+    /// surfaces as `WaitingFor::UnlessPayment` (CR 118.12a), and even with a
+    /// sac-for-mana `{C}` source on the payer's board the recommendation returns
+    /// `false` — the guard that early-returns for non-`Priority` states
+    /// (mod.rs `_ => return false`) makes this safe.
+    #[test]
+    fn unless_pay_surfaces_pay_cost_prompt_despite_sac_for_mana_autopass() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+
+        let sac = add_sac_for_mana_source(&mut state, PlayerId(0));
+
+        // Mana-Leak-shaped prompt: P0 must pay {1} or the effect happens.
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            pending_effect: Box::new(empty_effect(sac)),
+            trigger_event: None,
+            effect_description: Some("counter target spell".to_string()),
+            remaining: vec![],
+        };
+
+        // Reach-guard: the waiting state is genuinely non-`Priority`.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "precondition: the prompt is UnlessPayment (PayCost class), not Priority"
+        );
+        // Non-interference: auto-pass never fires for a non-`Priority` prompt.
+        assert!(
+            !super::auto_pass_recommended(&state, &[]),
+            "auto-pass must not suppress an unless-pay prompt despite a sac-for-mana source"
         );
     }
 
@@ -2804,6 +3614,7 @@ mod tests {
                     "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
                 ),
                 attack_defended: None,
+                source_controller: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -3368,6 +4179,164 @@ mod tests {
         assert!(
             clones < 5,
             "delve validation should not clone state per graveyard card (got {clones} clones)"
+        );
+    }
+
+    /// CR 117.3d: a matching priority yield for the top-of-stack trigger makes
+    /// `auto_pass_recommended` return `true`, overriding the meaningful-action
+    /// hold that would otherwise keep the window open. Reverting the yield short-
+    /// circuit flips this back to `false`.
+    #[test]
+    fn auto_pass_recommended_true_for_yielded_top() {
+        let mut state = setup_priority();
+        // Opponent-controlled token trigger on top of the stack.
+        let source = ObjectId(500);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(1),
+        );
+        ability.source_incarnation = Some(2);
+        ability.source_card_id = Some(CardId(77));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: source,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Token".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        // A meaningful action keeps auto-pass OFF absent a yield (reach-guard:
+        // proves the yield is what flips the result).
+        let actions = vec![GameAction::PlayLand {
+            object_id: ObjectId(700),
+            card_id: CardId(1),
+        }];
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "without a yield, a meaningful action must keep the window open"
+        );
+
+        state.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(77),
+            },
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "CR 117.3d: a matching yield overrides the meaningful-action hold"
+        );
+    }
+
+    /// State-shape tests for the engine-owned phase-stop gate migrated out of the
+    /// frontend (Step 5). `auto_passes_initial_priority_by_default` returns true on
+    /// an own-turn Upkeep with an empty stack, which is the downstream `true` these
+    /// tests reach absent the phase-stop gate — so the gate's `false` is never
+    /// vacuous.
+    #[test]
+    fn auto_pass_recommended_false_on_empty_stack_phase_stop() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        let actions = vec![GameAction::PassPriority];
+
+        // Reach-guard: without any stop, the own-turn upkeep window auto-passes.
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "reach-guard: empty-stack own-turn upkeep recommends auto-pass absent a stop"
+        );
+
+        // With an AllTurns stop on the current phase, the new gate refuses.
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::Upkeep,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "empty stack + phase stop on the current phase must never auto-pass"
+        );
+    }
+
+    #[test]
+    fn auto_pass_recommended_true_when_phase_not_stopped() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        // Stop configured on a DIFFERENT phase → this branch does not gate.
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::End,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "a stop on an unrelated phase must not gate the current phase"
+        );
+    }
+
+    #[test]
+    fn auto_pass_recommended_true_when_stack_nonempty_despite_stop() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        // A phase stop on the current phase, but the stack is NON-empty: the new
+        // gate is empty-stack-only (disjoint from the CR 117.3d yield short-circuit
+        // below), so it must not fire here. Reverting the `is_empty()` guard flips
+        // this to `false`.
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: ObjectId(600),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::Upkeep,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "the empty-stack-only phase-stop gate must not fire while the stack is non-empty"
+        );
+    }
+
+    #[test]
+    fn auto_pass_recommended_phase_stop_per_player_isolation() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        // Stop belongs to player 1; the priority seat is player 0 → the gate must
+        // not fire for player 0.
+        state.phase_stops.insert(
+            PlayerId(1),
+            vec![PhaseStop {
+                phase: Phase::Upkeep,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "player 1's phase stop must not gate player 0's auto-pass"
         );
     }
 }

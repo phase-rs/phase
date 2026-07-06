@@ -1,4 +1,4 @@
-import type { Phase } from "../../adapter/types";
+import type { Phase, PhaseStopScope } from "../../adapter/types";
 import { useId, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -117,17 +117,23 @@ const PHASE_KEY: Record<Phase, string> = {
 
 type PhaseTranslate = ReturnType<typeof useTranslation>["t"];
 
+const SCOPE_TOOLTIP_KEY: Record<PhaseStopScope, string> = {
+  AllTurns: "phaseStop.scopeAllTurns",
+  OwnTurn: "phaseStop.scopeOwnTurn",
+  OpponentsTurns: "phaseStop.scopeOpponentsTurns",
+};
+
 function getPhaseTooltip(
   t: PhaseTranslate,
   phase: Phase,
-  hasStop: boolean,
+  scope: PhaseStopScope | undefined,
   isActive: boolean,
 ): string {
   const key = PHASE_KEY[phase];
   return t("phaseStop.tooltip", {
     label: t(`phaseStop.${key}Label`),
     description: t(`phaseStop.${key}Description`),
-    stopText: hasStop ? t("phaseStop.tooltipStopSet") : t("phaseStop.tooltipNoStop"),
+    stopText: scope ? t(SCOPE_TOOLTIP_KEY[scope]) : t("phaseStop.tooltipNoStop"),
     activeText: isActive ? ` ${t("phaseStop.tooltipCurrentPhase")}` : "",
   });
 }
@@ -140,21 +146,36 @@ function PhaseDot({ phase }: { phase: Phase }) {
   const setPhaseStops = usePreferencesStore((s) => s.setPhaseStops);
 
   const isActive = phase === currentPhase;
-  const hasStop = phaseStops.includes(phase);
-  const tooltip = getPhaseTooltip(t, phase, hasStop, isActive);
+  const stop = phaseStops.find((s) => s.phase === phase);
+  const hasStop = stop !== undefined;
+  const tooltip = getPhaseTooltip(t, phase, stop?.scope, isActive);
 
-  const togglePhase = () => {
-    if (hasStop) {
-      setPhaseStops(phaseStops.filter((p) => p !== phase));
-    } else {
-      setPhaseStops([...phaseStops, phase]);
+  // Cycle the stop for this phase: off → AllTurns → OwnTurn → OpponentsTurns → off.
+  // Update in place so array order is preserved — `usePhaseStopsSync` dedupes by
+  // positional comparison, so appending would reorder and force a redundant
+  // engine dispatch even when the set of stops is unchanged.
+  const cyclePhase = () => {
+    if (stop === undefined) {
+      setPhaseStops([...phaseStops, { phase, scope: "AllTurns" }]);
+      return;
     }
+    const next: PhaseStopScope | null =
+      stop.scope === "AllTurns"
+        ? "OwnTurn"
+        : stop.scope === "OwnTurn"
+          ? "OpponentsTurns"
+          : null; // OpponentsTurns → off
+    setPhaseStops(
+      next === null
+        ? phaseStops.filter((s) => s.phase !== phase)
+        : phaseStops.map((s) => (s.phase === phase ? { phase, scope: next } : s)),
+    );
   };
 
   return (
     <button
       type="button"
-      onClick={togglePhase}
+      onClick={cyclePhase}
       aria-label={tooltip}
       aria-describedby={tooltipId}
       aria-pressed={hasStop}

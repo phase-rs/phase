@@ -30,6 +30,7 @@ pub fn resolve(
             player,
             count,
             keep_count,
+            keep_count_expr,
             up_to,
             filter,
             destination,
@@ -40,16 +41,22 @@ pub fn resolve(
         } => {
             let resolved_count =
                 resolve_quantity_with_targets(state, count, ability).max(0) as usize;
+            // CR 107.1b: a dynamic keep count that resolves negative is clamped
+            // to zero (no card is kept), never a negative selection bound.
+            let dynamic_keep = keep_count_expr
+                .as_ref()
+                .map(|e| resolve_quantity_with_targets(state, e, ability).max(0) as usize);
             let keep_all_for_reorder = destination == &Some(Zone::Library)
                 && rest_destination == &Some(Zone::Library)
-                && keep_count.is_none();
+                && keep_count.is_none()
+                && dynamic_keep.is_none();
             (
                 player,
                 resolved_count,
                 if keep_all_for_reorder {
                     resolved_count
                 } else {
-                    keep_count.unwrap_or(1) as usize
+                    dynamic_keep.unwrap_or_else(|| keep_count.unwrap_or(1) as usize)
                 },
                 *up_to,
                 filter.clone(),
@@ -477,6 +484,7 @@ mod tests {
                 },
                 destination: None,
                 keep_count: None,
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
@@ -570,6 +578,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 destination: None,
                 keep_count: Some(0),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
@@ -622,6 +631,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 destination: None,
                 keep_count: Some(0),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
@@ -674,6 +684,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: Some(Zone::Library),
                 keep_count: None,
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
@@ -1360,6 +1371,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: None,
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter,
                 rest_destination: None,
@@ -1435,6 +1447,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: Some(Zone::Hand),
                 keep_count: Some(u32::MAX),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 rest_destination: Some(Zone::Library),
@@ -1739,6 +1752,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: Some(Zone::Battlefield),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
@@ -1794,6 +1808,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: Some(Zone::Battlefield),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),

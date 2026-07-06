@@ -1320,7 +1320,10 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
             });
         // CR 702.142b: Tag as Boast for meta-reference effects.
         def.ability_tag = Some(AbilityTag::Boast);
-        def.description = Some(format!("Boast \u{2014} {}", rest_original));
+        def.description = Some(format!(
+            "Boast \u{2014} {}",
+            sanitize_granting_placeholder(rest_original)
+        ));
         return def;
     }
 
@@ -1369,14 +1372,28 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
             parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
         def.cost = Some(cost);
         def.activation_restrictions.extend(constraints.restrictions);
-        def.description = Some(text.to_string());
+        // CR 601.2f: Fold a trailing self-referential "This ability costs {X}
+        // less to activate, where X is ~'s power" node into `cost_reduction`
+        // (the same AST-level extractor standalone activated abilities use). The
+        // reduction's `Power{Source}` is host-referential (the equipped
+        // creature), an untouched third channel — no interaction with the
+        // GrantingObject cost/effect rewrite. Enables The Dominion Bracelet.
+        crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
+        def.description = Some(sanitize_granting_placeholder(text));
         def
     } else {
         // No cost separator — treat as spell-like ability text
         let mut def = parse_effect_chain(text, AbilityKind::Spell);
-        def.description = Some(text.to_string());
+        def.description = Some(sanitize_granting_placeholder(text));
         def
     }
+}
+
+/// CR 201.5a: Descriptions render the granter self-reference as `~` (matching
+/// pre-fix display); the `GRANTING_SELF_PLACEHOLDER` marker is a parse-time
+/// signal only and must never leak the raw private-use char into stored text.
+fn sanitize_granting_placeholder(text: &str) -> String {
+    text.replace(crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER, "~")
 }
 
 /// True when `trimmed_prefix` is a bracketed planeswalker loyalty cost (`[+N]`,

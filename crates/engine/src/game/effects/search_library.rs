@@ -42,6 +42,27 @@ fn resolve_library_owner(
             return player;
         }
     }
+    // CR 701.23a + CR 108.3 / CR 109.4: An object-relative name-hate search
+    // (The End, Deadly Cover-Up, Crumble to Dust, Surgical Extraction, Test of
+    // Talents, Deicide) carries its searched player as a `Typed` controller-ref
+    // (`ParentTargetOwner` / `ParentTargetController`) on `target_player`. Only
+    // the *searched zones' owner* is derived here; the caster remains the
+    // searcher (`searcher_is_library_owner(Typed{..}) == false`, CR 701.23a
+    // asymmetric). The bare `ParentTargetController` branch above is untouched so
+    // Assassin's Trophy's self-search is preserved.
+    if let TargetFilter::Typed(tf) = target_player {
+        if let Some(ctrl) = &tf.controller {
+            if let Some(pid) = crate::game::filter::controller_ref_player(
+                state,
+                ability.source_id,
+                Some(ability.controller),
+                Some(ability),
+                ctrl,
+            ) {
+                return pid;
+            }
+        }
+    }
     ability.controller
 }
 

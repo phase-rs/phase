@@ -447,7 +447,10 @@ pub fn resolve(
         copy: None,
         enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
-        applied: HashSet::new(),
+        applied: state
+            .post_replacement_token_choice_applied
+            .clone()
+            .unwrap_or_default(),
     };
 
     match replacement::replace_event(state, proposed, events) {
