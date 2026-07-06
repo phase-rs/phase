@@ -66,7 +66,7 @@ function createGameState(waitingFor: WaitingFor): GameState {
       regular_damage_done: false,
     },
     waiting_for: waitingFor,
-    auto_pass: { 0: { type: "UntilEndOfTurn" } },
+    auto_pass: { 0: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
   });
 }
 

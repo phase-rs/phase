@@ -758,6 +758,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -1060,6 +1061,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -1080,6 +1082,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        // Builds its PutCounter/RemoveCounter branches at resolution — carries no
+        // static conjure name to preload.
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
@@ -1098,6 +1103,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -1110,11 +1116,13 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
@@ -1128,6 +1136,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -1145,6 +1154,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }

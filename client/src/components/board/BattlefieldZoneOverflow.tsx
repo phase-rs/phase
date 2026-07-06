@@ -32,12 +32,20 @@ interface BattlefieldZoneOverflowProps {
    *  the local player's own lands/support rows opt in — the setting is a
    *  viewer-wide preference, so a control per opponent box would be redundant. */
   showCollapseControl?: boolean;
+  /** Split multiplayer overview pane: the container is a third of the board
+   *  width, so the summary tile wraps its mana pips into a squarish block
+   *  instead of one long strip. Shape-only — collapse thresholds unchanged. */
+  splitOverview?: boolean;
 }
 
 const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 
 const MOBILE_COLLAPSE_GROUPS = 4;
 const DESKTOP_COLLAPSE_GROUPS = 8;
+// Split panes are a third of the board width, so loose lands/support crowd
+// ~3× sooner than the full-width desktop threshold assumes. Creatures are
+// exempt — they're the pane's primary content and size-to-fit instead.
+const SPLIT_COLLAPSE_GROUPS = 4;
 // Creatures own the full board width (lands/support each share a half-row), so
 // they tolerate more cards before crowding. Identical tokens already stack into
 // one group, so the creature threshold counts GROUPS (distinct stacks), not
@@ -69,6 +77,7 @@ export function BattlefieldZoneOverflow({
   className,
   dividerBeforeIndex,
   showCollapseControl = false,
+  splitOverview = false,
 }: BattlefieldZoneOverflowProps) {
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -78,7 +87,9 @@ export function BattlefieldZoneOverflow({
   const compact = isMobile || isCompactHeight;
   const threshold = isCreatures
     ? (compact ? MOBILE_COLLAPSE_CREATURE_GROUPS : DESKTOP_COLLAPSE_CREATURE_GROUPS)
-    : (compact ? MOBILE_COLLAPSE_GROUPS : DESKTOP_COLLAPSE_GROUPS);
+    : splitOverview
+      ? SPLIT_COLLAPSE_GROUPS
+      : (compact ? MOBILE_COLLAPSE_GROUPS : DESKTOP_COLLAPSE_GROUPS);
   const objectIds = useMemo(() => groups.flatMap((group) => group.ids), [groups]);
   // Collapse by DISTINCT stack count, never body count: identical permanents
   // already render as one grouped tile, so 7 Forests + 2 duals reads as ~3
@@ -131,6 +142,7 @@ export function BattlefieldZoneOverflow({
         rowType={zone}
         dividerBeforeIndex={dividerBeforeIndex}
         className={className}
+        splitOverview={splitOverview}
       />
     );
   }
@@ -152,6 +164,7 @@ export function BattlefieldZoneOverflow({
           objectIds={objectIds}
           zone={zone}
           showCollapseControl={showCollapseControl}
+          splitOverview={splitOverview}
           onOpen={() => setOpen(true)}
         />
       )}
@@ -174,10 +187,10 @@ export function BattlefieldZoneOverflow({
 // Fixed, readable card size for the scrollable creature grid. Big enough to
 // read P/T, keywords, and counters; the parent scrolls the overflow.
 const CREATURE_GRID_VARS: CSSProperties = {
-  "--art-crop-w": "5.6rem",
-  "--art-crop-h": "4.2rem",
-  "--card-w": "3.85rem",
-  "--card-h": "5.4rem",
+  "--art-crop-w": "clamp(5.6rem, 4.4vw, 7.4rem)",
+  "--art-crop-h": "clamp(4.2rem, 3.3vw, 5.55rem)",
+  "--card-w": "clamp(3.85rem, 3.05vw, 5.15rem)",
+  "--card-h": "clamp(5.4rem, 4.25vw, 7.2rem)",
 } as CSSProperties;
 
 interface CreatureOverviewProps {
@@ -304,10 +317,18 @@ interface ZoneSummaryTileProps {
   objectIds: ObjectId[];
   zone: OverflowZone;
   showCollapseControl: boolean;
+  splitOverview?: boolean;
   onOpen: () => void;
 }
 
-function ZoneSummaryTile({ groups, objectIds, zone, showCollapseControl, onOpen }: ZoneSummaryTileProps) {
+function ZoneSummaryTile({
+  groups,
+  objectIds,
+  zone,
+  showCollapseControl,
+  splitOverview = false,
+  onOpen,
+}: ZoneSummaryTileProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   // Aspect-preserving size multiplier for the collapsed overflow pill (absent ⇒
@@ -324,7 +345,14 @@ function ZoneSummaryTile({ groups, objectIds, zone, showCollapseControl, onOpen 
   const defaultSizeClass = isMobile
     ? "min-h-[2.25rem] min-w-[4.75rem] px-1.5 py-0.5"
     : "min-h-[3.25rem] min-w-[7.5rem] px-2 py-1.5";
-  const sizeClass = zone === "support" ? supportSizeClass : defaultSizeClass;
+  // Split panes cap the tile's width so the pip row wraps into a squarish
+  // block (~2 pips per line) instead of one long strip eating the pane width.
+  const splitSizeClass = "min-h-[3.25rem] min-w-[6.5rem] max-w-[9rem] px-2 py-1.5";
+  const sizeClass = splitOverview
+    ? splitSizeClass
+    : zone === "support"
+      ? supportSizeClass
+      : defaultSizeClass;
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
@@ -483,7 +511,15 @@ function ZoneSummaryTile({ groups, objectIds, zone, showCollapseControl, onOpen 
             {cardCount}
           </span>
         </span>
-        <span className={zone === "support" ? "mt-1 block w-full" : "mt-1 flex items-center gap-1"}>
+        <span
+          className={
+            zone === "support"
+              ? "mt-1 block w-full"
+              : splitOverview
+                ? "mt-1 flex flex-wrap items-center gap-1"
+                : "mt-1 flex items-center gap-1"
+          }
+        >
           {zone === "lands" ? (
             manaOptions.length > 0 ? (
               manaOptions.map(({ color, total, untapped, shard }) => (

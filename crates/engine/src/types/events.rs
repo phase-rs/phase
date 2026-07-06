@@ -116,6 +116,36 @@ pub enum ClashResult {
     Tied,
 }
 
+impl ClashResult {
+    /// CR 701.30d: A clash's `result` is stated from the clash controller's
+    /// perspective (the player who initiated the clash). Re-express it from
+    /// `player`'s perspective, returning `None` if `player` did not participate.
+    /// The controller sees `self`; the opponent sees the mirror (Won ⇄ Lost, Tied
+    /// unchanged).
+    ///
+    /// Single source of truth shared by resolution-time "if you won" gating
+    /// (`event_outcome_was_won_by_controller`) and trigger MATCHING
+    /// (`match_clash`'s `clash_result` gate) so both agree on who won.
+    pub fn for_player(
+        self,
+        clash_controller: PlayerId,
+        opponent: PlayerId,
+        player: PlayerId,
+    ) -> Option<ClashResult> {
+        if player == clash_controller {
+            Some(self)
+        } else if player == opponent {
+            Some(match self {
+                ClashResult::Won => ClashResult::Lost,
+                ClashResult::Lost => ClashResult::Won,
+                ClashResult::Tied => ClashResult::Tied,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// CR 103.1 / CR 706: one round of the starting-player d20 roll-off.
 /// `rolls` are in seat order; round 1 contains every seat, and each later
 /// round contains exactly the previous round's tied-max group (CR 103.1
@@ -298,6 +328,14 @@ pub enum GameEvent {
         attacker: ObjectId,
         tapped: ObjectId,
         tapped_snapshot: Box<CostPaidObjectSnapshot>,
+    },
+    /// CR 701.47c: An amass instruction chose an Army creature. This event is
+    /// observational; the resolving ability carries the authoritative
+    /// `amassed_army_object` snapshot for later CR 701.47c references.
+    ArmyAmassed {
+        object_id: ObjectId,
+        source_id: ObjectId,
+        controller: PlayerId,
     },
     /// CR 702.143a: A player foretold a card from their hand.
     Foretold {
@@ -498,6 +536,15 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
+    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
+    /// an unblocked creature at that time — the precondition for "becomes blocked"
+    /// triggers to fire from an effect-block.
+    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
+    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
+    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
+    AttackerBecameBlockedByEffect {
+        attacker: ObjectId,
+    },
     /// CR 508.1h + CR 509.1d: The aggregate combat tax was paid; the declaration
     /// proceeds with every declared creature intact.
     CombatTaxPaid {
@@ -611,6 +658,15 @@ pub enum GameEvent {
     PlayerPerformedAction {
         player_id: PlayerId,
         action: PlayerActionKind,
+    },
+    /// Engine-authored diagnostic for top-card predicate
+    /// guesses. This is intentionally a log/debug event rather than rules input:
+    /// `ChooseOption` remains the authoritative action, while this records
+    /// which predicate AI or a human guessed.
+    CardPredicateGuessMade {
+        player_id: PlayerId,
+        source_id: Option<ObjectId>,
+        choice: String,
     },
     /// CR 701.19a: Regeneration shield — consumed on use, expires at cleanup.
     Regenerated {

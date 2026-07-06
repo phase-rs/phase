@@ -523,6 +523,11 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 305.6 + CR 607.2d: land-axis counterpart — "Lands you control are the
+    // chosen type in addition to their other types" (Realmwright).
+    if let Some(def) = parse_chosen_land_type_static(&tp, &text) {
+        return Some(def);
+    }
     // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
     if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
         return Some(def);
@@ -1043,10 +1048,27 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 205.1a + CR 613.1f: Imprisoned-in-the-Moon — "Enchanted <subject> is a
+    // colorless [<subtype>...] <type> with "<ability>" and loses all other card
+    // types and abilities." Must precede parse_enchanted_is_type, whose base-P/T
+    // split does not model the with-"<ability>" clause (issue #4770).
+    if let Some(def) = parse_enchanted_becomes_type_with_ability(&tp, &text) {
+        return Some(def);
+    }
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.
     if let Some(def) = parse_enchanted_is_type(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 613.1d (Layer 4) + CR 205.1b: "[Enchanted|Equipped] <subject> isn't a
+    // <type> and is a <type> in addition to its other types" — attached-permanent
+    // type SWAP (Luxior: equipped planeswalker loses Planeswalker, gains
+    // Creature). Placed after `parse_enchanted_is_type` (whose "is a" copula
+    // parse rejects the "isn't a ..." lead) and before the generic
+    // enchanted/equipped predicate arms so the type-removal clause is preserved.
+    if let Some(def) = parse_attached_isnt_and_is_type(&tp, &text) {
         return Some(def);
     }
 
@@ -2990,6 +3012,14 @@ pub(crate) fn parse_static_line_inner(
     // E.g., "Creature spells you cast have convoke."
     // Also: "Creature cards you own that aren't on the battlefield have flash."
     if let Some(def) = parse_spells_have_keyword(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "<type> cards in your hand [without <kw>] have <kw>. Its <kw> cost is
+    // equal to its mana cost reduced by {N}." (CR 702.143d + CR 702 alt-cost
+    // off-zone family) — Singing Towers of Darillium grants foretell with a
+    // per-recipient derived cost.
+    if let Some(def) = parse_hand_cards_have_derived_cost_keyword(&text) {
         return Some(def);
     }
 

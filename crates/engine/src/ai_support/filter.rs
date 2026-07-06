@@ -753,7 +753,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         FilterProp::Not { prop } => filterprop_reads_only_candidate_fp(prop),
 
         // POISON — read another object / side-table / combat / history / identity.
-        FilterProp::Attacking { .. }
+        // ControllerChoseLabel reads the controller's per-player anchor state.
+        FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
@@ -794,7 +796,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::MostPrevalentCreatureTypeIn { .. }
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -1017,7 +1019,7 @@ impl LegalityPoisonGates {
                     | StaticMode::MustBlock
                     | StaticMode::MustBlockAttacker { .. }
                     | StaticMode::MustBeBlocked { .. }
-                    | StaticMode::MustBeBlockedByAll
+                    | StaticMode::MustBeBlockedByAll { .. }
                     | StaticMode::MaxBlockersEachCombat { .. }
                     | StaticMode::ExtraBlockers { .. }
                     | StaticMode::CanBlockShadow

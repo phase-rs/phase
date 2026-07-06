@@ -10,19 +10,21 @@ use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_target::parse_target;
-use super::super::oracle_util::{contains_possessive, TextPair};
+use super::super::oracle_util::{contains_possessive, parse_count_expr, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
-use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
+use crate::parser::oracle_quantity::{
+    parse_cda_quantity, parse_for_each_object_filter_clause, parse_quantity_ref,
+};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
+    AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
-    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, LibraryPosition,
-    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
+    LibraryPosition, MultiTargetSpec, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -380,6 +382,164 @@ pub(super) fn patch_reveal_until_for_library_category_exile(def: &mut AbilityDef
             *kept_destination = Zone::Library;
             *rest_destination = Zone::Library;
         }
+    }
+}
+
+/// CR 608.2c + CR 205.2a: A bare "choose land or nonland" is an opaque
+/// labeled choice. It becomes a library-card-kind choice only when a later
+/// clause consumes "the chosen kind" through `MatchesLastChosenCardPredicate`.
+pub(super) fn promote_labeled_card_predicate_choices_for_chosen_kind(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        promote_labeled_card_predicate_choices_for_chosen_kind(sub);
+        if is_labeled_card_predicate_choice(&def.effect) && ability_uses_chosen_card_predicate(sub)
+        {
+            if let Effect::Choose {
+                choice_type,
+                persist,
+                ..
+            } = def.effect.as_mut()
+            {
+                *choice_type = ChoiceType::CardPredicate {
+                    options: ChoiceType::land_or_nonland_card_predicate_options(),
+                };
+                *persist = false;
+            }
+        }
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        promote_labeled_card_predicate_choices_for_chosen_kind(else_ability);
+    }
+}
+
+/// CR 701.20b + CR 608.2c: In a reorder-only look instruction ("look at the
+/// top N cards ... put them back in any order"), a later "reveal that card"
+/// refers to the new top card of the library, not to a selected parent target.
+/// Ordinary from-among Dig continuations keep their `ParentTarget` binding.
+pub(super) fn rewrite_reorder_dig_backref_reveal_to_top(def: &mut AbilityDefinition) {
+    if is_reorder_only_library_dig(&def.effect) {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            rewrite_first_transparent_parent_reveal_to_top(sub);
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_reorder_dig_backref_reveal_to_top(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        rewrite_reorder_dig_backref_reveal_to_top(else_ability);
+    }
+}
+
+fn is_reorder_only_library_dig(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Dig {
+            keep_count: None,
+            destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Library),
+            reveal: false,
+            ..
+        }
+    )
+}
+
+fn rewrite_first_transparent_parent_reveal_to_top(def: &mut AbilityDefinition) -> bool {
+    if matches!(
+        def.effect.as_ref(),
+        Effect::Reveal {
+            target: TargetFilter::ParentTarget
+        }
+    ) {
+        *def.effect = Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        };
+        return true;
+    }
+
+    if !matches!(def.effect.as_ref(), Effect::Choose { .. } | Effect::NoOp) {
+        return false;
+    }
+
+    def.sub_ability
+        .as_deref_mut()
+        .is_some_and(rewrite_first_transparent_parent_reveal_to_top)
+}
+
+fn is_labeled_card_predicate_choice(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Labeled { options },
+            ..
+        } if *options
+            == ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options()
+            )
+    )
+}
+
+fn ability_uses_chosen_card_predicate(def: &AbilityDefinition) -> bool {
+    effect_uses_chosen_card_predicate(&def.effect)
+        || def
+            .condition
+            .as_ref()
+            .is_some_and(condition_uses_chosen_card_predicate)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_uses_chosen_card_predicate)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_uses_chosen_card_predicate)
+}
+
+fn effect_uses_chosen_card_predicate(effect: &Effect) -> bool {
+    match effect {
+        Effect::Dig { filter, .. }
+        | Effect::RevealUntil { filter, .. }
+        | Effect::SearchLibrary { filter, .. }
+        | Effect::Seek { filter, .. } => target_filter_uses_chosen_card_predicate(filter),
+        _ => false,
+    }
+}
+
+fn condition_uses_chosen_card_predicate(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::RevealedHasCardType {
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            ..
+        } => true,
+        AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::SourceMatchesFilter { filter }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | AbilityCondition::ControllerControlsMatching { filter }
+        | AbilityCondition::ZoneChangedThisWay { filter }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+            target_filter_uses_chosen_card_predicate(filter)
+        }
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            condition_uses_chosen_card_predicate(condition)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_uses_chosen_card_predicate)
+        }
+        _ => false,
+    }
+}
+
+fn target_filter_uses_chosen_card_predicate(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::MatchesLastChosenCardPredicate)),
+        TargetFilter::Not { filter } => target_filter_uses_chosen_card_predicate(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_uses_chosen_card_predicate)
+        }
+        _ => false,
     }
 }
 
@@ -964,6 +1124,23 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             &before_lower,
                             &remainder_trimmed.to_ascii_lowercase(),
                         );
+                        // CR 205.1a + CR 613.1d: "It's a(n) <types> [with '<ability>']
+                        // and it loses all other card types" (Vraska, the Silencer) is a
+                        // single type-REPLACEMENT copula. The "loses all other card
+                        // types" tail is the CR 205.1a signal that the copula SETS (not
+                        // adds) the card types, so it must reach
+                        // `parse_its_a_type_loses_others` attached to the copula head
+                        // rather than being bisected into a verb-less "loses ..."
+                        // sub_ability. This phrase is unique to the replacement form, so
+                        // a bare " and " immediately before it is always an internal
+                        // conjunct, never a clause boundary.
+                        let remainder_lower_for_loses = remainder_trimmed.to_ascii_lowercase();
+                        let loses_all_other_card_types_continuation = alt((
+                            tag::<_, _, OracleError<'_>>("it loses all other card types"),
+                            tag("loses all other card types"),
+                        ))
+                        .parse(remainder_lower_for_loses.as_str())
+                        .is_ok();
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -981,6 +1158,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || roll_die_modifier_continuation
                         || bare_becomes_continuation
                         || mass_exile_union_continuation
+                        || loses_all_other_card_types_continuation
                         || inside_prefix_comma_and_continuation;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
@@ -1186,6 +1364,13 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 111.1 + CR 707.2: "for each <object>, create a token that's a copy
+    // of it" is one copy-token instruction. The comma separates the object-set
+    // head from the token body, not two independent clauses.
+    if is_for_each_copy_token_continuation(&current_lower, trimmed, &trimmed_lower) {
+        return None;
+    }
+
     if tag::<_, _, OracleError<'_>>("then ")
         .parse(trimmed_lower.as_str())
         .is_ok()
@@ -1295,6 +1480,42 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     }
 
     None
+}
+
+fn is_for_each_copy_token_continuation(
+    current_lower: &str,
+    next_text: &str,
+    next_lower: &str,
+) -> bool {
+    let current = strip_sequence_connector_lower(current_lower);
+    let Ok((object_clause, _)) = tag::<_, _, OracleError<'_>>("for each ").parse(current) else {
+        return false;
+    };
+    if parse_for_each_object_filter_clause(object_clause.trim()).is_none() {
+        return false;
+    }
+
+    let mut ctx = ParseContext::default();
+    matches!(
+        super::token::try_parse_token(next_lower, next_text, &mut ctx),
+        Some(Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget
+                | TargetFilter::SelfRef
+                | TargetFilter::TriggeringSource,
+            ..
+        })
+    )
+}
+
+fn strip_sequence_connector_lower(input: &str) -> &str {
+    let trimmed = input.trim();
+    alt((
+        tag::<_, _, OracleError<'_>>("then, "),
+        tag::<_, _, OracleError<'_>>("then "),
+    ))
+    .parse(trimmed)
+    .map(|(rest, _)| rest.trim_start())
+    .unwrap_or(trimmed)
 }
 
 /// CR 120.2b: True when the closing chunk text contains a `damage to `
@@ -2114,6 +2335,10 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag::<_, _, OracleError<'_>>("it doesn't ")),
         value((), tag("it can't ")),
         value((), tag("it cannot ")),
+        value((), tag("~ can't ")),
+        value((), tag("~ cannot ")),
+        value((), tag("this creature can't ")),
+        value((), tag("this creature cannot ")),
         value((), tag("it gains ")),
         value((), tag("it gets ")),
         value((), tag("it has ")),
@@ -3239,12 +3464,8 @@ pub(super) fn apply_clause_continuation(
                         }
 
                         // 2. Map quantity → keep_count / up_to for the choice Dig.
-                        let (choice_keep_count, choice_up_to) = match quantity {
-                            PutCount::All => (Some(u32::MAX), false),
-                            PutCount::AnyNumber => (Some(u32::MAX), true),
-                            PutCount::Up(n) => (Some(n), true),
-                            PutCount::Exactly(n) => (Some(n), false),
-                        };
+                        let (choice_keep_count, choice_keep_count_expr, choice_up_to) =
+                            quantity.to_dig_keep();
 
                         // 3. Decline branch: put all looked-at cards on library
                         // bottom with no interactive choice (player declined
@@ -3255,6 +3476,7 @@ pub(super) fn apply_clause_continuation(
                                 player: TargetFilter::Controller,
                                 count: QuantityExpr::Fixed { value: 0 },
                                 keep_count: Some(0),
+                                keep_count_expr: None,
                                 up_to: false,
                                 filter: TargetFilter::Any,
                                 destination: None,
@@ -3275,6 +3497,7 @@ pub(super) fn apply_clause_continuation(
                                 player: TargetFilter::Controller,
                                 count: QuantityExpr::Fixed { value: 0 },
                                 keep_count: choice_keep_count,
+                                keep_count_expr: choice_keep_count_expr,
                                 up_to: choice_up_to,
                                 filter: card_filter,
                                 destination: kept_dest,
@@ -3305,6 +3528,7 @@ pub(super) fn apply_clause_continuation(
             };
             if let Effect::Dig {
                 keep_count,
+                keep_count_expr,
                 up_to,
                 filter,
                 destination,
@@ -3337,24 +3561,10 @@ pub(super) fn apply_clause_continuation(
                 // sentinel here: the Dig resolver clamps it to the number of
                 // seen cards, preserving "all" and "any number" without the old
                 // arbitrary 255 cap or overloading `None`'s default meaning.
-                match quantity {
-                    PutCount::All => {
-                        *keep_count = Some(u32::MAX);
-                        *up_to = false;
-                    }
-                    PutCount::AnyNumber => {
-                        *keep_count = Some(u32::MAX);
-                        *up_to = true;
-                    }
-                    PutCount::Up(n) => {
-                        *keep_count = Some(n);
-                        *up_to = true;
-                    }
-                    PutCount::Exactly(n) => {
-                        *keep_count = Some(n);
-                        *up_to = false;
-                    }
-                }
+                let (new_keep, new_keep_expr, new_up_to) = quantity.to_dig_keep();
+                *keep_count = new_keep;
+                *keep_count_expr = new_keep_expr;
+                *up_to = new_up_to;
                 *filter = card_filter;
                 // CR 701.20b + CR 608.2c: When `destination` is None the kept
                 // cards are NOT auto-routed by the Dig resolver; downstream sub_abilities
@@ -4095,10 +4305,16 @@ pub(super) fn parse_intrinsic_continuation_ast(
             let full_lower = full_text.to_ascii_lowercase();
             // CR 400.7 + CR 701.23 + CR 701.24: Name-hate compounds ("search … graveyard,
             // hand, and library … with the same name as that {creature,spell,…} and exile
-            // them") lower to `ChangeZoneAll { SameNameAsParentTarget }`, not SearchLibrary
-            // + SearchDestination. Suppress the generic put/exile step when the full
-            // sentence matches the multi-zone same-name exile recognizer.
-            if super::imperative::try_parse_multi_zone_same_name_exile(&full_lower).is_some() {
+            // them"). The mandatory "all cards" form lowers to
+            // `ChangeZoneAll { SameNameAsParentTarget }` (NOT SearchLibrary) and handles
+            // the exile itself — suppress the generic put/exile step for it. The
+            // interactive "any number" / "up to N" forms DO lower to `SearchLibrary`
+            // (§9 R1 / D2) and need this intrinsic `ChangeZone { Exile }` destination to
+            // remove the found set, so do NOT suppress them.
+            if matches!(
+                super::imperative::try_parse_multi_zone_same_name_exile(&full_lower),
+                Some((_, MultiZoneExileQuantifier::All))
+            ) {
                 return None;
             }
             // CR 608.2c: Conditional result destinations ("put it onto the
@@ -4280,9 +4496,9 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::All, after_put_q)
         } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
             if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
-                (PutCount::Up(n), remainder.trim())
+                (PutCount::up(n), remainder.trim())
             } else {
-                (PutCount::Up(1), rest)
+                (PutCount::up(1), rest)
             }
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
@@ -4291,27 +4507,29 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
             (
                 if prefix_optional {
-                    PutCount::Up(1)
+                    PutCount::up(1)
                 } else {
-                    PutCount::Exactly(1)
+                    PutCount::exactly(1)
                 },
                 rest,
             )
-        } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
+        } else if let Some((expr, remainder)) = parse_count_expr(after_put) {
+            // CR 701.20e: literal → `Fixed` (identical lowering); "X" → `Variable`
+            // → dynamic keep carried through `Dig.keep_count_expr`.
             (
                 if prefix_optional {
-                    PutCount::Up(n)
+                    PutCount::Up(expr)
                 } else {
-                    PutCount::Exactly(n)
+                    PutCount::Exactly(expr)
                 },
                 remainder.trim(),
             )
         } else {
             (
                 if prefix_optional {
-                    PutCount::Up(1)
+                    PutCount::up(1)
                 } else {
-                    PutCount::Exactly(1)
+                    PutCount::exactly(1)
                 },
                 after_put,
             )
@@ -4395,9 +4613,9 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::All, after_put_q)
         } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
             if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
-                (PutCount::Up(n), remainder.trim())
+                (PutCount::up(n), remainder.trim())
             } else {
-                (PutCount::Up(1), rest)
+                (PutCount::up(1), rest)
             }
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
@@ -4405,12 +4623,14 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::AnyNumber, rest)
         } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
             // "a creature card" / "an artifact card" — up_to 1 (player may choose none)
-            (PutCount::Up(1), rest)
-        } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
-            // Explicit numeric count: "two creature cards" → exactly 2
-            (PutCount::Exactly(n), remainder.trim())
+            (PutCount::up(1), rest)
+        } else if let Some((expr, remainder)) = parse_count_expr(after_put) {
+            // CR 701.20e: explicit count — literal ("two creature cards" → exactly
+            // 2, `Fixed`, identical lowering) or dynamic ("X cards from among them"
+            // → `Variable`, carried through `Dig.keep_count_expr`; Stargaze).
+            (PutCount::Exactly(expr), remainder.trim())
         } else {
-            (PutCount::Up(1), after_put)
+            (PutCount::up(1), after_put)
         };
 
         // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less")
@@ -4501,11 +4721,12 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
                 nom_primitives::parse_number
                     .parse(rest)
-                    .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
-            } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
-                PutCount::Exactly(n)
+                    .map_or(PutCount::up(1), |(_, n)| PutCount::up(n))
+            } else if let Some((expr, _)) = parse_count_expr(after_put) {
+                // CR 701.20e: literal → `Fixed`; "X" → `Variable` (dynamic keep).
+                PutCount::Exactly(expr)
             } else {
-                PutCount::Up(1)
+                PutCount::up(1)
             };
 
             let rest_destination = parse_of_them_rest_destination(lower);
@@ -4981,6 +5202,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
@@ -5020,6 +5242,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -5032,6 +5255,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
         | Effect::AddTargetReplacement { .. }
@@ -5039,6 +5263,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
@@ -5059,6 +5284,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -5076,6 +5302,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }
@@ -5135,6 +5362,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ApplyPerpetual { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::ChooseCounterAdjustment { .. }
         // CR 614.12 + CR 303.4: Return-as-Aura is its own emitted sub-effect
         // following a `ChangeZone`; it is not a lookback-transparent clause
         // for the Dig-from-among continuation search.
@@ -5354,20 +5582,19 @@ pub(super) fn parse_followup_continuation_ast(
             })
         }
         Effect::Mana { .. } => {
-            // CR 106.6: Only absorb a parsed spend restriction when at least one of
-            // its branches is payable at a reachable production payment site (see
-            // `ManaSpendRestriction::has_payable_branch`). An all-dead restriction
-            // (every branch's runtime gate is hardcoded-false or never reached — X
-            // costs, face-down casts, turn-face-up) is deliberately left unabsorbed
-            // here so this `Effect::Mana` line lowers to `Effect::Unimplemented`
-            // (honest coverage red) instead of masquerading as supported. Liveness
-            // is decided once on the fully assembled restriction, so a mixed
-            // disjunction keeps its live branches (the `Any` short-circuit) rather
-            // than being dropped wholesale. A dropped all-dead restriction also
-            // drops any paired `grants`; that is intentional (no real card pairs a
-            // grant with an all-dead restriction).
+            // CR 106.6: Only absorb a parsed spend restriction when every branch it
+            // names is coverage-supported (see
+            // `ManaSpendRestriction::is_coverage_supported`). Unsupported
+            // restrictions are deliberately left unabsorbed so the residual clause
+            // remains an `Effect::Unimplemented` (honest coverage red) instead of
+            // marking a card supported while dropping an unsupported branch from
+            // coverage accounting. Do not partially absorb mixed disjunctions:
+            // Tin Street Gossip must stay red until face-down spell casting exists.
+            // A dropped unsupported restriction also drops any paired `grants`; that
+            // is intentional (no real card pairs a grant with an unsupported
+            // restriction).
             if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
-                if restriction.has_payable_branch() {
+                if restriction.is_coverage_supported() {
                     return Some(ContinuationAst::ManaRestriction {
                         restriction,
                         grants,
@@ -5475,7 +5702,7 @@ pub(super) fn parse_followup_continuation_ast(
         {
             use crate::types::ability::{FilterProp, TypedFilter};
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
                     FilterProp::NameMatchesAnyPermanent { controller: None },
                 ])),
@@ -5493,7 +5720,7 @@ pub(super) fn parse_followup_continuation_ast(
         // for a following rest-placement clause.
         Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower) => {
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
                 rest_destination: None,
@@ -6571,6 +6798,75 @@ pub(super) fn does_the_same_unimplemented_name(subject: DoesTheSameSubject) -> S
     }
 }
 
+/// CR 508.6 + CR 608.2c: Recognize a player-SCOPED "does the same / does so"
+/// replication rider — "each opponent[ attacking that player] does the same"
+/// (the Commander 2017 curse cycle: Curse of Opulence / Vitality / Verbosity /
+/// Disturbance). Returns the affected `PlayerFilter` scope on a match.
+///
+/// Unlike the single targeted-opponent form (`try_parse_does_the_same_clause`,
+/// which is deferred because the opponent acts on their OWN objects via a
+/// mid-chain target slot), the scoped fan-out maps cleanly onto EXISTING engine
+/// machinery: the caller clones the immediately-preceding sibling clause's
+/// effect and stamps the returned scope as its `player_scope`. The runtime
+/// `player_scope` driver rebinds the acting controller to each iterated player
+/// (CR 608.2c: the antecedent action is replicated verbatim per player), so an
+/// antecedent whose recipient is the controller (create a token, gain life,
+/// draw a card) is performed by each such player for themselves — no new engine
+/// variant, resolver, or scope is required.
+///
+/// CR 508.6 defines a player as "attacking [a player]" iff it controls a
+/// creature attacking that player. When the rider carries the "attacking that
+/// player" combat qualifier, the affected set is therefore NARROWER than plain
+/// `Opponent` (all opponents): it is only those opponents who control a creature
+/// attacking the enchanted/defending player this combat (CR 102.2 + CR 508.1b).
+/// The qualifier is folded into a dedicated `OpponentAttackingEnchantedPlayer`
+/// scope so a non-attacking opponent — and, crucially, the enchanted defending
+/// player in a two-player game — never receives the copied effect. A plain
+/// "each opponent does the same" (no qualifier) keeps the raw `Opponent` scope.
+/// Combinators only; the clause must be fully consumed (modulo a trailing
+/// period) or the rider stays an honest `Unimplemented` residual.
+pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter> {
+    // Single-authority scope recognition: reuse the canonical "each <scope>"
+    // subject stripper. It returns the residual predicate with only its leading
+    // verb deconjugated ("attacking" is unaffected), so the combat qualifier and
+    // replication verb below parse against the untouched tail.
+    let (scope, rest) = super::lower::strip_each_player_subject(text);
+    let scope = scope?;
+    let rest_lower = rest.to_lowercase();
+    let (has_attacking_qualifier, remainder) = nom_on_lower(&rest, &rest_lower, |i| {
+        // CR 508.6: optional combat-relation qualifier "attacking that
+        // player / that opponent / you". Its PRESENCE narrows the scope below.
+        let (i, qualifier) = opt((
+            tag("attacking "),
+            alt((tag("that player"), tag("that opponent"), tag("you"))),
+            multispace1,
+        ))
+        .parse(i)?;
+        // Prefix nesting (sum, not product): "do" + optional "es" +
+        // (" the same" | " so") covers does/do × the-same/so.
+        let (i, _) = tag("do").parse(i)?;
+        let (i, _) = opt(tag("es")).parse(i)?;
+        let (i, _) = alt((tag(" the same"), tag(" so"))).parse(i)?;
+        Ok((i, qualifier.is_some()))
+    })?;
+    if !remainder.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    if has_attacking_qualifier {
+        // CR 508.6 + CR 102.2 + CR 508.1b: "each opponent attacking that player"
+        // = opponents of the controller who declared a creature attacking the
+        // enchanted player. Only composes with the opponent subject; any other
+        // subject + combat qualifier stays an honest residual (no matching CR
+        // scope, and no card exercises it).
+        match scope {
+            PlayerFilter::Opponent => Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+            _ => None,
+        }
+    } else {
+        Some(scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6591,6 +6887,57 @@ mod tests {
                 try_parse_does_the_same_clause(phrasing),
                 Some(DoesTheSameSubject::TargetOpponent),
                 "should recognize {phrasing:?}"
+            );
+        }
+    }
+
+    // CR 508.6 + CR 102.2 + CR 608.2c: the player-scoped "does the same"
+    // recognizer maps the Commander 2017 curse-cycle rider to its affected
+    // `PlayerFilter`. The "attacking that player" combat qualifier NARROWS the
+    // opponent fan-out to only opponents attacking the enchanted player (so the
+    // non-attacking defender is excluded — CR 508.6); a plain "each opponent
+    // does the same" without the qualifier keeps the raw `Opponent` scope.
+    #[test]
+    fn scoped_does_the_same_recognizes_curse_cycle_riders() {
+        for phrasing in [
+            "Each opponent attacking that player does the same.",
+            "each opponent attacking that player does the same",
+            "Each opponent attacking that player does so.",
+        ] {
+            assert_eq!(
+                try_parse_scoped_does_the_same(phrasing),
+                Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+                "the 'attacking that player' qualifier must narrow the scope to \
+                 attackers of the enchanted player for {phrasing:?}"
+            );
+        }
+        assert_eq!(
+            try_parse_scoped_does_the_same("each opponent does the same"),
+            Some(PlayerFilter::Opponent),
+            "unqualified 'each opponent does the same' keeps the plain opponent scope"
+        );
+        assert_eq!(
+            try_parse_scoped_does_the_same("each player does the same"),
+            Some(PlayerFilter::All),
+            "'each player' fans out over all players"
+        );
+    }
+
+    // Guard: the scoped recognizer must NOT fire without a real "each <scope>"
+    // subject, and must not swallow a trailing tail — those stay honest
+    // residuals rather than a silent over-broad fan-out.
+    #[test]
+    fn scoped_does_the_same_rejects_non_scoped_or_trailing() {
+        for phrasing in [
+            "does the same.",
+            "target opponent does the same",
+            "each opponent attacking that player does the same for enchantment cards",
+            "each opponent draws a card",
+        ] {
+            assert_eq!(
+                try_parse_scoped_does_the_same(phrasing),
+                None,
+                "should reject {phrasing:?}"
             );
         }
     }
@@ -7765,6 +8112,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             destination: None,
             keep_count: None,
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
@@ -7945,7 +8293,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(2),
+                quantity: PutCount::exactly(2),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
@@ -7969,7 +8317,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(1),
+                quantity: PutCount::exactly(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
@@ -7998,7 +8346,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(1),
+                quantity: PutCount::exactly(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
@@ -8021,7 +8369,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Exactly(2),
+                quantity: PutCount::exactly(2),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Graveyard),
@@ -8129,7 +8477,7 @@ mod tests {
         else {
             panic!("expected DigFromAmong continuation, got {result:?}");
         };
-        assert_eq!(quantity, PutCount::Up(1));
+        assert_eq!(quantity, PutCount::up(1));
         // CR 401.4: kept card goes on TOP of the library; the rest go to the bottom.
         assert_eq!(destination, Some(Zone::Library));
         assert_eq!(rest_destination, Some(Zone::Library));
@@ -8187,7 +8535,7 @@ mod tests {
         };
         assert_eq!(
             quantity,
-            PutCount::Up(1),
+            PutCount::up(1),
             "\"may put a\" is optional → up_to 1"
         );
         assert_eq!(destination, Some(Zone::Hand));
@@ -8222,7 +8570,7 @@ mod tests {
         else {
             panic!("expected DigFromAmong continuation, got {result:?}");
         };
-        assert_eq!(quantity, PutCount::Up(1));
+        assert_eq!(quantity, PutCount::up(1));
         assert_eq!(destination, Some(Zone::Hand));
         assert_eq!(rest_destination, None);
         assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
@@ -8255,7 +8603,7 @@ mod tests {
         };
         assert_eq!(
             quantity,
-            PutCount::Exactly(1),
+            PutCount::exactly(1),
             "after the optional payment is made, returning a card is not optional"
         );
         assert_eq!(filter, TargetFilter::Any);
@@ -8457,7 +8805,7 @@ mod tests {
         apply_clause_continuation(
             &mut defs,
             ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: or_filter.clone(),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
@@ -9416,7 +9764,7 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::Up(1),
+                quantity: PutCount::up(1),
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
                     FilterProp::NameMatchesAnyPermanent { controller: None },
                 ])),
@@ -9761,6 +10109,10 @@ mod tests {
             "this creature gets +2/+0 until end of turn"
         ));
         assert!(starts_bare_and_clause("~ gets +2/+0 until end of turn"));
+        assert!(starts_bare_and_clause("~ can't be blocked this turn"));
+        assert!(starts_bare_and_clause(
+            "this creature can't be blocked this turn"
+        ));
     }
 
     /// CR 608.2c: Anaphoric back-reference conjuncts. Nalia de'Arnise's third
@@ -10382,6 +10734,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 4 },
             destination: None,
             keep_count: None,
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
@@ -10498,7 +10851,7 @@ mod tests {
             matches!(
                 result,
                 Some(ContinuationAst::DigFromAmong {
-                    quantity: PutCount::Exactly(2),
+                    quantity: PutCount::Exactly(QuantityExpr::Fixed { value: 2 }),
                     filter: TargetFilter::Any,
                     destination: Some(Zone::Hand),
                     ..

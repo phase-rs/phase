@@ -66,6 +66,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -95,6 +96,8 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 201.5a: a granter self-ref carries no pitch-bound X.
+        | TargetFilter::GrantingObject
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -139,6 +142,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -168,6 +172,8 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 201.5a: no pitch-bound X constraint to relax.
+        | TargetFilter::GrantingObject
         | TargetFilter::AllPlayers => filter.clone(),
     }
 }

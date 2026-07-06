@@ -899,6 +899,168 @@ fn set_planar_controller_noop_outside_planechase() {
 }
 
 // ---------------------------------------------------------------------------
+// Cluster 81 runtime acceptance: an ACTIVE PLANE's continuous statics apply
+// from the command zone (W0 admission), keyed on per-player anchor labels.
+// ---------------------------------------------------------------------------
+
+/// CR 607.2d / CR 607.2m (by analogy) + CR 311.2: Two Streams Facility's anchor
+/// statics apply while the plane is the active command-zone card — the
+/// green-anchor player gets +1 land drop, and a creature controlled by the
+/// red-waterfall player gets +2/+0 and haste. Proves the W0 command-zone
+/// source-admission fix end-to-end (without it, both statics are dead code).
+#[test]
+fn two_streams_anchor_statics_apply_from_command_zone() {
+    use crate::types::ability::{ContinuousModification, FilterProp, TypedFilter};
+    use crate::types::keywords::Keyword;
+
+    let p0 = PlayerId(0);
+    let p1 = PlayerId(1);
+    let mut state = GameState::new_two_player(11);
+
+    // Static 1: green-anchor players may play an additional land.
+    let land_drop = StaticDefinition::new(StaticMode::MayPlayAdditionalLand).affected(
+        TargetFilter::PlayerWhoChoseLabel {
+            label: "Green anchor".to_string(),
+        },
+    );
+    // Static 2: creatures controlled by red-waterfall players get +2/+0 & haste.
+    let mut anthem_filter = TypedFilter::creature();
+    anthem_filter
+        .properties
+        .push(FilterProp::ControllerChoseLabel {
+            label: "Red waterfall".to_string(),
+        });
+    let anthem = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(anthem_filter))
+        .modifications(vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 0 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            },
+        ]);
+    let face = synthesized_planar_face(CoreType::Plane, vec![], vec![land_drop, anthem]);
+    let (_active_id, _) = setup_planechase(&mut state, p0, ("Two Streams Facility", &face), &[]);
+
+    // Per-player anchor choices: P0 green, P1 red.
+    state.players[0]
+        .chosen_attributes
+        .push(crate::types::ability::ChosenAttribute::Label(
+            "Green anchor".to_string(),
+        ));
+    state.players[1]
+        .chosen_attributes
+        .push(crate::types::ability::ChosenAttribute::Label(
+            "Red waterfall".to_string(),
+        ));
+
+    // A vanilla 1/1 creature controlled by P1 (the red-waterfall player).
+    let creature_id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    let mut creature = crate::game::game_object::GameObject::new(
+        creature_id,
+        CardId(creature_id.0),
+        p1,
+        "Anchor Test Bear".to_string(),
+        Zone::Battlefield,
+    );
+    creature.card_types.core_types.push(CoreType::Creature);
+    creature.base_power = Some(1);
+    creature.base_toughness = Some(1);
+    creature.power = Some(1);
+    creature.toughness = Some(1);
+    state.objects.insert(creature_id, creature);
+    state.battlefield.push_back(creature_id);
+
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // Land-drop grant: green-anchor P0 gets +1, red-waterfall P1 gets +0.
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, p0),
+        1,
+        "green-anchor player must gain an additional land drop from the command-zone plane"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, p1),
+        0,
+        "non-green-anchor player must not gain the land drop"
+    );
+
+    // Anthem: the P1 (red-waterfall) creature is +2/+0 with haste.
+    let bear = state.objects.get(&creature_id).unwrap();
+    assert_eq!(bear.power, Some(3), "red-waterfall creature must get +2/+0");
+    assert!(
+        bear.has_keyword(&Keyword::Haste),
+        "red-waterfall creature must gain haste"
+    );
+}
+
+/// CR 702.143d: Singing Towers of Darillium, as the active plane in the command
+/// zone, grants foretell (with a per-recipient derived cost) to nonland cards in
+/// hand — proving the W0 admission + the off-zone derived-cost applier + the
+/// `foretell_cost` routing through `effective_off_zone_keywords`.
+#[test]
+fn singing_towers_grants_derived_cost_foretell_from_command_zone() {
+    use crate::types::ability::{ContinuousModification, CostDerivation, FilterProp, TypedFilter};
+    use crate::types::keywords::{CostBearingKeywordKind, Keyword};
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    let p0 = PlayerId(0);
+    let mut state = GameState::new_two_player(12);
+    state.active_player = p0;
+
+    // Affected: nonland cards you own in hand.
+    let mut affected = TypedFilter::default().controller(crate::types::ability::ControllerRef::You);
+    affected
+        .type_filters
+        .push(crate::types::ability::TypeFilter::Non(Box::new(
+            crate::types::ability::TypeFilter::Land,
+        )));
+    affected.properties.push(FilterProp::InAnyZone {
+        zones: vec![Zone::Hand],
+    });
+    let grant = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(affected))
+        .modifications(vec![ContinuousModification::AddKeywordWithDerivedCost {
+            kind: CostBearingKeywordKind::Foretell,
+            derivation: CostDerivation::ManaCostReducedBy(ManaCost::generic(2)),
+        }]);
+    let face = synthesized_planar_face(CoreType::Plane, vec![], vec![grant]);
+    setup_planechase(&mut state, p0, ("Singing Towers of Darillium", &face), &[]);
+
+    // A {4}{U}{U} nonland card in P0's hand.
+    let card_id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    let mut card = crate::game::game_object::GameObject::new(
+        card_id,
+        CardId(card_id.0),
+        p0,
+        "Expensive Spell".to_string(),
+        Zone::Hand,
+    );
+    card.card_types.core_types.push(CoreType::Sorcery);
+    card.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue; 2],
+        generic: 4,
+    };
+    state.objects.insert(card_id, card);
+    state.players[0].hand.push_back(card_id);
+
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // The hand card now has an effective Foretell keyword with derived cost
+    // {2}{U}{U} (generic 4 reduced by 2, blue pips preserved).
+    let kws = crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, card_id);
+    let expected_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue; 2],
+        generic: 2,
+    };
+    assert!(
+        kws.contains(&Keyword::Foretell(expected_cost)),
+        "granted foretell must carry the derived {{2}}{{U}}{{U}} cost, got {kws:?}"
+    );
+}
+
 // 18. Fixed Point in Time: planar-die planeswalk → chaos ensues instead
 //     (CR 614.6 / CR 701.31 / CR 901.9c)
 // ---------------------------------------------------------------------------

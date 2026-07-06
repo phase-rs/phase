@@ -99,6 +99,10 @@ impl ContinuousModification {
             | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
+            // CR 613.1f: derived-cost cast-from-off-zone keyword grant is an
+            // ability-adding effect (Layer 6). This is what makes the off-zone
+            // collector's `effect.layer == Layer::Ability` filter retain it.
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }

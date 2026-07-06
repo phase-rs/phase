@@ -10,7 +10,8 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope,
     PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, TapStateChange, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    SharedQuality, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -115,6 +116,73 @@ fn parse_damage_to_qualifier_player_planeswalker_or_battle() {
             )));
         }
         other => panic!("expected Or {{ Player, Planeswalker, Battle }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_kookus_named_creature_condition_preserves_literal_name_and_body() {
+    let parsed = parse_oracle_text(
+        "Trample\nAt the beginning of your upkeep, if you don't control a creature named Keeper of Kookus, this creature deals 3 damage to you and attacks this turn if able.\n{R}: This creature gets +1/+0 until end of turn.",
+        "Kookus",
+        &[],
+        &[],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Keeper of Kookus"))
+        })
+        .expect("Kookus upkeep trigger should parse");
+
+    let condition = trigger.condition.clone().expect("trigger condition");
+    match condition {
+        TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } => match filter {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                assert!(properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::Named { name } if name == "keeper of kookus"
+                )));
+            }
+            other => panic!("expected named creature filter, got {other:?}"),
+        },
+        other => panic!("expected no-Keeper condition, got {other:?}"),
+    }
+
+    let execute = trigger.execute.as_ref().expect("trigger body");
+    match execute.effect.as_ref() {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            ..
+        } => {}
+        other => panic!("expected damage to controller, got {other:?}"),
+    }
+
+    let must_attack = execute
+        .sub_ability
+        .as_ref()
+        .expect("must-attack continuation");
+    match must_attack.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } => assert!(static_abilities
+            .iter()
+            .any(|static_ability| static_ability.mode == StaticMode::MustAttack)),
+        other => panic!("expected must-attack continuation, got {other:?}"),
     }
 }
 
@@ -595,6 +663,42 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
         Some(crate::types::ability::TriggerConstraint::OncePerTurn),
     );
     assert!(def.execute.is_some());
+}
+
+/// CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
+/// names the one unique step that occurs exactly once per game (the starting
+/// player's first upkeep), so the trigger must carry `OncePerGame` — NOT fire
+/// every upkeep. Regression guard for the anchor-choice trigger on planes like
+/// Two Streams Facility, whose once-per-game restriction was previously dropped.
+#[test]
+fn phase_trigger_first_upkeep_of_the_game_is_once_per_game() {
+    let def = parse_trigger_line(
+        "At the beginning of the first upkeep of the game, each player draws a card.",
+        "Two Streams Facility",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::OncePerGame),
+    );
+}
+
+/// Contrast guard: "the first upkeep ... each turn" is a distinct phrasing that
+/// stays `MaxTimesPerTurn { max: 1 }` (CR 603.4) — the new "of the game" arm
+/// must not swallow it.
+#[test]
+fn phase_trigger_first_upkeep_each_turn_stays_max_times_per_turn() {
+    let def = parse_trigger_line(
+        "At the beginning of the first upkeep each turn, you gain 1 life.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::MaxTimesPerTurn { max: 1 }),
+    );
 }
 
 /// CR 608.2c + CR 712.2 (issue #4543): Tamiyo, Inquisitive Student —
@@ -1208,6 +1312,51 @@ fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
         }
         other => panic!("expected attachment intervening-if, got {other:?}"),
     }
+}
+
+/// CR 208.1 + CR 603.4 + CR 603.10a + CR 608.2h: Deathknell Berserker -- a
+/// dies-trigger intervening "if" gated on the creature's last-known power
+/// ("if its power was 3 or greater"). The look-back reads the dying creature's
+/// last-known power (CR 603.10a + CR 608.2h), so the possessive-subject
+/// threshold uses past-tense "was". Before the linking-verb axis accepted
+/// "was", the condition silently swallowed and the Zombie Berserker token was
+/// created on every death regardless of power.
+///
+/// Asserted shape:
+/// - Trigger-level `condition` is a `QuantityComparison` on Power(Source) >= 3.
+/// - The execute effect is Token creation (the Zombie Berserker), not Unimplemented.
+#[test]
+fn parse_deathknell_berserker_dies_power_lki_intervening_if() {
+    let def = parse_trigger_line(
+        "When this creature dies, if its power was 3 or greater, create a 2/2 black Zombie Berserker creature token.",
+        "Deathknell Berserker",
+    );
+
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }),
+        "trigger-level intervening-if must be Power(Source) >= 3, got {:?}",
+        def.condition,
+    );
+
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(*execute.effect, Effect::Token { .. }),
+        "execute effect must be Token creation, got {:?}",
+        execute.effect,
+    );
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "execute effect must not be Unimplemented",
+    );
 }
 
 /// CR 115.1d: "attach any number of target Equipment you control to it"
@@ -2077,10 +2226,11 @@ fn trigger_combat_damage_create_treasure_and_manifest_that_players_library() {
             Effect::Manifest {
                 target: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                enters_under: Some(ControllerRef::You),
                 ..
             }
         ),
-        "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
+        "expected Manifest {{ TriggeringPlayer, count: 1, enters_under: You }}, got: {:?}",
         sub.effect
     );
 }
@@ -4672,7 +4822,9 @@ fn parse_angel_of_destiny_end_step_loss_issue_1599() {
 ///   `QuantityCheck` on `Power { scope: Source } >= 7`.
 #[test]
 fn parse_cloud_ex_soldier_attack_trigger_structure() {
-    use crate::types::ability::{AbilityCondition, Effect};
+    use crate::types::ability::{
+        AbilityCondition, Effect, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    };
 
     let def = parse_trigger_line(
             "Whenever ~ attacks, draw a card for each equipped attacking creature you control. Then if ~ has power 7 or greater, create two Treasure tokens.",
@@ -4689,11 +4841,31 @@ fn parse_cloud_ex_soldier_attack_trigger_structure() {
     let execute = def.execute.as_ref().expect("execute must be Some");
 
     // Outer effect: draw clause.
-    assert!(
-        matches!(*execute.effect, Effect::Draw { .. }),
-        "outer execute must be Draw, got {:?}",
-        execute.effect,
-    );
+    match &*execute.effect {
+        Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter:
+                                TargetFilter::Typed(TypedFilter {
+                                    type_filters,
+                                    controller: Some(ControllerRef::You),
+                                    properties,
+                                }),
+                        },
+                },
+            ..
+        } if type_filters == &vec![TypeFilter::Creature]
+            && properties
+                == &vec![
+                    FilterProp::EquippedBy,
+                    FilterProp::Attacking { defender: None },
+                ] => {}
+        other => panic!(
+            "outer execute must draw for each equipped attacking creature you control, got {other:?}"
+        ),
+    }
 
     // Sub-ability: Treasure token creation gated on Power >= 7.
     let sub = execute
@@ -7215,6 +7387,40 @@ fn trigger_intervening_if_opponent_discarded_this_turn() {
     );
 }
 
+/// Issue #5143 — Anje Falkenrath: "Whenever you discard a card, if it has
+/// madness, untap Anje Falkenrath." The madness intervening-if must gate on
+/// the discarded card, not fire on every discard.
+#[test]
+fn trigger_intervening_if_discarded_card_has_madness() {
+    use crate::types::ability::FilterProp;
+    use crate::types::keywords::KeywordKind;
+
+    let def = parse_trigger_line(
+        "Whenever you discard a card, if it has madness, untap Anje Falkenrath.",
+        "Anje Falkenrath",
+    );
+    assert_eq!(def.mode, TriggerMode::Discarded);
+    let Some(TriggerCondition::EventObjectMatchesFilter { filter }) = &def.condition else {
+        panic!(
+            "expected EventObjectMatchesFilter intervening-if, got {:?}",
+            def.condition
+        );
+    };
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed madness filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Madness
+            }
+        )),
+        "expected madness keyword filter, got {:?}",
+        tf.properties
+    );
+}
+
 /// Issue #551 — The Raven Man: "At the beginning of each end step, if a
 /// player discarded a card this turn, create a 1/1 black Bird ...". The
 /// "a player" (any player) intervening-if must be hoisted as an all-players
@@ -9044,6 +9250,96 @@ fn trigger_vengevine_intervening_if_maps_to_nth_creature_spell_constraint() {
     );
     assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
     assert!(def.optional);
+}
+
+/// CR 601.2a + CR 603.4: Alania's disjunctive "first-of-type this turn"
+/// intervening-if lowers to `Or` of composed `And(TriggeringSpellMatchesFilter,
+/// SpellsCastThisTurn == n)` disjuncts — NOT a bundled ordinal variant — and the
+/// residual "you may have target opponent draw a card. If you do, copy that
+/// spell" parses for free (optional Draw + preserved gated CopySpell).
+///
+/// DISCRIMINATION: reverting the `parse_disjunctive_first_spell_intervening_if`
+/// wire-in restores `Effect::Unimplemented { name: "the", .. }` at the top of the
+/// chain and drops `def.condition` to `None`, flipping both the condition-equality
+/// assertion and the zero-Unimplemented reach-guard.
+#[test]
+fn trigger_alania_disjunctive_first_of_type_intervening_if() {
+    let def = parse_trigger_line(
+        "Whenever you cast a spell, if it's the first instant spell, the first sorcery spell, or the first Otter spell other than Alania you've cast this turn, you may have target opponent draw a card. If you do, copy that spell. You may choose new targets for the copy.",
+        "Alania, Divergent Storm",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    // Fires on ANY spell you cast; the disjunctive Or gates it — valid_card stays None.
+    assert_eq!(def.valid_card, None);
+
+    let instant = type_only_filter("instant").expect("instant type filter");
+    let sorcery = type_only_filter("sorcery").expect("sorcery type filter");
+    let otter = type_only_filter("otter").expect("otter subtype filter");
+    let otter_excl = TargetFilter::And {
+        filters: vec![
+            otter,
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Named {
+                    name: "Alania, Divergent Storm".to_string(),
+                }),
+            },
+        ],
+    };
+    let disjunct = |filter: TargetFilter| TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::TriggeringSpellMatchesFilter {
+                filter: filter.clone(),
+            },
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(filter),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            },
+        ],
+    };
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Or {
+            conditions: vec![disjunct(instant), disjunct(sorcery), disjunct(otter_excl)],
+        }),
+        "Alania condition must be Or-of-And(anchor, count); got {:?}",
+        def.condition
+    );
+
+    // Zero Unimplemented leakage (reach-guard for the reverted recognizer).
+    let execute = def.execute.as_ref().expect("Alania trigger execute");
+    fn has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| has_unimplemented(s))
+    }
+    assert!(
+        !has_unimplemented(execute),
+        "effect chain leaked Unimplemented: {execute:?}"
+    );
+
+    // The preserved CopySpell sub is still present and gated on the optional draw.
+    fn find_copyspell(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(*ability.effect, Effect::CopySpell { .. }) {
+            return Some(ability);
+        }
+        ability.sub_ability.as_deref().and_then(find_copyspell)
+    }
+    let copy = find_copyspell(execute).expect("CopySpell sub preserved");
+    assert_eq!(
+        copy.condition,
+        Some(AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+        }),
+        "CopySpell must stay gated on the optional draw (if you do)"
+    );
 }
 
 /// CR 109.4: "other than this card" in an exile target must add
@@ -13373,6 +13669,78 @@ fn trigger_source_deals_exactly_n_damage_to_player() {
     assert_eq!(def.mode, TriggerMode::DamageDone);
     assert_eq!(def.damage_amount, Some((Comparator::EQ, 5)));
     assert_eq!(def.valid_target, Some(TargetFilter::Player));
+}
+
+#[test]
+fn ghyrson_damage_trigger_parses_mixed_permanent_or_player_recipient() {
+    let parsed = parse_oracle_text(
+        "Ward {2}\nWhenever another source you control deals exactly 1 damage to a permanent or player, Ghyrson Starn, Kelermorph deals 2 damage to that permanent or player.",
+        "Ghyrson Starn, Kelermorph",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+        "Ghyrson must parse without unimplemented abilities: {:?}",
+        parsed.abilities
+    );
+    let trigger = parsed.triggers.first().expect("Ghyrson trigger parses");
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    assert_eq!(trigger.damage_amount, Some((Comparator::EQ, 1)));
+    assert_eq!(trigger.valid_target, None);
+    match trigger.valid_source.as_ref() {
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) => assert!(
+            properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Another)),
+            "source filter must require another controlled source: {properties:?}"
+        ),
+        other => panic!("expected another source you control filter, got {other:?}"),
+    }
+    let execute = trigger.execute.as_ref().expect("trigger has an effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::EventTarget,
+                damage_source: None,
+                ..
+            }
+        ),
+        "Ghyrson effect must damage the event target, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn damage_trigger_mixed_permanent_or_player_requires_exact_qualifier() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a permanent or player this turn, draw a card.",
+        "Test",
+    );
+    assert_ne!(
+        def.mode,
+        TriggerMode::DamageDone,
+        "mixed permanent/player recipient must not accept trailing qualifier text"
+    );
+}
+
+#[test]
+fn damage_trigger_creature_or_player_is_not_promoted_to_mixed_recipient() {
+    let def = parse_trigger_line(
+        "Whenever another source you control deals exactly 1 damage to a creature or player, draw a card.",
+        "Test",
+    );
+    assert_ne!(def.mode, TriggerMode::DamageDone);
 }
 
 // Same general parser must also accept the no-threshold + noncombat-kind
@@ -17738,6 +18106,7 @@ fn cast_trigger_lowers_to_control_next_turn_effect() {
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after,
+            window: _,
         } => {
             assert!(*grant_extra_turn_after);
             assert_eq!(

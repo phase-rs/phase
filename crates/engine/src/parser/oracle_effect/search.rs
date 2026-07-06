@@ -2326,7 +2326,7 @@ fn parse_search_filter_suffixes(
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("of the chosen kind").parse(remaining) {
             suffix
                 .properties
-                .push(FilterProp::IsChosenLandOrNonlandKind);
+                .push(FilterProp::MatchesLastChosenCardPredicate);
             remaining = rest.trim_start();
             continue;
         }

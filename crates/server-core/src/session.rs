@@ -1072,25 +1072,50 @@ impl SessionManager {
             ));
         }
 
-        // SetPhaseStops: preference propagation keyed to the authenticated player,
-        // not whoever currently holds priority. Mirrors CancelAutoPass — the engine's
-        // own handler would key by `authorized_submitter`, which is the priority
-        // holder in multiplayer, so we must intercept here to write to the correct
-        // player's entry.
-        if let GameAction::SetPhaseStops { stops } = &action {
-            if stops.is_empty() {
-                session.state.phase_stops.remove(&player);
-            } else {
-                session.state.phase_stops.insert(player, stops.clone());
-            }
+        // SetPhaseStops: per-player preference keyed to the authenticated player,
+        // not the priority holder. Bypasses the turn/legal-action prechecks (any
+        // player may adjust their own stops at any time) and delegates the
+        // mutation to the engine (single authority — the write handler keys by
+        // `actor`, i.e. the authenticated player). Not an undo point → no
+        // takeback snapshot. CR 102.1 (scope resolves against the active player).
+        if matches!(action, GameAction::SetPhaseStops { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
             let (new_legal_actions, spell_costs, by_object) =
                 engine_legal_actions_full(&session.state);
             let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
             return Ok((
                 session.state.clone(),
-                vec![],
+                result.events,
                 new_legal_actions,
-                vec![],
+                result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ));
+        }
+
+        // SetPriorityYield: per-player standing priority-yield preference keyed
+        // to the authenticated player, not the priority holder. Bypasses the
+        // turn/legal-action prechecks (any player may adjust their own yields at
+        // any time) and delegates the mutation to the engine (single authority).
+        // A preference toggle is not an undo point, so — unlike ReorderHand — it
+        // takes NO takeback snapshot. CR 117.3d.
+        if matches!(action, GameAction::SetPriorityYield { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
+            let (new_legal_actions, spell_costs, by_object) =
+                engine_legal_actions_full(&session.state);
+            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
+            return Ok((
+                session.state.clone(),
+                result.events,
+                new_legal_actions,
+                result.log_entries,
                 auto_pass,
                 spell_costs,
                 by_object,
@@ -1204,7 +1229,16 @@ impl SessionManager {
                 && session
                     .state
                     .waiting_for
-                    .accepts_freeform_blocker_damage_assignment());
+                    .accepts_freeform_blocker_damage_assignment())
+            // CR 107.1c: "remove any number of counters" has a combinatorial legal
+            // space the coarse AI candidates cannot enumerate; the engine handler
+            // (validate_counter_selection) is the real validation boundary, so the
+            // server bypasses its candidate gate for a human's intermediate submit.
+            || (matches!(action, GameAction::ChooseCountersToRemove { .. })
+                && session
+                    .state
+                    .waiting_for
+                    .accepts_freeform_counter_removal());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {
@@ -1384,6 +1418,7 @@ mod tests {
     use engine::types::card_type::CardType;
     use engine::types::game_state::WaitingFor;
     use engine::types::mana::ManaCost;
+    use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use seat_reducer::types::SeatMutation;
 
     fn make_deck() -> PlayerDeckPayload {
@@ -1784,6 +1819,54 @@ mod tests {
             }
         }
         (mgr, code, token0, token1)
+    }
+
+    /// `SetPhaseStops` is keyed to the authenticated player and delegated to the
+    /// engine write-handler (keyed by `actor`), so a non-priority player's stops
+    /// land on their OWN entry — not the priority holder's. Mirrors the
+    /// `SetPriorityYield` delegate precedent.
+    #[test]
+    fn set_phase_stops_lands_on_authenticated_players_entry() {
+        let (mut mgr, code, token0, token1) = setup_two_player_game();
+
+        let priority_player = match &mgr.sessions.get(&code).unwrap().state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => panic!("expected Priority, got {:?}", other),
+        };
+        // Dispatch from the player who does NOT hold priority.
+        let (non_priority_player, non_priority_token) = if priority_player == PlayerId(0) {
+            (PlayerId(1), token1)
+        } else {
+            (PlayerId(0), token0)
+        };
+
+        let stops = vec![PhaseStop {
+            phase: Phase::DeclareBlockers,
+            scope: PhaseStopScope::OpponentsTurns,
+        }];
+        let result = mgr.handle_action(
+            &code,
+            &non_priority_token,
+            GameAction::SetPhaseStops {
+                stops: stops.clone(),
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "SetPhaseStops from a non-priority player should succeed: {:?}",
+            result.err()
+        );
+
+        let state = &mgr.sessions.get(&code).unwrap().state;
+        assert_eq!(
+            state.phase_stops.get(&non_priority_player),
+            Some(&stops),
+            "the write must land on the authenticated (non-priority) player's entry"
+        );
+        assert!(
+            !state.phase_stops.contains_key(&priority_player),
+            "the priority holder's entry must remain untouched"
+        );
     }
 
     /// `ReorderHand` succeeds even when the sender is not the priority holder.
@@ -2311,6 +2394,84 @@ mod tests {
             err.contains("not permitted") || err.contains("permission"),
             "{err}"
         );
+    }
+
+    // CR 107.1c: "remove any number of counters" — a human's intermediate submit
+    // ("remove 2 of 3") is not one of the coarse AI candidates (remove-none /
+    // remove-all), so the session must bypass its candidate legality gate via
+    // accepts_freeform_counter_removal + the skip_legality arm. Reverting either
+    // (#9 / #10) makes the intermediate submission fail as "Illegal action".
+    #[test]
+    fn remove_counters_intermediate_submit_bypasses_candidate_gate() {
+        use engine::types::ability::{
+            Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        };
+        use engine::types::counter::CounterType;
+        use engine::types::game_state::{CounterRemoveChoice, GameState, WaitingFor};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token) = mgr.create_game(make_deck());
+
+        let mut state = GameState::new_two_player(7);
+        let bearer = engine::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bearer)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 3);
+        let pending = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
+                target: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(bearer)],
+            bearer,
+            PlayerId(0),
+        );
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::RemoveCountersChoice {
+            player: PlayerId(0),
+            source_id: bearer,
+            counter_type: None,
+            available: vec![(CounterType::Plus1Plus1, 3)],
+            pending_effect: Box::new(pending),
+        };
+        mgr.sessions.get_mut(&code).unwrap().state = state;
+
+        // Discriminating: this "remove 2 of 3" submit is absent from the coarse
+        // candidate set ({[], remove-all}); only the accepts_freeform bypass makes
+        // it legal (revert accepts_freeform_counter_removal -> false => rejected).
+        let result = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::ChooseCountersToRemove {
+                selections: vec![CounterRemoveChoice {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 2,
+                }],
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "intermediate removal must be accepted, not rejected as illegal: {result:?}"
+        );
+        let removed_to = mgr.sessions.get(&code).unwrap().state.objects[&bearer]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(removed_to, 1, "exactly 2 of 3 +1/+1 counters removed");
     }
 
     #[test]

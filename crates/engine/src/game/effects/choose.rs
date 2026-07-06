@@ -71,15 +71,25 @@ pub fn resolve(
         return Ok(());
     }
 
+    let source_id = if persist || choice_type.needs_choice_source_context() {
+        Some(ability.source_id)
+    } else {
+        None
+    };
+
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
         choice_type,
         options,
-        source_id: if persist {
-            Some(ability.source_id)
-        } else {
-            None
-        },
+        source_id,
+        // CR 607.2d / CR 607.2m (by analogy): `persist_player` is an INDEPENDENT
+        // routing discriminator, not a repurposing of `source_id`. During a
+        // `player_scope: All` fan-out (effects/mod.rs `set_scoped_player_recursive`),
+        // `ability.scoped_player` names the fanned per-player value, so a
+        // persisting choice records the anchor onto that exact player. Outside a
+        // fan-out (Khans Siege), `scoped_player` is `None`, so this stays `None`
+        // and the object-scoped `source_id` binding is preserved unchanged.
+        persist_player: if persist { ability.scoped_player } else { None },
     };
 
     events.push(GameEvent::EffectResolved {
@@ -148,12 +158,16 @@ pub(crate) fn resolve_random_in_chain(
     let index = state.rng.random_range(0..options.len());
     let chosen = options[index].clone();
 
-    let source_id = if persist {
+    let source_id = if persist || choice_type.needs_choice_source_context() {
         Some(ability.source_id)
     } else {
         None
     };
-    bind_named_choice(state, &choice_type, &chosen, source_id);
+    // Anchor choices are never random-selected today, so the random path keeps
+    // object-scoped behavior; `persist_player: None` makes that a deliberate
+    // decision. A future per-player random anchor would compute
+    // `ability.scoped_player` here explicitly.
+    bind_named_choice(state, &choice_type, &chosen, source_id, None);
 
     // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)` answer binds a
     // resolution-scoped chosen player. Append it to the resolving ability's
@@ -186,18 +200,49 @@ pub(crate) fn resolve_random_in_chain(
 /// Faithfully reproduces the state-side binding the interactive handler
 /// performs (`engine_resolution_choices.rs`): when `source_id` is `Some`, a
 /// persistable choice is pushed onto the source's `chosen_attributes` and (for
-/// the layer-affecting choice kinds) layers are recomputed; `last_named_choice`
-/// is always set. The resolution-scoped `chosen_players` append for
+/// the layer-affecting choice kinds) layers are recomputed. Resolution-scoped
+/// land/nonland choices intentionally keep only `last_named_choice` so the
+/// chosen kind or guess can drive the current resolution without rendering a
+/// lasting source-card badge. The resolution-scoped `chosen_players` append for
 /// `Player`/`Opponent` choices is the CALLER's responsibility because its
 /// destination differs (the interactive path appends to the stashed
 /// continuation chain; the random path mutates the resolving ability directly).
+///
+/// CR 607.2d / CR 607.2m (by analogy): when `persist_player` is `Some(pid)`, the
+/// answer is a PER-PLAYER anchor label — it is pushed onto
+/// `state.players[pid].chosen_attributes` ONLY and the object-push branch is
+/// SKIPPED entirely, so no `Label` lands on `source_id`'s object (an
+/// object-scoped `ChosenLabelIs` must never read a per-player anchor). The two
+/// destinations are mutually exclusive.
 pub(crate) fn bind_named_choice(
     state: &mut GameState,
     choice_type: &ChoiceType,
     choice: &str,
     source_id: Option<ObjectId>,
+    persist_player: Option<PlayerId>,
 ) {
-    if let Some(obj_id) = source_id {
+    if let Some(pid) = persist_player {
+        // CR 607.2d / CR 607.2m (by analogy): per-player anchor label. The
+        // `Player` axis only ever stores `ChosenAttribute::Label`, so no
+        // multi-keyword split is needed here. Replace-on-rechoose (retain-drop
+        // any existing `Label`, then push) mirrors the object-branch Keyword
+        // replace so "last chose" holds exactly one anchor per player.
+        if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), choice) {
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
+                player
+                    .chosen_attributes
+                    .retain(|a| !matches!(a, ChosenAttribute::Label(_)));
+                player.chosen_attributes.push(attr);
+            }
+            // CR 613.1: per-player labels feed statics/filters — re-run layers.
+            crate::game::layers::mark_layers_full(state);
+        }
+        state.last_named_choice = ChoiceValue::from_choice(choice_type, choice);
+        return;
+    }
+    if let Some(obj_id) =
+        source_id.filter(|_| !choice_type.is_resolution_scoped_card_predicate_choice())
+    {
         // CR 608.2d: A multi-keyword choice (`ChoiceType::Keyword { count > 1 }`,
         // e.g. Greymond's "choose two abilities from among ...") arrives as one
         // comma-joined answer ("First Strike, Vigilance"). Split it on ',' and
@@ -447,6 +492,9 @@ fn compute_options(
         ChoiceType::CardName => Vec::new(),
         ChoiceType::NumberRange { min, max } => (*min..=*max).map(|n| n.to_string()).collect(),
         ChoiceType::Labeled { options } => options.clone(),
+        ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
+            ChoiceType::card_predicate_labels(options)
+        }
         // CR 205.3i: Land types include the basic land types plus Cave, Desert, Gate, etc.
         ChoiceType::LandType => to_strings(LAND_TYPES),
         // CR 102.3: An opponent is any player not on the choosing player's team
@@ -600,6 +648,78 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 607.2d / CR 607.2m (by analogy): `bind_named_choice` routes an anchor
+    /// label to the PLAYER when `persist_player` is set (never to the object),
+    /// to the OBJECT otherwise, and replaces on re-choose per player.
+    #[test]
+    fn bind_named_choice_routes_per_player_vs_object() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = ObjectId(500);
+        let obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            crate::types::identifiers::CardId(500),
+            PlayerId(0),
+            "Anchor Plane".to_string(),
+            crate::types::zones::Zone::Command,
+        );
+        state.objects.insert(obj_id, obj);
+        let labeled = ChoiceType::Labeled {
+            options: vec!["Green anchor".to_string(), "Red waterfall".to_string()],
+        };
+
+        // Per-player: Label lands on players[0], object stays empty.
+        bind_named_choice(
+            &mut state,
+            &labeled,
+            "Green anchor",
+            Some(obj_id),
+            Some(PlayerId(0)),
+        );
+        assert!(crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(0),
+            "Green anchor"
+        ));
+        assert!(
+            state
+                .objects
+                .get(&obj_id)
+                .unwrap()
+                .chosen_attributes
+                .is_empty(),
+            "per-player anchor must NOT land on the plane object"
+        );
+
+        // Re-choose replaces the prior per-player Label (exactly one anchor).
+        bind_named_choice(
+            &mut state,
+            &labeled,
+            "Red waterfall",
+            Some(obj_id),
+            Some(PlayerId(0)),
+        );
+        assert!(crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(0),
+            "Red waterfall"
+        ));
+        assert!(!crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(0),
+            "Green anchor"
+        ));
+
+        // Object-scoped (persist_player None): Label lands on the object.
+        bind_named_choice(&mut state, &labeled, "Green anchor", Some(obj_id), None);
+        assert!(state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .chosen_attributes
+            .iter()
+            .any(|a| matches!(a, ChosenAttribute::Label(l) if l == "Green anchor")));
     }
 
     #[test]
@@ -841,6 +961,53 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options, &["Left", "Right"]);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn land_nonland_guess_carries_source_context_without_persisting() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::CardPredicateGuess {
+                    options: ChoiceType::land_or_nonland_card_predicate_options(),
+                },
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type,
+                options,
+                source_id,
+                persist_player,
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(
+                    *choice_type,
+                    ChoiceType::CardPredicateGuess {
+                        options: ChoiceType::land_or_nonland_card_predicate_options()
+                    }
+                );
+                assert_eq!(
+                    options,
+                    &ChoiceType::card_predicate_labels(
+                        &ChoiceType::land_or_nonland_card_predicate_options()
+                    )
+                );
+                assert_eq!(*source_id, Some(ObjectId(100)));
+                assert_eq!(*persist_player, None);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -1215,7 +1382,7 @@ mod tests {
         let choice_type = ChoiceType::Labeled {
             options: vec!["Left".into(), "Center".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &choice_type, "Left", Some(src));
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
 
         let obj = &state.objects[&src];
         assert_eq!(
@@ -1248,7 +1415,7 @@ mod tests {
             options: vec!["Left".into(), "Right".into()],
         };
         // Lowercase answer proves case-insensitive typing via from_choice_label.
-        bind_named_choice(&mut state, &choice_type, "left", Some(src));
+        bind_named_choice(&mut state, &choice_type, "left", Some(src), None);
 
         let obj = &state.objects[&src];
         assert_eq!(obj.chosen_direction(), Some(SeatDirection::Left));
@@ -1271,8 +1438,8 @@ mod tests {
         let choice_type = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &choice_type, "Left", Some(src));
-        bind_named_choice(&mut state, &choice_type, "Right", Some(src));
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
+        bind_named_choice(&mut state, &choice_type, "Right", Some(src), None);
 
         let obj = &state.objects[&src];
         let directions: Vec<_> = obj
