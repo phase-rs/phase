@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Data-carrying static mode variants that are supported but can't be registered
 /// by exact key in the static registry (because the key includes runtime data).
-fn is_data_carrying_static(mode: &StaticMode) -> bool {
+pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
     matches!(
         mode,
         // CR 514.2: nullary marker static — runtime enforcement is the cleanup
@@ -128,6 +128,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // direct-match in combat.rs declare-blockers validation (mirrors
             // CantBeBlockedBy).
             | StaticMode::MustBeBlocked { .. }
+            // CR 509.1c: MustBeBlockedByAll carries an optional blocker
+            // `TargetFilter` (None = all creatures (Lure); Some = only matching
+            // creatures compelled, Talruum Piper flying / Marble Priest Walls).
+            // The variant is now parameterized with a non-Hash TargetFilter, so
+            // it is no longer registry-keyed; runtime enforcement is direct-match
+            // in combat.rs declare-blockers validation (mirrors MustBeBlocked).
+            | StaticMode::MustBeBlockedByAll { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
@@ -797,7 +804,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ));
             }
             FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
-            FilterProp::IsChosenLandOrNonlandKind => parts.push("chosen land/nonland kind".into()),
+            FilterProp::MatchesLastChosenCardPredicate => {
+                parts.push("chosen card predicate".into())
+            }
             FilterProp::NotColor { color } => {
                 parts.push(format!("non-{}", format!("{color:?}").to_lowercase()));
             }
@@ -1216,6 +1225,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
                 ObjectScope::OtherRevealedCard => "other revealed card",
+                ObjectScope::AmassedArmy => "amassed Army",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1241,6 +1251,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's power".into(),
             ObjectScope::CostPaidObject => "referenced object's power".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's power".into(),
+            ObjectScope::AmassedArmy => "amassed Army's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1252,6 +1263,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's toughness".into(),
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's toughness".into(),
+            ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1263,6 +1275,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's mana value".into(),
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's mana value".into(),
+            ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1275,6 +1288,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's colors".into(),
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's colors".into(),
+            ObjectScope::AmassedArmy => "amassed Army's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1286,6 +1300,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "typeline components on event target".into(),
             ObjectScope::CostPaidObject => "typeline components on cost-paid object".into(),
             ObjectScope::OtherRevealedCard => "typeline components on other revealed card".into(),
+            ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1297,6 +1312,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "words in event target's name".into(),
             ObjectScope::CostPaidObject => "words in cost-paid object's name".into(),
             ObjectScope::OtherRevealedCard => "words in other revealed card's name".into(),
+            ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1307,6 +1323,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
                 ObjectScope::OtherRevealedCard => "other revealed card",
+                ObjectScope::AmassedArmy => "amassed Army",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -1846,6 +1863,8 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::NumberRange { min, max } => return format!("number ({min}-{max})"),
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
+        ChoiceType::CardPredicate { .. } => "card predicate",
+        ChoiceType::CardPredicateGuess { .. } => "card predicate guess",
         ChoiceType::Opponent { .. } => "opponent",
         ChoiceType::Player => "player",
         ChoiceType::TwoColors => "two colors",
@@ -6547,6 +6566,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetPower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6558,6 +6578,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6569,6 +6590,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetManaValue", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaValue", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -6581,6 +6603,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6592,6 +6615,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetObjectNameWordCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardNameWordCount", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6603,6 +6627,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetObjectTypelineComponentCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectTypelineComponentCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardTypelineComponentCount", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -6614,6 +6639,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetManaSymbolsInManaCost", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaSymbolsInManaCost", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaSymbolsInManaCost", Handled),
+            ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
@@ -8152,7 +8178,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 static_abilities.iter().any(|s| match &s.mode {
                     // CR 509.1c: "All creatures able to block ~ do so" lowers to the
                     // lure-strength MustBeBlockedByAll (not the one-blocker MustBeBlocked).
-                    StaticMode::MustBeBlockedByAll => {
+                    StaticMode::MustBeBlockedByAll { .. } => {
                         effective_lower.contains("able to block")
                             && effective_lower.contains("do so")
                     }
@@ -10569,6 +10595,7 @@ mod tests {
                     characteristic_defining: false,
                     description: None,
                     attack_defended: None,
+                    source_controller: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -10613,6 +10640,7 @@ mod tests {
                     characteristic_defining: false,
                     description: None,
                     attack_defended: None,
+                    source_controller: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -11598,6 +11626,7 @@ mod tests {
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -11629,6 +11658,7 @@ mod tests {
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -11658,6 +11688,7 @@ mod tests {
             characteristic_defining: false,
             description: None,
             attack_defended: None,
+            source_controller: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -11805,6 +11836,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("Skip your draw step.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(
@@ -11834,6 +11866,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("Players skip their upkeep steps.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(
@@ -11873,6 +11906,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("Players can't draw cards.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11903,6 +11937,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("You can't draw cards.".to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11935,6 +11970,7 @@ mod tests {
             characteristic_defining: false,
             description: Some(oracle.to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -11973,6 +12009,7 @@ mod tests {
                 characteristic_defining: false,
                 description: Some(description.to_string()),
                 attack_defended: None,
+                source_controller: None,
             });
         }
 
@@ -12113,6 +12150,7 @@ mod tests {
             characteristic_defining: false,
             description: Some(oracle.to_string()),
             attack_defended: None,
+            source_controller: None,
         });
 
         assert!(

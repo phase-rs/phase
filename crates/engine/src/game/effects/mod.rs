@@ -1274,6 +1274,29 @@ pub(crate) fn parent_referent_context_from_events(
     damaged_object_context_from_events(state, events)
 }
 
+fn amassed_army_context_from_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Option<CostPaidObjectSnapshot> {
+    // CR 701.47c + CR 608.2c: "the Army you amassed" / "the amassed Army"
+    // names the Army chosen by the most recent amass instruction in this
+    // resolving ability. This helper only stamps the serialized ability
+    // carrier; quantity resolution reads `ResolvedAbility.amassed_army_object`,
+    // not the event log.
+    events.iter().rev().find_map(|event| match event {
+        GameEvent::ArmyAmassed { object_id, .. } => {
+            state
+                .objects
+                .get(object_id)
+                .map(|obj| CostPaidObjectSnapshot {
+                    object_id: *object_id,
+                    lki: obj.snapshot_public_characteristics(),
+                })
+        }
+        _ => None,
+    })
+}
+
 /// CR 608.2c: capture a single creature an earlier instruction dealt damage to
 /// as the resolution's anaphoric referent (the "fight-back clause"). A
 /// multi-target damage parent (e.g. Living Inferno, which deals damage to each
@@ -1575,24 +1598,17 @@ fn try_begin_reflexive_target_selection(
         return Ok(false);
     }
 
-    // CR 608.2c + CR 109.4: Propagate the parent's resolution-scoped
-    // `chosen_players` onto the reflexive ability BEFORE its target slots are
-    // built, so a `ControllerRef::ChosenPlayer`-scoped target filter (Strax's
-    // "fights another target creature THAT PLAYER controls" after a random
-    // "choose a player") enumerates against the game-selected player. The
-    // interactive path achieves this via the answer handler appending to the
-    // stashed continuation chain; the inline (e.g. random-`Choose`) path has no
-    // such stash, so the slot builder would otherwise see an empty
-    // `chosen_players`. Only clones when the parent actually carries choices the
-    // reflexive lacks, preserving the borrow for every ordinary reflexive.
-    let reflexive_owned;
-    let reflexive = if parent.is_some_and(|p| {
-        !p.chosen_players.is_empty() && p.chosen_players.len() > reflexive.chosen_players.len()
-    }) {
+    // CR 608.2c + CR 603.12: The reflexive triggered ability is put on the
+    // stack during the parent ability's resolution, so target legality must see
+    // the same resolution-scoped referents that the pending trigger will later
+    // carry. Stamp one clone before `build_target_slots` so chosen-player and
+    // amassed-Army filters enumerate legal targets from the actual parent event.
+    let reflexive_context_owned;
+    let reflexive = if let Some(parent) = parent {
         let mut owned = reflexive.clone();
-        owned.set_chosen_players_recursive(&parent.unwrap().chosen_players);
-        reflexive_owned = owned;
-        &reflexive_owned
+        apply_parent_chain_context(&mut owned, parent, effect_context_object, state);
+        reflexive_context_owned = owned;
+        &reflexive_context_owned
     } else {
         reflexive
     };
@@ -1606,10 +1622,7 @@ fn try_begin_reflexive_target_selection(
     // shared modal-trigger router, which prompts `WaitingFor::AbilityModeChoice`
     // and only then collects each chosen mode's targets.
     if reflexive.modal.is_some() && !reflexive.mode_abilities.is_empty() {
-        let mut reflexive_clone = reflexive.clone();
-        if let Some(parent) = parent {
-            apply_parent_chain_context(&mut reflexive_clone, parent, effect_context_object, state);
-        }
+        let reflexive_clone = reflexive.clone();
         let trigger_description = reflexive_clone
             .description
             .clone()
@@ -1682,9 +1695,6 @@ fn try_begin_reflexive_target_selection(
         )
         .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
         let mut reflexive_clone = reflexive.clone();
-        if let Some(parent) = parent {
-            apply_parent_chain_context(&mut reflexive_clone, parent, effect_context_object, state);
-        }
         crate::game::ability_utils::assign_targets_in_chain(state, &mut reflexive_clone, &chosen)
             .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
         resolve_ability_chain(state, &reflexive_clone, events, depth + 1)?;
@@ -1699,10 +1709,7 @@ fn try_begin_reflexive_target_selection(
     )
     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
 
-    let mut reflexive_clone = reflexive.clone();
-    if let Some(parent) = parent {
-        apply_parent_chain_context(&mut reflexive_clone, parent, effect_context_object, state);
-    }
+    let reflexive_clone = reflexive.clone();
     let trigger_description = reflexive_clone
         .description
         .clone()
@@ -1861,6 +1868,9 @@ fn apply_parent_chain_context(
     if !parent.chosen_players.is_empty() && parent.chosen_players.len() > child.chosen_players.len()
     {
         child.set_chosen_players_recursive(&parent.chosen_players);
+    }
+    if let Some(snapshot) = parent.amassed_army_object.as_ref() {
+        child.set_amassed_army_object_recursive(snapshot.clone());
     }
     if let Some(snapshot) = effect_context_object {
         child.set_effect_context_object_recursive(snapshot.clone());
@@ -5849,23 +5859,30 @@ fn resolve_chain_body(
             ability.starting_with.clone(),
             controller,
         );
-        let matching_players: Vec<PlayerId> = if matches!(scope, PlayerFilter::AllExcept { .. }) {
-            // CR 608.2c + CR 109.4 + CR 608.2h: the `AllExcept` anchor may be an
-            // ability-target reference (ParentObjectTargetController), which the
-            // generic `matches_player_scope` predicate cannot resolve (it carries
-            // no `ResolvedAbility`). Route through the ability-aware
-            // `speed_effects::players_for_filter`, then re-impose APNAP order by
-            // intersecting against the apnap sequence.
-            let set =
-                crate::game::effects::speed_effects::players_for_filter(state, scope, ability);
-            apnap.into_iter().filter(|pid| set.contains(pid)).collect()
-        } else {
-            apnap
+        let matching_players: Vec<PlayerId> = match scope {
+            PlayerFilter::AllExcept { .. } => {
+                // CR 608.2c + CR 109.4 + CR 608.2h: the `AllExcept` anchor may be an
+                // ability-target reference (ParentObjectTargetController), which the
+                // generic `matches_player_scope` predicate cannot resolve (it carries
+                // no `ResolvedAbility`). Route through the ability-aware
+                // `speed_effects::players_for_filter`, then re-impose APNAP order by
+                // intersecting against the apnap sequence.
+                let set =
+                    crate::game::effects::speed_effects::players_for_filter(state, scope, ability);
+                apnap.into_iter().filter(|pid| set.contains(pid)).collect()
+            }
+            PlayerFilter::ChosenPlayer { index } => ability
+                .chosen_players
+                .get(*index as usize)
+                .copied()
+                .map(|chosen| apnap.into_iter().filter(|pid| *pid == chosen).collect())
+                .unwrap_or_default(),
+            _ => apnap
                 .into_iter()
                 .filter(|pid| {
                     matches_player_scope(state, *pid, scope, controller, ability.source_id)
                 })
-                .collect()
+                .collect(),
         };
         let (scoped_template, after_scope) = split_player_scope_chain(ability, scope);
         let after_scope_needs_linked_exile = after_scope.as_ref().is_some_and(|tail| {
@@ -6896,6 +6913,7 @@ fn resolve_chain_body(
     };
     let effect_context_object =
         parent_referent_context_from_events(state, &events[events_before..]);
+    let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
     // CR 608.2c: "[Mandatory action]. If you do, [rider]." — seed the
     // performed-flag for a mandatory parent whose action just occurred.
@@ -6939,6 +6957,15 @@ fn resolve_chain_body(
         owned.context.optional_effect_performed = true;
         mandatory_rider_owned = owned;
         &mandatory_rider_owned
+    } else {
+        ability
+    };
+    let amassed_army_owned;
+    let ability = if let Some(snapshot) = &amassed_army_object {
+        let mut owned = ability.clone();
+        owned.set_amassed_army_object_recursive(snapshot.clone());
+        amassed_army_owned = owned;
+        &amassed_army_owned
     } else {
         ability
     };
@@ -7855,7 +7882,8 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::EventSource
             | crate::types::ability::ObjectScope::CostPaidObject
             | crate::types::ability::ObjectScope::OtherRevealedCard
-            | crate::types::ability::ObjectScope::EventTarget => false,
+            | crate::types::ability::ObjectScope::EventTarget
+            | crate::types::ability::ObjectScope::AmassedArmy => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
@@ -7910,9 +7938,13 @@ pub(crate) fn evaluate_condition(
                 .copied();
             let type_matches = subject_id
                 .map(|id| {
-                    card_types.iter().any(|card_type| {
-                        super::printed_cards::object_has_core_type(state, id, *card_type)
-                    })
+                    if card_types.is_empty() {
+                        additional_filter.is_some() || subtype_filter.is_some()
+                    } else {
+                        card_types.iter().any(|card_type| {
+                            super::printed_cards::object_has_core_type(state, id, *card_type)
+                        })
+                    }
                 })
                 .unwrap_or(false);
             // CR 205.3m: Match the revealed card's subtype against the subtype filter.
@@ -8049,7 +8081,8 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::EventSource
                 | crate::types::ability::ObjectScope::CostPaidObject
                 | crate::types::ability::ObjectScope::OtherRevealedCard
-                | crate::types::ability::ObjectScope::EventTarget => None,
+                | crate::types::ability::ObjectScope::EventTarget
+                | crate::types::ability::ObjectScope::AmassedArmy => None,
             };
             object_id
                 .and_then(|id| state.objects.get(&id))
@@ -8878,11 +8911,12 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
-        ControllerRef, DelayedTriggerCondition, Duration, EffectScope, FilterProp,
-        ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
-        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        CardPredicateChoice, CastingPermission, ChoiceValue, Chooser, ChosenAttribute, Comparator,
+        ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, EffectScope,
+        FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter,
+        PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext, StaticDefinition,
+        TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -18602,6 +18636,60 @@ mod tests {
             evaluate_condition(&land_cond, &state, &ability),
             "reveal must take precedence over the zone-change fallback",
         );
+    }
+
+    #[test]
+    fn revealed_has_card_type_accepts_chosen_land_nonland_property_without_type_list() {
+        let mut state = GameState::new_two_player(42);
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let nonland_card = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Ornithopter".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&nonland_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let condition = AbilityCondition::RevealedHasCardType {
+            card_types: Vec::new(),
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            subtype_filter: None,
+        };
+
+        state.last_named_choice = Some(ChoiceValue::CardPredicate(CardPredicateChoice::Land));
+        state.last_revealed_ids.push(land_card);
+        assert!(evaluate_condition(&condition, &state, &ability));
+
+        state.last_revealed_ids.clear();
+        state.last_revealed_ids.push(nonland_card);
+        assert!(!evaluate_condition(&condition, &state, &ability));
+
+        state.last_named_choice = Some(ChoiceValue::CardPredicate(CardPredicateChoice::Nonland));
+        assert!(evaluate_condition(&condition, &state, &ability));
     }
 
     #[test]

@@ -384,6 +384,22 @@ fn apply_pending_counter_post_action(
             }
             true
         }
+        PendingCounterPostAction::ContinueAmassAfterTokenCreation {
+            controller,
+            subtype,
+            count,
+            ability,
+        } => super::amass::continue_amass_after_token_creation(
+            state, controller, &subtype, count, &ability, events,
+        ),
+        PendingCounterPostAction::FinalizeAmass {
+            object_id,
+            subtype,
+            ability,
+        } => {
+            super::amass::finalize_amass(state, object_id, &subtype, &ability, events);
+            true
+        }
         PendingCounterPostAction::InjectPredefinedTokenAbilities { object_id } => {
             // CR 111.10 + CR 400.7: Incubator tokens get predefined
             // subtype abilities and battlefield-entry bookkeeping after their

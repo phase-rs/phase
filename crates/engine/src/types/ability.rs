@@ -336,6 +336,18 @@ pub enum ChoiceType {
     },
     /// "Choose a land type" — includes basic + common nonbasic land types.
     LandType,
+    /// Choose a card predicate for resolution-scoped comparisons such as
+    /// "card of the chosen kind". Unlike `Color`, this is not a persisted
+    /// source choice; it classifies the card currently being revealed/checked.
+    CardPredicate {
+        options: Vec<CardPredicateChoice>,
+    },
+    /// Guess which card predicate the revealed card will match. Used by
+    /// top-card "guessed right" sequences and intentionally resolution-scoped
+    /// rather than persisted on the source card.
+    CardPredicateGuess {
+        options: Vec<CardPredicateChoice>,
+    },
     /// "Choose an opponent" — selects one opponent player (CR 102.3 defines an
     /// opponent as any player not on the choosing player's team).
     ///
@@ -388,6 +400,42 @@ pub enum ChoiceType {
     },
 }
 
+/// A predicate option that can be chosen or guessed for a card revealed during
+/// the current resolution. Options may overlap: a red-black card matches both
+/// `Color(Red)` and `Color(Black)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CardPredicateChoice {
+    Land,
+    Nonland,
+    Color(ManaColor),
+}
+
+impl CardPredicateChoice {
+    pub fn label(self) -> String {
+        match self {
+            Self::Land => "Land".to_string(),
+            Self::Nonland => "Nonland".to_string(),
+            Self::Color(color) => format!("{color:?}"),
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "Land" => Some(Self::Land),
+            "Nonland" => Some(Self::Nonland),
+            _ => label.parse::<ManaColor>().ok().map(Self::Color),
+        }
+    }
+
+    pub fn matches_card(self, core_types: &[CoreType], colors: &[ManaColor]) -> bool {
+        match self {
+            Self::Land => core_types.contains(&CoreType::Land),
+            Self::Nonland => !core_types.contains(&CoreType::Land),
+            Self::Color(color) => colors.contains(&color),
+        }
+    }
+}
+
 impl ChoiceType {
     /// Unrestricted creature-type choice (all creature types offered).
     pub fn creature_type() -> Self {
@@ -420,6 +468,29 @@ impl ChoiceType {
 
     pub fn card_type_excluding(excluded: Vec<CoreType>) -> Self {
         Self::CardType { excluded }
+    }
+
+    pub fn land_or_nonland_card_predicate_options() -> Vec<CardPredicateChoice> {
+        vec![CardPredicateChoice::Land, CardPredicateChoice::Nonland]
+    }
+
+    pub fn is_resolution_scoped_card_predicate_choice(&self) -> bool {
+        matches!(
+            self,
+            Self::CardPredicate { .. } | Self::CardPredicateGuess { .. }
+        )
+    }
+
+    pub fn is_card_predicate_guess(&self) -> bool {
+        matches!(self, Self::CardPredicateGuess { .. })
+    }
+
+    pub fn needs_choice_source_context(&self) -> bool {
+        matches!(self, Self::CardPredicateGuess { .. })
+    }
+
+    pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
+        options.iter().map(|option| option.label()).collect()
     }
 
     /// Whether the player supplies the chosen value at runtime rather than the
@@ -507,6 +578,22 @@ impl Serialize for ChoiceType {
                 variant.end()
             }
             Self::LandType => serializer.serialize_unit_variant("ChoiceType", 8, "LandType"),
+            Self::CardPredicate { options } => {
+                let mut variant =
+                    serializer.serialize_struct_variant("ChoiceType", 15, "CardPredicate", 1)?;
+                variant.serialize_field("options", options)?;
+                variant.end()
+            }
+            Self::CardPredicateGuess { options } => {
+                let mut variant = serializer.serialize_struct_variant(
+                    "ChoiceType",
+                    16,
+                    "CardPredicateGuess",
+                    1,
+                )?;
+                variant.serialize_field("options", options)?;
+                variant.end()
+            }
             // Serialize the unrestricted form as the legacy unit variant
             // "Opponent" so existing card-data JSON stays byte-stable; only emit
             // the struct form when a restriction is present.
@@ -585,6 +672,12 @@ impl<'de> Deserialize<'de> for ChoiceType {
             Labeled {
                 options: Vec<String>,
             },
+            CardPredicate {
+                options: Vec<CardPredicateChoice>,
+            },
+            CardPredicateGuess {
+                options: Vec<CardPredicateChoice>,
+            },
             Opponent {
                 #[serde(default)]
                 restriction: Option<Box<PlayerFilter>>,
@@ -643,6 +736,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
+                ChoiceTypeData::CardPredicate { options } => Ok(Self::CardPredicate { options }),
+                ChoiceTypeData::CardPredicateGuess { options } => {
+                    Ok(Self::CardPredicateGuess { options })
+                }
                 ChoiceTypeData::Opponent { restriction } => Ok(Self::Opponent { restriction }),
                 ChoiceTypeData::Keyword { options, count } => Ok(Self::Keyword { options, count }),
                 ChoiceTypeData::CounterKind { options } => Ok(Self::CounterKind { options }),
@@ -1063,6 +1160,7 @@ impl ChosenAttribute {
             // CR 608.2d + CR 122.1: Persist the chosen counter kind so a later
             // `Effect::PutChosenCounter` can read it.
             ChoiceValue::Counter(counter_type) => Some(Self::Counter(counter_type)),
+            ChoiceValue::CardPredicate(_) => None,
             ChoiceValue::LandType(_) => None,
         }
     }
@@ -1080,6 +1178,7 @@ pub enum ChoiceValue {
     CardName(String),
     Number(u8),
     Label(String),
+    CardPredicate(CardPredicateChoice),
     LandType(String),
     Player(PlayerId),
     TwoColors([ManaColor; 2]),
@@ -1113,6 +1212,12 @@ impl ChoiceValue {
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
             ChoiceType::NumberRange { .. } => value.parse::<u8>().ok().map(Self::Number),
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
+            ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
+                let predicate = CardPredicateChoice::from_label(value)?;
+                options
+                    .contains(&predicate)
+                    .then_some(Self::CardPredicate(predicate))
+            }
             ChoiceType::LandType => Some(Self::LandType(value.to_string())),
             // CR 800.4a: Parse player ID from string.
             ChoiceType::Opponent { .. } | ChoiceType::Player => value
@@ -1884,9 +1989,10 @@ pub enum ManaSpendRestriction {
     /// is never `true` at a payment site and the gate never over-permits. The
     /// variant exists so the restriction stays representable as a typed value even
     /// though this leaf is dead today: the parser still recognizes the shape, but a
-    /// card whose ONLY spend restriction is this leaf is left unabsorbed at the
+    /// card whose spend restriction includes this leaf is left unabsorbed at the
     /// `Effect::Mana` seam and intentionally surfaces an `Effect::Unimplemented`
-    /// gap (honest coverage red) via `ManaSpendRestriction::has_payable_branch`.
+    /// gap (honest coverage red) via
+    /// `ManaSpendRestriction::is_coverage_supported`.
     /// Once a real face-down CAST routes its
     /// `{3}` cost through `PaymentContext::Spell` the gate becomes live with no
     /// type change. See
@@ -1910,40 +2016,39 @@ pub enum ManaSpendRestriction {
 }
 
 impl ManaSpendRestriction {
-    /// Returns `true` iff at least one branch of this restriction is **payable**:
-    /// its lowered [`ManaRestriction`](super::mana::ManaRestriction) runtime gate
-    /// can return `true` at some reachable production payment site — i.e. there
-    /// exists a real spend the engine would accept for it today (data-value
-    /// reachability). `Any(subs)` is payable iff any sub-branch is payable.
+    /// Returns `true` iff this restriction is fully coverage-supported: every
+    /// leaf named by the lowered [`ManaRestriction`](super::mana::ManaRestriction)
+    /// has production-live semantics today. `Any(subs)` is coverage-supported iff
+    /// it is non-empty and every sub-branch is coverage-supported.
     ///
-    /// A `ManaSpendRestriction` with no payable branch is left *unabsorbed* at the
-    /// parser seam (see `parser::oracle_effect::sequence`), so the surrounding
-    /// `Effect::Mana` line lowers to `Effect::Unimplemented` — honest coverage
-    /// **red** — rather than masquerading as supported while every action it names
-    /// is non-functional at runtime. (Dead example today: a lone `FaceDownSpell`
-    /// leaf — no production path casts a spell *through spell payment* face down,
-    /// so `SpellMeta.is_face_down` is never `true` at a payment site. The
-    /// turn-face-up leaf is now live via the paid `GameAction::TurnFaceUp`
-    /// special action.)
+    /// A `ManaSpendRestriction` with any unsupported leaf is left *unabsorbed* at
+    /// the parser seam (see `parser::oracle_effect::sequence`), so the surrounding
+    /// `Effect::Mana` line keeps a residual `Effect::Unimplemented` — honest
+    /// coverage **red** — rather than marking a card supported while one branch it
+    /// names is not production-live. (Dead example today: `FaceDownSpell` — no
+    /// production path casts a spell *through spell payment* face down, so
+    /// `SpellMeta.is_face_down` is never `true` at a payment site. The
+    /// turn-face-up leaf is live via the paid `GameAction::TurnFaceUp` special
+    /// action, but an `Any([FaceDownSpell, TurnPermanentFaceUp])` still remains
+    /// coverage-red until face-down spell casting exists.)
     ///
-    /// Any `grants` paired with an all-dead restriction drop with it. This is
-    /// intentional: no real card pairs a mana-spell grant with a restriction whose
-    /// every branch is dead, so nothing functional is lost.
+    /// Any `grants` paired with an unsupported restriction drop with it. This is
+    /// intentional: no real card pairs a mana-spell grant with a restriction that
+    /// has an unsupported leaf, so nothing functional is lost.
     ///
     /// The match is exhaustive with **no wildcard arm** on purpose: a future
     /// `ManaSpendRestriction` variant must fail to compile here, forcing an
-    /// explicit liveness classification rather than silently defaulting to
-    /// payable (false green) or unpayable (false red).
-    pub fn has_payable_branch(&self) -> bool {
+    /// explicit coverage classification rather than silently defaulting to a
+    /// false green or false red.
+    pub fn is_coverage_supported(&self) -> bool {
         match self {
-            // DEAD — no reachable production payment site makes the lowered gate
-            // return true today (except `XCostOnly`, live via `SpellMeta.has_x_in_cost`):
+            // LIVE — production coverage exists via `SpellMeta.has_x_in_cost`.
             ManaSpendRestriction::XCostOnly => true,
             // CR 708.4: gate is `meta.is_face_down`, which `build_spell_meta` never
             // sets `true` at a payment site (no production path casts a spell face
-            // down *through spell payment*), so the gate is never satisfied.
+            // down *through spell payment*), so coverage must remain red.
             ManaSpendRestriction::FaceDownSpell => false,
-            // LIVE — at least one reachable production payment site accepts a spend.
+            // LIVE — production-live leaves with parser/runtime coverage.
             // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: lowered to
             // `OnlyForSpecialAction(SpecialAction::TurnFaceUp)`, now satisfiable —
             // the `GameAction::TurnFaceUp` handler pays the morph/disguise/manifest
@@ -1962,11 +2067,12 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellWithColorCount { .. }
             | ManaSpendRestriction::SpellFromZone(_)
             | ManaSpendRestriction::UnlockDoor => true,
-            // CR 106.6: a disjunction is payable iff any branch is payable, so a
-            // mixed `Any` with at least one live branch stays supported while an
-            // all-dead `Any` (e.g. `[FaceDownSpell, TurnPermanentFaceUp]`) is dead.
+            // CR 106.6: coverage for a disjunction requires every named branch to
+            // be production-live. Partial absorption would drop unsupported
+            // branches from coverage accounting, so mixed Tin Street-style `Any`
+            // remains red until `FaceDownSpell` is supported.
             ManaSpendRestriction::Any(subs) => {
-                subs.iter().any(ManaSpendRestriction::has_payable_branch)
+                !subs.is_empty() && subs.iter().all(ManaSpendRestriction::is_coverage_supported)
             }
         }
     }
@@ -3334,11 +3440,10 @@ pub enum FilterProp {
     /// Used for "spells of the chosen type" patterns (Archon of Valor's Reach).
     /// Reads `ChosenAttribute::CardType` from the source permanent.
     IsChosenCardType,
-    /// CR 205.2 + CR 608.2c: Matches objects by the transient "land or nonland"
+    /// CR 205.2 + CR 608.2c: Matches objects by a transient card predicate
     /// choice made earlier in the same resolving instruction sequence. Used by
-    /// "of the chosen kind" library filters, where "Land" means cards with the
-    /// land card type and "Nonland" means cards without it.
-    IsChosenLandOrNonlandKind,
+    /// "of the chosen kind" library filters and guess-resolution conditions.
+    MatchesLastChosenCardPredicate,
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
@@ -4449,6 +4554,12 @@ pub enum ObjectScope {
     /// Drain class (issue #511): a reveal/counter/reanimate earlier in the same
     /// ability binds "that <type>'s" to the referenced object.
     Demonstrative,
+    /// CR 701.47c + CR 608.2c: The Army creature chosen by the current amass
+    /// instruction. "The Army you amassed" and "the amassed Army" refer to
+    /// that chosen creature even if it didn't receive counters. This is
+    /// resolution-local state carried by `ResolvedAbility.amassed_army_object`,
+    /// not the generic demonstrative/effect-context slot.
+    AmassedArmy,
     /// CR 603.2 + CR 120.1: The object that **received** the damage referenced
     /// by the current trigger event — the recipient counterpart to
     /// [`ObjectScope::EventSource`]. This is "that creature" in "deals
@@ -10139,8 +10250,9 @@ pub enum Effect {
     /// Sets WaitingFor::NamedChoice and stores the result in GameState::last_named_choice.
     Choose {
         choice_type: ChoiceType,
-        /// When true, the chosen value is stored on the source object's chosen_attributes.
-        /// Used for ETB choices that other abilities reference ("the chosen type/color").
+        /// When true, persistable choice types store the chosen value on the
+        /// source object's chosen_attributes. Some non-persisting choice types
+        /// still carry source context for logs or prompts.
         #[serde(default)]
         persist: bool,
         /// CR 608.2d (override) + CR 701.9b (analogous): When `Random`, the game
@@ -17379,6 +17491,21 @@ pub struct StaticDefinition {
     /// uses the same axis). `None` means the creature cannot attack at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_defended: Option<crate::types::triggers::AttackTargetFilter>,
+    /// CR 611.2c + CR 109.5: Installing-player anchor for a controller-relative
+    /// blocker filter granted onto another object. When a one-shot effect grafts
+    /// a `MustBeBlockedByAll` / `MustBeBlocked` static whose blocker filter is
+    /// controller-relative (`ControllerRef::You`/`Opponent`) onto a TARGET
+    /// permanent (You Look Upon the Tarrasque), CR 109.5's "the current
+    /// controller of the object it's on" would evaluate "your opponents"
+    /// relative to the target's controller, not the spell controller. Per
+    /// CR 611.2c the resolving continuous effect's anchor is locked at
+    /// materialization, so this field snapshots the installing player's id so
+    /// combat re-derives the filter context via
+    /// `FilterContext::from_source_with_controller`. `None` = resolve the
+    /// controller from the carrier object (every permanent-static lure; Talruum
+    /// Piper, Marble Priest; unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_controller: Option<crate::types::player::PlayerId>,
 }
 
 impl StaticDefinition {
@@ -17395,6 +17522,7 @@ impl StaticDefinition {
             characteristic_defining: false,
             description: None,
             attack_defended: None,
+            source_controller: None,
         }
     }
 
@@ -17430,6 +17558,14 @@ impl StaticDefinition {
         defended: Option<crate::types::triggers::AttackTargetFilter>,
     ) -> Self {
         self.attack_defended = defended;
+        self
+    }
+
+    /// CR 611.2c + CR 109.5: Snapshot the installing player as the anchor for a
+    /// controller-relative granted blocker filter (see the `source_controller`
+    /// field doc). Set at graft time by the `AddStaticMode` layer arm.
+    pub fn source_controller(mut self, controller: crate::types::player::PlayerId) -> Self {
+        self.source_controller = Some(controller);
         self
     }
 
@@ -18649,6 +18785,12 @@ pub struct ResolvedAbility {
     /// instructions may still refer to it after it left its zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect_context_object: Option<CostPaidObjectSnapshot>,
+    /// CR 701.47c + CR 608.2c: Public characteristics of the Army chosen by
+    /// the most recent amass instruction in this resolving ability. Carried
+    /// separately from `effect_context_object` so generic demonstratives never
+    /// accidentally bind to an amass-specific referent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amassed_army_object: Option<CostPaidObjectSnapshot>,
     /// CR 603.4: Index of the printed ability this resolution came from on the
     /// source object's ability list. Identifies "this ability" for per-turn
     /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
@@ -18762,6 +18904,7 @@ impl ResolvedAbility {
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
+            amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
@@ -18878,6 +19021,18 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_effect_context_object_recursive(snapshot);
+        }
+    }
+
+    /// CR 701.47c + CR 608.2c: Stamp the Army chosen by an amass instruction
+    /// across every continuation branch in this resolution.
+    pub fn set_amassed_army_object_recursive(&mut self, snapshot: CostPaidObjectSnapshot) {
+        self.amassed_army_object = Some(snapshot.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_amassed_army_object_recursive(snapshot.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_amassed_army_object_recursive(snapshot);
         }
     }
 
@@ -19088,64 +19243,102 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::mana::ZoneSpendPolarity;
+    use crate::types::zones::Zone;
 
-    /// CR 106.6: `ManaSpendRestriction::has_payable_branch` must classify each
-    /// leaf by whether its lowered runtime gate can return `true` at a reachable
-    /// production payment site today, and short-circuit `Any` in both directions.
+    /// CR 106.6: `ManaSpendRestriction::is_coverage_supported` must classify each
+    /// leaf by whether its lowered semantics are production-live today, and require
+    /// every branch of an `Any` disjunction to be coverage-supported.
     ///
     /// Revert direction (each assertion pins one classification):
-    /// - Flipping a LIVE arm to `false` fails its `assert!(... .has_payable_branch())`.
+    /// - Flipping a LIVE arm to `false` fails its
+    ///   `assert!(... .is_coverage_supported())`.
     ///   `TurnPermanentFaceUp` is live via the paid `GameAction::TurnFaceUp`
     ///   special action (CR 116.2b + CR 702.37e); reverting that flip fails its
     ///   positive assertion below.
     /// - Flipping a DEAD arm (`FaceDownSpell`) to `true` fails its `assert!(!...)`.
-    /// - The all-dead `Any([FaceDownSpell])` pins the `Any` short-circuit in the
-    ///   `false` direction (returning `true` on an all-dead set fails it); the
-    ///   mixed `Any([FaceDownSpell, TurnPermanentFaceUp])` (Tin Street Gossip) and
-    ///   `Any([SpellType, UnlockDoor, TurnPermanentFaceUp])` (Creeping Peeper) pin
-    ///   it in the `true` direction (treating any dead leaf as poisoning the whole
-    ///   disjunction fails it).
+    /// - `Any([])`, all-dead `Any([FaceDownSpell])`, and mixed Tin Street
+    ///   `Any([FaceDownSpell, TurnPermanentFaceUp])` pin the false direction.
+    /// - Creeping Peeper's all-live
+    ///   `Any([SpellType, UnlockDoor, TurnPermanentFaceUp])` pins the true
+    ///   direction.
     #[test]
-    fn has_payable_branch_distinguishes_live_and_dead_leaves() {
-        // LIVE: at least one reachable production payment site accepts a spend.
-        assert!(ManaSpendRestriction::SpellOnly.has_payable_branch());
-        assert!(ManaSpendRestriction::UnlockDoor.has_payable_branch());
-        assert!(ManaSpendRestriction::SpellType("Enchantment".into()).has_payable_branch());
-        assert!(ManaSpendRestriction::ActivateOnly.has_payable_branch());
+    fn is_coverage_supported_distinguishes_live_and_dead_leaves() {
+        // LIVE: every current production-live leaf stays coverage-supported.
+        assert!(ManaSpendRestriction::SpellOnly.is_coverage_supported());
+        assert!(ManaSpendRestriction::SpellType("Enchantment".into()).is_coverage_supported());
+        assert!(ManaSpendRestriction::ChosenCreatureType.is_coverage_supported());
+        assert!(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            spell_type: "Creature".into(),
+            ability: AbilityActivationScope::Any,
+        }
+        .is_coverage_supported());
+        assert!(ManaSpendRestriction::ActivateOnly.is_coverage_supported());
+        assert!(ManaSpendRestriction::ActivateTagged(AbilityTag::Equip).is_coverage_supported());
+        assert!(ManaSpendRestriction::XCostOnly.is_coverage_supported());
+        assert!(
+            ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Flashback)
+                .is_coverage_supported()
+        );
+        assert!(ManaSpendRestriction::SpellWithKeywordKindFromZone {
+            kind: KeywordKind::Flashback,
+            zone: Zone::Graveyard,
+        }
+        .is_coverage_supported());
+        assert!(ManaSpendRestriction::SpellWithManaValue {
+            comparator: Comparator::GE,
+            value: 4,
+        }
+        .is_coverage_supported());
+        assert!(ManaSpendRestriction::SpellMatchingCostCriteria {
+            spell_type: Some("Creature".into()),
+            criteria: vec![SpellCostCriterion::HasXInCost],
+        }
+        .is_coverage_supported());
+        assert!(ManaSpendRestriction::SpellWithColorCount {
+            comparator: Comparator::EQ,
+            count: 2,
+        }
+        .is_coverage_supported());
+        assert!(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+            zone: Zone::Graveyard,
+            polarity: ZoneSpendPolarity::From,
+        })
+        .is_coverage_supported());
+        assert!(ManaSpendRestriction::UnlockDoor.is_coverage_supported());
         // CR 116.2b + CR 702.37e: the paid `GameAction::TurnFaceUp` handler makes
         // the turn-face-up special-action gate satisfiable.
-        assert!(ManaSpendRestriction::TurnPermanentFaceUp.has_payable_branch());
-        // XCostOnly is live via `SpellMeta.has_x_in_cost`.
-        assert!(ManaSpendRestriction::XCostOnly.has_payable_branch());
+        assert!(ManaSpendRestriction::TurnPermanentFaceUp.is_coverage_supported());
 
         // DEAD: `FaceDownSpell` is the only remaining hardcoded-false leaf — no
         // production path casts a spell through spell payment face down.
-        assert!(!ManaSpendRestriction::FaceDownSpell.has_payable_branch());
+        assert!(!ManaSpendRestriction::FaceDownSpell.is_coverage_supported());
+
+        assert!(!ManaSpendRestriction::Any(vec![]).is_coverage_supported());
 
         // All-dead disjunction is dead: an `Any` whose only leaf is the dead
-        // `FaceDownSpell` has no payable branch.
+        // `FaceDownSpell` has no supported branch.
         assert!(
             !ManaSpendRestriction::Any(vec![ManaSpendRestriction::FaceDownSpell,])
-                .has_payable_branch()
+                .is_coverage_supported()
         );
 
-        // Mixed disjunction with a live branch stays payable — a dead leaf must not
-        // poison the whole `Any`. Tin Street Gossip's `Any([FaceDownSpell,
-        // TurnPermanentFaceUp])` is payable via its live turn-face-up leaf.
-        assert!(ManaSpendRestriction::Any(vec![
+        // Mixed Tin Street Gossip disjunction remains coverage-red: the
+        // face-down-cast branch is not production-live yet.
+        assert!(!ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::FaceDownSpell,
             ManaSpendRestriction::TurnPermanentFaceUp,
         ])
-        .has_payable_branch());
+        .is_coverage_supported());
 
         // Creeping Peeper / Smoky Lounge class: live spell-type + unlock branches
-        // alongside the (now live) turn-up leaf stay payable.
+        // alongside the live turn-up leaf stay supported.
         assert!(ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::SpellType("Enchantment".into()),
             ManaSpendRestriction::UnlockDoor,
             ManaSpendRestriction::TurnPermanentFaceUp,
         ])
-        .has_payable_branch());
+        .is_coverage_supported());
     }
 
     /// CR 111.1 + CR 400.1: the shared `OriginConstraint::matches_from` predicate
@@ -19565,6 +19758,57 @@ mod tests {
         let json = serde_json::to_string(&ChoiceType::Opponent { restriction: None }).unwrap();
 
         assert_eq!(json, "\"Opponent\"");
+    }
+
+    #[test]
+    fn choice_type_card_predicate_variants_serde_round_trip() {
+        for original in [
+            ChoiceType::CardPredicate {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            ChoiceType::CardPredicateGuess {
+                options: vec![
+                    CardPredicateChoice::Color(ManaColor::Red),
+                    CardPredicateChoice::Color(ManaColor::Black),
+                ],
+            },
+        ] {
+            let json = serde_json::to_string(&original).unwrap();
+            let decoded: ChoiceType = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(decoded, original);
+        }
+    }
+
+    #[test]
+    fn card_predicate_choices_can_overlap_for_multicolor_cards() {
+        let choice_type = ChoiceType::CardPredicateGuess {
+            options: vec![
+                CardPredicateChoice::Color(ManaColor::Red),
+                CardPredicateChoice::Color(ManaColor::Black),
+            ],
+        };
+
+        assert_eq!(
+            ChoiceValue::from_choice(&choice_type, "Red"),
+            Some(ChoiceValue::CardPredicate(CardPredicateChoice::Color(
+                ManaColor::Red
+            )))
+        );
+        assert_eq!(
+            ChoiceValue::from_choice(&choice_type, "Black"),
+            Some(ChoiceValue::CardPredicate(CardPredicateChoice::Color(
+                ManaColor::Black
+            )))
+        );
+        assert_eq!(ChoiceValue::from_choice(&choice_type, "Blue"), None);
+
+        let card_types = vec![CoreType::Creature];
+        let colors = vec![ManaColor::Red, ManaColor::Black];
+
+        assert!(CardPredicateChoice::Color(ManaColor::Red).matches_card(&card_types, &colors));
+        assert!(CardPredicateChoice::Color(ManaColor::Black).matches_card(&card_types, &colors));
+        assert!(!CardPredicateChoice::Color(ManaColor::Blue).matches_card(&card_types, &colors));
     }
 
     #[test]
@@ -20071,6 +20315,7 @@ mod tests {
             characteristic_defining: false,
             description: Some("Other creatures you control get +1/+1.".to_string()),
             attack_defended: None,
+            source_controller: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -20361,6 +20606,7 @@ mod tests {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

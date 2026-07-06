@@ -6131,6 +6131,124 @@ fn try_parse_an_opponent_to_verb(
     Some(clause)
 }
 
+/// CR 608.2d + CR 701.20a: "An opponent guesses whether the top card of your
+/// library is the chosen kind" is a non-targeted opponent decision over the same
+/// land/nonland label space used by the preceding "choose land or nonland".
+///
+/// The runtime `Choose` effect stores only one `last_named_choice`, so this
+/// parser intentionally models the opponent's yes/no guess as the opponent
+/// choosing the predicted kind of the top card. For a public prior land/nonland
+/// choice, that is equivalent information: if the opponent predicts the revealed
+/// card's actual kind, "they guessed right"; otherwise they guessed wrong.
+fn try_parse_opponent_guesses_chosen_library_kind(
+    text: &str,
+    chosen_player_index: u8,
+) -> Option<ParsedEffectClause> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    all_consuming(parse_top_card_predicate_guess)
+        .parse(lower.as_str())
+        .ok()?;
+
+    let mut guess = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            // `ChoiceType::CardPredicateGuess` carries source context for logging
+            // without persisting a source-card label.
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        },
+    );
+    guess.player_scope = Some(PlayerFilter::ChosenPlayer {
+        index: chosen_player_index,
+    });
+
+    let mut choose_opponent = parsed_clause(Effect::Choose {
+        choice_type: ChoiceType::Opponent { restriction: None },
+        persist: false,
+        selection: TargetSelectionMode::Chosen,
+    });
+    choose_opponent.sub_ability = Some(Box::new(guess));
+    Some(choose_opponent)
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TopCardPredicateGuess {
+    ControllerLibraryChosenKind,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TopCardGuessLibrary {
+    Controller,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TopCardGuessPredicate {
+    ChosenKind,
+}
+
+fn parse_top_card_predicate_guess(input: &str) -> OracleResult<'_, TopCardPredicateGuess> {
+    let (input, _) = tag("an opponent guesses whether ").parse(input)?;
+    let (input, library) = parse_top_card_guess_library(input)?;
+    let (input, _) = tag(" is ").parse(input)?;
+    let (input, predicate) = parse_top_card_guess_predicate(input)?;
+    match (library, predicate) {
+        (TopCardGuessLibrary::Controller, TopCardGuessPredicate::ChosenKind) => {
+            Ok((input, TopCardPredicateGuess::ControllerLibraryChosenKind))
+        }
+    }
+}
+
+fn parse_top_card_guess_library(input: &str) -> OracleResult<'_, TopCardGuessLibrary> {
+    value(
+        TopCardGuessLibrary::Controller,
+        tag("the top card of your library"),
+    )
+    .parse(input)
+}
+
+fn parse_top_card_guess_predicate(input: &str) -> OracleResult<'_, TopCardGuessPredicate> {
+    value(TopCardGuessPredicate::ChosenKind, tag("the chosen kind")).parse(input)
+}
+
+fn chain_has_card_predicate_guess(clauses: &[ClauseIr]) -> bool {
+    clauses
+        .iter()
+        .any(|clause| parsed_clause_has_card_predicate_guess(&clause.parsed))
+}
+
+fn parsed_clause_has_card_predicate_guess(clause: &ParsedEffectClause) -> bool {
+    effect_is_card_predicate_guess(&clause.effect)
+        || clause
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_card_predicate_guess)
+}
+
+fn ability_has_card_predicate_guess(def: &AbilityDefinition) -> bool {
+    effect_is_card_predicate_guess(&def.effect)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_card_predicate_guess)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_has_card_predicate_guess)
+}
+
+fn effect_is_card_predicate_guess(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Choose {
+            choice_type: ChoiceType::CardPredicateGuess { .. },
+            ..
+        }
+    )
+}
+
 fn filter_is_bare_opponent_player(filter: &TargetFilter) -> bool {
     matches!(
         filter,
@@ -8496,9 +8614,18 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// - "all creatures able to block ~ do so"
 /// - "all creatures able to block ~ this turn do so"
 fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        value((), tag("all creatures able to block ")).parse(i)
-    })?;
+    // Two-slot blocker grammar after "all ": slot A ("creature(s) able to block ")
+    // yields `blockers = None` (every creature — the mass Lure form); slot B
+    // ("<type-phrase> able to block ", e.g. "creatures your opponents control")
+    // yields `blockers = Some(filter)`. Shared with the permanent path in
+    // oracle_static::evasion. A runs before B, byte-identical to the old literal,
+    // so unfiltered lines are unchanged. CR 509.1c.
+    let (_, after_all_orig) =
+        nom_on_lower(tp.original, tp.lower, |i| value((), tag("all ")).parse(i))?;
+    let after_all_lower = &tp.lower[tp.lower.len() - after_all_orig.len()..];
+    let (rest_lower_slot, blockers) =
+        super::oracle_static::parse_forced_block_blocker_slot(after_all_lower)?;
+    let rest_orig = &after_all_orig[after_all_orig.len() - rest_lower_slot.len()..];
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
     let rest = TextPair::new(rest_orig, rest_lower);
 
@@ -8531,11 +8658,13 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll)
-                .affected(target.clone())
-                .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustBeBlockedByAll,
-                }])],
+            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll {
+                blockers: blockers.clone(),
+            })
+            .affected(target.clone())
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustBeBlockedByAll { blockers },
+            }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(target),
         },
@@ -9847,7 +9976,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
 
 /// CR 614.11 + CR 701.20a: Detect a "card of the chosen kind" reveal-until
 /// filter by delegating to `parse_search_filter` and inspecting the result
-/// for `FilterProp::IsChosenLandOrNonlandKind`. The search-filter parser is
+/// for `FilterProp::MatchesLastChosenCardPredicate`. The search-filter parser is
 /// the canonical detector for this phrase (consumed by the Seek-of-the-
 /// chosen-kind family); reusing it here avoids a parallel string match and
 /// inherits any future "permanent card of the chosen kind" extensions.
@@ -9859,7 +9988,7 @@ fn try_parse_chosen_kind_filter(filter_text: &str) -> Option<TargetFilter> {
     };
     tf.properties
         .iter()
-        .any(|p| matches!(p, FilterProp::IsChosenLandOrNonlandKind))
+        .any(|p| matches!(p, FilterProp::MatchesLastChosenCardPredicate))
         .then_some(parsed)
 }
 
@@ -19127,7 +19256,10 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::Keyword { options, count: 1 })
     } else {
         // Generic "X or Y" / "X, Y, or Z" / "W, X, Y, or Z" labeled choice —
-        // must come AFTER all specific patterns above.
+        // must come AFTER all specific patterns above. Keep this helper
+        // presentation-generic; sequence lowering promotes land/nonland labels
+        // only when a later "chosen kind" consumer gives them card-kind
+        // semantics.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
 }
@@ -21501,10 +21633,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
-    sequence::patch_reveal_until_for_library_category_exile(&mut def);
-    fold_speed_floor_sentences(&mut def);
-    rewrite_choose_tracked_set_exclusion(&mut def);
-    fold_additional_combat_attacker_restriction(&mut def);
+    finalize_effect_chain(&mut def);
     def
 }
 
@@ -21542,10 +21671,7 @@ pub(crate) fn parse_effect_chain_with_context(
     }
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
-    sequence::patch_reveal_until_for_library_category_exile(&mut def);
-    fold_speed_floor_sentences(&mut def);
-    rewrite_choose_tracked_set_exclusion(&mut def);
-    fold_additional_combat_attacker_restriction(&mut def);
+    finalize_effect_chain(&mut def);
     def
 }
 
@@ -21633,6 +21759,15 @@ fn try_parse_exile_pile_shuffle_cloak(text: &str, kind: AbilityKind) -> Option<A
     );
     head.sub_ability = Some(Box::new(shuffle));
     Some(head)
+}
+
+pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
+    sequence::patch_reveal_until_for_library_category_exile(def);
+    sequence::promote_labeled_card_predicate_choices_for_chosen_kind(def);
+    sequence::rewrite_reorder_dig_backref_reveal_to_top(def);
+    fold_speed_floor_sentences(def);
+    rewrite_choose_tracked_set_exclusion(def);
+    fold_additional_combat_attacker_restriction(def);
 }
 
 /// CR 509.1g + CR 506.3e + CR 707.2 + CR 603.7: Mirror Match's whole-card idiom
@@ -22014,6 +22149,36 @@ fn meld_single_clause(effect: Effect, source_text: &str) -> ClauseIr {
     ClauseIr {
         parsed: parsed_clause(effect),
         boundary: Some(ClauseBoundary::Sentence),
+        condition: None,
+        is_optional: false,
+        opponent_may_scope: None,
+        repeat_for: None,
+        player_scope: None,
+        starting_with: None,
+        delayed_condition: None,
+        prefix_delayed_condition: None,
+        intrinsic_continuation: None,
+        followup_continuation: None,
+        absorbed_by_followup: false,
+        multi_target: None,
+        where_x_expression: None,
+        is_otherwise: false,
+        unless_pay: None,
+        special: None,
+        source_text: source_text.to_string(),
+        target_selection_mode: TargetSelectionMode::Chosen,
+        target_chooser: None,
+    }
+}
+
+fn unimplemented_clause_ir(
+    name: &str,
+    source_text: &str,
+    boundary: Option<ClauseBoundary>,
+) -> ClauseIr {
+    ClauseIr {
+        parsed: parsed_clause(Effect::unimplemented(name, source_text)),
+        boundary,
         condition: None,
         is_optional: false,
         opponent_may_scope: None,
@@ -23330,6 +23495,27 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text)
         };
         let condition = condition.or(leading_cond);
+        let has_card_predicate_guess =
+            condition.is_none() && chain_has_card_predicate_guess(&clauses);
+        let (predicate_guess_cond, text) = if has_card_predicate_guess {
+            conditions::strip_card_predicate_guess_result_conditional(&text)
+                .map(|(cond, body)| (Some(cond), body))
+                .unwrap_or((None, text))
+        } else {
+            (None, text)
+        };
+        if has_card_predicate_guess
+            && predicate_guess_cond.is_none()
+            && conditions::is_card_predicate_guess_result_conditional(&text)
+        {
+            clauses.push(unimplemented_clause_ir(
+                "card_predicate_guess_result_condition",
+                normalized_text,
+                chunk.boundary_after,
+            ));
+            continue;
+        }
+        let condition = condition.or(predicate_guess_cond);
         // CR 608.2c + CR 708.7: a generic "if you can't" rider attached to a
         // preceding `TurnFaceUp` must read the performed-signal, not the
         // zone-change ledger (a successful turn-up changes no zone). See the
@@ -24134,6 +24320,42 @@ pub(crate) fn parse_effect_chain_ir(
                 source_text: normalized_text.to_string(),
                 target_selection_mode: chunk_ctx.target_selection_mode,
                 target_chooser: chunk_ctx.target_chooser.clone(),
+            });
+            continue;
+        }
+
+        if let Some(clause) =
+            try_parse_opponent_guesses_chosen_library_kind(&text, ctx.chosen_player_count)
+        {
+            let chosen_scope = ControllerRef::ChosenPlayer {
+                index: ctx.chosen_player_count,
+            };
+            ctx.chosen_player_count = ctx.chosen_player_count.saturating_add(1);
+            ctx.relative_player_scope = Some(chosen_scope.clone());
+            chain_chosen_player_count = ctx.chosen_player_count;
+            chain_chosen_player_scope = Some(chosen_scope);
+            clauses.push(ClauseIr {
+                parsed: clause,
+                boundary: chunk.boundary_after,
+                condition: condition.clone(),
+                is_optional,
+                opponent_may_scope,
+                repeat_for: repeat_for.clone(),
+                player_scope,
+                starting_with: starting_with.clone(),
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: where_x_expression.clone(),
+                is_otherwise: false,
+                unless_pay: None,
+                special: None,
+                source_text: normalized_text.to_string(),
+                target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }

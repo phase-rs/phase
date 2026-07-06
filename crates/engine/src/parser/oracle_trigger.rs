@@ -1241,14 +1241,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let execute = match &ir.body {
         Some(TriggerBody::EffectChain(chain_ir)) => {
             let mut ability = lower_effect_chain_ir(chain_ir);
-            // CR 702.179c-d: fold trailing speed-floor sentences into the
-            // preceding `ChangeSpeed` effect and drop the orphan node.
-            crate::parser::oracle_effect::fold_speed_floor_sentences(&mut ability);
-            // CR 508.1c + CR 611.2c: fold a trailing "only X can attack during
-            // that combat phase" sentence into the preceding `AdditionalPhase`
-            // (Bumi, Unleashed — triggered additional combat) and drop the
-            // orphan node, mirroring the spell-effect path.
-            crate::parser::oracle_effect::fold_additional_combat_attacker_restriction(&mut ability);
+            crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
             if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
                 && matches!(
                     ability.effect.as_ref(),

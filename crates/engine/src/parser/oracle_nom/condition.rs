@@ -1901,8 +1901,8 @@ fn parse_pt_ref_scoped(input: &str, scope: ObjectScope) -> OracleResult<'_, Quan
     .parse(input)
 }
 
-/// Possessive-subject form: `<possessive> <property> is `, leaving the threshold
-/// number on the remaining input.
+/// Possessive-subject form: `<possessive> <property> {is|was} `, leaving the
+/// threshold number on the remaining input.
 fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((
         tag("its "),
@@ -1919,21 +1919,31 @@ fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
         tag("equipped creature's "),
     ))
     .parse(input)?;
-    alt((
+    // CR 208.1: decouple the property axis (power/toughness) from the linking-
+    // verb axis (present "is" / past "was") so the arm count is the SUM of the
+    // two axes, not their product. Past tense surfaces when the subject's stat
+    // is read as last-known information (CR 603.10a look-back + CR 608.2h): a
+    // dies-trigger intervening "if" checks the creature's last-known power --
+    // "if its power was 3 or greater" (Deathknell Berserker). "was" is a strict
+    // superset of the prior "is"-only forms; no card uses "its <stat> was ..."
+    // in any other position, so every previously supported parse is unchanged.
+    let (rest, qty) = alt((
         value(
             QuantityRef::Power {
                 scope: crate::types::ability::ObjectScope::Source,
             },
-            tag("power is "),
+            tag("power"),
         ),
         value(
             QuantityRef::Toughness {
                 scope: crate::types::ability::ObjectScope::Source,
             },
-            tag("toughness is "),
+            tag("toughness"),
         ),
     ))
-    .parse(rest)
+    .parse(rest)?;
+    let (rest, _) = alt((tag(" is "), tag(" was "))).parse(rest)?;
+    Ok((rest, qty))
 }
 
 /// Source-subject form: `<subject> has <property> `, leaving the threshold
@@ -12142,6 +12152,58 @@ mod tests {
                 other => panic!("{text:?} → {other:?}"),
             }
         }
+    }
+
+    /// CR 208.1 + CR 603.10a + CR 608.2h: past-tense possessive P/T threshold.
+    /// A dies-trigger intervening "if" reads the creature's last-known power via
+    /// the CR 603.10a look-back, so the linking verb is "was", not "is" (e.g.
+    /// Deathknell Berserker: "if its power was 3 or greater"). Decoupling the
+    /// verb axis makes "was" a strict superset of "is"; the present-tense forms
+    /// must still parse identically (no regression).
+    #[test]
+    fn test_its_power_toughness_was_threshold_lki() {
+        // "its power was 3 or greater" -> Power(Source) GE 3
+        let (rest, c) = parse_inner_condition("its power was 3 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            },
+            "past-tense possessive power threshold"
+        );
+        // "its toughness was 1 or less" -> Toughness(Source) LE 1
+        let (rest, c) = parse_inner_condition("its toughness was 1 or less").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            },
+            "past-tense possessive toughness threshold"
+        );
+        // No regression: the present-tense "is" form still parses identically.
+        let (rest, c) = parse_inner_condition("its power is 3 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                ..
+            }
+        ));
     }
 
     #[test]

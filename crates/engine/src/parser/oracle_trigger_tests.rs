@@ -1278,6 +1278,51 @@ fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
     }
 }
 
+/// CR 208.1 + CR 603.4 + CR 603.10a + CR 608.2h: Deathknell Berserker -- a
+/// dies-trigger intervening "if" gated on the creature's last-known power
+/// ("if its power was 3 or greater"). The look-back reads the dying creature's
+/// last-known power (CR 603.10a + CR 608.2h), so the possessive-subject
+/// threshold uses past-tense "was". Before the linking-verb axis accepted
+/// "was", the condition silently swallowed and the Zombie Berserker token was
+/// created on every death regardless of power.
+///
+/// Asserted shape:
+/// - Trigger-level `condition` is a `QuantityComparison` on Power(Source) >= 3.
+/// - The execute effect is Token creation (the Zombie Berserker), not Unimplemented.
+#[test]
+fn parse_deathknell_berserker_dies_power_lki_intervening_if() {
+    let def = parse_trigger_line(
+        "When this creature dies, if its power was 3 or greater, create a 2/2 black Zombie Berserker creature token.",
+        "Deathknell Berserker",
+    );
+
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }),
+        "trigger-level intervening-if must be Power(Source) >= 3, got {:?}",
+        def.condition,
+    );
+
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(*execute.effect, Effect::Token { .. }),
+        "execute effect must be Token creation, got {:?}",
+        execute.effect,
+    );
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "execute effect must not be Unimplemented",
+    );
+}
+
 /// CR 115.1d: "attach any number of target Equipment you control to it"
 /// (Super-Soldier Serum) is a variable-count target down to zero. The execute
 /// ability must carry a `multi_target` spec so the player can decline or

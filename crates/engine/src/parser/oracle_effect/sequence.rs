@@ -19,12 +19,12 @@ use crate::parser::oracle_quantity::{
     parse_cda_quantity, parse_for_each_object_filter_clause, parse_quantity_ref,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Chooser,
+    AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
-    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, LibraryPosition,
-    MultiTargetSpec, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming,
-    TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
+    LibraryPosition, MultiTargetSpec, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -382,6 +382,164 @@ pub(super) fn patch_reveal_until_for_library_category_exile(def: &mut AbilityDef
             *kept_destination = Zone::Library;
             *rest_destination = Zone::Library;
         }
+    }
+}
+
+/// CR 608.2c + CR 205.2a: A bare "choose land or nonland" is an opaque
+/// labeled choice. It becomes a library-card-kind choice only when a later
+/// clause consumes "the chosen kind" through `MatchesLastChosenCardPredicate`.
+pub(super) fn promote_labeled_card_predicate_choices_for_chosen_kind(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        promote_labeled_card_predicate_choices_for_chosen_kind(sub);
+        if is_labeled_card_predicate_choice(&def.effect) && ability_uses_chosen_card_predicate(sub)
+        {
+            if let Effect::Choose {
+                choice_type,
+                persist,
+                ..
+            } = def.effect.as_mut()
+            {
+                *choice_type = ChoiceType::CardPredicate {
+                    options: ChoiceType::land_or_nonland_card_predicate_options(),
+                };
+                *persist = false;
+            }
+        }
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        promote_labeled_card_predicate_choices_for_chosen_kind(else_ability);
+    }
+}
+
+/// CR 701.20b + CR 608.2c: In a reorder-only look instruction ("look at the
+/// top N cards ... put them back in any order"), a later "reveal that card"
+/// refers to the new top card of the library, not to a selected parent target.
+/// Ordinary from-among Dig continuations keep their `ParentTarget` binding.
+pub(super) fn rewrite_reorder_dig_backref_reveal_to_top(def: &mut AbilityDefinition) {
+    if is_reorder_only_library_dig(&def.effect) {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            rewrite_first_transparent_parent_reveal_to_top(sub);
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_reorder_dig_backref_reveal_to_top(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        rewrite_reorder_dig_backref_reveal_to_top(else_ability);
+    }
+}
+
+fn is_reorder_only_library_dig(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Dig {
+            keep_count: None,
+            destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Library),
+            reveal: false,
+            ..
+        }
+    )
+}
+
+fn rewrite_first_transparent_parent_reveal_to_top(def: &mut AbilityDefinition) -> bool {
+    if matches!(
+        def.effect.as_ref(),
+        Effect::Reveal {
+            target: TargetFilter::ParentTarget
+        }
+    ) {
+        *def.effect = Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        };
+        return true;
+    }
+
+    if !matches!(def.effect.as_ref(), Effect::Choose { .. } | Effect::NoOp) {
+        return false;
+    }
+
+    def.sub_ability
+        .as_deref_mut()
+        .is_some_and(rewrite_first_transparent_parent_reveal_to_top)
+}
+
+fn is_labeled_card_predicate_choice(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Labeled { options },
+            ..
+        } if *options
+            == ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options()
+            )
+    )
+}
+
+fn ability_uses_chosen_card_predicate(def: &AbilityDefinition) -> bool {
+    effect_uses_chosen_card_predicate(&def.effect)
+        || def
+            .condition
+            .as_ref()
+            .is_some_and(condition_uses_chosen_card_predicate)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_uses_chosen_card_predicate)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_uses_chosen_card_predicate)
+}
+
+fn effect_uses_chosen_card_predicate(effect: &Effect) -> bool {
+    match effect {
+        Effect::Dig { filter, .. }
+        | Effect::RevealUntil { filter, .. }
+        | Effect::SearchLibrary { filter, .. }
+        | Effect::Seek { filter, .. } => target_filter_uses_chosen_card_predicate(filter),
+        _ => false,
+    }
+}
+
+fn condition_uses_chosen_card_predicate(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::RevealedHasCardType {
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            ..
+        } => true,
+        AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::SourceMatchesFilter { filter }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | AbilityCondition::ControllerControlsMatching { filter }
+        | AbilityCondition::ZoneChangedThisWay { filter }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+            target_filter_uses_chosen_card_predicate(filter)
+        }
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            condition_uses_chosen_card_predicate(condition)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_uses_chosen_card_predicate)
+        }
+        _ => false,
+    }
+}
+
+fn target_filter_uses_chosen_card_predicate(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::MatchesLastChosenCardPredicate)),
+        TargetFilter::Not { filter } => target_filter_uses_chosen_card_predicate(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_uses_chosen_card_predicate)
+        }
+        _ => false,
     }
 }
 
@@ -2177,6 +2335,10 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag::<_, _, OracleError<'_>>("it doesn't ")),
         value((), tag("it can't ")),
         value((), tag("it cannot ")),
+        value((), tag("~ can't ")),
+        value((), tag("~ cannot ")),
+        value((), tag("this creature can't ")),
+        value((), tag("this creature cannot ")),
         value((), tag("it gains ")),
         value((), tag("it gets ")),
         value((), tag("it has ")),
@@ -5416,20 +5578,19 @@ pub(super) fn parse_followup_continuation_ast(
             })
         }
         Effect::Mana { .. } => {
-            // CR 106.6: Only absorb a parsed spend restriction when at least one of
-            // its branches is payable at a reachable production payment site (see
-            // `ManaSpendRestriction::has_payable_branch`). An all-dead restriction
-            // (every branch's runtime gate is hardcoded-false or never reached — X
-            // costs, face-down casts, turn-face-up) is deliberately left unabsorbed
-            // here so this `Effect::Mana` line lowers to `Effect::Unimplemented`
-            // (honest coverage red) instead of masquerading as supported. Liveness
-            // is decided once on the fully assembled restriction, so a mixed
-            // disjunction keeps its live branches (the `Any` short-circuit) rather
-            // than being dropped wholesale. A dropped all-dead restriction also
-            // drops any paired `grants`; that is intentional (no real card pairs a
-            // grant with an all-dead restriction).
+            // CR 106.6: Only absorb a parsed spend restriction when every branch it
+            // names is coverage-supported (see
+            // `ManaSpendRestriction::is_coverage_supported`). Unsupported
+            // restrictions are deliberately left unabsorbed so the residual clause
+            // remains an `Effect::Unimplemented` (honest coverage red) instead of
+            // marking a card supported while dropping an unsupported branch from
+            // coverage accounting. Do not partially absorb mixed disjunctions:
+            // Tin Street Gossip must stay red until face-down spell casting exists.
+            // A dropped unsupported restriction also drops any paired `grants`; that
+            // is intentional (no real card pairs a grant with an unsupported
+            // restriction).
             if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
-                if restriction.has_payable_branch() {
+                if restriction.is_coverage_supported() {
                     return Some(ContinuationAst::ManaRestriction {
                         restriction,
                         grants,
@@ -9944,6 +10105,10 @@ mod tests {
             "this creature gets +2/+0 until end of turn"
         ));
         assert!(starts_bare_and_clause("~ gets +2/+0 until end of turn"));
+        assert!(starts_bare_and_clause("~ can't be blocked this turn"));
+        assert!(starts_bare_and_clause(
+            "this creature can't be blocked this turn"
+        ));
     }
 
     /// CR 608.2c: Anaphoric back-reference conjuncts. Nalia de'Arnise's third

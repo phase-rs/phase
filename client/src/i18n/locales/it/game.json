@@ -97,6 +97,7 @@
     },
     "emblemTag": "Emblema",
     "allPlayers": "Tutti",
+    "allZones": "Tutte le zone",
     "cancel": "Annulla"
   },
   "board": {
@@ -269,6 +270,7 @@
     "confirmDistribute_other": "Dichiara {{count}} attaccanti"
   },
   "fullControl": {
+    "label": "Controllo",
     "on": "Controllo totale attivo",
     "off": "Controllo totale disattivato",
     "tooltip": "Mantieni le finestre di priorità invece di lasciare che i punti tranquilli passino automaticamente. Scorciatoia: F."
@@ -588,11 +590,19 @@
   },
   "priorityYield": {
     "listHeader": "Rinunce di priorità",
-    "yieldThis": "Rinuncia a questo",
-    "yieldAllCopies": "Rinuncia a tutte le copie",
+    "menuHeader": "Salta automaticamente questo innesco",
+    "menuExplainer": "Salta la pausa in cui il gioco si ferma per chiederti di agire ogni volta che questo innesco va sulla pila. Puoi comunque rispondere ad altre cose.",
+    "yieldThis": "Solo questo",
+    "yieldThisHint": "Solo questo {{source}}, non le altre copie",
+    "yieldAllCopies": "Tutte le copie",
+    "allCopiesHint": "Ogni {{source}}, comprese quelle nuove",
     "revoke": "Revoca",
+    "revokeHint": "Torna a fermarti per questo innesco",
     "clearAll": "Cancella tutto",
-    "allCopiesHint": "Consigliato per le pedine"
+    "menuButton": "Salta automaticamente questo innesco",
+    "menuButtonActive": "Salto automatico: modifica o revoca",
+    "menuButtonShort": "Auto-salta",
+    "menuButtonShortActive": "Saltando"
   },
   "targeting": {
     "choosePermanentToCopy": "Scegli un permanente da copiare",
@@ -1731,6 +1741,8 @@
       "twoColors": "Scegli due colori",
       "numberRange": "Scegli un numero",
       "labeled": "Fai una scelta",
+      "cardPredicate": "Scegli un tipo di carta",
+      "cardPredicateGuess": "Indovina un tipo di carta",
       "keyword": "Scegli un'abilità",
       "counterKind": "Scegli un segnalino",
       "fallback": "Fai una scelta"

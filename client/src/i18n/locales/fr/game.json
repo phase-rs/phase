@@ -97,6 +97,7 @@
     },
     "emblemTag": "Emblème",
     "allPlayers": "Tous",
+    "allZones": "Toutes les zones",
     "cancel": "Annuler"
   },
   "board": {
@@ -269,6 +270,7 @@
     "confirmDistribute_other": "Déclarer {{count}} attaquants"
   },
   "fullControl": {
+    "label": "Contrôle",
     "on": "Contrôle total activé",
     "off": "Contrôle total désactivé",
     "tooltip": "Conservez les fenêtres de priorité au lieu de laisser les moments calmes passer automatiquement. Raccourci : F."
@@ -588,11 +590,19 @@
   },
   "priorityYield": {
     "listHeader": "Renoncements de priorité",
-    "yieldThis": "Passer celui-ci",
-    "yieldAllCopies": "Passer toutes les copies",
+    "menuHeader": "Passer automatiquement ce déclencheur",
+    "menuExplainer": "Ignore la pause où le jeu s'arrête pour vous demander d'agir chaque fois que ce déclencheur est mis sur la pile. Vous pouvez toujours répondre à autre chose.",
+    "yieldThis": "Celui-ci uniquement",
+    "yieldThisHint": "Uniquement ce {{source}}, pas les autres copies",
+    "yieldAllCopies": "Toutes les copies",
+    "allCopiesHint": "Chaque {{source}}, y compris les nouvelles",
     "revoke": "Révoquer",
+    "revokeHint": "Se remettre à s'arrêter pour ce déclencheur",
     "clearAll": "Tout effacer",
-    "allCopiesHint": "Recommandé pour les capacités de jetons"
+    "menuButton": "Passer automatiquement ce déclencheur",
+    "menuButtonActive": "Passage automatique – modifier ou révoquer",
+    "menuButtonShort": "Auto-passer",
+    "menuButtonShortActive": "Passage auto"
   },
   "targeting": {
     "choosePermanentToCopy": "Choisissez un permanent à copier",
@@ -1731,6 +1741,8 @@
       "twoColors": "Choisir deux couleurs",
       "numberRange": "Choisir un nombre",
       "labeled": "Faire un choix",
+      "cardPredicate": "Choisir un type de carte",
+      "cardPredicateGuess": "Deviner un type de carte",
       "keyword": "Choisir une capacité",
       "counterKind": "Choisir un marqueur",
       "fallback": "Faire un choix"

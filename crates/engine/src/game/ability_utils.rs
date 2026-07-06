@@ -2477,6 +2477,90 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
     }
 }
 
+fn target_filter_contains_amassed_army_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(filter_prop_contains_amassed_army_ref),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_contains_amassed_army_ref(filter)
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_contains_amassed_army_ref)
+        }
+        _ => false,
+    }
+}
+
+fn filter_prop_contains_amassed_army_ref(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => quantity_expr_contains_amassed_army_ref(value),
+        FilterProp::CanEnchant { target } => target_filter_contains_amassed_army_ref(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => target_filter_contains_amassed_army_ref(filter),
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(target_filter_contains_amassed_army_ref),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_amassed_army_ref),
+        FilterProp::Not { prop } => filter_prop_contains_amassed_army_ref(prop),
+        _ => false,
+    }
+}
+
+fn quantity_expr_contains_amassed_army_ref(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::Power {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::Toughness {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectColorCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectNameWordCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ObjectTypelineComponentCount {
+                    scope: ObjectScope::AmassedArmy,
+                }
+                | QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::AmassedArmy,
+                    ..
+                },
+        } => true,
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_contains_amassed_army_ref(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_contains_amassed_army_ref)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_amassed_army_ref(left)
+                || quantity_expr_contains_amassed_army_ref(right)
+        }
+    }
+}
+
+fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
+    target_filter_contains_chosen_x_ref(filter) || target_filter_contains_amassed_army_ref(filter)
+}
+
 /// CR 601.2c: A negated prop (`FilterProp::Not`) can wrap an X-bearing prop
 /// (e.g. `Not(Cmc { value: X })`), so X resolution must descend into it just
 /// like the `CanEnchant` filter-bearing arm — otherwise an unannounced X in a
@@ -3644,7 +3728,7 @@ fn legal_targets_for_ability_filter_uncapped(
         return targets;
     }
 
-    let needs_ability_context = target_filter_contains_chosen_x_ref(filter);
+    let needs_ability_context = target_filter_needs_ability_context(filter);
     let relative_kind = relative_controller_kind(filter);
     if relative_kind.is_none() {
         if needs_ability_context {
@@ -4341,7 +4425,7 @@ fn legal_targets_for_selected_slot(
             _ => spec.filter.clone(),
         };
 
-        if target_filter_contains_chosen_x_ref(&enumeration_filter) {
+        if target_filter_needs_ability_context(&enumeration_filter) {
             if controller == ability.controller {
                 targeting::find_legal_targets_for_ability(state, &enumeration_filter, ability)
             } else {

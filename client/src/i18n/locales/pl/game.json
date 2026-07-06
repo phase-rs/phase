@@ -97,6 +97,7 @@
     },
     "emblemTag": "Emblemat",
     "allPlayers": "Wszyscy",
+    "allZones": "Wszystkie strefy",
     "cancel": "Anuluj"
   },
   "board": {
@@ -269,6 +270,7 @@
     "confirmDistribute_other": "Zadeklaruj {{count}} atakujących"
   },
   "fullControl": {
+    "label": "Kontrola",
     "on": "Pełna kontrola włączona",
     "off": "Pełna kontrola wyłączona",
     "tooltip": "Zatrzymuj okna priorytetu zamiast pozwalać na automatyczne przekazywanie w spokojnych momentach. Skrót: F."
@@ -588,11 +590,19 @@
   },
   "priorityYield": {
     "listHeader": "Rezygnacje z priorytetu",
-    "yieldThis": "Zrezygnuj z tego",
-    "yieldAllCopies": "Zrezygnuj ze wszystkich kopii",
+    "menuHeader": "Automatycznie pomijaj ten wyzwalacz",
+    "menuExplainer": "Pomija moment, w którym gra zatrzymuje się i pyta o akcję za każdym razem, gdy ten wyzwalacz trafia na stos. Nadal możesz reagować na inne rzeczy.",
+    "yieldThis": "Tylko ten",
+    "yieldThisHint": "Tylko ten {{source}} — nie inne kopie",
+    "yieldAllCopies": "Wszystkie kopie",
+    "allCopiesHint": "Każdy {{source}}, także nowe",
     "revoke": "Cofnij",
+    "revokeHint": "Znów zatrzymuj się na tym wyzwalaczu",
     "clearAll": "Wyczyść wszystko",
-    "allCopiesHint": "Zalecane dla żetonów"
+    "menuButton": "Automatycznie pomijaj ten wyzwalacz",
+    "menuButtonActive": "Automatyczne pomijanie — zmień lub cofnij",
+    "menuButtonShort": "Auto-pomiń",
+    "menuButtonShortActive": "Pomijanie"
   },
   "targeting": {
     "choosePermanentToCopy": "Wybierz trwałego do skopiowania",
@@ -1731,6 +1741,8 @@
       "twoColors": "Wybierz dwa kolory",
       "numberRange": "Wybierz liczbę",
       "labeled": "Dokonaj wyboru",
+      "cardPredicate": "Wybierz rodzaj karty",
+      "cardPredicateGuess": "Zgadnij rodzaj karty",
       "keyword": "Wybierz zdolność",
       "counterKind": "Wybierz żeton",
       "fallback": "Dokonaj wyboru"

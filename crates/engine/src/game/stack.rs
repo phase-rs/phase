@@ -2006,6 +2006,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         chosen_x,
         cost_paid_object,
         effect_context_object,
+        amassed_army_object,
         ability_index,
         may_trigger_origin,
         target_selection_mode,
@@ -2059,6 +2060,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && chosen_x.is_none()
         && cost_paid_object.is_none()
         && effect_context_object.is_none()
+        && amassed_army_object.is_none()
         && ability_index.is_none()
         && may_trigger_origin.is_none()
         && *target_selection_mode == TargetSelectionMode::Chosen

@@ -16981,8 +16981,8 @@ mod snapshot_tests {
     /// `ReplacementMode::Optional { decline: None }` (so the player is
     /// prompted to accept/decline and the original draw resolves on decline),
     /// and the effect chain must compose the existing `Effect::Choose`
-    /// (`ChoiceType::Labeled["Land","Nonland"]`) and `Effect::RevealUntil`
-    /// (filter: `FilterProp::IsChosenLandOrNonlandKind`, kept→Hand, rest→
+    /// (`ChoiceType::CardPredicate`) and `Effect::RevealUntil`
+    /// (filter: `FilterProp::MatchesLastChosenCardPredicate`, kept→Hand, rest→
     /// Library) building blocks with no `Unimplemented` node anywhere.
     #[test]
     fn abundance_parses_as_optional_choose_then_reveal_until_chosen_kind() {
@@ -17005,24 +17005,23 @@ mod snapshot_tests {
         );
 
         let execute = def.execute.as_ref().expect("execute chain must be present");
-        // Head clause: Choose(Labeled["Land","Nonland"]).
+        // Head clause: Choose(CardPredicate).
         let Effect::Choose {
-            choice_type: ChoiceType::Labeled { options },
+            choice_type: ChoiceType::CardPredicate { options },
             ..
         } = &*execute.effect
         else {
             panic!(
-                "expected head Effect::Choose(Labeled), got {:?}",
+                "expected head Effect::Choose(CardPredicate), got {:?}",
                 execute.effect
             );
         };
         assert_eq!(
             options,
-            &vec!["Land".to_string(), "Nonland".to_string()],
-            "labeled choice options must be exactly [\"Land\",\"Nonland\"]"
+            &ChoiceType::land_or_nonland_card_predicate_options()
         );
 
-        // RevealUntil { filter: IsChosenLandOrNonlandKind, kept=Hand, rest=Library }
+        // RevealUntil { filter: MatchesLastChosenCardPredicate, kept=Hand, rest=Library }
         // chained via the bare-and split (either as ContinuationStep or
         // SequentialSibling — both run sequentially under the chain resolver).
         let reveal = execute
@@ -17044,8 +17043,8 @@ mod snapshot_tests {
         assert!(
             tf.properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::IsChosenLandOrNonlandKind)),
-            "RevealUntil filter must carry FilterProp::IsChosenLandOrNonlandKind so the \
+                .any(|p| matches!(p, FilterProp::MatchesLastChosenCardPredicate)),
+            "RevealUntil filter must carry FilterProp::MatchesLastChosenCardPredicate so the \
              runtime resolves the kept card against the controller's earlier labeled choice"
         );
         assert_eq!(*kept_destination, Zone::Hand);

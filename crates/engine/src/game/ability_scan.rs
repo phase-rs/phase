@@ -191,6 +191,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         chosen_x: _,              // concrete cast-time X
         cost_paid_object: _,      // concrete captured-object snapshot
         effect_context_object: _, // concrete captured-object snapshot
+        amassed_army_object: _,   // concrete captured-object snapshot
         ability_index: _,         // usize provenance
         may_trigger_origin: _,    // provenance tag
         target_selection_mode: _, // Chosen/Random tag
@@ -2492,6 +2493,7 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // by exclusion within this ability's own resolution — no event/sibling
         // axis, like the demonstrative/anaphoric referents.
         ObjectScope::OtherRevealedCard => Axes::NONE,
+        ObjectScope::AmassedArmy => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -3660,6 +3662,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
         effect_context_object: _, // concrete captured-object snapshot
+        amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance
         may_trigger_origin: _, // provenance tag
         target_selection_mode: _, // Chosen/Random tag (announce-time)

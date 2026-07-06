@@ -2106,6 +2106,7 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
         | ObjectScope::Target
         | ObjectScope::Anaphoric
         | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
         | ObjectScope::EventSource
         // Per-resolution local surfaced by THIS ability's own reveal — not one of
         // the 12 retained legacy refs (mirrors the LastRevealed precedent).
@@ -2308,7 +2309,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
         | FilterProp::NotColor { .. }
@@ -2545,7 +2546,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
         | FilterProp::NotColor { .. }
@@ -3363,6 +3364,7 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
         ObjectScope::Target | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
             reads_board_of(kind)
         }
+        ObjectScope::AmassedArmy => member_bound_read(),
         ObjectScope::EventSource | ObjectScope::EventTarget => reads_event_live(),
         // §L7 precedent (CR 608.2c): a per-resolution local surfaced by THIS
         // ability's own reveal within the same resolution — observed by no
@@ -3475,6 +3477,7 @@ fn walk_ability(
         chosen_x: _,
         cost_paid_object: _,
         effect_context_object: _,
+        amassed_army_object: _,
         ability_index: _,
         may_trigger_origin: _,
         target_selection_mode: _,

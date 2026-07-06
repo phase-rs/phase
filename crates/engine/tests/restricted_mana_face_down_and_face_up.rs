@@ -296,21 +296,20 @@ fn overgrown_zealot_turn_face_up_mana_rejects_every_live_context() {
 /// `OnlyForAny([OnlyForFaceDownSpell, OnlyForSpecialAction(TurnFaceUp)])`: a DEAD
 /// face-down-cast leaf sitting beside a LIVE turn-face-up leaf. The leaf-level
 /// tests above pin each half in isolation; this drives `spend_for` at TSG's
-/// whole disjunction to prove the dead leaf cannot make the card *over-claimed*:
+/// whole disjunction to prove the dead leaf cannot make runtime spending
+/// over-permissive:
 ///
 ///   - the {R} is CONSUMED for the turn-face-up special action — the live leaf
-///     makes TSG's mana genuinely usable, so the card is not a dead-mana
-///     over-claim (its `has_payable_branch` support is real, CR 116.2b), and
+///     makes TSG's mana genuinely usable at runtime for that special action, and
 ///   - the {R} is WITHHELD for a normal face-up creature cast — the dead
 ///     `FaceDownSpell` leaf does not widen the disjunction into permitting
 ///     arbitrary casts (no over-permit).
 ///
 /// Combined with `face_down_spell_mana_rejects_every_production_context` (the
 /// `FaceDownSpell` leaf is fail-CLOSED at every production context — it can only
-/// under-permit, never over-permit), this is the measured proof that Tin Street
-/// Gossip is honestly supported through its live turn-face-up branch, not
-/// over-claimed through its dead face-down-cast branch. CR 106.6 + CR 708.4 +
-/// CR 116.2b + CR 702.37e.
+/// under-permit, never over-permit), this is the runtime proof for the lowered OR
+/// gate. Parser coverage remains red until the face-down-cast branch is
+/// production-live. CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e.
 ///
 /// Revert-proof: drop the `TurnFaceUp` leaf and the disjunction is all-dead — the
 /// turn-face-up spend (A) no longer consumes, so its assert flips; make the
@@ -336,8 +335,8 @@ fn tin_street_gossip_disjunction_consumes_for_turn_face_up_not_cast() {
     };
 
     // LEGAL (A, CR 116.2b): the live turn-face-up special action — the {R} is
-    // consumed. TSG's mana is genuinely usable, so the dead `FaceDownSpell` leaf
-    // does not leave it as unusable dead mana (no over-claim).
+    // consumed. The dead `FaceDownSpell` leaf does not interfere with the live
+    // special-action branch at runtime.
     let mut pool = make_pool();
     let spent = pool.spend_for(
         ManaType::Red,

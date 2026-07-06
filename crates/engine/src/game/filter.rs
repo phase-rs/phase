@@ -194,7 +194,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         // CR 700.2: modality reads the object's own printed characteristic, not
         // the board population.
@@ -415,7 +415,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         // CR 700.2: modality is candidate-local (the object's own printed
         // characteristic), so a board entry cannot perturb it.
@@ -2797,6 +2797,13 @@ fn spell_object_matches_property(
                 .and_then(|source| source.chosen_card_type())
                 .is_some_and(|card_type| record.core_types.contains(&card_type))
         }),
+        FilterProp::MatchesLastChosenCardPredicate => context.is_some_and(|context| {
+            matches_last_chosen_card_predicate(
+                &context.state.last_named_choice,
+                &record.core_types,
+                &record.colors,
+            )
+        }),
         // CR 109.1 (cited as identity foundation — CR has no dedicated
         // "another" entry): "other [X] spells you cast" excludes the case
         // where the spell being cast IS the static's own source object. The
@@ -3019,7 +3026,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::MostPrevalentCreatureTypeIn { .. }
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
         | FilterProp::Renowned
@@ -3246,14 +3253,13 @@ fn zone_change_pt_value(record: &ZoneChangeRecord, stat: PtStat, scope: PtValueS
     }
 }
 
-fn matches_last_chosen_land_or_nonland_kind(
+fn matches_last_chosen_card_predicate(
     choice: &Option<ChoiceValue>,
     core_types: &[CoreType],
+    colors: &[ManaColor],
 ) -> bool {
-    let is_land = core_types.contains(&CoreType::Land);
     match choice {
-        Some(ChoiceValue::Label(label)) if label.eq_ignore_ascii_case("Land") => is_land,
-        Some(ChoiceValue::Label(label)) if label.eq_ignore_ascii_case("Nonland") => !is_land,
+        Some(ChoiceValue::CardPredicate(predicate)) => predicate.matches_card(core_types, colors),
         _ => false,
     }
 }
@@ -3891,9 +3897,10 @@ fn matches_filter_prop(
             crate::game::game_object::chosen_card_type_of(source.chosen_attributes)
                 .is_some_and(|chosen| obj.card_types.core_types.contains(&chosen))
         }
-        FilterProp::IsChosenLandOrNonlandKind => matches_last_chosen_land_or_nonland_kind(
+        FilterProp::MatchesLastChosenCardPredicate => matches_last_chosen_card_predicate(
             &state.last_named_choice,
             &obj.card_types.core_types,
+            &obj.color,
         ),
         // CR 701.60b: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
@@ -4311,6 +4318,11 @@ fn zone_change_record_matches_property(
             )
         }),
         FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
+        FilterProp::MatchesLastChosenCardPredicate => matches_last_chosen_card_predicate(
+            &state.last_named_choice,
+            &record.core_types,
+            &record.colors,
+        ),
         // CR 509.1b: Power comparison against the live source.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -4479,7 +4491,6 @@ fn zone_change_record_matches_property(
         FilterProp::Suspected => record.is_suspected,
         FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
         // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
         // evaluated on the live stack object, not the snapshot).

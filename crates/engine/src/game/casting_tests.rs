@@ -1573,6 +1573,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             characteristic_defining: false,
             description: Some("Assassin spells you cast have freerunning {B}{B}.".to_string()),
             attack_defended: None,
+            source_controller: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -9308,6 +9309,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }]
             .into();
         }
@@ -11799,6 +11801,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
                 "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
             ),
             attack_defended: None,
+            source_controller: None,
         };
         obj.static_definitions = vec![def].into();
     }

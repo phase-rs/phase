@@ -177,9 +177,12 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // NOT registry-keyed (mirrors CantBeBlockedBy). Coverage support is via
     // coverage::is_data_carrying_static; runtime enforcement is direct-match in
     // combat.rs declare-blockers validation.
-    // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
-    // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
-    registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);
+    // CR 509.1c: MustBeBlockedByAll is now a parameterized, data-carrying variant
+    // (`blockers: Option<TargetFilter>` — None = all creatures (Lure), Some =
+    // only matching creatures (Talruum Piper flying, Marble Priest Walls)) — it
+    // cannot be an exact HashMap key, so it is NOT registry-keyed (mirrors
+    // MustBeBlocked). Coverage support is via coverage::is_data_carrying_static;
+    // runtime enforcement is direct-match in combat.rs declare-blockers validation.
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);

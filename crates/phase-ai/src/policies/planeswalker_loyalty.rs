@@ -203,6 +203,7 @@ mod tests {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }],
             target: None,
             duration: None,

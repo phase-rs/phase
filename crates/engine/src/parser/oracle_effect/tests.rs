@@ -17701,10 +17701,13 @@ fn mass_forced_block_target_creature() {
     assert!(
         matches!(&e, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlockedByAll { blockers: None }
+                )
             )
         ),
-        "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
+        "Expected GenericEffect with unfiltered MustBeBlockedByAll, got {:?}",
         e
     );
 }
@@ -17716,11 +17719,76 @@ fn mass_forced_block_self_ref() {
     assert!(
         matches!(&e, Effect::GenericEffect { static_abilities, .. }
             if static_abilities.iter().any(|sd|
-                sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustBeBlockedByAll { .. }
+                )
             )
         ),
         "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
         e
+    );
+}
+
+#[test]
+fn mass_forced_block_filtered_opponents_control() {
+    // CR 509.1c: a one-shot filtered lure — "All creatures your opponents control
+    // able to block that creature this turn do so" — must lower to a
+    // MustBeBlockedByAll carrying Some(filter) so only the opponents' creatures
+    // are compelled. This is the reach-guard for the slot-B / 8020 seam: it
+    // fails if the parser drops the filter (Some → None) OR if the filter is not
+    // threaded into the AddStaticMode modification.
+    use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+    use crate::types::statics::StaticMode;
+    let expected = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+
+    let e = parse_effect(
+        "All creatures your opponents control able to block that creature this turn do so",
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &e
+    else {
+        panic!("Expected GenericEffect, got {:?}", e);
+    };
+
+    // The top-level static carries Some(filter) (guards the 8017 seam).
+    let sd = static_abilities
+        .iter()
+        .find(|sd| {
+            matches!(
+                &sd.mode,
+                StaticMode::MustBeBlockedByAll { blockers: Some(f) } if *f == expected
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Expected top-level MustBeBlockedByAll {{ blockers: Some(opponents' creatures) }}, got {:?}",
+                static_abilities
+            )
+        });
+
+    // The SAME Some(filter) must appear inside the AddStaticMode modification
+    // (guards the distinct 8020 seam).
+    assert!(
+        sd.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustBeBlockedByAll { blockers: Some(f) }
+            } if *f == expected
+        )),
+        "AddStaticMode modification must carry the same Some(filter), got {:?}",
+        sd.modifications
+    );
+
+    // Positive reach-guard: the subject ("that creature") produced a non-None
+    // effect target, proving the line parsed as the mass-forced-block form and
+    // did not short-circuit before the blocker slot.
+    assert!(
+        target.is_some(),
+        "the mass-forced-block effect must carry a subject target, got None"
     );
 }
 
@@ -20384,6 +20452,307 @@ fn coiling_oracle_reveal_conditional_with_otherwise() {
             .unwrap();
 }
 
+fn collect_ability_nodes<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+    out.push(ability);
+    if let Some(sub) = ability.sub_ability.as_deref() {
+        collect_ability_nodes(sub, out);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref() {
+        collect_ability_nodes(else_ability, out);
+    }
+}
+
+fn is_card_predicate_guess_condition(condition: &AbilityCondition) -> bool {
+    matches!(
+        condition,
+        AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            subtype_filter: None,
+        } if card_types.is_empty()
+    )
+}
+
+#[test]
+fn gollum_scheming_guide_guess_sequence_has_no_unimplemented() {
+    use crate::types::statics::StaticMode;
+
+    let def = parse_effect_chain(
+        "look at the top two cards of your library, put them back in any order, then choose land or nonland. \
+         An opponent guesses whether the top card of your library is the chosen kind. \
+         Reveal that card. \
+         If they guessed right, remove ~ from combat. \
+         Otherwise, you draw a card and ~ can't be blocked this turn.",
+        AbilityKind::Spell,
+    );
+
+    let mut nodes = Vec::new();
+    collect_ability_nodes(&def, &mut nodes);
+    assert!(
+        nodes
+            .iter()
+            .all(|node| !matches!(*node.effect, Effect::Unimplemented { .. })),
+        "Gollum chain must not contain Unimplemented nodes: {def:#?}"
+    );
+    assert!(
+        nodes.iter().any(|node| {
+            matches!(
+                node.effect.as_ref(),
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 1
+                }
+            )
+        }),
+        "supported Gollum wording must reveal the controller's top card: {def:#?}"
+    );
+
+    let choose_opponent = nodes
+        .iter()
+        .find(|node| {
+            node.player_scope.is_none()
+                && matches!(
+                    node.effect.as_ref(),
+                    Effect::Choose {
+                        choice_type: ChoiceType::Opponent { restriction: None },
+                        persist: false,
+                        ..
+                    }
+                )
+        })
+        .expect("controller should choose the single opponent who guesses");
+
+    let opponent_guess = choose_opponent
+        .sub_ability
+        .as_deref()
+        .expect("chosen opponent should make the land/nonland guess");
+    assert_eq!(
+        opponent_guess.player_scope,
+        Some(PlayerFilter::ChosenPlayer { index: 0 })
+    );
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.player_scope != Some(PlayerFilter::Opponent)),
+        "the guess must not fan out to every opponent"
+    );
+    assert!(
+        matches!(
+            opponent_guess.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::CardPredicateGuess { .. },
+                persist: false,
+                ..
+            }
+        ),
+        "opponent guesses need source context for logging, but must not persist a source label"
+    );
+
+    let remove = nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.effect.as_ref(),
+                Effect::RemoveFromCombat {
+                    target: TargetFilter::SelfRef
+                }
+            )
+        })
+        .expect("guessed-right branch should remove Gollum from combat");
+    assert_eq!(
+        remove.condition,
+        Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![],
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            subtype_filter: None,
+        })
+    );
+
+    let else_branch = remove
+        .else_ability
+        .as_deref()
+        .expect("guessed-wrong branch must attach through Otherwise");
+    assert!(
+        matches!(*else_branch.effect, Effect::Draw { .. }),
+        "otherwise branch should draw a card, got {:?}",
+        else_branch.effect
+    );
+
+    let mut else_nodes = Vec::new();
+    collect_ability_nodes(else_branch, &mut else_nodes);
+    assert!(
+        else_nodes.iter().any(|node| {
+            matches!(
+                node.effect.as_ref(),
+                Effect::GenericEffect {
+                    static_abilities,
+                    ..
+                } if static_abilities
+                    .iter()
+                    .any(|static_def| static_def.mode == StaticMode::CantBeBlocked)
+            )
+        }),
+        "otherwise branch should also make Gollum unable to be blocked: {else_branch:#?}"
+    );
+}
+
+#[test]
+fn card_predicate_guess_result_subjects_share_one_contextual_condition_shape() {
+    for subject in ["they", "that player", "that opponent"] {
+        let def = parse_effect_chain(
+            &format!(
+                "An opponent guesses whether the top card of your library is the chosen kind. \
+                 Reveal that card. \
+                 If {subject} guessed right, remove ~ from combat."
+            ),
+            AbilityKind::Spell,
+        );
+
+        let mut nodes = Vec::new();
+        collect_ability_nodes(&def, &mut nodes);
+        let remove = nodes
+            .iter()
+            .find(|node| matches!(node.effect.as_ref(), Effect::RemoveFromCombat { .. }))
+            .unwrap_or_else(|| panic!("{subject} guessed right should parse: {def:#?}"));
+        let condition = remove.condition.as_ref().unwrap_or_else(|| {
+            panic!("{subject} guessed right should carry a condition: {def:#?}")
+        });
+        assert!(
+            is_card_predicate_guess_condition(condition),
+            "{subject} guessed right should match the last chosen card predicate, got {condition:?}"
+        );
+    }
+}
+
+#[test]
+fn card_predicate_guess_result_rejects_unsupported_outcomes() {
+    for result_text in [
+        "they guessed wrong",
+        "that player guessed incorrectly",
+        "target opponent guessed right",
+    ] {
+        let def = parse_effect_chain(
+            &format!(
+                "An opponent guesses whether the top card of your library is the chosen kind. \
+                 If {result_text}, remove ~ from combat."
+            ),
+            AbilityKind::Spell,
+        );
+
+        let mut nodes = Vec::new();
+        collect_ability_nodes(&def, &mut nodes);
+        assert!(
+            !nodes
+                .iter()
+                .filter_map(|node| node.condition.as_ref())
+                .any(is_card_predicate_guess_condition),
+            "{result_text:?} is not a supported card-predicate guess result axis: {def:#?}"
+        );
+        assert!(
+            !nodes.iter().any(|node| {
+                node.condition.is_none()
+                    && matches!(node.effect.as_ref(), Effect::RemoveFromCombat { .. })
+            }),
+            "{result_text:?} must not drop the unsupported condition and run the body unconditionally: {def:#?}"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
+            "{result_text:?} should stay visible as unsupported: {def:#?}"
+        );
+    }
+}
+
+#[test]
+fn non_card_predicate_guess_result_does_not_reuse_gollum_condition() {
+    let def = parse_effect_chain(
+        "An opponent guesses which number you chose, then you reveal the number you chose. \
+         If they guessed right, sacrifice this enchantment.",
+        AbilityKind::Spell,
+    );
+
+    let mut nodes = Vec::new();
+    collect_ability_nodes(&def, &mut nodes);
+    assert!(
+        !nodes
+            .iter()
+            .filter_map(|node| node.condition.as_ref())
+            .any(is_card_predicate_guess_condition),
+        "number guesses must not be treated as top-card predicate guesses: {def:#?}"
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
+        "unsupported number-guess wording should remain visible as unsupported: {def:#?}"
+    );
+}
+
+#[test]
+fn gollum_guess_rejects_their_library_variant() {
+    let def = parse_effect_chain(
+        "look at the top two cards of your library, put them back in any order, then choose land or nonland. \
+         An opponent guesses whether the top card of their library is the chosen kind. \
+         Reveal that card. \
+         If they guessed right, remove ~ from combat.",
+        AbilityKind::Spell,
+    );
+
+    let mut nodes = Vec::new();
+    collect_ability_nodes(&def, &mut nodes);
+    assert!(
+        !nodes.iter().any(|node| {
+            matches!(
+                node.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::CardPredicateGuess { .. },
+                    ..
+                }
+            )
+        }),
+        "unsupported non-controller library wording must not parse as a predicate guess: {def:#?}"
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
+        "unsupported non-controller library wording should stay honestly unsupported: {def:#?}"
+    );
+}
+
+#[test]
+fn gollum_guess_rejects_non_chosen_kind_predicate_variant() {
+    let def = parse_effect_chain(
+        "look at the top two cards of your library, put them back in any order, then choose land or nonland. \
+         An opponent guesses whether the top card of your library is red. \
+         Reveal that card. \
+         If they guessed right, remove ~ from combat.",
+        AbilityKind::Spell,
+    );
+
+    let mut nodes = Vec::new();
+    collect_ability_nodes(&def, &mut nodes);
+    assert!(
+        !nodes.iter().any(|node| {
+            matches!(
+                node.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::CardPredicateGuess { .. },
+                    ..
+                }
+            )
+        }),
+        "unsupported predicate wording must not parse as a predicate guess: {def:#?}"
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
+        "unsupported predicate wording should stay honestly unsupported: {def:#?}"
+    );
+}
+
 /// CR 608.2c + CR 205.3a: "If it's a [subtype], A. Otherwise, B." — the subtype
 /// guard must parse to a non-None condition so the existing if/otherwise lowering
 /// attaches the else-branch. Pre-fix the subtype dropped to `None`, so the
@@ -21453,7 +21822,7 @@ fn search_filter_card_of_chosen_kind() {
     assert!(tf
         .properties
         .iter()
-        .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
+        .any(|property| matches!(property, FilterProp::MatchesLastChosenCardPredicate)));
 }
 
 #[test]
@@ -21472,7 +21841,7 @@ fn search_filter_permanent_card_of_chosen_kind() {
     assert!(tf
         .properties
         .iter()
-        .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
+        .any(|property| matches!(property, FilterProp::MatchesLastChosenCardPredicate)));
 }
 
 // --- Seek parser tests ---
@@ -21726,7 +22095,7 @@ fn seek_cards_of_chosen_kind() {
     assert!(tf
         .properties
         .iter()
-        .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
+        .any(|property| matches!(property, FilterProp::MatchesLastChosenCardPredicate)));
 }
 
 #[test]
@@ -21735,18 +22104,21 @@ fn choose_land_or_nonland_then_seek_chosen_kind_chain() {
         "Secretly choose land or nonland. Seek a card of the chosen kind.",
         AbilityKind::Spell,
     );
-    // CR 205.2a / CR 614.12c: A Labeled card-type/anchor choice now persists
-    // so later "of the chosen type" / "of the chosen kind" / `ChosenLabelIs`
-    // references can read it back from the source's `chosen_attributes`.
+    // CR 205.2a: The transient library-kind choice writes `last_named_choice`
+    // for the following "chosen kind" clause without rendering a lasting
+    // source-card label.
     let Effect::Choose {
-        choice_type: ChoiceType::Labeled { options },
-        persist: true,
+        choice_type: ChoiceType::CardPredicate { options },
+        persist: false,
         ..
     } = *def.effect
     else {
         panic!("Expected Choose land/nonland, got {:?}", def.effect);
     };
-    assert_eq!(options, vec!["Land".to_string(), "Nonland".to_string()]);
+    assert_eq!(
+        options,
+        ChoiceType::land_or_nonland_card_predicate_options()
+    );
 
     let seek = def.sub_ability.expect("expected seek continuation");
     let Effect::Seek { filter, count, .. } = *seek.effect else {
@@ -21759,7 +22131,7 @@ fn choose_land_or_nonland_then_seek_chosen_kind_chain() {
     assert!(tf
         .properties
         .iter()
-        .any(|property| matches!(property, FilterProp::IsChosenLandOrNonlandKind)));
+        .any(|property| matches!(property, FilterProp::MatchesLastChosenCardPredicate)));
 }
 
 #[test]
@@ -31739,11 +32111,13 @@ fn named_choice_accepts_land_card_name() {
 }
 
 #[test]
-fn named_choice_accepts_secretly_choose_land_or_nonland() {
+fn named_choice_keeps_land_or_nonland_as_generic_label() {
     assert_eq!(
         super::try_parse_named_choice("secretly choose land or nonland"),
         Some(ChoiceType::Labeled {
-            options: vec!["Land".to_string(), "Nonland".to_string()]
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options()
+            )
         })
     );
 }

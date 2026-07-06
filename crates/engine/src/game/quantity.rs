@@ -239,7 +239,8 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             // CR 608.2c: the other revealer's card is a per-resolution referent,
             // resolved only at resolution time (never a static CDA read).
             | ObjectScope::OtherRevealedCard
-            | ObjectScope::Demonstrative => true,
+            | ObjectScope::Demonstrative
+            | ObjectScope::AmassedArmy => true,
         }
     }
     match expr {
@@ -3464,17 +3465,16 @@ fn object_for_scope<'a>(
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e))
             .and_then(|id| state.objects.get(&id)),
-        // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
-        // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
-        // referent) resolves to a live `GameObject` here — both are snapshot
-        // referents read through `ability` slots, not `state.objects`.
-        // `OtherRevealedCard` is likewise resolved specially in
-        // `resolve_object_mana_value` (by-exclusion over `last_revealed_ids`),
-        // not via this generic single-id path.
+        // CR 608.2k / CR 608.2c / CR 701.47c: object-*identity* lookup.
+        // These resolution-local referents are snapshot/ability-carried slots,
+        // not plain live-board scopes available to this ability-free helper.
+        // `OtherRevealedCard` is resolved specially in `resolve_object_mana_value`
+        // by exclusion over `last_revealed_ids`, not via this generic path.
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
-        | ObjectScope::Demonstrative => None,
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy => None,
     }
 }
 
@@ -3518,16 +3518,16 @@ fn object_id_for_scope(
             .cloned()
             .or_else(detection_trigger_event)
             .and_then(|e| crate::game::targeting::extract_target_object_from_event(&e)),
-        // CR 608.2k / CR 608.2c: object-*identity* lookup. Neither
-        // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
-        // referent) resolves to an `ObjectId` here — both are snapshot
-        // referents read through `ability` slots, not `state.objects`.
+        // CR 608.2k / CR 608.2c / CR 701.47c: object-*identity* lookup.
+        // These resolution-local referents are snapshot/ability-carried slots,
+        // not plain live-board scopes available to this ability-free helper.
         // `OtherRevealedCard` is resolved specially in `resolve_object_mana_value`
-        // (by-exclusion over `last_revealed_ids`), not via this generic path.
+        // by exclusion over `last_revealed_ids`, not via this generic path.
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
-        | ObjectScope::Demonstrative => None,
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy => None,
     }
 }
 
@@ -3683,6 +3683,24 @@ fn resolve_counters_on_scope(
         ObjectScope::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
             .map(|snapshot| counter_count_from_map(&snapshot.lki.counters, counter_type))
+            .unwrap_or(0),
+        ObjectScope::AmassedArmy => ability
+            .and_then(|ability| ability.amassed_army_object.as_ref())
+            .map(|snapshot| {
+                let live = state.objects.get(&snapshot.object_id);
+                let on_battlefield =
+                    live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
+                if on_battlefield {
+                    return live
+                        .map(|obj| counter_count_from_map(&obj.counters, counter_type))
+                        .unwrap_or(0);
+                }
+                state
+                    .lki_cache
+                    .get(&snapshot.object_id)
+                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
+                    .unwrap_or_else(|| counter_count_from_map(&snapshot.lki.counters, counter_type))
+            })
             .unwrap_or(0),
         _ => object_for_scope(state, scope, ctx, targets)
             .map(|obj| counter_count_from_map(&obj.counters, counter_type))
@@ -3974,6 +3992,18 @@ where
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
             })
             .unwrap_or(0),
+        // CR 701.47c + CR 608.2h: "the amassed Army's power/toughness" reads
+        // the Army chosen by the current amass instruction. The ability carrier
+        // provides identity plus a final snapshot fallback; the live/LKI helper
+        // keeps later same-resolution movement rules aligned with other object
+        // characteristic reads.
+        ObjectScope::AmassedArmy => ability
+            .and_then(|a| a.amassed_army_object.as_ref())
+            .and_then(|snapshot| {
+                read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
+                    .or_else(|| lki_extract(&snapshot.lki))
+            })
+            .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its power"). Shares the
         // `Demonstrative` referent chain (earlier instruction → trigger-event
         // source → cost referent), plus one extra final fallback for the
@@ -4154,6 +4184,26 @@ fn resolve_object_mana_value(
                                 .map(|lki| u32_to_i32_saturating(lki.mana_value))
                         })
                 })
+            })
+            .unwrap_or(0),
+        ObjectScope::AmassedArmy => ability
+            .and_then(|a| a.amassed_army_object.as_ref())
+            .map(|snapshot| {
+                state
+                    .objects
+                    .get(&snapshot.object_id)
+                    .map(|obj| {
+                        u32_to_i32_saturating(
+                            obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                        )
+                    })
+                    .or_else(|| {
+                        state
+                            .lki_cache
+                            .get(&snapshot.object_id)
+                            .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                    })
+                    .unwrap_or_else(|| u32_to_i32_saturating(snapshot.lki.mana_value))
             })
             .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its mana value") in a triggered

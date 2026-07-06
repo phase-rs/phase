@@ -840,6 +840,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::AttackersDeclared { attacker_ids, .. } => count_slice(attacker_ids),
         GameEvent::CreatureExerted { object_id } => count_one(*object_id),
         GameEvent::CreatureEnlisted { attacker, .. } => count_one(*attacker),
+        GameEvent::ArmyAmassed { object_id, .. } => count_one(*object_id),
         GameEvent::ZoneChanged { object_id, .. }
         | GameEvent::Discarded { object_id, .. }
         | GameEvent::SpellCast { object_id, .. }
@@ -967,6 +968,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }
+        | GameEvent::CardPredicateGuessMade { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. }

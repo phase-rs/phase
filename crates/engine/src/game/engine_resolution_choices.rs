@@ -3722,6 +3722,13 @@ pub(super) fn handle_resolution_choice(
             // layer-affecting choice kinds, and record `last_named_choice`.
             // Single authority shared with the random `Effect::Choose` resolver.
             effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
+            if choice_type.is_card_predicate_guess() {
+                events.push(GameEvent::CardPredicateGuessMade {
+                    player_id: player,
+                    source_id,
+                    choice: choice.clone(),
+                });
+            }
 
             // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
             // answer binds a resolution-scoped chosen player. Append it to the
@@ -4664,5 +4671,112 @@ fn propagate_targets_through_search_shuffle(ability: &mut ResolvedAbility, targe
             next.targets = targets.to_vec();
         }
         cursor = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    #[test]
+    fn land_nonland_guess_logs_without_persisting_a_source_label() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            Zone::Battlefield,
+        );
+        let waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+        };
+        let mut events = Vec::new();
+
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::ChooseOption {
+                choice: "Nonland".to_string(),
+            },
+            &mut events,
+        )
+        .expect("choice resolves");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardPredicateGuessMade {
+                player_id,
+                source_id: Some(event_source_id),
+                choice,
+            } if *player_id == PlayerId(1)
+                && *event_source_id == source_id
+                && choice == "Nonland"
+        )));
+        let source = state.objects.get(&source_id).expect("source exists");
+        assert!(
+            source.chosen_attributes.is_empty(),
+            "opponent guess labels must not remain rendered on the source card"
+        );
+    }
+
+    #[test]
+    fn land_nonland_kind_choice_does_not_debug_log_or_persist_source_label() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Abundance".to_string(),
+            Zone::Battlefield,
+        );
+        let waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardPredicate {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+        };
+        let mut events = Vec::new();
+
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::ChooseOption {
+                choice: "Land".to_string(),
+            },
+            &mut events,
+        )
+        .expect("choice resolves");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::CardPredicateGuessMade { .. })),
+            "ordinary land/nonland kind choices should not produce debug guess logs"
+        );
+        assert!(
+            state
+                .objects
+                .get(&source_id)
+                .expect("source exists")
+                .chosen_attributes
+                .is_empty(),
+            "transient land/nonland kind choices should not render source labels"
+        );
     }
 }

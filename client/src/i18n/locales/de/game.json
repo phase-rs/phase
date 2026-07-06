@@ -97,6 +97,7 @@
     },
     "emblemTag": "Emblem",
     "allPlayers": "Alle",
+    "allZones": "Alle Zonen",
     "cancel": "Abbrechen"
   },
   "board": {
@@ -269,6 +270,7 @@
     "confirmDistribute_other": "{{count}} Angreifer erklären"
   },
   "fullControl": {
+    "label": "Kontrolle",
     "on": "Volle Kontrolle An",
     "off": "Volle Kontrolle Aus",
     "tooltip": "Prioritätsfenster halten, anstatt ruhige Stellen automatisch abgeben zu lassen. Tastenkürzel: F."
@@ -588,11 +590,19 @@
   },
   "priorityYield": {
     "listHeader": "Prioritätsverzichte",
-    "yieldThis": "Diesen überspringen",
-    "yieldAllCopies": "Alle Kopien überspringen",
+    "menuHeader": "Diesen Auslöser automatisch überspringen",
+    "menuExplainer": "Überspringt die Nachfrage, bei der das Spiel jedes Mal anhält, wenn dieser Auslöser auf den Stapel gelegt wird. Auf andere Dinge kannst du weiterhin reagieren.",
+    "yieldThis": "Nur dieses",
+    "yieldThisHint": "Nur dieses {{source}} – nicht andere Kopien",
+    "yieldAllCopies": "Alle Kopien",
+    "allCopiesHint": "Jedes {{source}}, auch neue",
     "revoke": "Widerrufen",
+    "revokeHint": "Wieder für diesen Auslöser anhalten",
     "clearAll": "Alle löschen",
-    "allCopiesHint": "Empfohlen für Spielstein-Auslöser"
+    "menuButton": "Diesen Auslöser automatisch überspringen",
+    "menuButtonActive": "Wird automatisch übersprungen – ändern oder widerrufen",
+    "menuButtonShort": "Auto-Pass",
+    "menuButtonShortActive": "Übersprungen"
   },
   "targeting": {
     "choosePermanentToCopy": "Wähle eine bleibende Karte zum Kopieren",
@@ -1731,6 +1741,8 @@
       "twoColors": "Wähle zwei Farben",
       "numberRange": "Wähle eine Zahl",
       "labeled": "Triff eine Wahl",
+      "cardPredicate": "Wähle eine Kartenart",
+      "cardPredicateGuess": "Errate eine Kartenart",
       "keyword": "Wähle eine Fähigkeit",
       "counterKind": "Wähle eine Marke",
       "fallback": "Triff eine Wahl"
