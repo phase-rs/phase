@@ -5470,7 +5470,7 @@ fn attach_unless_slots(
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     // CR 608.2c: "do X unless [game state]" — strip trailing unless suffix and
     // attach the negated gate before body parsing (payment-unless uses
     // `unless_pay` / `extract_resolution_unless_pay_modifier` instead).
@@ -19160,6 +19160,7 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::card_type())
     } else if alt((
         tag::<_, _, E>("a card name"),
+        tag("any card name"),
         tag("a nonland card name"),
         tag("a creature card name"),
         tag("a land card name"),

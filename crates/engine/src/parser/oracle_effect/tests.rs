@@ -40472,6 +40472,93 @@ fn teyo_minus_two_grants_temporary_attack_only_neighbor() {
     );
 }
 
+// CR 701.20e + CR 608.2d: "Look at an opponent's hand" (Anointed Peacekeeper
+// ETB) is a private look at a non-targeted opponent — reveal:false, no card
+// filter, controller-scoped `Typed(Opponent)` target. The new possessive arm
+// must not perturb the existing "target opponent's hand" / "target player's
+// hand" / "your hand" look siblings.
+#[test]
+fn parse_look_at_an_opponents_hand_is_private_opponent_look() {
+    use crate::types::ability::ControllerRef;
+
+    let def = parse_effect_chain("Look at an opponent's hand.", AbilityKind::Spell);
+    let Effect::RevealHand {
+        target,
+        reveal,
+        card_filter,
+        ..
+    } = &*def.effect
+    else {
+        panic!("Expected RevealHand, got {:?}", def.effect);
+    };
+    assert!(!*reveal, "look at is a private look, not a public reveal");
+    assert!(
+        matches!(target, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)),
+        "expected controller-scoped Opponent target, got {target:?}"
+    );
+    assert_eq!(*card_filter, TargetFilter::None);
+
+    let look_target = |t: &str| {
+        let d = parse_effect_chain(t, AbilityKind::Spell);
+        let Effect::RevealHand { target, .. } = &*d.effect else {
+            panic!("Expected RevealHand for {t:?}, got {:?}", d.effect);
+        };
+        target.clone()
+    };
+    assert!(
+        matches!(look_target("Look at target opponent's hand."), TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)),
+        "targeted opponent look must stay Typed(Opponent)"
+    );
+    assert_eq!(
+        look_target("Look at target player's hand."),
+        TargetFilter::Player,
+        "targeted player look unchanged"
+    );
+    assert_eq!(
+        look_target("Look at your hand."),
+        TargetFilter::Controller,
+        "self look unchanged"
+    );
+}
+
+// CR 201.4: "choose any card name" (Anointed Peacekeeper) is the same CardName
+// choice as the "a card name" forms — the alt-list must accept the "any"
+// determiner. Regression: the existing "a card name" / "a nonland card name"
+// forms still resolve. Negative: a "card <X>" phrase that is NOT a name (a
+// bare card, a card type) must NOT collapse to CardName, and the new "any"
+// determiner must not bleed into other "any …" phrases — "any number" is not
+// a card-name choice (the number arms require "a number").
+#[test]
+fn named_choice_accepts_any_card_name() {
+    assert_eq!(
+        super::try_parse_named_choice("choose any card name."),
+        Some(ChoiceType::CardName)
+    );
+    assert_eq!(
+        super::try_parse_named_choice("choose a card name"),
+        Some(ChoiceType::CardName)
+    );
+    assert_eq!(
+        super::try_parse_named_choice("choose a nonland card name"),
+        Some(ChoiceType::CardName)
+    );
+    // Negatives: no "name" head → not a CardName choice.
+    assert_ne!(
+        super::try_parse_named_choice("choose any card"),
+        Some(ChoiceType::CardName)
+    );
+    assert_ne!(
+        super::try_parse_named_choice("choose any card type"),
+        Some(ChoiceType::CardName)
+    );
+    // The new "any" determiner arm must not swallow other "any …" choices — a
+    // number choice must not collapse into CardName.
+    assert_ne!(
+        super::try_parse_named_choice("choose any number"),
+        Some(ChoiceType::CardName)
+    );
+}
+
 /// CR 701.9a + CR 107.1b: The whole Monomania oracle line parses -- with
 /// subject injection -- to the existing `Effect::Discard`: the target player
 /// discards `hand size - 1` cards of their own choice, keeping exactly one.
