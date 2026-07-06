@@ -14625,6 +14625,58 @@ fn parse_bare_damage_continuation<'a>(
             "",
         ));
     }
+    // CR 120.2b + CR 120.3: A chained continuation whose recipient is an
+    // "each <object>" scope — e.g. "... and 1 damage to each creature your
+    // opponents control" — is uniform mass damage to every matching permanent,
+    // not a single targeted hit. The primary segment already classifies this in
+    // `try_parse_damage_with_remainder`; the bare-continuation path must do the
+    // same or it emits a single-target `DealDamage` that would (illegally)
+    // require one legal target and mark damage on only one creature. Affects the
+    // second segment of Dagger Caster, Seismic Wave, Wildfire Howl (gift half),
+    // The Fall of Kroog, and Radiating Lightning. Excluded via `each of ` guard:
+    // the "each of up to N target(s)" distribute form (Drakuseth), which is a
+    // targeted multi-hit owned by the primary distribute path, not mass damage.
+    if tag::<_, _, OracleError<'_>>("each ")
+        .parse(after_to)
+        .is_ok()
+        && tag::<_, _, OracleError<'_>>("each of ")
+            .parse(after_to)
+            .is_err()
+    {
+        // "each player" / "each opponent" / "each foe" → per-player damage,
+        // which may vary per recipient (`DamageEachPlayer`, CR 120.3a).
+        if let Some(player_filter) = lower::parse_damage_each_player_scope(after_to) {
+            return Some((
+                Effect::DamageEachPlayer {
+                    amount,
+                    player_filter,
+                },
+                "",
+            ));
+        }
+        // "each <object filter>" → uniform mass object damage (`DamageAll`). A
+        // trailing "and each <player>" composite scope is lifted into
+        // `player_filter`, mirroring the primary each-branch classification.
+        let (target, rem) = parse_target_with_ctx(after_to, ctx);
+        let (target, rem) = refine_damage_target_remainder(target, rem);
+        let rem = trim_dangling_target_word(rem);
+        let trimmed_rem = rem.trim_start_matches([',', ' ']);
+        let trimmed_rem_lower = trimmed_rem.to_lowercase();
+        let player_filter = tag::<_, _, OracleError<'_>>("and ")
+            .parse(trimmed_rem_lower.as_str())
+            .ok()
+            .and_then(|(after_and, _)| lower::parse_damage_each_player_scope(after_and));
+        let rem_out = if player_filter.is_some() { "" } else { rem };
+        return Some((
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+                damage_source: None,
+            },
+            rem_out,
+        ));
+    }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
     let rem = trim_dangling_target_word(rem);
