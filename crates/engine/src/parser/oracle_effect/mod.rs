@@ -2589,10 +2589,9 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
 /// origin zone is parsed by the shared `parse_enters_origin_zone` combinator, so
 /// this generalizes over any origin zone it recognizes (exile / graveyard /
 /// library / hand). An optional single-type-word prefix scopes the subject; its
-/// absence matches any card. Trailing " this turn" is left as harmless nom
-/// remainder — this dispatch layer tolerates partial consumption, and the
-/// `EndOfTurn` expiry is fixed here (mirroring `try_parse_damage_prevention_
-/// disabled`).
+/// absence matches any card. The only accepted trailing duration is " this
+/// turn", matching the fixed `EndOfTurn` expiry; other trailing text is rejected
+/// so unsupported durations cannot silently lower to the wrong cleanup timing.
 fn cant_enter_battlefield_from_zone(input: &str) -> OracleResult<'_, (Zone, Vec<TypeFilter>)> {
     let (input, type_filter) = opt(terminated(
         alt((
@@ -2614,14 +2613,18 @@ fn cant_enter_battlefield_from_zone(input: &str) -> OracleResult<'_, (Zone, Vec<
     let (input, _) = opt(tag(" the battlefield")).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     let (input, zone) = super::oracle_nom::filter::parse_enters_origin_zone(input)?;
+    let (input, _) = opt(tag(" this turn")).parse(input)?;
     Ok((input, (zone, type_filter.into_iter().collect())))
 }
 
 fn try_parse_cant_enter_battlefield_from_restriction(
     tp: TextPair<'_>,
 ) -> Option<ParsedEffectClause> {
-    let ((zone, type_filters), _rest) =
+    let ((zone, type_filters), rest) =
         nom_on_lower(tp.original, tp.lower, cant_enter_battlefield_from_zone)?;
+    if !rest.is_empty() {
+        return None;
+    }
 
     // Encode both subject type (possibly empty = any card) and origin zone in
     // the reused `TargetFilter` / `FilterProp::InAnyZone` vocabulary, identical

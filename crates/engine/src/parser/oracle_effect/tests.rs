@@ -38706,10 +38706,17 @@ fn cant_enter_battlefield_from_zone_parses_zone_and_type() {
     assert_eq!(types, vec![TypeFilter::Creature]);
     assert_eq!(zones, vec![Zone::Graveyard]);
 
-    // Trailing " this turn" is tolerated as harmless remainder.
+    // Trailing " this turn" is accepted because the restriction stores
+    // RestrictionExpiry::EndOfTurn.
     let (types, zones) = parse_filter("cards can't enter from exile this turn");
     assert!(types.is_empty());
     assert_eq!(zones, vec![Zone::Exile]);
+
+    let lower = "cards can't enter from exile until your next turn";
+    assert!(
+        try_parse_cant_enter_battlefield_from_restriction(TextPair::new(lower, lower)).is_none(),
+        "unsupported trailing durations must not silently lower to EndOfTurn"
+    );
 }
 
 /// Full-card regression: Bad Wolf Bay's chaos ability must lower to
