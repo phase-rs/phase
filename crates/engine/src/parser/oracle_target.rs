@@ -1911,6 +1911,27 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 109.2: A description that includes a card type or subtype means
+    // permanents of that type/subtype on the battlefield. A leading universal
+    // quantifier — "all", "each", or "every" — ranges over every such object,
+    // source included, so it is a semantic no-op on the filter and adds NO
+    // FilterProp::Another (unlike "other"/"another" below, which exclude the
+    // source). Strip it so a subject like "Each Vehicle you control" / "All Cats
+    // you control" reaches the type word instead of leaking the quantifier into
+    // the subtype string (e.g. Subtype("Each Vehicle")). Guarded on a following
+    // type-phrase lead so a bare quantifier without a type word is left intact.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("all "),
+        tag("each "),
+        tag("every "),
+    ))
+    .parse(&lower[pos..])
+    {
+        if starts_with_type_phrase_lead(rest) {
+            pos = lower.len() - rest.len();
+        }
+    }
+
     // Handle "other"/"another" prefix: "other creatures", "another creature",
     // "other nonland permanents", "another target creature"
     if tag::<_, _, OracleError<'_>>("other ")
@@ -13660,6 +13681,53 @@ mod tests {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
+        }
+    }
+
+    /// CR 109.2: A leading universal quantifier ("all"/"each"/"every") ranging
+    /// over a type/subtype subject must be stripped to reach the type word — it
+    /// must NOT leak into the subtype string (e.g. Subtype("Each Vehicle")) and
+    /// must NOT add `FilterProp::Another` (it selects the source too, unlike
+    /// "other"). Consumers of `parse_type_phrase` that exercise this: the
+    /// "sacrifice all <type> you control" additional/activation cost filters
+    /// (Soulblast — creatures; Kaervek's Spite — permanents; Tomb of Urami —
+    /// lands) and the "Whenever all <type> you control attack" trigger
+    /// `valid_card` (Mob Mentality — non-Wall creatures). Before this fix those
+    /// filters were left empty/untyped (matching every object) or the trigger
+    /// failed to classify.
+    #[test]
+    fn parse_type_phrase_universal_quantifier_stripped_no_leak() {
+        for (text, subtype) in [
+            ("each Vehicle you control", "Vehicle"),
+            ("all Cats you control", "Cat"),
+            ("every Skeleton you control", "Skeleton"),
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(subtype.to_string())),
+                "expected Subtype(\"{subtype}\") for '{text}', got {:?}",
+                tf.type_filters
+            );
+            // The quantifier must NOT survive inside the subtype string.
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+                "quantifier leaked into subtype for '{text}': {:?}",
+                tf.type_filters
+            );
+            // Universal quantifiers select the source too — no Another exclusion.
+            assert!(
+                !tf.properties.contains(&FilterProp::Another),
+                "unexpected Another for '{text}': {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
         }
     }
 
