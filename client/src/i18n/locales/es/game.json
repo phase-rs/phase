@@ -269,6 +269,7 @@
     "confirmDistribute_other": "Declarar {{count}} atacantes"
   },
   "fullControl": {
+    "label": "Control",
     "on": "Control total activado",
     "off": "Control total desactivado",
     "tooltip": "Mantén las ventanas de prioridad en lugar de dejar que los momentos tranquilos pasen automáticamente. Atajo: F."
@@ -588,11 +589,15 @@
   },
   "priorityYield": {
     "listHeader": "Cesiones de prioridad",
-    "yieldThis": "Ceder este",
-    "yieldAllCopies": "Ceder todas las copias",
+    "menuHeader": "Pasar automáticamente este disparo",
+    "menuExplainer": "Omite la pausa en la que el juego se detiene para preguntarte cada vez que este disparo se pone en la pila. Aún puedes responder a otras cosas.",
+    "yieldThis": "Solo este",
+    "yieldThisHint": "Solo este {{source}}, no otras copias",
+    "yieldAllCopies": "Todas las copias",
+    "allCopiesHint": "Cada {{source}}, incluidas las nuevas",
     "revoke": "Revocar",
+    "revokeHint": "Volver a detenerse en este disparo",
     "clearAll": "Borrar todo",
-    "allCopiesHint": "Recomendado para disparos de fichas",
     "menuButton": "Pasar automáticamente este disparo",
     "menuButtonActive": "Pasando automáticamente: cambiar o revocar",
     "menuButtonShort": "Auto-pasar",

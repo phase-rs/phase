@@ -41,6 +41,7 @@ import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
+import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { HandBadge } from "../components/hand/HandBadge.tsx";
@@ -1409,7 +1410,10 @@ function GamePageContent({
               <CombatPhaseIndicator />
               <HandBadge className="w-full" />
             </div>
-            <FullControlToggle className="w-full" />
+            <div className="flex items-center gap-1.5">
+              <PriorityYieldList />
+              <FullControlToggle className="w-full" />
+            </div>
           </div>
         )}
         <div
@@ -1432,6 +1436,9 @@ function GamePageContent({
               <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
                 <TurnStatusLine />
                 <HandBadge />
+                {/* CR 117.3d: standing priority-yield summary chip, beside the
+                    Full Control toggle (self-hides when no yields stand). */}
+                <PriorityYieldList />
                 <FullControlToggle />
               </div>
               <ActionButton />

@@ -17,6 +17,9 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: () => ({ src: "/test-card.png", isLoading: false }),
 }));
 
+const { dispatchActionMock } = vi.hoisted(() => ({ dispatchActionMock: vi.fn() }));
+vi.mock("../../../game/dispatch.ts", () => ({ dispatchAction: dispatchActionMock }));
+
 function createGameState(overrides: Partial<GameState> = {}): GameState {
   return buildGameState({
     next_object_id: 100,
@@ -28,6 +31,7 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
 describe("StackEntry", () => {
   beforeEach(() => {
     useGameStore.getState().reset();
+    dispatchActionMock.mockClear();
   });
 
   afterEach(() => {
@@ -170,12 +174,61 @@ describe("StackEntry", () => {
     // Discoverable: the control is present with no hidden gesture, and the menu
     // stays closed until the button is tapped.
     const button = screen.getByRole("button", { name: /auto-pass/i });
-    expect(screen.queryByText("Yield this")).not.toBeInTheDocument();
+    expect(screen.queryByText("Only this one")).not.toBeInTheDocument();
 
     fireEvent.click(button);
 
-    expect(screen.getByText("Yield this")).toBeInTheDocument();
-    expect(screen.getByText("Yield all copies")).toBeInTheDocument();
+    expect(screen.getByText("Only this one")).toBeInTheDocument();
+    expect(screen.getByText("All copies")).toBeInTheDocument();
+  });
+
+  it("dispatches a scoped SetPriorityYield when a menu option is chosen", () => {
+    const entry: StackEntryType = buildStackEntry({
+      id: 88,
+      source_id: 50,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: {
+          source_id: 50,
+          ability: { targets: [], source_card_id: 9 },
+          source_name: "Bloodghast",
+        },
+      },
+    });
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObject({ id: 50, card_id: 9, name: "Bloodghast", zone: "Stack" }),
+      ),
+      stack: [entry],
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    render(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /auto-pass/i }));
+
+    // Realistic pointer sequence: pointerdown fires PopoverMenu's window-level
+    // outside-click listener BEFORE the click. If that listener wrongly treats a
+    // menu-internal press as "outside" and closes the menu, the option unmounts
+    // and its onClick never runs — the exact "pressing does nothing" symptom.
+    const option = screen.getByText("All copies");
+    fireEvent.pointerDown(option);
+    expect(screen.getByText("All copies")).toBeInTheDocument(); // menu stayed open
+    fireEvent.click(option);
+
+    expect(dispatchActionMock).toHaveBeenCalledWith({
+      type: "SetPriorityYield",
+      data: { op: { type: "Add", data: { source_id: 50, scope: "AllCopies" } } },
+    });
+
+    // Observable behavior, not just that the handler ran: choosing an option
+    // dismisses the menu. (The dispatch firing is necessary but not sufficient —
+    // "the menu stays open" is a distinct, user-visible failure.)
+    expect(screen.queryByText("All copies")).not.toBeInTheDocument();
   });
 
   it("does not render the yield button on a spell entry", () => {
