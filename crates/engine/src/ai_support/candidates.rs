@@ -2902,7 +2902,10 @@ pub fn candidate_actions_with_probe(
     let mut actions = candidate_actions_exact(state);
     actions.extend(candidate_actions_broad_with_probe(state, probe));
 
-    if state.waiting_for.has_pending_cast() {
+    let has_pending_cast = state.waiting_for.has_pending_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
+    if has_pending_cast {
         if let Some(player) = state.waiting_for.acting_player() {
             actions.push(candidate(
                 GameAction::CancelCast,

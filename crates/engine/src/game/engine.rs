@@ -4707,6 +4707,19 @@ fn apply_action(
             )?
         }
         // CR 601.2d: Distribute among targets (casting-time distribution).
+        (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+            let player = *player;
+            match state.pending_cast.take() {
+                Some(pending) => {
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                }
+                None => {
+                    return Err(EngineError::InvalidAction(
+                        "No pending cast to cancel during distribution".to_string(),
+                    ));
+                }
+            }
+        }
         (
             WaitingFor::DistributeAmong {
                 player,

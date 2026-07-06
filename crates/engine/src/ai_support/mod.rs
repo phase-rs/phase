@@ -1406,8 +1406,8 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        CastingVariant, ConvokeMode, GameState, MulliganDecisionEntry, PendingCast, StackEntry,
-        StackEntryKind, WaitingFor,
+        CastingVariant, ConvokeMode, DistributionUnit, GameState, MulliganDecisionEntry,
+        PendingCast, StackEntry, StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -1720,6 +1720,32 @@ mod tests {
                 "GameOver: viewer {pid:?} must receive no grouped actions"
             );
         }
+    }
+
+    #[test]
+    fn legal_actions_offer_cancel_cast_during_distribution_with_unpayable_pending_cost() {
+        let mut state = setup_priority();
+        set_dummy_pending_cast(&mut state);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 1,
+            targets: vec![TargetRef::Object(target)],
+            unit: DistributionUnit::Damage,
+        };
+
+        let actions = legal_actions(&state);
+
+        assert!(
+            actions.contains(&GameAction::CancelCast),
+            "pending distribution must remain cancellable when the distribution candidate is rejected"
+        );
     }
 
     #[test]
