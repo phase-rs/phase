@@ -3319,6 +3319,14 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             tag("target opponent's hand"),
         ),
+        // "look at an opponent's hand" (Anointed Peacekeeper ETB) — a
+        // non-targeted controller choice. Ordered AFTER the longer "target …"
+        // tags so those still win. Routes the LookAt path to
+        // `Effect::RevealHand { reveal: false, target: Typed(Opponent) }`.
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("an opponent's hand"),
+        ),
         value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
         value(TargetFilter::TriggeringPlayer, tag("their hand")),
         value(
