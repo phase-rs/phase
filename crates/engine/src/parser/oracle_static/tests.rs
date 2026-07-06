@@ -15,8 +15,6 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
-/// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
-/// "You and creatures you control have protection from the chosen card
 /// CR 207.2c: an ability word is italic flavor with no rules meaning. A leading
 /// ability-word label on a subject-anchored static must be stripped so the static
 /// still parses; a leading label that is NOT a recognized ability word must be
@@ -127,6 +125,8 @@ fn ability_word_prefix_is_stripped_from_subject_anchored_statics() {
     );
 }
 
+/// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
+/// "You and creatures you control have protection from the chosen card
 /// type." must decompose into exactly TWO `StaticDefinition`s:
 ///   - object-half: `Continuous` / `AddKeyword(Protection(ChosenCardType))`
 ///     with a controller-You creatures filter;
