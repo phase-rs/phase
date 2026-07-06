@@ -2176,26 +2176,37 @@ fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
 /// the source's controller instead of each opponent. Splitting it off routes it
 /// through the chunk loop's scope-carry (mirroring "... and loses 2 life").
 ///
-/// The discriminator is a `counter` token within THIS conjunct's segment
-/// (bounded at the next " and ") whose slash-free head excludes the P/T-counter
-/// form ("a +1/+1 counter" — an object-counter continuation on the prior
-/// conjunct's target, left un-split). Player counters (poison/energy/experience/
-/// ticket/…) are word-named and slash-free. Mirrors the trailing `.or()` arm
+/// The discriminator is the SAME classifier the lowerer uses:
+/// `imperative::try_parse_player_counter` (CR 122.1b — poison/experience/rad/
+/// ticket only; it rejects energy, which lowers to `GainEnergy`, and object/P-T
+/// counters like `+1/+1`). Reusing it guarantees the split set can never diverge
+/// from what the chunk parser accepts as `GivePlayerCounter`, so no object/energy
+/// counter text is split into a chunk the parser would reject or misroute. The
+/// segment is bounded to THIS conjunct (up to the next " and ") so a later
+/// `counter` token can't false-trigger. Mirrors the trailing `.or()` arm
 /// `starts_remove_counter_clause_lower`.
 fn starts_gets_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
-    let (rest, _) = tag("gets ").parse(s)?;
-    let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(rest) {
+    // Bound to THIS conjunct (up to the next " and ").
+    let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(s) {
         Ok((_, seg)) => seg,
-        Err(_) => rest,
+        Err(_) => s,
     };
-    // Head up to "counter"; require it slash-free so "+1/+1 counter" (object P/T)
-    // stays un-split while "poison counter" (player) matches.
-    let (_, head) = take_until::<_, _, OracleError<'_>>("counter").parse(segment)?;
-    let _ = all_consuming(opt(nom::bytes::complete::is_not::<_, _, OracleError<'_>>(
-        "/",
-    )))
-    .parse(head)?;
-    Ok((rest, ()))
+    // Drop a trailing sentence period so the classifier's "ends with
+    // counter[s]" check matches a chunk-final clause ("… gets a poison counter.").
+    let core = match terminated(
+        take_until::<_, _, OracleError<'_>>("."),
+        tag::<_, _, OracleError<'_>>("."),
+    )
+    .parse(segment)
+    {
+        Ok((_, c)) => c,
+        Err(_) => segment,
+    };
+    if super::imperative::try_parse_player_counter(core).is_some() {
+        Ok((s, ()))
+    } else {
+        nom::combinator::fail::<_, (), OracleError<'_>>().parse(s)
+    }
 }
 
 /// CR 601.2c + CR 508.1d + CR 509.1c: A second `"[up to] <n> target <filter>"`
@@ -10344,16 +10355,23 @@ mod tests {
     /// CR 122.1 + CR 109.5 (issue #4733): a bare "gets a/an/N <kind> counter[s]"
     /// conjunct is a carried-subject player-counter clause that must split so it
     /// inherits the prior conjunct's `player_scope` (Vraska's Fall: "Each opponent
-    /// sacrifices … and gets a poison counter"). The P/T-counter form
-    /// ("gets a +1/+1 counter") carries a '/' and stays un-split (object
-    /// continuation), and a bare pump ("gets +2/+0") has no counter token.
+    /// sacrifices … and gets a poison counter"). The split predicate reuses
+    /// `try_parse_player_counter`, so it accepts exactly the lowerer's set
+    /// (poison/experience/rad/ticket) and rejects energy (→ GainEnergy), object
+    /// P/T counters, and non-player "charge" counters — the split set can't
+    /// diverge from what the chunk parser will accept.
     #[test]
     fn gets_player_counter_clause_splits() {
+        // Player counters the lowerer accepts → split so the scope carries.
         assert!(starts_bare_and_clause("gets a poison counter"));
-        assert!(starts_bare_and_clause("gets an energy counter"));
         assert!(starts_bare_and_clause("gets three experience counters"));
-        // P/T counter → object continuation, not a player-counter clause.
+        assert!(starts_bare_and_clause("gets a rad counter"));
+        assert!(starts_bare_and_clause("gets a ticket counter"));
+        // Energy is NOT a player counter (lowers to GainEnergy) → must not split.
+        assert!(!starts_bare_and_clause("gets an energy counter"));
+        // Object counters must not split.
         assert!(!starts_bare_and_clause("gets a +1/+1 counter"));
+        assert!(!starts_bare_and_clause("gets a charge counter"));
         // Bare pump → no counter token at all.
         assert!(!starts_bare_and_clause("gets +2/+0 until end of turn"));
     }
