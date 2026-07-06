@@ -10,8 +10,9 @@ import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, formatCounterTooltip, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
 import { KeywordStrip } from "../board/KeywordStrip.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -187,16 +188,16 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               )}
 
               {counters.length > 0 && (
-                <div className="absolute top-1 right-1 z-20 flex flex-col gap-0.5">
+                <div className="absolute top-1 right-1 z-[60] flex flex-col gap-0.5">
                   {counters.map(([type, count]) => (
-                    <div
-                      key={type}
-                      title={formatCounterTooltip(type, count)}
-                      className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-                      style={counterStyle}
-                    >
-                      {count}
-                    </div>
+                    <CounterTooltip key={type} type={type} count={count}>
+                      <span
+                        className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                        style={counterStyle}
+                      >
+                        {count}
+                      </span>
+                    </CounterTooltip>
                   ))}
                 </div>
               )}

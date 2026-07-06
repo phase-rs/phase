@@ -50,12 +50,25 @@ export function ChooseXValueUI() {
     if (isChooseX) setValue(defaultValue);
   }, [isChooseX, defaultValue]);
 
+  const clampValue = useCallback(
+    (nextValue: number) => Math.min(Math.max(nextValue, min), max),
+    [max, min],
+  );
+
+  const handleValueChange = useCallback(
+    (nextValue: number) => {
+      if (!Number.isFinite(nextValue)) return;
+      setValue(clampValue(nextValue));
+    },
+    [clampValue],
+  );
+
   const handleCommit = useCallback(() => {
     dispatch({
       type: "ChooseX",
-      data: { value: Math.min(Math.max(value, min), max) },
+      data: { value: clampValue(value) },
     });
-  }, [dispatch, max, min, value]);
+  }, [clampValue, dispatch, value]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -103,7 +116,7 @@ export function ChooseXValueUI() {
                 min={min}
                 max={max}
                 value={value}
-                onChange={(e) => setValue(Number(e.target.value))}
+                onChange={(e) => handleValueChange(Number(e.target.value))}
                 className="h-2 w-full cursor-pointer appearance-none rounded-full bg-gray-700 accent-cyan-500"
                 aria-label={t("mana.chooseXAria")}
               />
@@ -111,6 +124,47 @@ export function ChooseXValueUI() {
                 {min > 0 ? t("mana.minMax", { min, max }) : t("mana.maxOnly", { max })}
               </span>
             </label>
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleValueChange(value - 1)}
+                disabled={value <= min}
+                aria-label={t("mana.decreaseX")}
+                className={gameButtonClass({
+                  tone: "neutral",
+                  size: "xs",
+                  disabled: value <= min,
+                  className: "h-9 w-9 px-0 text-base",
+                })}
+              >
+                −
+              </button>
+              <input
+                type="number"
+                min={min}
+                max={max}
+                step={1}
+                inputMode="numeric"
+                value={value}
+                onChange={(e) => handleValueChange(Number(e.target.value))}
+                aria-label={t("mana.chooseXInputAria")}
+                className="h-9 w-20 rounded-lg border border-cyan-400/30 bg-gray-950/80 px-2 text-center font-mono text-base font-semibold text-cyan-100 shadow-inner outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-400/30"
+              />
+              <button
+                type="button"
+                onClick={() => handleValueChange(value + 1)}
+                disabled={value >= max}
+                aria-label={t("mana.increaseX")}
+                className={gameButtonClass({
+                  tone: "neutral",
+                  size: "xs",
+                  disabled: value >= max,
+                  className: "h-9 w-9 px-0 text-base",
+                })}
+              >
+                +
+              </button>
+            </div>
           </div>
 
           <div className="flex justify-center gap-3">

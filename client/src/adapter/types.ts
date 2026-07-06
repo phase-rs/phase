@@ -1059,6 +1059,7 @@ export interface TriggerContextDisplay {
 
 export interface StackEntryDisplay {
   source_name: string;
+  token_image_ref?: TokenImageRef | null;
   kind_label: string;
   ability_description?: string;
   targets?: StackTargetDisplay[];
