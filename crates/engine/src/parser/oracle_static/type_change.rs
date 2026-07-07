@@ -1881,6 +1881,43 @@ pub(crate) fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<St
     None
 }
 
+/// CR 613.4b + CR 205.1b: Merge a creature-animation predicate with the additive
+/// type/subtype grants past `parse_animation_spec`'s internal `" and "` stop.
+/// `parse_animation_spec` supplies base P/T (layer 7b), set color (layer 5),
+/// and leading creature type/subtype grants; `parse_additive_type_clause_modifications`
+/// supplies the trailing `"and <type> lands in addition to their other types"`
+/// nouns (layer 4). Only additive `AddType` / `AddSubtype` grants are merged —
+/// the animation spec's set color takes precedence over the additive parser's
+/// additive color.
+///
+/// Shared by [`parse_land_animation`] (single-subject) and
+/// [`parse_compound_all_subjects_type_change`] (compound-subject).
+fn merge_creature_animation_with_additive_type_modifications(
+    predicate: &str,
+) -> Option<Vec<ContinuousModification>> {
+    let spec = super::oracle_effect::animation::parse_animation_spec(
+        predicate,
+        &mut ParseContext::default(),
+    )?;
+    let mut modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if modifications.is_empty() {
+        return None;
+    }
+    if let Some(additive) = parse_additive_type_clause_modifications(&format!("~ are {predicate}"))
+    {
+        for modification in additive {
+            let is_type_grant = matches!(
+                modification,
+                ContinuousModification::AddType { .. } | ContinuousModification::AddSubtype { .. }
+            );
+            if is_type_grant && !modifications.contains(&modification) {
+                modifications.push(modification);
+            }
+        }
+    }
+    Some(modifications)
+}
+
 /// CR 613.1d (Layer 4) + CR 613.4b (Layer 7b) + CR 205.1b: Parse a continuous
 /// static that animates a population of lands into creatures while they remain
 /// lands — "All lands are 1/1 creatures that are still lands" (Living Plane,
@@ -1894,6 +1931,10 @@ pub(crate) fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<St
 /// additively (CR 613.1d), and card types stay additive, so the land keeps its
 /// land type — the "that are still lands" tail (CR 205.1b) merely confirms that
 /// reading and is consumed by `split_type_retention_clause`.
+///
+/// When the predicate instead uses the explicit CR 205.1b additive marker
+/// ("… and <type> lands in addition to their other types"), trailing land-type
+/// grants are merged via [`merge_creature_animation_with_additive_type_modifications`].
 ///
 /// Dispatched before `parse_land_type_change`; the `"creature"` guard makes
 /// land *type* lines ("Lands you control are Plains") fall through unclaimed.
@@ -1922,14 +1963,23 @@ pub(crate) fn parse_land_animation(tp: &TextPair<'_>, text: &str) -> Option<Stat
     }
     .trim();
 
-    let spec = super::oracle_effect::animation::parse_animation_spec(
-        animation_text,
-        &mut ParseContext::default(),
-    )?;
-    let modifications = super::oracle_effect::animation::animation_modifications(&spec);
-    if modifications.is_empty() {
-        return None;
-    }
+    let modifications = if super::oracle_effect::animation::has_in_addition_to_other_types(rest) {
+        // CR 205.1b: predicates that use the explicit additive marker ("… and
+        // <type> lands in addition to their other types") carry trailing land-type
+        // grants past the animation parser's internal " and " stop — the same merge
+        // `parse_compound_all_subjects_type_change` applies for compound subjects.
+        merge_creature_animation_with_additive_type_modifications(animation_text)?
+    } else {
+        let spec = super::oracle_effect::animation::parse_animation_spec(
+            animation_text,
+            &mut ParseContext::default(),
+        )?;
+        let modifications = super::oracle_effect::animation::animation_modifications(&spec);
+        if modifications.is_empty() {
+            return None;
+        }
+        modifications
+    };
     Some(
         StaticDefinition::continuous()
             .affected(affected)
@@ -1986,29 +2036,7 @@ pub(crate) fn parse_compound_all_subjects_type_change(
     {
         return None;
     }
-    let spec = super::oracle_effect::animation::parse_animation_spec(
-        predicate,
-        &mut ParseContext::default(),
-    )?;
-    let mut modifications = super::oracle_effect::animation::animation_modifications(&spec);
-    if modifications.is_empty() {
-        return None;
-    }
-    // Merge the additive type/subtype grants past the animation parser's
-    // internal " and " stop (the "and <type> lands in addition to their other
-    // types" tail). The animation spec already set base P/T and color.
-    if let Some(additive) = parse_additive_type_clause_modifications(&format!("~ are {predicate}"))
-    {
-        for modification in additive {
-            let is_type_grant = matches!(
-                modification,
-                ContinuousModification::AddType { .. } | ContinuousModification::AddSubtype { .. }
-            );
-            if is_type_grant && !modifications.contains(&modification) {
-                modifications.push(modification);
-            }
-        }
-    }
+    let modifications = merge_creature_animation_with_additive_type_modifications(predicate)?;
 
     Some(
         StaticDefinition::continuous()
