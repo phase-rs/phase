@@ -149,6 +149,14 @@ pub(crate) fn process_one_tap(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<TapUntapOutcome, EffectError> {
+    // CR 701.26a + CR 508.1f: an effect can't tap a permanent with a "can't become
+    // tapped" restriction (Ood Sphere's ruling: goaded creatures "can't be tapped
+    // by effects"). The tap simply doesn't happen — return Complete as the
+    // `Prevented` arm below does. Attacker declaration (CR 508.1f) never routes
+    // here, so a restricted creature still taps by attacking.
+    if crate::game::restrictions::object_cant_tap(state, object_id) {
+        return Ok(TapUntapOutcome::Complete);
+    }
     let proposed = ProposedEvent::Tap {
         object_id,
         applied: HashSet::new(),

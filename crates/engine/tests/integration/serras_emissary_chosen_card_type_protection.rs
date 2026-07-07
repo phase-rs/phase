@@ -58,6 +58,7 @@ fn damage_ability(source_id: ObjectId, controller: PlayerId, target: TargetRef) 
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![target],
         source_id,
@@ -90,6 +91,7 @@ fn setup_emissary_choosing_creature(db: &CardDatabase) -> (GameState, ObjectId, 
             "Sorcery".to_string(),
         ],
         source_id: Some(emissary),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {

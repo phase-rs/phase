@@ -1,6 +1,65 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::types::ability::{CountScope, DoorLockOp};
+use crate::types::ability::{CountScope, CounterAdjustment, DoorLockOp};
+use crate::types::counter::{CounterMatch, CounterType};
+
+/// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
+/// with zero `Unimplemented` — buyback consumed as a keyword line, sentence 1
+/// to a `TargetOnly` over the battlefield∪exile `Or` pool, sentence 2 to the
+/// `ChooseCounterAdjustment { AddOrRemove }` sub-ability.
+#[test]
+fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
+    let text = "Buyback {3} (You may pay an additional {3} as you cast this spell. \
+                    If you do, put this card into your hand as it resolves.)\n\
+                    Choose a counter on target permanent or suspended card. Remove that \
+                    counter from that permanent or card or put another of those counters on it.";
+    let parsed = parse_oracle_text(
+        text,
+        "Clockspinning",
+        &["Buyback".to_string()],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "one spell ability (buyback consumed as keyword): {:?}",
+        parsed.abilities
+    );
+    let ability = &parsed.abilities[0];
+    let Effect::TargetOnly {
+        target: TargetFilter::Or { filters },
+    } = ability.effect.as_ref()
+    else {
+        panic!("expected TargetOnly Or pool, got {:?}", ability.effect);
+    };
+    assert_eq!(filters.len(), 2, "permanent + suspended card legs");
+
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("sentence-2 ChooseCounterAdjustment sub-ability");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::AddOrRemove,
+                ..
+            }
+        ),
+        "got {:?}",
+        sub.effect
+    );
+
+    fn has_unimpl(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_ref().is_some_and(|s| has_unimpl(s))
+    }
+    assert!(
+        !has_unimpl(ability),
+        "no Unimplemented expected: {ability:?}"
+    );
+}
 
 #[test]
 fn escape_keyword_extracted_on_instants_and_sorceries() {
@@ -93,6 +152,97 @@ fn ability_word_labeled_activated_ability_parses_cost_effect_restriction() {
             .contains(&ActivationRestriction::DuringYourTurn),
         "'Activate only during your turn' must yield DuringYourTurn, got {:?}",
         def.activation_restrictions
+    );
+}
+
+fn has_not_your_turn_activation_restriction(restrictions: &[ActivationRestriction]) -> bool {
+    restrictions.iter().any(|restriction| {
+        matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not { condition })
+            } if matches!(condition.as_ref(), ParsedCondition::IsYourTurn)
+        )
+    })
+}
+
+#[test]
+fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
+    let r = parse(
+        "{T}: Add {C}{C}. Activate only during an opponent's turn.",
+        "Lavinia, Foil to Conspiracy",
+        &[],
+        &["Creature"],
+        &["Human", "Detective"],
+    );
+
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        has_not_your_turn_activation_restriction(restrictions),
+        "expected Not(IsYourTurn) activation restriction, got {:?}",
+        restrictions
+    );
+}
+
+#[test]
+fn legacy_play_this_ability_as_sorcery_records_activation_restriction() {
+    let r = parse(
+        "When Shichifukujin Dragon comes into play, put seven +1/+1 counters on it.\n\
+         {R}{R}{R}, Sacrifice two +1/+1 counters: Put three +1/+1 counters on \
+         Shichifukujin Dragon at end of turn. Play this ability as a sorcery.",
+        "Shichifukujin Dragon",
+        &[],
+        &["Creature"],
+        &["Dragon"],
+    );
+
+    let activation = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Play this ability"))
+        })
+        .expect("expected legacy activated ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "expected legacy play-this-ability wording to map to AsSorcery, got {:?}",
+        activation.activation_restrictions
+    );
+}
+
+#[test]
+fn parenthetical_activate_only_as_instant_records_activation_restriction() {
+    let r = parse(
+        "Swampwalk (This creature can't be blocked as long as defending player controls a Swamp.)\n\
+         {T}: Add {B}{B}{B}{B}. Target opponent gains control of Witch Engine. \
+         (Activate only as an instant.)",
+        "Witch Engine",
+        &[Keyword::Landwalk("Swamp".to_string())],
+        &["Creature"],
+        &["Horror"],
+    );
+
+    let activation =
+        r.abilities
+            .iter()
+            .find(|ability| {
+                ability.description.as_deref().is_some_and(|description| {
+                    description.contains("Target opponent gains control")
+                })
+            })
+            .expect("expected parenthetical activation-timing ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsInstant),
+        "expected parenthetical activation timing to map to AsInstant, got {:?}",
+        activation.activation_restrictions
     );
 }
 
@@ -439,6 +589,98 @@ fn parsed_has_unimplemented(r: &ParsedAbilities) -> bool {
             .iter()
             .filter_map(|t| t.execute.as_deref())
             .any(def_chain_has_unimplemented)
+}
+
+#[test]
+fn altair_ibn_la_ahad_for_each_exile_memory_counter_copy_parses() {
+    let parsed = parse(
+        "First strike\nWhenever Altaïr attacks, exile up to one target Assassin creature card from your graveyard with a memory counter on it. Then for each creature card you own in exile with a memory counter on it, create a tapped and attacking token that's a copy of it. Exile those tokens at end of combat.",
+        "Altaïr Ibn-La'Ahad",
+        &[Keyword::FirstStrike],
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Altaïr must parse with zero Unimplemented effects: {parsed:#?}"
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.execute.is_some())
+        .expect("Altaïr attack trigger");
+    let execute = trigger.execute.as_deref().expect("trigger execute");
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!(
+            "expected Graveyard->Exile head effect, got {:?}",
+            execute.effect
+        );
+    };
+    let copy = execute
+        .sub_ability
+        .as_deref()
+        .expect("CopyTokenOf sub-ability after exile");
+    let Effect::CopyTokenOf {
+        source_filter: Some(TargetFilter::Typed(source_filter)),
+        tapped,
+        enters_attacking,
+        ..
+    } = copy.effect.as_ref()
+    else {
+        panic!(
+            "expected source-filtered CopyTokenOf after exile, got {:?}",
+            copy.effect
+        );
+    };
+    assert!(*tapped);
+    assert!(*enters_attacking);
+    assert!(source_filter.type_filters.contains(&TypeFilter::Creature));
+    assert!(source_filter.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        )
+    }));
+    assert!(source_filter
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Exile })));
+    assert!(source_filter.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Generic(name)),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        } if name == "memory"
+    )));
+
+    let delayed = copy
+        .sub_ability
+        .as_deref()
+        .expect("delayed end-of-combat cleanup");
+    let Effect::CreateDelayedTrigger { effect, .. } = delayed.effect.as_ref() else {
+        panic!("expected delayed cleanup trigger, got {:?}", delayed.effect);
+    };
+    let Effect::ChangeZone {
+        target,
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Exile,
+        ..
+    } = effect.effect.as_ref()
+    else {
+        panic!(
+            "expected LastCreated Battlefield->Exile cleanup, got {:?}",
+            effect.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::LastCreated);
 }
 
 /// CR 702.34a / CR 702.128a / CR 702.180a: the three self-cost graveyard
@@ -860,13 +1102,20 @@ fn ochran_assassin_forced_block_is_permanent_static() {
     let lure = r
         .statics
         .iter()
-        .find(|s| s.mode == StaticMode::MustBeBlockedByAll)
+        .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
         .unwrap_or_else(|| {
             panic!(
                 "expected a permanent MustBeBlockedByAll static, got {:?}",
                 r.statics
             )
         });
+    // The unfiltered "All creatures able to block ~" form must lower to the
+    // None (every-creature Lure) shape — proves the slot-A path is preserved.
+    assert!(
+        matches!(lure.mode, StaticMode::MustBeBlockedByAll { blockers: None }),
+        "Ochran Assassin's bare lure must carry blockers == None, got {:?}",
+        lure.mode
+    );
     assert_eq!(
         lure.affected,
         Some(TargetFilter::SelfRef),
@@ -881,10 +1130,99 @@ fn ochran_assassin_forced_block_is_permanent_static() {
             Effect::GenericEffect { static_abilities, .. }
                 if static_abilities
                     .iter()
-                    .any(|s| s.mode == StaticMode::MustBeBlockedByAll)
+                    .any(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
         )),
         "no one-shot GenericEffect MustBeBlockedByAll ability should remain, got {:?}",
         r.abilities
+    );
+}
+
+/// CR 509.1c: Talruum Piper — "All creatures with flying able to block ~ do so"
+/// is a filtered permanent lure: only fliers are compelled to block, so it must
+/// lower to `MustBeBlockedByAll { blockers: Some(<creatures with flying>) }`
+/// affecting the source. Revert-discriminating: if the parser's slot-B filter is
+/// dropped the mode becomes `blockers: None` (every creature) and the structural
+/// `Some(f)` equality below fails.
+#[test]
+fn talruum_piper_filtered_forced_block_is_permanent_static() {
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    let r = parse(
+        "All creatures with flying able to block Talruum Piper do so.",
+        "Talruum Piper",
+        &[],
+        &["Creature"],
+        &["Minotaur"],
+    );
+
+    let lure = r
+        .statics
+        .iter()
+        .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a permanent MustBeBlockedByAll static, got {:?}",
+                r.statics
+            )
+        });
+    assert_eq!(
+        lure.affected,
+        Some(TargetFilter::SelfRef),
+        "the lure must affect the source creature itself"
+    );
+    let expected =
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::WithKeyword {
+                value: Keyword::Flying,
+            }]),
+        );
+    assert!(
+        matches!(
+            &lure.mode,
+            StaticMode::MustBeBlockedByAll { blockers: Some(f) } if *f == expected
+        ),
+        "Talruum Piper must carry Some(creatures with flying), got {:?}",
+        lure.mode
+    );
+}
+
+/// CR 509.1c + CR 205.3a: Marble Priest — "All Walls able to block ~ do so" is a
+/// subtype-filtered permanent lure: only Walls are compelled. Must lower to
+/// `MustBeBlockedByAll { blockers: Some(<Wall subtype>) }`. Revert-discriminating
+/// on the same slot-B path as Talruum Piper, exercising a subtype (rather than
+/// keyword) filter.
+#[test]
+fn marble_priest_wall_filtered_forced_block_is_permanent_static() {
+    use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+    let r = parse(
+        "All Walls able to block Marble Priest do so.",
+        "Marble Priest",
+        &[],
+        &["Creature"],
+        &["Human", "Cleric"],
+    );
+
+    let lure = r
+        .statics
+        .iter()
+        .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a permanent MustBeBlockedByAll static, got {:?}",
+                r.statics
+            )
+        });
+    let expected = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Subtype("Wall".to_string())],
+        controller: None,
+        properties: vec![],
+    });
+    assert!(
+        matches!(
+            &lure.mode,
+            StaticMode::MustBeBlockedByAll { blockers: Some(f) } if *f == expected
+        ),
+        "Marble Priest must carry Some(Wall subtype), got {:?}",
+        lure.mode
     );
 }
 
@@ -993,6 +1331,7 @@ fn oracle_face_for(
             scryfall_id: Some(format!("{}-face", name.to_lowercase())),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     };
     crate::database::synthesis::build_oracle_face(&card, None)
 }
@@ -1506,6 +1845,7 @@ fn pupu_ufo_full_card_supported_dynamic_base_power() {
                 scryfall_id: Some("pupu-ufo-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
@@ -1556,6 +1896,7 @@ fn sita_varma_full_card_supported_inverted_genitive_base_pt() {
                 scryfall_id: Some("sita-varma-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
@@ -4093,6 +4434,35 @@ fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
 }
 
 #[test]
+fn lost_in_thought_ignore_effect_rider_fails_closed() {
+    let r = parse(
+        "Enchant creature\n\
+         Enchanted creature can't attack or block, and its activated abilities can't be activated. \
+         Its controller may exile three cards from their graveyard for that player to ignore this effect until end of turn.",
+        "Lost in Thought",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+
+    assert!(
+        r.statics.is_empty(),
+        "unimplemented CR 116.2d ignore-effect rider must not export unconditional statics: {:?}",
+        r.statics
+    );
+    assert!(
+        r.abilities.iter().any(|a| {
+            matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "static_structure"
+            )
+        }),
+        "expected static_structure Unimplemented for ignore-effect rider, got {:?}",
+        r.abilities
+    );
+}
+
+#[test]
 fn vazal_megalegendary_line_consumed_and_limit_extracted() {
     // CR 100.2a / CR 903.5b: Vazal's "Megalegendary (Your deck can have only
     // one copy of this card.)" line must not surface as Unimplemented, and
@@ -4678,6 +5048,7 @@ fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
         &DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
         }
     );
 
@@ -6493,11 +6864,9 @@ fn smoky_lounge_full_mana_line_no_unimplemented() {
 /// `Any([SpellType("Enchantment"), UnlockDoor, TurnPermanentFaceUp])`. The
 /// whole card parses with no `Effect::Unimplemented`.
 ///
-/// Over-gapping guard: this `Any` mixes two live branches
-/// (`SpellType("Enchantment")`, `UnlockDoor`) with the dead
-/// `TurnPermanentFaceUp`. `has_payable_branch` must short-circuit to `true`
-/// here, so the restriction stays absorbed and supported — the gate must NOT
-/// over-gap a disjunction just because one leaf is dead.
+/// Over-gapping guard: this `Any` is all-live (`SpellType("Enchantment")`,
+/// `UnlockDoor`, and `TurnPermanentFaceUp`). `is_coverage_supported` must return
+/// `true` here, so the restriction stays absorbed and supported.
 #[test]
 fn creeping_peeper_full_mana_line_no_unimplemented() {
     let r = parse(
@@ -6529,21 +6898,21 @@ fn creeping_peeper_full_mana_line_no_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 116.2b + CR 702.37e: Overgrown Zealot's second ability —
-/// "Add two mana of any one color. Spend this mana only to turn permanents
-/// face up" — names ONLY the turn-face-up special action, whose runtime gate
-/// (`OnlyForSpecialAction(TurnFaceUp)`) no production payment site can satisfy
-/// today. `ManaSpendRestriction::has_payable_branch` reports the standalone
-/// `TurnPermanentFaceUp` leaf as dead, so the seam leaves the restriction
-/// unabsorbed and the line lowers to `Effect::Unimplemented` — honest coverage
-/// red rather than false-green "supported".
+/// CR 106.6 + CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: Overgrown
+/// Zealot's second ability — "Add two mana of any one color. Spend this mana
+/// only to turn permanents face up" — names ONLY the turn-face-up special
+/// action, whose runtime gate (`OnlyForSpecialAction(TurnFaceUp)`) the paid
+/// `GameAction::TurnFaceUp` handler now satisfies.
+/// `ManaSpendRestriction::is_coverage_supported` reports the standalone
+/// `TurnPermanentFaceUp` leaf live, so the seam absorbs the restriction into the
+/// `Effect::Mana` line — supported, no `Effect::Unimplemented`.
 ///
-/// Revert direction: if `has_payable_branch` returned `true` for
-/// `TurnPermanentFaceUp`, the seam would absorb the restriction and no
-/// `Effect::Unimplemented` would be produced — the assertion below flips and
-/// fails.
+/// Revert direction: if `is_coverage_supported` returned `false` for
+/// `TurnPermanentFaceUp`, the seam would leave the restriction unabsorbed and the
+/// line would lower to `Effect::Unimplemented` — the `!parsed_has_unimplemented`
+/// assertion below flips and fails.
 #[test]
-fn overgrown_zealot_turn_face_up_only_is_unsupported_gap() {
+fn overgrown_zealot_turn_face_up_only_supported() {
     let r = parse(
         "{T}: Add two mana of any one color. Spend this mana only to turn permanents face up.",
         "Overgrown Zealot",
@@ -6551,33 +6920,56 @@ fn overgrown_zealot_turn_face_up_only_is_unsupported_gap() {
         &["Creature"],
         &["Elf", "Druid"],
     );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
-        parsed_has_unimplemented(&r),
-        "Overgrown Zealot's turn-face-up-only spend restriction has no payable \
-             branch, so the line must lower to Effect::Unimplemented (honest red): \
-             abilities={:?} triggers={:?}",
+        !parsed_has_unimplemented(&r),
+        "Overgrown Zealot's turn-face-up spend restriction is now payable, so the \
+             line must be supported (no Effect::Unimplemented): abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
     );
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert!(
+        matches!(produced, ManaProduction::AnyOneColor { .. }),
+        "expected two-mana-of-any-one-color, got {produced:?}"
+    );
+    assert_eq!(
+        restrictions,
+        &vec![ManaSpendRestriction::TurnPermanentFaceUp],
+        "the turn-face-up restriction must fold into the mana effect"
+    );
+    assert!(
+        crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+        "must stay a mana ability"
+    );
 }
 
-/// CR 106.6 + CR 708.4 + CR 116.2b: Tin Street Gossip's mana ability —
-/// "Add {R}{G}. Spend this mana only to cast face-down spells or to turn
-/// creatures face up" — is a disjunction of two dead branches: `FaceDownSpell`
-/// (gate `meta.is_face_down`, never true at a payment site, CR 708.4) and
-/// `TurnPermanentFaceUp` (`OnlyForSpecialAction(TurnFaceUp)`, never emitted,
-/// CR 116.2b). `has_payable_branch` of `Any([FaceDownSpell,
-/// TurnPermanentFaceUp])` is `false`, so the seam leaves it unabsorbed and the
-/// line lowers to `Effect::Unimplemented` — honest coverage red.
+/// CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e: Tin Street Gossip's mana
+/// ability — "Add {R}{G}. Spend this mana only to cast face-down spells or to
+/// turn creatures face up" — is now coverage-SUPPORTED. The spend restriction is
+/// a disjunction `Any([FaceDownSpell, TurnPermanentFaceUp])`; both leaves are
+/// production-live (FaceDownSpell via this PR's face-down spell casting, gate
+/// `meta.is_face_down` at a `PaymentContext::Spell` site, CR 708.4;
+/// TurnPermanentFaceUp via the paid `GameAction::TurnFaceUp`, CR 116.2b), so
+/// `is_coverage_supported` for the whole disjunction is `true` and the seam
+/// ABSORBS the restriction into the `Effect::Mana` line — no residual
+/// `Effect::Unimplemented`.
 ///
-/// Revert direction: if either leaf were classified payable (or the `Any`
-/// short-circuit were broken to return `true` on an all-dead set), the seam
-/// would absorb the restriction and produce no `Effect::Unimplemented` — the
-/// assertion below flips and fails. This pins the all-dead `Any` arm in the
-/// false direction (the live mixed-`Any` cases are pinned by Creeping Peeper /
-/// Smoky Lounge / the unit test).
+/// This is the parser half of the #5155 D10 closure: #5165 deferred Tin Street's
+/// coverage "until face-down spell casting exists" — it exists now.
+///
+/// Revert direction: if `FaceDownSpell` were reclassified unsupported, `Any` would
+/// return `false`, the seam would leave the restriction unabsorbed, and the
+/// `!parsed_has_unimplemented` + non-empty `restrictions` assertions below flip.
 #[test]
-fn tin_street_gossip_face_down_or_turn_face_up_is_unsupported_gap() {
+fn tin_street_gossip_face_down_or_turn_face_up_is_coverage_supported() {
     let r = parse(
             "Vigilance\n{T}: Add {R}{G}. Spend this mana only to cast face-down spells or to turn creatures face up.",
             "Tin Street Gossip",
@@ -6585,13 +6977,40 @@ fn tin_street_gossip_face_down_or_turn_face_up_is_unsupported_gap() {
             &["Creature"],
             &["Goblin", "Artificer"],
         );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
-        parsed_has_unimplemented(&r),
-        "Tin Street Gossip's face-down/turn-face-up spend restriction has no \
-             payable branch, so the line must lower to Effect::Unimplemented \
-             (honest red): abilities={:?} triggers={:?}",
+        !parsed_has_unimplemented(&r),
+        "Tin Street Gossip's face-down/turn-up disjunction is now production-live, so the line must be supported (no Effect::Unimplemented): abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
+    );
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert!(
+        matches!(produced, ManaProduction::Fixed { colors, .. } if colors == &[ManaColor::Red, ManaColor::Green]),
+        "expected fixed R+G, got {produced:?}"
+    );
+    assert_eq!(
+        restrictions,
+        &vec![ManaSpendRestriction::Any(vec![
+            ManaSpendRestriction::FaceDownSpell,
+            ManaSpendRestriction::TurnPermanentFaceUp,
+        ])],
+        "the face-down/turn-up disjunction must fold into the mana effect"
+    );
+    assert!(
+        r.abilities[0].sub_ability.is_none(),
+        "the restriction sentence must be folded into the mana effect, leaving no residual gap"
+    );
+    assert!(
+        crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
+        "must stay a mana ability"
     );
 }
 
@@ -6732,7 +7151,7 @@ fn parses_return_forest_cost_untap_activated_ability() {
 /// restriction, instead of dropping the whole sentence to Unimplemented.
 #[test]
 fn any_player_may_activate_but_only_records_timing_restriction() {
-    let activation_restrictions_for = |text: &str, name: &str| {
+    let activation_for = |text: &str, name: &str| {
         let parsed = parse(text, name, &[], &["Artifact"], &[]);
         assert!(
             parsed
@@ -6747,14 +7166,15 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
             .into_iter()
             .find(|ability| !ability.activation_restrictions.is_empty())
             .expect("expected an activated ability with restrictions")
-            .activation_restrictions
     };
 
     // "as a sorcery" form (Endbringer's Revel / Scandalmonger / Task Mage Assembly).
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only as a sorcery.",
         "Test Any-Player Sorcery",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::AsSorcery),
         "expected AsSorcery, got {:?}",
@@ -6762,10 +7182,12 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     );
 
     // "during their turn" form (Volrath's Dungeon) → the activator's turn.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only during their turn.",
         "Test Any-Player Turn",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::DuringYourTurn),
         "expected DuringYourTurn, got {:?}",
@@ -6773,21 +7195,37 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     );
 
     // "during their upkeep" form maps to the activator's upkeep restriction.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only during their upkeep.",
         "Test Any-Player Upkeep",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.contains(&ActivationRestriction::DuringYourUpkeep),
         "expected DuringYourUpkeep, got {:?}",
         restrictions
     );
 
+    let activation = activation_for(
+        "{T}: Draw a card. Any player may activate this ability but only during an opponent's turn.",
+        "Test Any-Player Opponent Turn",
+    );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
+    assert!(
+        has_not_your_turn_activation_restriction(restrictions),
+        "expected Not(IsYourTurn), got {:?}",
+        restrictions
+    );
+
     // "if <condition>" form (Lightning Storm) keeps the parsed condition gate.
-    let restrictions = activation_restrictions_for(
+    let activation = activation_for(
         "{T}: Draw a card. Any player may activate this ability but only if ~ is on the stack.",
         "Test Any-Player Condition",
     );
+    assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
+    let restrictions = &activation.activation_restrictions;
     assert!(
         restrictions.iter().any(|restriction| matches!(
             restriction,
@@ -6806,6 +7244,14 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
 fn opponents_may_activate_but_only_records_timing_restriction() {
     let activation_for = |text: &str, name: &str| {
         let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "expected no unimplemented fallback, got {:?}",
+            parsed.abilities
+        );
         parsed
             .abilities
             .into_iter()
@@ -6837,6 +7283,45 @@ fn opponents_may_activate_but_only_records_timing_restriction() {
             .contains(&ActivationRestriction::DuringYourTurn),
         "expected DuringYourTurn, got {:?}",
         during_turn.activation_restrictions
+    );
+
+    let opponent_turn = activation_for(
+        "{1}: Draw a card. Only your opponents may activate this ability and only during an opponent's turn.",
+        "Test Opponent Opponent Turn",
+    );
+    assert_eq!(opponent_turn.activator_filter, Some(PlayerFilter::Opponent));
+    assert!(
+        has_not_your_turn_activation_restriction(&opponent_turn.activation_restrictions),
+        "expected Not(IsYourTurn), got {:?}",
+        opponent_turn.activation_restrictions
+    );
+}
+
+#[test]
+fn quoted_sentence_before_activate_only_keeps_timing_restriction() {
+    let r = parse(
+        "{T}: Add {W}.\n{1}{W}, {T}, Sacrifice ~: Create a 1/1 colorless Pilot creature token with \"~ saddles Mounts and crews Vehicles as though its power were 2 greater.\" Activate only as a sorcery.",
+        "Country Roads",
+        &[],
+        &["Land"],
+        &[],
+    );
+    let activation = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("Create a 1/1 colorless Pilot"))
+        })
+        .expect("expected token-making activated ability");
+    assert!(
+        activation
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "expected quoted-text suffix to preserve AsSorcery, got {:?}",
+        activation.activation_restrictions
     );
 }
 
@@ -8492,6 +8977,185 @@ fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
         r.abilities[1].effect.as_ref(),
         Effect::CreateDelayedTrigger { .. }
     ));
+}
+
+/// CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+/// phase" lowers to `Effect::AdditionalPhase { phase: Untap, .. }` (the
+/// beginning-phase marker), covering Temple of Atropos, Sphinx/Shadow of the
+/// Second Sun, and Cyclonus.
+#[test]
+fn additional_beginning_phase_parses_as_untap_phase_insert() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("there is an additional beginning phase after this phase"),
+        Effect::AdditionalPhase {
+            phase: Phase::Untap,
+            ..
+        }
+    ));
+}
+
+/// CR 103.1 + CR 101.4: both surface forms of the turn-order reversal lower to
+/// `Effect::ReverseTurnOrder` (Temple of Atropos chaos, Aeon Engine, Time
+/// Distortion).
+#[test]
+fn reverse_turn_order_parses_as_reverse_turn_order_effect() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("reverse the game's turn order"),
+        Effect::ReverseTurnOrder
+    ));
+    assert!(matches!(
+        parse_effect("reverse the turn order"),
+        Effect::ReverseTurnOrder
+    ));
+}
+
+/// Temple of Atropos parses with ZERO Unimplemented: the phase trigger inserts a
+/// beginning phase (CR 501.1), and the chaos trigger reverses the turn order
+/// (CR 103.1) then planeswalks (the already-supported `Planeswalk` sub-ability).
+#[test]
+fn temple_of_atropos_parses_with_zero_unimplemented() {
+    let text = "At the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)\nWhen chaos ensues, reverse the game's turn order. Then planeswalk. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)";
+    let r = parse(text, "Temple of Atropos", &[], &["Plane"], &["Time"]);
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Temple of Atropos must parse with zero Unimplemented: {r:#?}"
+    );
+    assert_eq!(r.triggers.len(), 2, "two triggers: {:?}", r.triggers);
+
+    let phase_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("postcombat-main phase trigger");
+    let phase_exec = phase_trigger.execute.as_deref().expect("phase execute");
+    assert!(
+        matches!(
+            phase_exec.effect.as_ref(),
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        ),
+        "phase trigger must insert a beginning phase, got {:?}",
+        phase_exec.effect
+    );
+
+    let chaos_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChaosEnsues)
+        .expect("chaos trigger");
+    let chaos_exec = chaos_trigger.execute.as_deref().expect("chaos execute");
+    assert!(
+        matches!(chaos_exec.effect.as_ref(), Effect::ReverseTurnOrder),
+        "chaos trigger head must reverse turn order, got {:?}",
+        chaos_exec.effect
+    );
+    let sub = chaos_exec
+        .sub_ability
+        .as_deref()
+        .expect("planeswalk sub-ability");
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Planeswalk),
+        "chaos trigger's second sentence must planeswalk, got {:?}",
+        sub.effect
+    );
+}
+
+#[test]
+fn turn_order_and_additional_beginning_phase_cards_parse_claimed_signatures() {
+    fn ability_has_effect(ability: &AbilityDefinition, pred: fn(&Effect) -> bool) -> bool {
+        pred(ability.effect.as_ref())
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| ability_has_effect(sub, pred))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|else_ability| ability_has_effect(else_ability, pred))
+    }
+
+    fn parsed_has_effect(parsed: &ParsedAbilities, pred: fn(&Effect) -> bool) -> bool {
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| ability_has_effect(ability, pred))
+            || parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .any(|ability| ability_has_effect(ability, pred))
+    }
+
+    fn is_reverse_turn_order(effect: &Effect) -> bool {
+        matches!(effect, Effect::ReverseTurnOrder)
+    }
+
+    fn is_additional_beginning_phase(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        )
+    }
+
+    for (name, text, keywords, types, subtypes, pred) in [
+        (
+            "Aeon Engine",
+            "This artifact enters tapped.\n{T}, Exile this artifact: Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)",
+            &[][..],
+            &["Artifact"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Time Distortion",
+            "When you encounter Time Distortion, reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise. Then planeswalk away from this phenomenon.)",
+            &[][..],
+            &["Phenomenon"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Sphinx of the Second Sun",
+            "Flying\nAt the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::Flying][..],
+            &["Creature"][..],
+            &["Sphinx"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Shadow of the Second Sun",
+            "Enchant player\nAt the beginning of each of enchanted player's postcombat main phases, there is an additional beginning phase after this phase. (The end step happens after the added untap, upkeep, and draw steps.)",
+            &[Keyword::Enchant(TargetFilter::Player)][..],
+            &["Enchantment"][..],
+            &["Aura"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Cyclonus, Cybertronian Fighter",
+            "Living metal (During your turn, this Vehicle is also a creature.)\nFlying\nWhenever Cyclonus deals combat damage to a player, convert it. If you do, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::LivingMetal, Keyword::Flying][..],
+            &["Artifact"][..],
+            &["Vehicle"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+    ] {
+        let parsed = parse(text, name, keywords, types, subtypes);
+        assert!(
+            !parsed_has_unimplemented(&parsed),
+            "{name} must parse with zero Unimplemented effects: {parsed:#?}"
+        );
+        assert!(
+            parsed_has_effect(&parsed, pred),
+            "{name} must contain the claimed parse-diff signature: {parsed:#?}"
+        );
+    }
 }
 
 #[test]
@@ -11650,6 +12314,126 @@ fn strip_counter_conditional_no_ice_counters() {
     );
 }
 
+/// SHAPE C1 — the indefinite-article arm: "a +1/+1 counter on it" means
+/// one or more (CR 122.1 + CR 122.1a). The "it" subject keeps the source scope.
+#[test]
+fn strip_counter_conditional_article_it_source() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, Comparator, Effect, QuantityExpr, QuantityRef,
+    };
+
+    let def = parse_effect_chain(
+        "draw a card if it has a +1/+1 counter on it",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) if *counter_type == crate::types::counter::CounterType::Plus1Plus1
+        ),
+        "Expected QuantityCheck(P1P1 >= 1, Source), got {:?}",
+        def.condition,
+    );
+    // Reach-guard (CR: the effect must actually be the draw, never Unimplemented).
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "Expected Draw effect, got {:?}",
+        def.effect,
+    );
+    assert!(
+        !matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "Draw clause must not be Unimplemented, got {:?}",
+        def.effect,
+    );
+}
+
+/// SHAPE C2 — the demonstrative arm in NON-trigger context: "that creature" is
+/// the spell's target (CR 115.1), so the scope is `Target`, not `Source`. This is
+/// Oblivion's Hunger clause 2. `parse_effect_chain` parses in spell (non-trigger)
+/// context, so the demonstrative is recognized.
+#[test]
+fn strip_counter_conditional_demonstrative_target_non_trigger() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, Comparator, Effect, QuantityExpr, QuantityRef,
+    };
+
+    let def = parse_effect_chain(
+        "draw a card if that creature has a +1/+1 counter on it",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Target, counter_type: Some(counter_type) } },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) if *counter_type == crate::types::counter::CounterType::Plus1Plus1
+        ),
+        "Expected QuantityCheck(P1P1 >= 1, Target), got {:?}",
+        def.condition,
+    );
+    // Reach-guard: draw effect reached, zero Unimplemented.
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "Expected Draw effect, got {:?}",
+        def.effect,
+    );
+    assert!(
+        !matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "Draw clause must not be Unimplemented, got {:?}",
+        def.effect,
+    );
+}
+
+/// SHAPE C3 — GUARD: a LEADING demonstrative "if that creature has … counter …,
+/// [source] deals N … instead" (Bring Low's verbatim clause 2) must NOT be
+/// captured by the counter-conditional as an additive `QuantityCheck`-gated
+/// `DealDamage`. The leading demonstrative is deliberately withheld from
+/// `strip_counter_conditional` (offered only in the trailing form), so
+/// `strip_counter_conditional` returns no condition here and this
+/// replacement-class clause stays on the same inert deferral path as upstream
+/// `main` (CR 608.2e). Discriminating: under the pre-fix over-acceptance the
+/// leading demonstrative matched and the condition became
+/// `QuantityCheck(Target, GE 1)`, with the "instead" replacement wrongly lowered
+/// as an additive 5-damage sibling (target with a counter → 3+5=8 instead of the
+/// correct 5). This test fails under that regression (condition would be
+/// `Some(QuantityCheck)`) and passes only on the deferred path (condition `None`,
+/// exactly as upstream produces for this isolated clause).
+#[test]
+fn strip_counter_conditional_leading_demonstrative_instead_deferred() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityCondition, AbilityKind};
+
+    let def = parse_effect_chain(
+        "If that creature has a +1/+1 counter on it, Bring Low deals 5 damage to it instead.",
+        AbilityKind::Spell,
+    );
+    // Must NOT be captured as a counter-gated additive QuantityCheck (the
+    // pre-fix false-green). This is the discriminating assertion.
+    assert!(
+        !matches!(&def.condition, Some(AbilityCondition::QuantityCheck { .. })),
+        "Leading 'if that creature has a +1/+1 counter … instead' must NOT parse to a \
+         QuantityCheck-gated additive DealDamage; got {:?}",
+        def.condition,
+    );
+    // Upstream parity: the counter-conditional does not recognize this leading
+    // demonstrative at all, so no counter condition is attached — the clause is
+    // left as an honest deferred gap, identical to upstream `main`.
+    assert!(
+        def.condition.is_none(),
+        "Leading demonstrative 'instead' clause must stay a deferred gap (no counter \
+         condition), matching upstream main; got {:?}",
+        def.condition,
+    );
+}
+
 #[test]
 fn earthbender_ascension_landfall_chain() {
     use crate::parser::oracle_effect::parse_effect_chain;
@@ -13158,6 +13942,49 @@ fn top_level_static_scavenge_and_encore_grants_stay_on_graveyard_cards() {
         }
 }
 
+/// CR 702.128a: Naktamun grants Embalm to every creature card in the
+/// controller's graveyard, with the embalm cost equal to that card's own
+/// mana cost — the same continuation-sentence shape as Scavenge/Encore, but
+/// for a keyword that was previously absent from `GrantedCastKeywordKind`
+/// even though the runtime resolver already supported it.
+#[test]
+fn top_level_static_embalm_grant_stays_on_graveyard_cards() {
+    let result = parse(
+        "Each creature card in your graveyard has embalm. Its embalm cost is equal to its mana cost.",
+        "Naktamun",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(result.statics.len(), 1, "{:?}", result.statics);
+    let static_def = &result.statics[0];
+    let TargetFilter::Typed(tf) = static_def
+        .affected
+        .as_ref()
+        .expect("expected affected filter")
+    else {
+        panic!("expected typed affected filter");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "missing graveyard filter: {:?}",
+        tf.properties
+    );
+    assert!(
+        static_def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                    ManaCost::SelfManaCost
+                )),
+            }),
+        "missing embalm grant: {:?}",
+        static_def.modifications
+    );
+}
+
 #[test]
 fn green_goblin_full_face_parses_mayhem_and_graveyard_cost_reduction() {
     // CR 702.187b + CR 601.2f: The full Green Goblin face — flying/menace,
@@ -13253,7 +14080,7 @@ fn helper_parses_same_line_escape_grant_continuation() {
 fn escape_continuation_parser_accepts_self_mana_cost_clause() {
     let keyword = parse_graveyard_keyword_continuation(
             "The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
-            GraveyardGrantedKeywordKind::Escape,
+            GrantedCastKeywordKind::Escape,
         )
         .expect("continuation should parse");
     assert_eq!(keyword, granted_escape_cost(3));
@@ -13263,7 +14090,7 @@ fn escape_continuation_parser_accepts_self_mana_cost_clause() {
 fn escape_continuation_parser_rejects_trailing_text() {
     let keyword = parse_graveyard_keyword_continuation(
             "The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard until end of turn.",
-            GraveyardGrantedKeywordKind::Escape,
+            GrantedCastKeywordKind::Escape,
         );
     assert!(
         keyword.is_none(),
@@ -13696,6 +14523,38 @@ fn spell_cost_reduction_for_creatures_that_attacked_stays_static() {
         "unexpected DynamicQty warning: {:?}",
         r.parse_warnings
     );
+}
+
+#[test]
+fn vivid_spell_cost_reduction_uses_distinct_colors_quantity() {
+    let r = parse(
+        "Vivid — This spell costs {1} less to cast for each color among permanents you control.\nDraw a card.",
+        "Rime Chill",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Rime Chill-style cost reducer must not leave Unimplemented: {r:#?}"
+    );
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 1, .. },
+        dynamic_count:
+            Some(QuantityRef::DistinctColorsAmongPermanents {
+                filter: TargetFilter::Typed(tf),
+            }),
+        ..
+    } = &r.statics[0].mode
+    else {
+        panic!(
+            "expected self-spell ReduceCost over distinct permanent colors, got {:?}",
+            r.statics
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
 }
 
 /// CR 701.26b + CR 614.6: Blossombind — the compound "Enchanted creature
@@ -15600,6 +16459,16 @@ fn leading_conditional_instead_composes_self_replacement() {
         ),
         "expected AttackedThisTurn >= 1 inside ConditionInstead, got: {inner:?}"
     );
+    assert!(
+        !matches!(
+            sub.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::EventTarget,
+                ..
+            }
+        ),
+        "self-replacement damage must not bind trigger EventTarget"
+    );
 }
 
 #[test]
@@ -15644,6 +16513,16 @@ fn leading_conditional_instead_threshold_graveyard_count() {
             }
         ),
         "expected GraveyardSize >= 7 inside ConditionInstead, got: {inner:?}"
+    );
+    assert!(
+        !matches!(
+            sub.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::EventTarget,
+                ..
+            }
+        ),
+        "self-replacement damage must not bind trigger EventTarget"
     );
 }
 
@@ -16439,6 +17318,85 @@ fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
 }
 
 #[test]
+fn activated_draw_for_each_color_among_permanents_uses_distinct_colors_quantity() {
+    let parsed = parse(
+        "{5}, {T}: Draw a card for each color among permanents you control.",
+        "Chromatic Orrery",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Chromatic Orrery draw ability must not leave Unimplemented: {parsed:#?}"
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("expected parsed draw ability");
+    let Effect::Draw {
+        count:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::DistinctColorsAmongPermanents {
+                        filter: TargetFilter::Typed(tf),
+                    },
+            },
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected Draw count over distinct permanent colors, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+}
+
+#[test]
+fn mana_for_each_color_among_monocolored_permanents_stays_mana_path() {
+    let parsed = parse(
+        "{1}, {T}: For each color among monocolored permanents you control, add one mana of that color.",
+        "Tarnation Vista",
+        &[],
+        &["Land"],
+        &[],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Tarnation Vista mana ability must not leave Unimplemented: {parsed:#?}"
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("expected parsed mana ability");
+    let Effect::Mana {
+        produced:
+            crate::types::ability::ManaProduction::DistinctColorsAmongPermanents {
+                filter: TargetFilter::Typed(tf),
+            },
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected mana production over distinct monocolored permanent colors, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::ColorCount { count: 1, .. })));
+    assert!(
+        ability.repeat_for.is_none(),
+        "mana path must not be split into repeat_for + generic mana"
+    );
+}
+
+#[test]
 fn source_filtered_copy_token_does_not_emit_dynamic_qty_warning() {
     let parsed = parse(
             "As this enchantment enters, choose a creature type.\nCreatures you control of the chosen type get +1/+0.\nAt the beginning of your end step, for each token you control of the chosen type that entered this turn, create a token that's a copy of it.",
@@ -16897,11 +17855,10 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
         .expect("begin-combat trigger must have an execute body");
 
     // CR 707.9b + CR 205.4: top-level effect is `CopyTokenOf` with the
-    // `RemoveSupertype { Legendary }` modification baked in. The token
-    // copies "equipped creature" — the target filter is internal detail
-    // tested elsewhere; this regression test pins ONLY the
-    // additional_modifications, which is the load-bearing field for the
-    // non-legendary semantic.
+    // `RemoveSupertype { Legendary }` modification baked in. The follow-up
+    // "That token gains haste" is a separate continuous effect bound to
+    // `LastCreated`, not to the equipped creature source copied by the
+    // parent effect.
     match &*exec.effect {
         Effect::CopyTokenOf {
             additional_modifications,
@@ -16916,6 +17873,44 @@ fn helm_of_the_host_emits_remove_supertype_legendary() {
             );
         }
         other => panic!("expected CopyTokenOf at trigger.execute.effect, got {other:?}"),
+    }
+
+    let haste = exec
+        .sub_ability
+        .as_deref()
+        .expect("Helm trigger must include the haste followup");
+    match &*haste.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } => {
+            assert_eq!(
+                *target,
+                Some(TargetFilter::LastCreated),
+                "Helm haste rider must target the created token, not the equipped creature"
+            );
+            assert_eq!(
+                *duration,
+                Some(Duration::Permanent),
+                "Helm's Oracle text states no duration for the haste grant"
+            );
+            assert!(
+                static_abilities.iter().any(|static_def| {
+                    static_def.affected == Some(TargetFilter::LastCreated)
+                        && static_def.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::Haste,
+                                }
+                            )
+                        })
+                }),
+                "Helm haste rider must affect LastCreated with AddKeyword(Haste): {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect haste followup, got {other:?}"),
     }
 }
 
@@ -17557,7 +18552,7 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
     assert!(matches!(
         &*execute.effect,
         Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::CreatureType { .. },
             persist: true,
             ..
         }
@@ -17943,4 +18938,188 @@ fn nested_conditional_difference_anaphor_downgrades_to_unimplemented() {
         has_unimplemented(execute),
         "nested unbindable difference anaphor must become a loud Unimplemented residual: {execute:#?}"
     );
+}
+
+/// CR 508.6 + CR 608.2c: The Commander 2017 "whenever enchanted player is
+/// attacked" curse cycle carries the rider "Each opponent attacking that player
+/// does the same." — a player-scoped replication of the antecedent effect.
+/// Before the fix the rider was an `Effect::unimplemented("attacking", …)`
+/// residual; it must now lower to a `SequentialSibling` sub_ability that CLONES
+/// the antecedent effect and iterates it over `player_scope: Opponent` (the same
+/// AST the explicit-verb riders of the cycle already produce). Fail-on-revert:
+/// walks the parsed trigger and asserts the cloned effect + scope, and that the
+/// rider residual is gone.
+fn parse_curse(name: &str, oracle: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(
+        oracle,
+        name,
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string(), "Curse".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Attacks)
+        .unwrap_or_else(|| panic!("{name}: expected an 'is attacked' trigger: {parsed:#?}"));
+    *trigger
+        .execute
+        .clone()
+        .unwrap_or_else(|| panic!("{name}: trigger must carry an execute body"))
+}
+
+#[test]
+fn curse_of_opulence_rider_clones_token_across_attacking_opponents() {
+    let execute = parse_curse(
+        "Curse of Opulence",
+        "Enchant player\n\
+         Whenever enchanted player is attacked, create a Gold token. Each opponent \
+         attacking that player does the same. (A Gold token is an artifact with \
+         \"Sacrifice this token: Add one mana of any color.\")",
+    );
+
+    // Base effect: the curse controller creates a Gold token.
+    assert!(
+        matches!(&*execute.effect, Effect::Token { name, .. } if name == "Gold"),
+        "base effect must create a Gold token, got {:#?}",
+        execute.effect
+    );
+
+    // Rider: cloned into a per-opponent SequentialSibling — NOT an Unimplemented.
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("does-the-same rider must lower to a sub_ability");
+    assert_eq!(
+        rider.player_scope,
+        Some(PlayerFilter::OpponentAttackingEnchantedPlayer),
+        "the 'attacking that player' qualifier must scope the rider to opponents \
+         attacking the enchanted player (CR 508.6), not all opponents"
+    );
+    assert_eq!(
+        rider.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert!(
+        matches!(&*rider.effect, Effect::Token { name, .. } if name == "Gold"),
+        "rider must CLONE the antecedent Gold-token effect, got {:#?}",
+        rider.effect
+    );
+
+    // Fail-on-revert: no surviving "attacking … does the same" residual.
+    assert!(
+        !has_unimplemented(&execute),
+        "no Unimplemented residual may survive: {execute:#?}"
+    );
+}
+
+#[test]
+fn curse_of_vitality_rider_clones_gain_life_across_attacking_opponents() {
+    let execute = parse_curse(
+        "Curse of Vitality",
+        "Enchant player\n\
+         Whenever enchanted player is attacked, you gain 2 life. Each opponent \
+         attacking that player does the same.",
+    );
+
+    assert!(
+        matches!(&*execute.effect, Effect::GainLife { amount, .. } if *amount == QuantityExpr::Fixed { value: 2 }),
+        "base effect must gain 2 life, got {:#?}",
+        execute.effect
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("does-the-same rider must lower to a sub_ability");
+    assert_eq!(
+        rider.player_scope,
+        Some(PlayerFilter::OpponentAttackingEnchantedPlayer)
+    );
+    assert_eq!(
+        rider.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert!(
+        matches!(&*rider.effect, Effect::GainLife { amount, .. } if *amount == QuantityExpr::Fixed { value: 2 }),
+        "rider must CLONE the antecedent gain-2-life effect, got {:#?}",
+        rider.effect
+    );
+
+    assert!(
+        !has_unimplemented(&execute),
+        "no Unimplemented residual may survive: {execute:#?}"
+    );
+}
+
+/// CR 122.1 + CR 614.1c: "enters with N additional +1/+1 counters on it" must
+/// parse the counter TYPE as the canonical `Plus1Plus1`, not leak the "additional"
+/// qualifier into a bogus `Generic("additional +1/+1")`. The qualifier follows the
+/// count word ("two additional …"), so it is stripped after the count is parsed.
+/// Fail-on-revert: before the fix these all produced `Generic("additional +1/+1")`
+/// / `Generic("additional time")`, which matches no real counter at runtime.
+#[test]
+fn enters_with_n_additional_counters_parses_canonical_type() {
+    fn enters_counter(text: &str, name: &str, types: &[&str]) -> (CounterType, QuantityExpr) {
+        let t: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &t, &[]);
+        let rep = parsed
+            .replacements
+            .iter()
+            .find(|r| {
+                r.execute
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.effect.as_ref(), Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| panic!("{name}: no PutCounter replacement: {parsed:?}"));
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = rep.execute.as_ref().unwrap().effect.as_ref()
+        else {
+            unreachable!()
+        };
+        (counter_type.clone(), count.clone())
+    }
+
+    // "that creature enters with two additional +1/+1 counters on it" (Necromantic Summons)
+    let (ct, count) = enters_counter(
+        "Put target creature card from a graveyard onto the battlefield under your control.\n\
+         Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
+         that creature enters with two additional +1/+1 counters on it.",
+        "Necromantic Summons",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Necromantic Summons type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 2 }, "count");
+
+    // "it enters with two additional +1/+1 counters on it" (Heroic Return)
+    let (ct, _) = enters_counter(
+        "Return target creature card from your graveyard to the battlefield. \
+         If a Hero enters this way, it enters with two additional +1/+1 counters on it.",
+        "Heroic Return",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Heroic Return type");
+
+    // "it enters with three additional +1/+1 counters on it" (Turntimber Symbiosis)
+    let (ct, count) = enters_counter(
+        "Look at the top seven cards of your library. You may put a creature card from among them \
+         onto the battlefield. If that card has mana value 3 or less, it enters with three \
+         additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+        "Turntimber Symbiosis",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Turntimber Symbiosis type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
+
+    // Non-P/T counter class: "it enters with three additional time counters on it" (Ravaging Riftwurm)
+    let (ct, count) = enters_counter(
+        "If this creature was kicked, it enters with three additional time counters on it.",
+        "Ravaging Riftwurm",
+        &["Creature"],
+    );
+    assert_eq!(ct, CounterType::Time, "Ravaging Riftwurm type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
 }

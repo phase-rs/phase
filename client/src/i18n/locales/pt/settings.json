@@ -61,6 +61,11 @@
     "showKeywords": "Mostrar palavras-chave nas cartas do campo de batalha",
     "opponentHoverPreview": "Pré-visualização ao Passar o Mouse sobre o Oponente",
     "showOpponentBoard": "Mostrar o tabuleiro do oponente ao passar o mouse sobre o HUD",
+    "multiplayerBoardLayout": "Layout do campo multijogador",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Oponente em foco",
+      "split": "Mesa dividida"
+    },
     "cardPreviewDelay": "Atraso ao passar o cursor",
     "cardPreviewDelayInstant": "Instantâneo",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -179,7 +184,9 @@
     "importedWithPreferences_one": "Importado {{count}} deck e preferências.",
     "importedWithPreferences_other": "Importados {{count}} decks e preferências.",
     "skippedMalformed_one": "Ignorada {{count}} entrada malformada.",
-    "skippedMalformed_other": "Ignoradas {{count}} entradas malformadas."
+    "skippedMalformed_other": "Ignoradas {{count}} entradas malformadas.",
+    "telemetry": "Enviar relatórios anônimos de falhas e uso",
+    "telemetryDescription": "Ajuda a corrigir falhas e priorizar o suporte a cartas. Sem conta, sem dados pessoais — apenas contagens de erros e resumos de partida."
   },
   "resetAll": {
     "confirm": "Redefinir todas as preferências para os padrões? Isso limpa todas as configurações deste diálogo.",

@@ -2,9 +2,10 @@ import type { ManaCost } from "../../adapter/types.ts";
 import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { ManaSymbol } from "./ManaSymbol.tsx";
 
-type PipSize = "xs" | "sm" | "md" | "lg";
+type PipSize = "2xs" | "xs" | "sm" | "md" | "lg";
 
 const PIP_SIZES: Record<PipSize, { container: string; gap: string; backdrop: string }> = {
+  "2xs": { container: "w-[10px] h-[10px] p-[0px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[1px] top-[2px] -bottom-[3px]" },
   xs: { container: "w-[12px] h-[12px] p-[0px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[1px] top-[2px] -bottom-[4px]" },
   sm: { container: "w-[18px] h-[18px] p-[0px]", gap: "gap-[1px]", backdrop: "-inset-x-[2px] top-[4px] -bottom-[8px]" },
   md: { container: "w-[22px] h-[22px] p-[2px]", gap: "gap-[1px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },

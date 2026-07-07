@@ -22,6 +22,7 @@ describe("preferencesStore", () => {
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
+        multiplayerBoardLayout: "focused",
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
       });
@@ -37,6 +38,7 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
+    expect(state.multiplayerBoardLayout).toBe("focused");
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
   });
 
@@ -88,6 +90,14 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().hudLayout).toBe("floating");
+  });
+
+  it("setMultiplayerBoardLayout updates multiplayer board layout", () => {
+    act(() => {
+      usePreferencesStore.getState().setMultiplayerBoardLayout("split");
+    });
+
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("split");
   });
 
   it("setFollowActiveOpponent updates the value", () => {
@@ -341,6 +351,34 @@ describe("preferencesStore", () => {
     ]);
   });
 
+  it("migrates v22 bare phaseStops into scoped { phase, scope: 'AllTurns' }", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { phaseStops: ["PreCombatMain"] }, version: 22 }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "PreCombatMain", scope: "AllTurns" },
+    ]);
+  });
+
+  it("migrates non-array v22 phaseStops to []", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { phaseStops: "garbage" }, version: 22 }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([]);
+  });
+
   // --- Audio preferences ---
 
   it("has correct audio defaults", () => {
@@ -513,5 +551,23 @@ describe("preferencesStore", () => {
     usePreferencesStore.persist.rehydrate();
 
     expect(usePreferencesStore.getState().aiBracketFilter).toEqual([]);
+  });
+
+  it("v20 → v21 migration defaults multiplayerBoardLayout to focused", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: {
+          cardSize: "large",
+        },
+        version: 20,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().multiplayerBoardLayout).toBe("focused");
   });
 });

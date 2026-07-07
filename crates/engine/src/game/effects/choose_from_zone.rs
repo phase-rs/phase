@@ -2153,6 +2153,128 @@ mod tests {
         }
     }
 
+    /// CR 608.2c (Portent of Calamity): the free-cast node's gate "if you exiled
+    /// four or more cards this way" reads the count of cards the per-card-type
+    /// exile placed into the chain tracked set. This drives the REAL exile
+    /// pipeline over four distinct card types and evaluates the PARSED gate (the
+    /// condition the parser attaches to the `CastFromZone` node) against the
+    /// resulting production-populated state — NOT a seeded set.
+    ///
+    /// Discrimination: exiling four cards opens the gate (`TrackedSetSize >= 4`),
+    /// exiling three keeps it closed. Reverting the parser wiring
+    /// (`parse_exiled_this_way_count`) drops the gate to `None`, so the
+    /// `.expect(...)` below fails; without the gate the free cast would fire
+    /// unconditionally and the three-card case could never be denied.
+    ///
+    /// `ChangeZoneAll` (the intervening "put the rest into your graveyard")
+    /// never republishes a tracked set (grep: 0 `publish_*tracked_set` calls in
+    /// `change_zone.rs`), so the exile set is still the most-recent set when the
+    /// free-cast node's gate resolves — evaluating at exile-complete is
+    /// equivalent to evaluating at the `CastFromZone` node.
+    #[test]
+    fn portent_free_cast_gate_reads_exiled_this_way_count() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, Chooser, Effect};
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::{CardId, TrackedSetId};
+
+        const PORTENT: &str = "Reveal the top X cards of your library. For each card type, you may exile a card of that type from among them. Put the rest into your graveyard. You may cast a spell from among the exiled cards without paying its mana cost if you exiled four or more cards this way. Then put the rest of the exiled cards into your hand.";
+        let def = parse_effect_chain(PORTENT, AbilityKind::Spell);
+        let mut node = &def;
+        let gate = loop {
+            if matches!(&*node.effect, Effect::CastFromZone { .. }) {
+                break node.condition.clone().expect(
+                    "the free-cast node must carry the 'exiled four or more this way' gate",
+                );
+            }
+            node = node
+                .sub_ability
+                .as_ref()
+                .expect("Portent chain must reach a CastFromZone node");
+        };
+
+        let eval_after_exiling = |exile_count: usize| -> bool {
+            let mut state = GameState::new_two_player(7);
+            let types = [
+                CoreType::Artifact,
+                CoreType::Creature,
+                CoreType::Enchantment,
+                CoreType::Sorcery,
+            ];
+            let mut pool = Vec::new();
+            for (i, ty) in types.iter().enumerate() {
+                let id = create_object(
+                    &mut state,
+                    CardId(i as u64 + 1),
+                    PlayerId(0),
+                    format!("Card {i}"),
+                    Zone::Library,
+                );
+                state.objects.get_mut(&id).unwrap().card_types.core_types = vec![*ty];
+                pool.push(id);
+            }
+            // Producer (RevealTop) binding: the revealed pool as the chain set.
+            let producer = TrackedSetId(1);
+            state.tracked_object_sets.insert(producer, pool.clone());
+            state.next_tracked_set_id = 2;
+            state.chain_tracked_set_id = Some(producer);
+
+            let ability = ResolvedAbility::new(
+                Effect::ForEachCategoryExile {
+                    category: crate::types::ability::IterationCategory::CardType,
+                    zone: Zone::Library,
+                    chooser: Chooser::Controller,
+                    up_to: true,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve_for_each_category(&mut state, &ability, &mut events).unwrap();
+
+            // Exile the offered card at the first `exile_count` member prompts;
+            // decline the remainder.
+            let mut exiled = 0;
+            while let WaitingFor::ChooseFromZoneChoice { cards, .. } = &state.waiting_for {
+                let pick = if exiled < exile_count {
+                    exiled += 1;
+                    cards.clone()
+                } else {
+                    vec![]
+                };
+                crate::game::engine::apply(
+                    &mut state,
+                    PlayerId(0),
+                    GameAction::SelectCards { cards: pick },
+                )
+                .unwrap();
+            }
+
+            let chain = state
+                .chain_tracked_set_id
+                .and_then(|id| state.tracked_object_sets.get(&id))
+                .map(|s| s.len())
+                .unwrap_or(0);
+            assert_eq!(
+                chain, exile_count,
+                "the exile pipeline must leave exactly {exile_count} cards in the 'exiled this way' set"
+            );
+
+            super::super::evaluate_condition(&gate, &state, &ability)
+        };
+
+        assert!(
+            eval_after_exiling(4),
+            "exiling four cards this way must open the free-cast gate (TrackedSetSize >= 4)"
+        );
+        assert!(
+            !eval_after_exiling(3),
+            "exiling only three cards this way must keep the free-cast gate closed"
+        );
+    }
+
     /// CR 608.2c (review finding #2): when the player DECLINES every member,
     /// no card is exiled, so "the cards exiled this way" is the EMPTY set. A
     /// downstream continuation consuming the chain tracked set must therefore see

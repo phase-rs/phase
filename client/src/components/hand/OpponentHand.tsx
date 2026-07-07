@@ -9,27 +9,27 @@ import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
-import type { ObjectId } from "../../adapter/types.ts";
-import { resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
+import type { ObjectId, PlayerId } from "../../adapter/types.ts";
+import { getOpponentIds, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
 
 interface OpponentHandProps {
+  playerId?: PlayerId;
   showCards?: boolean;
+  layout?: "default" | "split";
 }
 
-export function OpponentHand({ showCards = false }: OpponentHandProps) {
+export function OpponentHand({ playerId, showCards = false, layout = "default" }: OpponentHandProps) {
   const myId = usePerspectivePlayerId();
   const isCompactHeight = useIsCompactHeight();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
-  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
-  const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
+  const gameState = useGameStore((s) => s.gameState);
   const players = useGameStore((s) => s.gameState?.players);
   const opponents = useMemo(() => {
-    const orderedPlayers = seatOrder ?? players?.map((player) => player.id) ?? [];
-    const eliminated = new Set(eliminatedPlayers ?? []);
-    return orderedPlayers.filter((id) => id !== myId && !eliminated.has(id));
-  }, [eliminatedPlayers, myId, players, seatOrder]);
+    return getOpponentIds(gameState ?? null, myId);
+  }, [gameState, myId]);
   const opponentId =
-    resolveFocusedOpponent(focusedOpponent, opponents)
+    playerId
+    ?? resolveFocusedOpponent(focusedOpponent, opponents)
     ?? (myId === 0 ? 1 : 0);
   const opponent = players?.[opponentId];
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -40,15 +40,20 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
 
   const cardCount = opponent.hand.length;
   const center = cardCount > 0 ? (cardCount - 1) / 2 : 0;
+  const isSplitLayout = layout === "split";
 
   // Cards extend above the container so they peek from the top edge.
-  const BASE_Y = -15;
+  const baseY = isSplitLayout ? 0 : -15;
+  const curveY = isSplitLayout ? 1.4 : 6;
+  const rotationStep = isSplitLayout ? 3.5 : 6;
+  const overlap = isSplitLayout ? "calc(var(--card-w) * -0.2)" : "-16px";
+  const minHeightClass = isSplitLayout
+    ? "min-h-[calc(var(--card-h)*0.55)]"
+    : isCompactHeight ? "min-h-[32px]" : "min-h-[calc(var(--card-h)*0.7)]";
 
   return (
     <div
-      className={`flex items-start justify-center overflow-visible px-4 pb-1 ${
-        isCompactHeight ? "min-h-[32px]" : "min-h-[calc(var(--card-h)*0.7)]"
-      }`}
+      className={`flex items-start justify-center overflow-visible ${isSplitLayout ? "px-1 pb-0" : "px-4 pb-1"} ${minHeightClass}`}
       style={{ perspective: "800px" }}
     >
       <AnimatePresence>
@@ -58,7 +63,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
             || (publicRevealedCards?.includes(id) ?? false);
           const showFace = showCards || isRevealed;
           // Negate rotation so fan opens toward opponent (top of screen)
-          const rotation = -((i - center) * 6);
+          const rotation = -((i - center) * rotationStep);
 
           return (
             <motion.div
@@ -66,12 +71,12 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
               initial={{ opacity: 0, y: -60 }}
               animate={{
                 opacity: 1,
-                y: BASE_Y - Math.abs(i - center) ** 2 * 6,
+                y: baseY - Math.abs(i - center) ** 2 * curveY,
                 rotate: rotation,
               }}
               exit={{ opacity: 0, y: -60 }}
               transition={{ delay: i * 0.03, duration: 0.25 }}
-              style={{ marginLeft: i > 0 ? "-16px" : undefined, zIndex: i }}
+              style={{ marginLeft: i > 0 ? overlap : undefined, zIndex: i }}
             >
               <OpponentCardThumbnail
                 cardId={id}

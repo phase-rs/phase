@@ -61,6 +61,11 @@
     "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
     "opponentHoverPreview": "Aperçu au survol de l'adversaire",
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
+    "multiplayerBoardLayout": "Disposition du plateau multijoueur",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Adversaire ciblé",
+      "split": "Table divisée"
+    },
     "cardPreviewDelay": "Délai de survol",
     "cardPreviewDelayInstant": "Instantané",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -179,7 +184,9 @@
     "importedWithPreferences_one": "{{count}} deck et les préférences importés.",
     "importedWithPreferences_other": "{{count}} decks et les préférences importés.",
     "skippedMalformed_one": "{{count}} entrée malformée ignorée.",
-    "skippedMalformed_other": "{{count}} entrées malformées ignorées."
+    "skippedMalformed_other": "{{count}} entrées malformées ignorées.",
+    "telemetry": "Envoyer des rapports anonymes de plantage et d'utilisation",
+    "telemetryDescription": "Aide à corriger les plantages et à prioriser la prise en charge des cartes. Aucun compte, aucune donnée personnelle — uniquement des comptages d'erreurs et de résumés de partie."
   },
   "resetAll": {
     "confirm": "Réinitialiser toutes les préférences aux valeurs par défaut ? Cela efface tous les paramètres de cette boîte de dialogue.",

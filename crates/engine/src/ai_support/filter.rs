@@ -753,7 +753,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         FilterProp::Not { prop } => filterprop_reads_only_candidate_fp(prop),
 
         // POISON — read another object / side-table / combat / history / identity.
-        FilterProp::Attacking { .. }
+        // ControllerChoseLabel reads the controller's per-player anchor state.
+        FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
@@ -762,6 +764,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        // CR 302.6: per-turn control-continuity marker — a turn/history-relative
+        // predicate like the siblings here (POISON for memoization).
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
@@ -794,11 +799,15 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
-        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::MostPrevalentCreatureTypeIn { .. }
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::Unpaired
+        // CR 608.2c: Reads the resolution-chain tracked-set side-table
+        // (`tracked_object_sets` / `chain_tracked_set_id`), not the candidate's
+        // own fingerprint — POISON for memoization.
+        | FilterProp::InTrackedSet { .. }
         | FilterProp::Other { .. } => false,
     }
 }
@@ -1012,8 +1021,8 @@ impl LegalityPoisonGates {
                     | StaticMode::BlockRestriction { .. }
                     | StaticMode::MustBlock
                     | StaticMode::MustBlockAttacker { .. }
-                    | StaticMode::MustBeBlocked
-                    | StaticMode::MustBeBlockedByAll
+                    | StaticMode::MustBeBlocked { .. }
+                    | StaticMode::MustBeBlockedByAll { .. }
                     | StaticMode::MaxBlockersEachCombat { .. }
                     | StaticMode::ExtraBlockers { .. }
                     | StaticMode::CanBlockShadow

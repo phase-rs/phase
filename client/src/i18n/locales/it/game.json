@@ -4,6 +4,13 @@
     "collapse": "Comprimi avanzamento risoluzione",
     "expand": "Espandi avanzamento risoluzione"
   },
+  "debugCreate": {
+    "tokenPower": "Power",
+    "tokenToughness": "Toughness",
+    "tokenPowerPlaceholder": "Power",
+    "tokenToughnessPlaceholder": "Toughness",
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
   "card": {
     "faceDownName": "Carta coperta",
     "loading": "Caricamento {{name}}",
@@ -16,6 +23,8 @@
     "holdCtrlFront": "Tieni premuto Ctrl per il fronte",
     "holdCtrlFlip": "Tieni premuto Ctrl per girare",
     "flip": "Gira",
+    "report": "Segnala un problema",
+    "reported": "Segnalato ✓",
     "altParsedAbilities": "Alt: abilità analizzate",
     "debugId": "ID: {{id}}",
     "engineParse": "Analisi del motore",
@@ -80,7 +89,26 @@
     "autoPassing": "Passaggio automatico fino al passo finale...",
     "resolvingStack": "Risoluzione della pila..."
   },
+  "cardReport": {
+    "title": "Segnala un problema con una carta",
+    "subtitle": "Scegli la carta che non funziona correttamente.",
+    "search": "Cerca carte…",
+    "empty": "Nessuna carta segnalabile in vista.",
+    "zone": {
+      "Stack": "Pila",
+      "Battlefield": "Campo di battaglia",
+      "Hand": "Mano",
+      "Graveyard": "Cimitero",
+      "Exile": "Esilio",
+      "Command": "Zona di comando"
+    },
+    "emblemTag": "Emblema",
+    "allPlayers": "Tutti",
+    "allZones": "Tutte le zone",
+    "cancel": "Annulla"
+  },
   "board": {
+    "reportCard": "Segnala un problema con una carta",
     "regroupCreatures": "Raggruppa i gruppi di creature duplicate",
     "changeBackground": "Cambia sfondo…",
     "customizeLayout": "Personalizza layout…",
@@ -249,6 +277,7 @@
     "confirmDistribute_other": "Dichiara {{count}} attaccanti"
   },
   "fullControl": {
+    "label": "Controllo",
     "on": "Controllo totale attivo",
     "off": "Controllo totale disattivato",
     "tooltip": "Mantieni le finestre di priorità invece di lasciare che i punti tranquilli passino automaticamente. Scorciatoia: F."
@@ -287,6 +316,9 @@
     "cleanupDescription": "Il danno svanisce e si controlla la dimensione massima della mano.",
     "tooltipStopSet": "Stop impostato: clicca per rimuovere questo stop del passaggio automatico.",
     "tooltipNoStop": "Nessuno stop impostato: clicca per mettere in pausa il passaggio automatico qui.",
+    "scopeAllTurns": "Si ferma a ogni turno.",
+    "scopeOwnTurn": "Si ferma solo nei tuoi turni.",
+    "scopeOpponentsTurns": "Si ferma solo nei turni degli avversari.",
     "tooltipCurrentPhase": "Fase corrente.",
     "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -325,6 +357,18 @@
     "tooltip_one": "Passa il mouse per l'anteprima, clicca per vedere",
     "tooltip_other": "{{count}} incantesimi — passa il mouse per l'anteprima, clicca per vedere"
   },
+  "counterTooltip": {
+    "summary_one": "1 segnalino {{label}}\n{{description}}",
+    "summary_other": "{{count}} segnalini {{label}}\n{{description}}",
+    "descriptions": {
+      "p1p1": "Ogni segnalino +1/+1 dà +1/+1 al permanente.",
+      "m1m1": "Ogni segnalino -1/-1 dà -1/-1 al permanente.",
+      "loyalty": "I segnalini fedeltà tengono traccia della fedeltà di un planeswalker e vengono aggiunti o rimossi dalle abilità di fedeltà.",
+      "lore": "I segnalini sapere tengono traccia del progresso dei capitoli di una Saga. Aggiungerne uno di solito innesca la prossima abilità capitolo.",
+      "stun": "Se un permanente con un segnalino stordimento sta per STAPpare, rimuovi invece un segnalino stordimento da esso.",
+      "generic": "I segnalini {{label}} sono marcatori con nome usati dagli effetti delle carte."
+    }
+  },
   "badges": {
     "monarch": "Monarca",
     "monarchTooltip": "Il Monarca — pesca una carta extra a fine turno",
@@ -336,10 +380,10 @@
     "dungeonTooltip": "Avventura in {{name}} — stanza {{room}}",
     "poisonAriaLabel_one": "{{count}} segnalino veleno",
     "poisonAriaLabel_other": "{{count}} segnalini veleno",
-    "poisonTooltip": "Segnalini veleno: {{count}}",
+    "poisonTooltip": "Segnalini veleno: {{count}}\nUn giocatore con dieci o più segnalini veleno perde la partita.",
     "energyAriaLabel_one": "{{count}} segnalino energia",
     "energyAriaLabel_other": "{{count}} segnalini energia",
-    "energyTooltip": "Energia: {{count}}",
+    "energyTooltip": "Segnalini energia: {{count}}\nI segnalini energia sono una risorsa del giocatore spesa dalle abilità delle carte.",
     "ringAriaLabel": "L'Anello ti tenta (livello {{level}}), portatore dell'Anello: {{bearer}}",
     "ringTooltip": "L'Anello ti tenta — livello {{level}}",
     "ringBearerTooltip": "Portatore dell'Anello: {{name}}",
@@ -351,12 +395,12 @@
     "ringLevel4": "4. Quando infligge danno da combattimento a un giocatore, ogni avversario perde 3 punti vita.",
     "radAriaLabel_one": "{{count}} segnalino radiazione",
     "radAriaLabel_other": "{{count}} segnalini radiazione",
-    "radTooltip": "Segnalini radiazione: {{count}}",
+    "radTooltip": "Segnalini radiazione: {{count}}\nAll'inizio della fase principale pre-combattimento di quel giocatore, macina carte pari ai suoi segnalini rad, poi perde punti vita per ogni carta non terra macinata in questo modo.",
     "experienceAriaLabel_one": "{{count}} segnalino esperienza",
     "experienceAriaLabel_other": "{{count}} segnalini esperienza",
-    "experienceTooltip": "Segnalini esperienza: {{count}}",
+    "experienceTooltip": "Segnalini esperienza: {{count}}\nI segnalini esperienza sono segnalini del giocatore che le abilità delle carte usano per scalare gli effetti.",
     "speedAriaLabel": "Velocità {{value}}",
-    "speedTooltip": "Velocità: {{value}}",
+    "speedTooltip": "Velocità: {{value}}\nLa velocità tiene traccia del progresso di Accendi i motori. Può aumentare fino alla velocità massima 4.",
     "condCantWin": "Non può vincere la partita",
     "condCantGainLife": "Non può guadagnare punti vita",
     "condCantLoseLife": "Non può perdere punti vita",
@@ -445,6 +489,9 @@
     "free": "Gratis",
     "chooseXTitle": "Scegli un valore per X",
     "chooseXAria": "Scegli il valore di X",
+    "chooseXInputAria": "Inserisci il valore di X",
+    "decreaseX": "Diminuisci il valore di X",
+    "increaseX": "Aumenta il valore di X",
     "xEquals": "X = {{value}}",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
@@ -562,6 +609,22 @@
     "paidKickedTimes": "potenziata ×{{count}}",
     "paidAdditionalCost": "costo extra",
     "paidConvoked": "convocata ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Rinunce di priorità",
+    "menuHeader": "Salta automaticamente questo innesco",
+    "menuExplainer": "Salta la pausa in cui il gioco si ferma per chiederti di agire ogni volta che questo innesco va sulla pila. Puoi comunque rispondere ad altre cose.",
+    "yieldThis": "Solo questo",
+    "yieldThisHint": "Solo questo {{source}}, non le altre copie",
+    "yieldAllCopies": "Tutte le copie",
+    "allCopiesHint": "Ogni {{source}}, comprese quelle nuove",
+    "revoke": "Revoca",
+    "revokeHint": "Torna a fermarti per questo innesco",
+    "clearAll": "Cancella tutto",
+    "menuButton": "Salta automaticamente questo innesco",
+    "menuButtonActive": "Salto automatico: modifica o revoca",
+    "menuButtonShort": "Auto-salta",
+    "menuButtonShortActive": "Saltando"
   },
   "targeting": {
     "choosePermanentToCopy": "Scegli un permanente da copiare",
@@ -915,7 +978,8 @@
       "title": "Scegli il costo di attivazione"
     },
     "debug": {
-      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta"
+      "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta",
+      "modeButtonOff": "MODALITÀ CLIC DISATTIVATA"
     }
   },
   "gameProvider": {
@@ -966,6 +1030,8 @@
     },
     "deckPreview": {
       "editDeck": "Modifica {{name}}",
+      "randomTitle": "Mazzo casuale",
+      "randomDescription": "Un mazzo compatibile verrà scelto all'inizio della partita.",
       "cardCount_one": "{{count}} carta",
       "cardCount_other": "{{count}} carte",
       "unknownBadge": "Sconosciute {{count}}",
@@ -987,6 +1053,13 @@
     }
   },
   "cardChoice": {
+    "eachPlayerCopyChosen": {
+      "title": "Choose creatures to copy",
+      "prompt": "The first creature you choose is copied; if you choose a second, its power becomes +1/+1 counters on the copy.",
+      "confirm": "Conferma",
+      "copied": "copied",
+      "scaler": "scaler"
+    },
     "badges": {
       "choose": "Scegli",
       "selected": "Selezionata",
@@ -1455,6 +1528,11 @@
     "dashAltLabel": "Lancia con Dash",
     "dashAltSuffix": "(ottiene rapidità, torna in mano al passo finale)",
     "dashSubtitle": "Lancia {{name}} normalmente o usa il suo costo di Dash.",
+    "faceDownEyebrow": "A faccia in giù",
+    "faceDownNormalLabel": "Lancia normalmente",
+    "faceDownAltLabel": "Lancia a faccia in giù",
+    "faceDownAltSuffix": "(creatura 2/2 finché non viene girata a faccia in su)",
+    "faceDownSubtitle": "Lancia {{name}} normalmente, oppure lanciala a faccia in giù come una creatura 2/2 che può essere girata a faccia in su in seguito.",
     "evokeEyebrow": "Evocare",
     "evokeNormalLabel": "Lancia normalmente",
     "evokeAltLabel": "Lancia con Evocare",
@@ -1586,6 +1664,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
     "variantFallback": "Lancia con {{type}}"
   },
@@ -1698,7 +1777,10 @@
       "twoColors": "Scegli due colori",
       "numberRange": "Scegli un numero",
       "labeled": "Fai una scelta",
+      "cardPredicate": "Scegli un tipo di carta",
+      "cardPredicateGuess": "Indovina un tipo di carta",
       "keyword": "Scegli un'abilità",
+      "counterKind": "Scegli un segnalino",
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
@@ -1875,6 +1957,11 @@
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",
@@ -1957,6 +2044,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

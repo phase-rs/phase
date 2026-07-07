@@ -4,6 +4,13 @@
     "collapse": "Réduire la progression de résolution",
     "expand": "Développer la progression de résolution"
   },
+  "debugCreate": {
+    "tokenPower": "Power",
+    "tokenToughness": "Toughness",
+    "tokenPowerPlaceholder": "Power",
+    "tokenToughnessPlaceholder": "Toughness",
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
   "card": {
     "faceDownName": "Carte face cachée",
     "loading": "Chargement de {{name}}",
@@ -16,6 +23,8 @@
     "holdCtrlFront": "Maintenez Ctrl pour la face avant",
     "holdCtrlFlip": "Maintenez Ctrl pour pivoter",
     "flip": "Pivoter",
+    "report": "Signaler un problème",
+    "reported": "Signalé ✓",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -80,7 +89,26 @@
     "autoPassing": "Passage automatique jusqu'à l'étape de fin...",
     "resolvingStack": "Résolution de la pile..."
   },
+  "cardReport": {
+    "title": "Signaler un problème de carte",
+    "subtitle": "Choisissez la carte qui ne fonctionne pas correctement.",
+    "search": "Rechercher des cartes…",
+    "empty": "Aucune carte à signaler visible.",
+    "zone": {
+      "Stack": "Pile",
+      "Battlefield": "Champ de bataille",
+      "Hand": "Main",
+      "Graveyard": "Cimetière",
+      "Exile": "Exil",
+      "Command": "Zone de commandement"
+    },
+    "emblemTag": "Emblème",
+    "allPlayers": "Tous",
+    "allZones": "Toutes les zones",
+    "cancel": "Annuler"
+  },
   "board": {
+    "reportCard": "Signaler un problème de carte",
     "regroupCreatures": "Regrouper les groupes de créatures en double",
     "changeBackground": "Changer l'arrière-plan…",
     "customizeLayout": "Personnaliser la disposition…",
@@ -249,6 +277,7 @@
     "confirmDistribute_other": "Déclarer {{count}} attaquants"
   },
   "fullControl": {
+    "label": "Contrôle",
     "on": "Contrôle total activé",
     "off": "Contrôle total désactivé",
     "tooltip": "Conservez les fenêtres de priorité au lieu de laisser les moments calmes passer automatiquement. Raccourci : F."
@@ -287,6 +316,9 @@
     "cleanupDescription": "Les blessures s'estompent et la taille maximale de main est vérifiée.",
     "tooltipStopSet": "Arrêt défini : cliquez pour retirer cet arrêt de passage automatique.",
     "tooltipNoStop": "Aucun arrêt défini : cliquez pour mettre en pause le passage automatique ici.",
+    "scopeAllTurns": "S'arrête à chaque tour.",
+    "scopeOwnTurn": "S'arrête uniquement lors de vos tours.",
+    "scopeOpponentsTurns": "S'arrête uniquement lors des tours des adversaires.",
     "tooltipCurrentPhase": "Phase actuelle.",
     "tooltip": "Arrêt de phase : {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -325,6 +357,18 @@
     "tooltip_one": "Survolez pour un aperçu, cliquez pour voir",
     "tooltip_other": "{{count}} enchantements — survolez pour un aperçu, cliquez pour voir"
   },
+  "counterTooltip": {
+    "summary_one": "1 marqueur {{label}}\n{{description}}",
+    "summary_other": "{{count}} marqueurs {{label}}\n{{description}}",
+    "descriptions": {
+      "p1p1": "Chaque marqueur +1/+1 donne +1/+1 au permanent.",
+      "m1m1": "Chaque marqueur -1/-1 donne -1/-1 au permanent.",
+      "loyalty": "Les marqueurs loyauté suivent la loyauté d'un planeswalker et sont ajoutés ou retirés par les capacités de loyauté.",
+      "lore": "Les marqueurs sapience suivent la progression des chapitres d'une Saga. Ajouter un marqueur déclenche généralement la capacité du chapitre suivant.",
+      "stun": "Si un permanent avec un marqueur étourdissement devait se dégager, retirez-lui un marqueur étourdissement à la place.",
+      "generic": "Les marqueurs {{label}} sont des marqueurs nommés utilisés par des effets de cartes."
+    }
+  },
   "badges": {
     "monarch": "Monarque",
     "monarchTooltip": "Le Monarque — pioche une carte supplémentaire en fin de tour",
@@ -336,10 +380,10 @@
     "dungeonTooltip": "Aventure dans {{name}} — salle {{room}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",
     "poisonAriaLabel_other": "{{count}} marqueurs poison",
-    "poisonTooltip": "Marqueurs poison : {{count}}",
+    "poisonTooltip": "Marqueurs poison : {{count}}\nUn joueur avec dix marqueurs poison ou plus perd la partie.",
     "energyAriaLabel_one": "{{count}} marqueur énergie",
     "energyAriaLabel_other": "{{count}} marqueurs énergie",
-    "energyTooltip": "Énergie : {{count}}",
+    "energyTooltip": "Marqueurs énergie : {{count}}\nLes marqueurs énergie sont une ressource détenue par un joueur et dépensée par des capacités de cartes.",
     "ringAriaLabel": "L'Anneau vous tente (niveau {{level}}), porteur de l'Anneau : {{bearer}}",
     "ringTooltip": "L'Anneau vous tente — niveau {{level}}",
     "ringBearerTooltip": "Porteur de l'Anneau : {{name}}",
@@ -351,12 +395,12 @@
     "ringLevel4": "4. Quand il inflige des blessures de combat à un joueur, chaque adversaire perd 3 points de vie.",
     "radAriaLabel_one": "{{count}} marqueur rad",
     "radAriaLabel_other": "{{count}} marqueurs rad",
-    "radTooltip": "Marqueurs rad : {{count}}",
+    "radTooltip": "Marqueurs rad : {{count}}\nAu début de la phase principale précombat de ce joueur, il meule un nombre de cartes égal à ses marqueurs rad, puis perd des points de vie pour chaque carte non-terrain meulée ainsi.",
     "experienceAriaLabel_one": "{{count}} marqueur d'expérience",
     "experienceAriaLabel_other": "{{count}} marqueurs d'expérience",
-    "experienceTooltip": "Marqueurs d'expérience : {{count}}",
+    "experienceTooltip": "Marqueurs d'expérience : {{count}}\nLes marqueurs d'expérience sont des marqueurs de joueur que les capacités de cartes utilisent pour ajuster leurs effets.",
     "speedAriaLabel": "Vitesse {{value}}",
-    "speedTooltip": "Vitesse : {{value}}",
+    "speedTooltip": "Vitesse : {{value}}\nLa vitesse suit la progression de Démarrez vos moteurs. Elle peut augmenter jusqu'à la vitesse maximale 4.",
     "condCantWin": "Ne peut pas gagner la partie",
     "condCantGainLife": "Ne peut pas gagner de points de vie",
     "condCantLoseLife": "Ne peut pas perdre de points de vie",
@@ -445,6 +489,9 @@
     "free": "Gratuit",
     "chooseXTitle": "Choisissez une valeur pour X",
     "chooseXAria": "Choisir la valeur de X",
+    "chooseXInputAria": "Saisir la valeur de X",
+    "decreaseX": "Diminuer la valeur de X",
+    "increaseX": "Augmenter la valeur de X",
     "xEquals": "X = {{value}}",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
@@ -562,6 +609,22 @@
     "paidKickedTimes": "kické ×{{count}}",
     "paidAdditionalCost": "coût supplémentaire",
     "paidConvoked": "convoqué ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Renoncements de priorité",
+    "menuHeader": "Passer automatiquement ce déclencheur",
+    "menuExplainer": "Ignore la pause où le jeu s'arrête pour vous demander d'agir chaque fois que ce déclencheur est mis sur la pile. Vous pouvez toujours répondre à autre chose.",
+    "yieldThis": "Celui-ci uniquement",
+    "yieldThisHint": "Uniquement ce {{source}}, pas les autres copies",
+    "yieldAllCopies": "Toutes les copies",
+    "allCopiesHint": "Chaque {{source}}, y compris les nouvelles",
+    "revoke": "Révoquer",
+    "revokeHint": "Se remettre à s'arrêter pour ce déclencheur",
+    "clearAll": "Tout effacer",
+    "menuButton": "Passer automatiquement ce déclencheur",
+    "menuButtonActive": "Passage automatique – modifier ou révoquer",
+    "menuButtonShort": "Auto-passer",
+    "menuButtonShortActive": "Passage auto"
   },
   "targeting": {
     "choosePermanentToCopy": "Choisissez un permanent à copier",
@@ -915,7 +978,8 @@
       "title": "Choisir le coût d'activation"
     },
     "debug": {
-      "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte"
+      "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte",
+      "modeButtonOff": "MODE CLIC DÉSACTIVÉ"
     }
   },
   "gameProvider": {
@@ -966,6 +1030,8 @@
     },
     "deckPreview": {
       "editDeck": "Modifier {{name}}",
+      "randomTitle": "Deck aléatoire",
+      "randomDescription": "Un deck compatible sera choisi au début du match.",
       "cardCount_one": "{{count}} carte",
       "cardCount_other": "{{count}} cartes",
       "unknownBadge": "Inconnues {{count}}",
@@ -987,6 +1053,13 @@
     }
   },
   "cardChoice": {
+    "eachPlayerCopyChosen": {
+      "title": "Choose creatures to copy",
+      "prompt": "The first creature you choose is copied; if you choose a second, its power becomes +1/+1 counters on the copy.",
+      "confirm": "Confirmer",
+      "copied": "copied",
+      "scaler": "scaler"
+    },
     "badges": {
       "choose": "Choisir",
       "selected": "Sélectionné",
@@ -1455,6 +1528,11 @@
     "dashAltLabel": "Lancer avec Dash",
     "dashAltSuffix": "(gagne la célérité, retourne en main à l’étape de fin)",
     "dashSubtitle": "Lancez {{name}} normalement ou utilisez son coût de Dash.",
+    "faceDownEyebrow": "Face cachée",
+    "faceDownNormalLabel": "Lancer normalement",
+    "faceDownAltLabel": "Lancer face cachée",
+    "faceDownAltSuffix": "(créature 2/2 jusqu’à ce qu’elle soit retournée face visible)",
+    "faceDownSubtitle": "Lancez {{name}} normalement, ou lancez-la face cachée comme une créature 2/2 qui pourra être retournée face visible plus tard.",
     "evokeEyebrow": "Évocation",
     "evokeNormalLabel": "Lancer normalement",
     "evokeAltLabel": "Lancer avec Évocation",
@@ -1586,6 +1664,7 @@
     "variantForetell": "Lancer depuis la Prédiction",
     "variantOverload": "Lancer avec Surcharge",
     "variantBestow": "Lancer avec Don",
+    "variantFreerunning": "Lancer avec Freerunning",
     "variantFuse": "Lancer avec Fusion",
     "variantFallback": "Lancer avec {{type}}"
   },
@@ -1698,7 +1777,10 @@
       "twoColors": "Choisir deux couleurs",
       "numberRange": "Choisir un nombre",
       "labeled": "Faire un choix",
+      "cardPredicate": "Choisir un type de carte",
+      "cardPredicateGuess": "Deviner un type de carte",
       "keyword": "Choisir une capacité",
+      "counterKind": "Choisir un marqueur",
       "fallback": "Faire un choix"
     },
     "searchSubtitle": "Tapez pour rechercher dans toutes les cartes",
@@ -1875,6 +1957,11 @@
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",
@@ -1957,6 +2044,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

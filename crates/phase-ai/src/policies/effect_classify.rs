@@ -207,6 +207,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::Adapt { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -221,6 +222,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::BecomeUnprepared { .. }
+        | Effect::Behold { .. }
         | Effect::BlightEffect { .. }
         | Effect::Bolster { .. }
         | Effect::Cascade
@@ -229,10 +231,13 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChangeSpeed { .. }
         | Effect::ChangeTargets { .. }
         | Effect::ChangeZoneAll { .. }
+        | Effect::ChaosEnsues
         | Effect::Choose { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::ChooseCard { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::ChooseCounterKind { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
         | Effect::ChooseFromZone { .. }
@@ -254,6 +259,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CreateDelayedTrigger { .. }
         | Effect::CreateDrawReplacement { .. }
         | Effect::CreateEmblem { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::CreateTokenCopyFromPool { .. }
         | Effect::DamageEachPlayer { .. }
         | Effect::Detain { .. }
@@ -263,6 +269,8 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Double { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::Encore
         | Effect::EndCombatPhase
         | Effect::EndTheTurn
@@ -307,6 +315,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Myriad
         | Effect::NoOp
         | Effect::OpenAttractions { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::PairWith { .. }
         | Effect::PayCost { .. }
         | Effect::PhaseIn { .. }
@@ -316,6 +325,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ProliferateTarget { .. }
         | Effect::PumpAll { .. }
         | Effect::PutAtLibraryPosition { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::PutOnTopOrBottom { .. }
         | Effect::PutSticker { .. }
         | Effect::ReassembleContraption { .. }
@@ -324,6 +334,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RegisterBending { .. }
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::Renown { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Reveal { .. }
@@ -331,6 +342,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::RevealUntil { .. }
+        | Effect::ReverseTurnOrder
         | Effect::RingTemptsYou
         | Effect::Ripple { .. }
         | Effect::RollDie { .. }
@@ -348,6 +360,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SolveCase
         | Effect::Specialize
         | Effect::StartYourEngines { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::SwitchPT { .. }
         | Effect::TakeTheInitiative
         | Effect::TargetOnly { .. }
@@ -846,6 +859,7 @@ pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarit
         ContinuousModification::AddDynamicPower { .. }
         | ContinuousModification::AddDynamicToughness { .. } => EffectPolarity::Beneficial,
         ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddColor { .. }
@@ -899,6 +913,7 @@ mod lethality_tests {
             amount: QuantityExpr::Fixed { value },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         }
     }
 

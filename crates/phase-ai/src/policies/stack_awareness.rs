@@ -499,6 +499,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(creature)],
         );
@@ -515,6 +516,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(creature)],
         );
@@ -617,6 +619,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 5 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let score = score_policy(&state, &decision, &candidate);

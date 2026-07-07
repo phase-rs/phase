@@ -30,7 +30,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CopyRetarget { .. }
         | WaitingFor::RetargetChoice { .. }
         | WaitingFor::DistributeAmong { .. }
-        | WaitingFor::MoveCountersDistribution { .. } => DecisionKind::SelectTarget,
+        | WaitingFor::MoveCountersDistribution { .. }
+        | WaitingFor::RemoveCountersChoice { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
         WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,
@@ -87,6 +88,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::SearchPartitionChoice { .. }
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
+        | WaitingFor::BeholdChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
@@ -95,6 +97,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::NamedChoice { .. }
+        | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::ModeChoice { .. }
         | WaitingFor::DiscardToHandSize { .. }
@@ -156,6 +159,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
+        | WaitingFor::EachPlayerCopyChosenSelection { .. }
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
         // CR 510.1d + CR 702.22k: active player divides a banded blocker's
@@ -173,7 +177,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
         // mid-resolution selection; route to the ability catch-all.
         | WaitingFor::CoinFlipKeepChoice { .. }
-        | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::ActivationCostOneOfChoice { .. }
+        // CR 601.2b: choosing an additional cost's mode (e.g. behold a chosen
+        // creature type) is a casting-cost-phase step; route to the ability bucket.
+        | WaitingFor::CostTypeChoice { .. } => DecisionKind::ActivateAbility,
     }
 }
 

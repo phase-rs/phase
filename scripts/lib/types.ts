@@ -39,6 +39,10 @@ export interface ReportItem {
   reported_at: string;
   author_name: string;
   cards: string[];
+  /** Cards named explicitly via `[[Card]]` / Scryfall links — a trusted subset
+   *  of `cards` with no single-word false positives. Optional for backward
+   *  compatibility with report-items.jsonl written before this field existed. */
+  explicitCards?: string[];
   mechanics: string[];
   summary: string;
   actual: string;
@@ -69,6 +73,9 @@ export interface TriageItem {
   thread_name: string;
   message_id: string;
   cards: string[];
+  /** Trusted `[[Card]]` / Scryfall-link subset of `cards`, forwarded from the
+   *  report item so publish-time oracle verification always accepts it. */
+  explicitCards?: string[];
   summary: string;
   extraction_confidence: number;
   source_url: string;

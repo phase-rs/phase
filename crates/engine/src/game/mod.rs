@@ -1,3 +1,4 @@
+pub mod ability_rw;
 pub mod ability_scan;
 pub mod ability_utils;
 pub mod arithmetic;
@@ -200,7 +201,7 @@ pub use printed_cards::rehydrate_game_from_card_db;
 pub use public_state::finalize_public_state;
 pub use replay::{reconstruct_initial_state, ReplayError, ReplayPlayer};
 pub use triggers::process_triggers;
-pub use visibility::filter_state_for_viewer;
+pub use visibility::{filter_events_for_viewer, filter_state_for_viewer};
 pub use zones::{
     add_to_zone, create_object, move_to_library_at_index, move_to_library_position, move_to_zone,
     remove_from_zone,

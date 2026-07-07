@@ -3,8 +3,9 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{opt, peek, success, value};
+use nom::combinator::{eof, not, opt, peek, success, value};
 use nom::multi::many0;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -25,7 +26,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
-use super::oracle_nom::error::OracleError;
+use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -163,12 +164,16 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             value(TargetFilter::ParentTargetOwner, tag("their owner")),
             value(TargetFilter::TriggeringPlayer, tag("that player")),
             value(TargetFilter::TriggeringSource, tag("that source")),
-            // "that permanent or player" before "that permanent" — longest match first.
             value(
                 TargetFilter::TriggeringSource,
-                tag("that permanent or player"),
+                terminated(
+                    tag("that permanent"),
+                    not(preceded(
+                        tag(" "),
+                        alt((tag("or player"), tag("or a player"))),
+                    )),
+                ),
             ),
-            value(TargetFilter::TriggeringSource, tag("that permanent")),
             // CR 608.2k + CR 301.5a: "that creature" inside a trigger refers to the
             // triggering source object (e.g. Pip-Boy 3000's "Whenever equipped
             // creature attacks ... put a +1/+1 counter on that creature"), not to
@@ -351,6 +356,31 @@ fn parse_disjunct_mana_value(
 pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     let (filter, rest, _syntax) = parse_target_with_syntax(text, ctx);
     (filter, rest)
+}
+
+/// CR 701.14a: Parse the object of a `fight` clause. The reciprocal "each other"
+/// ("those creatures fight each other" — Malamet Battle Glyph, Longstalk Brawl,
+/// Duel for Dominance, and 7 siblings) is NOT an independent target: both
+/// fighters are the two earlier-declared chosen creatures. Emit
+/// `TargetFilter::ParentTarget` so fight slot-gen (`ability_utils`) creates no
+/// spurious target slot — otherwise the unrecognized "each other" falls back to
+/// an empty `Typed` filter that generates an illegal all-players slot and panics
+/// the cast. Every non-reciprocal object ("~ fights target creature", "it fights
+/// target creature") delegates unchanged to `parse_target_with_ctx`, keeping its
+/// explicit target slot. Shared by BOTH `fight ` dispatchers
+/// (`parse_targeted_action_ast`, `try_parse_verb_and_target`) so neither path
+/// silently no-ops.
+pub fn parse_fight_target<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
+    let lower = text.trim().to_ascii_lowercase();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("each other").parse(lower.as_str()) {
+        // Structural trailing-period cleanup after the `each other` tag matched.
+        // allow-noncombinator: punctuation strip on a matched chunk, not dispatch.
+        let rest = rest.strip_prefix('.').unwrap_or(rest);
+        if rest.trim().is_empty() {
+            return (TargetFilter::ParentTarget, "");
+        }
+    }
+    parse_target_with_ctx(text, ctx)
 }
 
 /// Context-aware target parser that additionally reports whether the phrase
@@ -627,6 +657,16 @@ pub fn parse_target_with_syntax<'a>(
         }
         let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
+            // CR 601.2c + CR 608.2c: when the chain declared multiple target
+            // slots and "that <type>" names exactly one of them (Stolen Uniform's
+            // "that Equipment"), bind the precise slot instead of the ambiguous
+            // whole-chain `ParentTarget`. Empty/ambiguous registry → falls through
+            // to the `ParentTarget` lift below, unchanged.
+            if let Some((slot_filter, slot_rest)) =
+                parse_definite_parent_reference(lower.as_str(), &ctx.declared_target_slots)
+            {
+                return (slot_filter, &text[lower.len() - slot_rest.len()..], syntax);
+            }
             return (TargetFilter::ParentTarget, rem, syntax);
         }
     }
@@ -806,6 +846,47 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
+        // CR 122.1 + CR 702.62b: "target permanent or suspended card" — a
+        // battlefield∪exile target pool (Clockspinning). A suspended card is in
+        // exile, has suspend, and bears ≥1 time counter. Matched before the bare
+        // "permanent" type phrase (longest-match-first) so the "or suspended card"
+        // half is not dropped.
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("permanent or suspended card").parse(after_target)
+        {
+            return (
+                TargetFilter::Or {
+                    filters: vec![
+                        // Battlefield permanent. The explicit `InZone{Battlefield}`
+                        // is required so `targeting::extract_explicit_zones` unions
+                        // Battlefield with Exile across this `Or` (otherwise only
+                        // Exile would be searched for legal targets).
+                        typed(
+                            TypeFilter::Permanent,
+                            None,
+                            vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                            vec![],
+                        ),
+                        // CR 702.62b: a suspended card.
+                        TargetFilter::Typed(TypedFilter::card().properties(vec![
+                            FilterProp::InZone { zone: Zone::Exile },
+                            FilterProp::HasKeywordKind {
+                                value: KeywordKind::Suspend,
+                            },
+                            FilterProp::Counters {
+                                counters: CounterMatch::OfType(CounterType::Time),
+                                comparator: Comparator::GE,
+                                count: QuantityExpr::Fixed { value: 1 },
+                            },
+                        ])),
+                    ],
+                },
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
+        }
         // "target opponent"
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("opponent").parse(after_target) {
             return (
@@ -888,7 +969,9 @@ pub fn parse_target_with_syntax<'a>(
             syntax,
         );
     }
-    if let Some((filter, rest)) = parse_definite_parent_reference(lower.as_str()) {
+    if let Some((filter, rest)) =
+        parse_definite_parent_reference(lower.as_str(), &ctx.declared_target_slots)
+    {
         return (filter, &text[lower.len() - rest.len()..], syntax);
     }
 
@@ -1215,6 +1298,28 @@ pub fn parse_target_with_syntax<'a>(
     {
         let phrase_start = lower.len() - rest_lower.len();
         let phrase = &text[phrase_start..];
+        // CR 608.2c: A trailing predicate on a bare-noun anaphor ("each of those
+        // creatures that didn't attack this turn", Maddening Imp) must fold into
+        // the tracked set as `TrackedSetFiltered{Not(AttackedThisTurn)}` — the
+        // frozen "those creatures" population INTERSECTED with the did-not-attack
+        // predicate. Parse the whole typed phrase first; if it carries any
+        // predicate PROPERTY beyond the head type noun, wrap it. A bare noun
+        // ("creatures"/"permanents"/"cards") with no trailing predicate yields
+        // only a head `type_filter` and no properties → the plain `TrackedSet`.
+        let (filter, remainder) = parse_type_phrase_with_ctx(phrase, ctx);
+        if target_filter_carries_predicate_property(&filter) {
+            return (
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(filter),
+                    // "each of those <type>" is an anaphor over the affected set
+                    // with no verb-specific zone binding.
+                    caused_by: None,
+                },
+                remainder,
+                syntax,
+            );
+        }
         if let Ok((rest_lower, _)) = alt((
             tag::<_, _, OracleError<'_>>("creatures"),
             tag("permanents"),
@@ -1230,20 +1335,31 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
-        let (filter, remainder) = parse_type_phrase_with_ctx(phrase, ctx);
         if target_filter_has_meaningful_content(&filter) {
             return (
                 TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(filter),
-                    // "each of those <type>" is an anaphor over the affected set
-                    // with no verb-specific zone binding.
                     caused_by: None,
                 },
                 remainder,
                 syntax,
             );
         }
+    }
+
+    // CR 608.2c: "each of them" is a plural-pronoun anaphor that refers back to
+    // the parent ability's chosen targets. Centralising the binding here means
+    // every sibling effect parser (destroy, exile, bounce, tap, etc.) benefits
+    // automatically instead of each site adding its own special case. A word-
+    // boundary guard via `parse_word_bounded` excludes "themselves". Resolution
+    // delegates to `resolve_pronoun_target` which applies the same trigger-
+    // subject vs. compound-anaphor dispatch as the bare "them" pronoun arm above.
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        let (i, ()) = value((), tag::<_, _, OracleError<'_>>("each of ")).parse(input)?;
+        parse_word_bounded(i, "them")
+    }) {
+        return (resolve_pronoun_target(ctx, "them"), rest, syntax);
     }
 
     // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
@@ -1489,36 +1605,96 @@ fn parse_selected_from_set_reference(input: &str) -> Option<&str> {
     Some(rest)
 }
 
-fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> {
-    let (rest, filter) = alt((
-        value(
-            TargetFilter::ParentTargetSlot { index: 1 },
-            tag::<_, _, OracleError<'_>>("the artifact card"),
-        ),
-        value(
-            TargetFilter::ParentTargetSlot { index: 0 },
-            tag::<_, _, OracleError<'_>>("the artifact"),
-        ),
+/// CR 601.2c + CR 608.2c: Resolve a definite anaphor ("the artifact", "the
+/// artifact card", "that Equipment", "the chosen creature") to the specific
+/// `ParentTargetSlot { index }` it names, by matching the anaphor's noun phrase
+/// (type/subtype token + optional "card" zone qualifier) against the chain's
+/// declared target slots (`ctx.declared_target_slots`).
+///
+/// Registry-driven: Goblin Welder's two-artifact disambiguation ("the artifact"
+/// = the battlefield slot, "the artifact card" = the graveyard slot) is
+/// reproduced from the slot filters' own zone properties, not a hardcoded
+/// artifact special case. Returns `None` — falling through to the broad
+/// `ParentTarget`/set-selection behavior — when the registry is empty
+/// (single-target spell) or the anaphor matches zero or ≥2 slots (ambiguous),
+/// so no anaphor is ever bound to a specific slot on a guess.
+///
+/// `input` is lowercase; the returned remainder is a slice of `input`.
+pub(super) fn parse_definite_parent_reference<'a>(
+    input: &'a str,
+    slots: &[TargetFilter],
+) -> Option<(TargetFilter, &'a str)> {
+    if slots.is_empty() {
+        return None;
+    }
+    // A definite determiner is REQUIRED — a bare type word ("creature") is a
+    // fresh target, not a back-reference. Longest-match-first: "the chosen "
+    // before "the ".
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the chosen "),
+        tag("the "),
+        tag("that "),
     ))
     .parse(input)
     .ok()?;
-    if rest.is_empty()
-        || peek(alt((
-            tag::<_, _, OracleError<'_>>(","),
-            tag::<_, _, OracleError<'_>>("."),
-            tag::<_, _, OracleError<'_>>(";"),
-            tag::<_, _, OracleError<'_>>(" and "),
-            tag::<_, _, OracleError<'_>>(" to "),
-            tag::<_, _, OracleError<'_>>(" into "),
-            tag::<_, _, OracleError<'_>>(" onto "),
-        )))
-        .parse(rest)
-        .is_ok()
-    {
-        Some((filter, rest))
-    } else {
-        None
+    let (after_type_word, anaphor_type) = nom_target::parse_type_filter_word(rest).ok()?;
+    // Optional trailing "card"/"cards" zone qualifier (Goblin Welder's "the
+    // artifact card"). When present, the anaphor names a non-battlefield
+    // (card-zone) slot.
+    let (rest, is_card) = match parse_card_or_cards_word(after_type_word.trim_start()) {
+        Ok((r, _)) => (r, true),
+        Err(_) => (after_type_word, false),
+    };
+    // A possessive continuation ("the creature's controller") is a distinct
+    // anaphor class (controller/owner of the slot), not a bare slot reference —
+    // refuse it so the possessive arms downstream keep their bindings.
+    if tag::<_, _, OracleError<'_>>("'").parse(rest).is_ok() {
+        return None;
     }
+    // Guard against consuming the head of a COMPOUND type phrase ("the artifact
+    // creature") as an anaphor: if the remainder begins with another type word,
+    // this is a fresh typed filter, not a slot back-reference.
+    let tail = rest.trim_start();
+    if !tail.is_empty() && nom_target::parse_type_filter_word(tail).is_ok() {
+        return None;
+    }
+    // CR 601.2c: each anaphor names exactly one earlier slot — bind only a
+    // UNIQUE match; zero or ≥2 matches fall through as `None`.
+    let mut matched: Option<usize> = None;
+    for (index, slot) in slots.iter().enumerate() {
+        if slot_matches_anaphor(&anaphor_type, is_card, slot) {
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some(index);
+        }
+    }
+    matched.map(|index| (TargetFilter::ParentTargetSlot { index }, rest))
+}
+
+/// CR 205.3 + CR 400.1: Whether a declared target slot filter matches a definite
+/// anaphor's parsed `(type token, is-card)`. Type match is by core-type
+/// membership or subtype equality; the card qualifier requires the slot to be
+/// (`is_card`) or not be (`!is_card`) in a non-battlefield card zone.
+fn slot_matches_anaphor(anaphor_type: &TypeFilter, is_card: bool, slot: &TargetFilter) -> bool {
+    let TargetFilter::Typed(tf) = slot else {
+        return false;
+    };
+    let type_ok = match anaphor_type {
+        TypeFilter::Subtype(sub) => tf
+            .get_subtype()
+            .is_some_and(|slot_sub| slot_sub.eq_ignore_ascii_case(sub)),
+        other => tf.type_filters.iter().any(|t| t == other),
+    };
+    if !type_ok {
+        return false;
+    }
+    // A "card" lives in a non-battlefield zone (Goblin Welder's graveyard slot);
+    // a battlefield permanent carries no such zone property.
+    let slot_is_card = slot
+        .extract_in_zone()
+        .is_some_and(|zone| zone != Zone::Battlefield);
+    slot_is_card == is_card
 }
 
 /// CR 201.2: Match a clause boundary that ends a card name in a board-filter
@@ -1544,6 +1720,44 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
 /// (issue #2016, Bonder's Ornament). They are kept as a single composable
 /// `alt()` over the predicate lead so the boundary covers the class, not one
 /// card.
+fn parse_named_filter_origin_zone_terminator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    tag::<_, _, OracleError<'_>>(" from ").parse(input)?;
+    let Some((_, _, consumed)) = parse_zone_suffix(input) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((&input[consumed..], ()))
+}
+
+/// CR 201.2 + CR 400.1: A locative zone constraint ("in your graveyard", "in
+/// all graveyards", "on the battlefield") scopes *where the named objects are
+/// counted/filtered*; it is outside the literal card name. Unlike the
+/// "from <zone>" move-origin suffix (`parse_named_filter_origin_zone_terminator`,
+/// which the caller consumes as a move source and leaves in the remainder), an
+/// "in"/"on" locative both terminates the name and is re-attached as an
+/// `InZone`/`InAnyZone` filter prop by the caller. Requires a real zone after
+/// the "in"/"on" preposition so a name-internal "in"/"on" stays whole. Covers
+/// the "cards named X in your graveyard / in all graveyards" count class
+/// (Frantic Inventory, Accumulated Knowledge, Take Inventory, Undead Servant,
+/// Goblin Gathering, Galvanic Bombardment, Ancestral Anger) and "creatures
+/// named X on the battlefield" (Plague Rats).
+fn parse_named_filter_locative_zone_terminator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((tag::<_, _, OracleError<'_>>(" in "), tag(" on "))).parse(input)?;
+    let Some((_, _, consumed)) = parse_zone_suffix(input) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((&input[consumed..], ()))
+}
+
 fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     alt((
         // Controller-scope suffixes (CR 109.4). Longest-match-first.
@@ -1556,6 +1770,14 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" that ")),
         value((), tag(" with ")),
         value((), tag(" without ")),
+        // CR 201.2 + CR 400.1: origin-zone suffixes are outside the literal
+        // card name ("card named X from your graveyard"). Require a real zone
+        // suffix after "from" so names like "Extract from Darkness" stay whole.
+        parse_named_filter_origin_zone_terminator,
+        // CR 201.2 + CR 400.1: locative "in <zone>"/"on the battlefield" count
+        // scope ("cards named X in your graveyard") — reattached as InZone by
+        // the caller. Requires a real zone so name-internal "in"/"on" is kept.
+        parse_named_filter_locative_zone_terminator,
         // Copular / state predicates opening a relative clause.
         value((), tag(" is ")),
         value((), tag(" are ")),
@@ -1597,6 +1819,7 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
             (
                 tag(", "),
                 alt((
+                    tag("~ "),
                     tag("it "),
                     tag("they "),
                     tag("he "),
@@ -1707,20 +1930,53 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 109.2: A description that includes a card type or subtype means
+    // permanents of that type/subtype on the battlefield. A leading universal
+    // quantifier — "all", "each", or "every" — ranges over every such object,
+    // source included, so it is a semantic no-op on the filter and adds NO
+    // FilterProp::Another (unlike "other"/"another" below, which exclude the
+    // source). Strip it so a subject like "Each Vehicle you control" / "All Cats
+    // you control" reaches the type word instead of leaking the quantifier into
+    // the subtype string (e.g. Subtype("Each Vehicle")). Guarded on a following
+    // type-phrase lead so a bare quantifier without a type word is left intact.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("all "),
+        tag("each "),
+        tag("every "),
+    ))
+    .parse(&lower[pos..])
+    {
+        // Strip the quantifier when a type-phrase lead follows directly OR through
+        // an "other"/"another" exclusion ("each other creature", "all other
+        // nonland permanents"); in the latter case only the quantifier is consumed
+        // here and the handler below adds `FilterProp::Another`.
+        let after_other = alt((tag::<_, _, OracleError<'_>>("other "), tag("another ")))
+            .parse(rest)
+            .map(|(r, _)| r)
+            .ok();
+        if starts_with_type_phrase_lead(rest)
+            || after_other.is_some_and(starts_with_type_phrase_lead)
+        {
+            pos = lower.len() - rest.len();
+        }
+    }
+
     // Handle "other"/"another" prefix: "other creatures", "another creature",
-    // "other nonland permanents", "another target creature"
+    // "other nonland permanents", "another target creature". Reads from the
+    // current `pos` (not the raw trimmed head) so it composes with a universal
+    // quantifier already stripped above ("all other creatures" → Another + type).
     if tag::<_, _, OracleError<'_>>("other ")
-        .parse(lower_trimmed)
+        .parse(&lower[pos..])
         .is_ok()
     {
         properties.push(FilterProp::Another);
-        pos = offset + "other ".len();
+        pos += "other ".len();
     } else if tag::<_, _, OracleError<'_>>("another ")
-        .parse(lower_trimmed)
+        .parse(&lower[pos..])
         .is_ok()
     {
         properties.push(FilterProp::Another);
-        pos = offset + "another ".len();
+        pos += "another ".len();
     }
     // "another target [type]" — strip "target " after "another " so the type is reachable.
     if properties.contains(&FilterProp::Another) {
@@ -2556,6 +2812,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 113.6b: A "without <keyword>" clause may TRAIL a zone clause ("nonland
+    // card in your hand without foretell" — Dream Devourer). The pre-zone
+    // `parse_without_keyword_suffix` pass above only catches the clause when it
+    // precedes the zone; this second pass catches the zone-then-without ordering
+    // so the subject fully consumes (the graveyard/hand keyword-grant gate
+    // requires an empty remainder).
+    if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
+        properties.extend(keyword_props);
+        pos += consumed;
+    }
+
     let mut exclude_chosen_type = false;
     let mut exclude_owned_by_controller: Option<ControllerRef> = None;
     let remaining_not_owned = lower[pos..].trim_start();
@@ -2748,6 +3015,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 name: orig_name.to_string(),
             });
             pos += named_offset + "named ".len() + name_end;
+
+            // CR 201.2 + CR 400.1: Re-run the zone-suffix pass now that the name
+            // is consumed, so a trailing locative constraint ("named X in your
+            // graveyard", "named X in all graveyards", "named X on the
+            // battlefield") attaches as an `InZone`/`InAnyZone` filter prop —
+            // parity with the non-named "creature card in your graveyard" path.
+            // The primary `parse_zone_suffix` pass above ran before the name was
+            // consumed and could not see it. Scoped to "in"/"on" locatives so
+            // "from <zone>" move-origins stay in the remainder for the caller
+            // (CR 115.2 target zones, return-from-graveyard move sources).
+            let after_named = lower[pos..].trim_start();
+            let is_locative =
+                alt((tag::<_, _, OracleError<'_>>("in "), tag("on "))).parse(after_named);
+            if is_locative.is_ok() {
+                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+                    properties.extend(zone_props);
+                    pos += consumed;
+                    if controller.is_none() {
+                        controller = zone_ctrl;
+                    }
+                }
+            }
         }
     }
 
@@ -3076,6 +3365,23 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_has_meaningful_content)
         }
+        _ => false,
+    }
+}
+
+/// CR 608.2c: True when a typed filter carries a `FilterProp` PREDICATE beyond
+/// the bare head type noun (e.g. `Not(AttackedThisTurn)`, `Untapped`, a
+/// controller-scoping property). Used by the "each of those <noun> that
+/// <predicate>" anaphor to decide whether the trailing predicate must fold into
+/// a `TrackedSetFiltered` (frozen set ∩ predicate) rather than collapsing to a
+/// bare `TrackedSet` that would drop the predicate.
+fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => !tf.properties.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_carries_predicate_property)
+        }
+        TargetFilter::Not { filter } => target_filter_carries_predicate_property(filter),
         _ => false,
     }
 }
@@ -3527,6 +3833,13 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
             ControllerRef::Opponent,
             tag::<_, _, OracleError<'_>>("your opponents controlled"),
         ),
+        // CR 102.1 + CR 608.2i: past-tense "the active player controlled"
+        // look-back. Longest-match-first preserved (no prefix collision with
+        // the arms above).
+        value(
+            ControllerRef::ActivePlayer,
+            tag::<_, _, OracleError<'_>>("the active player controlled"),
+        ),
     ))
     .parse(trimmed)
     {
@@ -3819,6 +4132,11 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
     .parse(trimmed_outer)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed_outer);
+
+    if let Ok((rest, prop)) = parse_attacking_alone_suffix_status(trimmed) {
+        return Some((prop, text.len() - rest.len()));
+    }
+
     for (pattern, defender) in [
         (
             "attacking you or a planeswalker you control",
@@ -3873,6 +4191,34 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
         }
     }
     None
+}
+
+/// CR 506.5: "attacking alone" is a combat status distinct from merely
+/// attacking a particular defender; runtime evaluation already lives on
+/// FilterProp::AttackingAlone.
+fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterProp> {
+    let (input, _) = (tag("attacking"), space1, tag("alone")).parse(input)?;
+    let (_, _) = parse_attacking_status_clause_boundary(input)?;
+    Ok((input, FilterProp::AttackingAlone))
+}
+
+fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
+    let trimmed = input.trim_start();
+    let (_, _) = not(alt((
+        tag::<_, _, OracleError<'_>>("if "),
+        tag("unless "),
+        tag("and/or "),
+        tag("or "),
+    )))
+    .parse(trimmed)?;
+
+    alt((
+        value((), eof),
+        value((), peek(tag::<_, _, OracleError<'_>>("."))),
+        value((), peek(tag(","))),
+        value((), (space1, eof)),
+    ))
+    .parse(input)
 }
 
 /// Parse "with power [or toughness] N or less/greater", "with toughness N or
@@ -5039,6 +5385,21 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    // CR 702.168: Disguise is a parameterized keyword (`Disguise(ManaCost)`), so
+    // the `Keyword::from_str` fallback would yield a concrete `Keyword::Disguise(cost)`
+    // and force an exact-cost match. "creatures you control with disguise" names
+    // the keyword class regardless of cost, so map it to the discriminant `Kind`.
+    if let Ok((rest, kind)) = value(
+        KeywordKind::Disguise,
+        tag::<_, _, OracleError<'_>>("disguise"),
+    )
+    .parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     // CR 702.113: "card with awaken" (and the other parameterized graveyard/cast
     // keywords) is a keyword-presence meta-reference that must match by
     // discriminant, not exact payload — a `WithKeyword(Awaken { count, cost })`
@@ -5053,6 +5414,8 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             | "harmonize"
             | "unearth"
             | "awaken"
+            | "foretell"
+            | "miracle"
     ) {
         let kind = match text {
             "flashback" => KeywordKind::Flashback,
@@ -5063,6 +5426,11 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             "harmonize" => KeywordKind::Harmonize,
             "unearth" => KeywordKind::Unearth,
             "awaken" => KeywordKind::Awaken, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
+            // CR 702.143 / CR 702.94: "card in your hand without foretell" and the
+            // miracle analogue are keyword-presence meta-references — match by
+            // discriminant so a granted (cost-bearing) instance still matches.
+            "foretell" => KeywordKind::Foretell, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above), not Oracle-text dispatch
+            "miracle" => KeywordKind::Miracle, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
             _ => unreachable!(),
         };
         return Some(KeywordMatch::Kind(kind));
@@ -6602,6 +6970,55 @@ mod tests {
         }
     }
 
+    /// CR 122.1 + CR 702.62b (Clockspinning): "target permanent or suspended
+    /// card" is a battlefield∪exile target pool. The permanent leg must carry an
+    /// explicit `InZone{Battlefield}` (so `extract_explicit_zones` unions both
+    /// zones) and the card leg must encode the suspended-card definition.
+    #[test]
+    fn parse_target_permanent_or_suspended_card() {
+        let (filter, rest) = parse_target("target permanent or suspended card");
+        assert_eq!(rest, "");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or pool, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let permanent_leg = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Permanent] => {
+                    Some(tf)
+                }
+                _ => None,
+            })
+            .expect("battlefield permanent leg");
+        assert!(permanent_leg.properties.contains(&FilterProp::InZone {
+            zone: Zone::Battlefield
+        }));
+
+        let card_leg = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Card] => Some(tf),
+                _ => None,
+            })
+            .expect("suspended card leg");
+        assert!(card_leg
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }));
+        assert!(card_leg.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Suspend
+        }));
+        assert!(card_leg.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                comparator: Comparator::GE,
+                ..
+            }
+        )));
+    }
+
     /// Issue #3677 (Flare of Denial): "sacrifice a nontoken blue creature" must
     /// capture the color AND the creature type, not just the NonToken negation.
     /// Before the fix, the color-prefix scan ran only BEFORE the `non-` negation
@@ -6687,14 +7104,111 @@ mod tests {
         let (name, _) = named_of("a creature named Storm Crow that has flying");
         assert_eq!(name, "Storm Crow");
 
+        // Origin-zone suffix terminates the name (Deathpact Angel class).
+        let (name, rest) = named_of("a card named Deathpact Angel from your graveyard");
+        assert_eq!(name, "Deathpact Angel");
+        assert_eq!(rest, " from your graveyard");
+
+        // "from" inside a card name is preserved when it is not an origin-zone
+        // suffix.
+        let (name, _) = named_of("a card named Extract from Darkness");
+        assert_eq!(name, "Extract from Darkness");
+
         // A comma-bearing legendary name is preserved (no split on internal
         // punctuation) when no clause boundary follows.
         let (name, _) = named_of("a creature named Bruna, the Fading Light");
         assert_eq!(name, "Bruna, the Fading Light");
 
+        // A comma followed by the normalized self-reference opens the next
+        // clause, not part of the literal name (Kookus class).
+        let (name, rest) = named_of("a creature named Keeper of Kookus, ~ deals 3 damage");
+        assert_eq!(name, "Keeper of Kookus");
+        assert_eq!(rest.trim_start_matches([',', ' ']), "~ deals 3 damage");
+
         // Period still ends the name.
         let (name, _) = named_of("a creature named Storm Crow.");
         assert_eq!(name, "Storm Crow");
+    }
+
+    /// CR 201.2 + CR 400.1: A locative "in <zone>" / "on the battlefield" count
+    /// scope is NOT part of the card name — it must terminate the name and
+    /// re-attach as an `InZone`/`InAnyZone` filter prop. Regression guard for
+    /// the "cards named X in your graveyard" misparse (Frantic Inventory,
+    /// Accumulated Knowledge, Plague Rats, Undead Servant, ...), where the zone
+    /// was swallowed into the name — producing `Named { name: "Frantic
+    /// Inventory in your graveyard" }`, a name no card ever has, so the count
+    /// always resolved to 0.
+    #[test]
+    fn named_filter_terminates_at_locative_zone() {
+        fn named_and_props(text: &str) -> (String, Vec<FilterProp>, Option<ControllerRef>, String) {
+            let (filter, rest) = parse_type_phrase(text);
+            let tf = typed_leg(&filter)
+                .unwrap_or_else(|| panic!("expected a Typed filter in {filter:?}"));
+            let name = tf
+                .properties
+                .iter()
+                .find_map(|p| match p {
+                    FilterProp::Named { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a Named property in {filter:?}"));
+            (
+                name,
+                tf.properties.clone(),
+                tf.controller.clone(),
+                rest.to_string(),
+            )
+        }
+
+        // "in your graveyard": name terminates, InZone Graveyard + You attached,
+        // remainder fully consumed.
+        let (name, props, ctrl, rest) =
+            named_and_props("cards named Frantic Inventory in your graveyard");
+        assert_eq!(name, "Frantic Inventory");
+        assert!(
+            props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Graveyard)),
+            "expected InZone Graveyard, got {props:?}"
+        );
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(rest, "");
+
+        // "in all graveyards": name terminates, InZone Graveyard, no controller
+        // restriction (counts every player's graveyard).
+        let (name, props, ctrl, rest) =
+            named_and_props("cards named Accumulated Knowledge in all graveyards");
+        assert_eq!(name, "Accumulated Knowledge");
+        assert!(
+            props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Graveyard)),
+            "expected InZone Graveyard, got {props:?}"
+        );
+        assert_eq!(ctrl, None);
+        assert_eq!(rest, "");
+
+        // "on the battlefield": name terminates, remainder consumed.
+        let (name, _props, _ctrl, rest) =
+            named_and_props("creatures named Plague Rats on the battlefield");
+        assert_eq!(name, "Plague Rats");
+        assert_eq!(rest, "");
+
+        // "from <zone>" move-origin is unchanged: the name still terminates at
+        // "Deathpact Angel" but the "from" suffix stays in the remainder for the
+        // caller (no InZone attached here).
+        let (name, props, _ctrl, rest) =
+            named_and_props("card named Deathpact Angel from your graveyard");
+        assert_eq!(name, "Deathpact Angel");
+        assert!(
+            !props.iter().any(|p| matches!(p, FilterProp::InZone { .. })),
+            "'from' origin-zone must not attach InZone here, got {props:?}"
+        );
+        assert_eq!(rest, " from your graveyard");
+
+        // A "from" inside a real card name is still preserved.
+        let (name, _props, _ctrl, _rest) = named_and_props("a card named Extract from Darkness");
+        assert_eq!(name, "Extract from Darkness");
     }
 
     fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
@@ -7207,6 +7721,34 @@ mod tests {
         assert!(typed.properties.contains(&FilterProp::Attacking {
             defender: Some(ControllerRef::You),
         }));
+    }
+
+    /// CR 506.5: "attacking alone" is a targetable combat-status predicate on
+    /// the candidate creature, including relative-clause wording.
+    #[test]
+    fn parse_target_creature_attacking_alone() {
+        let (filter, remainder) = parse_target("target creature that's attacking alone");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::AttackingAlone));
+    }
+
+    /// CR 506.5 + CR 109.4: controller suffixes compose with the attacking-alone
+    /// relative clause instead of dropping the combat-status predicate.
+    #[test]
+    fn parse_target_creature_you_control_attacking_alone() {
+        let (filter, remainder) =
+            parse_target("target creature you control that's attacking alone");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::AttackingAlone));
     }
 
     /// Stalking Leonin: "attacking you if it's controlled by..." must not treat
@@ -9103,6 +9645,32 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 608.2c: "each of them" is a plural-pronoun anaphor and must map to
+    /// `ParentTarget`, not degenerate to the all-matching "each <type>" path.
+    /// This guard ensures that all sibling effects (counter, destroy, exile,
+    /// bounce, tap, etc.) route through the central parser rather than needing
+    /// their own special-case intercepts.
+    #[test]
+    fn each_of_them_is_parent_target() {
+        let mut ctx = ParseContext::default();
+        let (filter, rest, _syntax) = parse_target_with_syntax("each of them", &mut ctx);
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    /// Word-boundary guard: "each of themselves" must NOT match the
+    /// "each of them" arm — the trailing "selves" suffix makes it a distinct
+    /// word that the word-boundary check (`parse_word_bounded`) must reject.
+    #[test]
+    fn each_of_themselves_does_not_match_each_of_them_arm() {
+        let (filter, _rest) = parse_target("each of themselves");
+        assert_ne!(
+            filter,
+            TargetFilter::ParentTarget,
+            "\"each of themselves\" must not bind to ParentTarget via the \"each of them\" arm"
+        );
+    }
+
     /// CR 702.113: "card with awaken" is a parameterized-keyword presence
     /// meta-reference and must map to `KeywordMatch::Kind(Awaken)` (matched by
     /// discriminant), not an exact-payload `WithKeyword` that never matches a
@@ -9115,25 +9683,137 @@ mod tests {
         ));
     }
 
+    /// Goblin Welder's two artifact slots: `[artifact on battlefield, artifact
+    /// card in graveyard]` — the registry the "Choose target artifact a player
+    /// controls and target artifact card in that player's graveyard" head
+    /// declares. The generalized resolver reproduces the old hardcoded artifact
+    /// disambiguation purely from these slots' zone properties.
+    fn goblin_welder_slots() -> Vec<TargetFilter> {
+        vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: None,
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: None,
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            }),
+        ]
+    }
+
+    fn parse_target_with_slots(text: &str, slots: Vec<TargetFilter>) -> (TargetFilter, &str) {
+        let mut ctx = ParseContext {
+            declared_target_slots: slots,
+            ..ParseContext::default()
+        };
+        let (filter, rest, _) = parse_target_with_syntax(text, &mut ctx);
+        (filter, rest)
+    }
+
     #[test]
     fn definite_artifact_reference_binds_first_parent_target_slot() {
-        let (filter, rest) = parse_target("the artifact and returns it");
+        // Threads the two-artifact registry so the general resolver reproduces
+        // the deleted hardcoded "the artifact" → slot 0 arm.
+        let (filter, rest) =
+            parse_target_with_slots("the artifact and returns it", goblin_welder_slots());
         assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 0 });
         assert_eq!(rest, " and returns it");
     }
 
     #[test]
     fn definite_artifact_card_reference_binds_second_parent_target_slot() {
-        let (filter, rest) = parse_target("the artifact card to the battlefield");
+        let (filter, rest) = parse_target_with_slots(
+            "the artifact card to the battlefield",
+            goblin_welder_slots(),
+        );
         assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 1 });
         assert_eq!(rest, " to the battlefield");
     }
 
     #[test]
     fn definite_artifact_reference_does_not_steal_type_phrase() {
-        let (filter, rest) = parse_target("the artifact creature");
+        // "the artifact creature" is a fresh compound type phrase, never an
+        // anaphor — even with the registry populated.
+        let (filter, rest) =
+            parse_target_with_slots("the artifact creature", goblin_welder_slots());
         assert_ne!(filter, TargetFilter::ParentTargetSlot { index: 0 });
         assert_ne!(rest, " creature");
+    }
+
+    #[test]
+    fn definite_reference_empty_registry_is_none() {
+        // Claim 4/7: with no declared slots the resolver never guesses a slot —
+        // it returns None so the broad `ParentTarget`/set-selection arms win.
+        assert_eq!(
+            parse_definite_parent_reference("the artifact and returns it", &[]),
+            None
+        );
+        assert_eq!(
+            parse_definite_parent_reference("the chosen creature", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn definite_reference_ambiguous_registry_is_none() {
+        // Two same-type battlefield slots + a bare "the creature" anaphor: two
+        // slots tie, so the resolver returns None (no silent slot-0 guess)
+        // rather than binding a specific slot.
+        let two_creatures = vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }),
+        ];
+        assert_eq!(
+            parse_definite_parent_reference("the creature and it fights", &two_creatures),
+            None
+        );
+    }
+
+    #[test]
+    fn set_selection_arm_unshadowed_by_empty_registry() {
+        // Claim 7: a "the chosen creature" set-selection card with NO dual-target
+        // declaration (empty registry) must still parse to `ParentTarget` via the
+        // `SELECTED_FROM_SET_PHRASES` arm — the generalized resolver returns None
+        // and does not shadow it with a `ParentTargetSlot`.
+        let (filter, _rest) = parse_target_with_slots("the chosen creature", vec![]);
+        assert_eq!(filter, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn stolen_uniform_anaphors_bind_precise_slots() {
+        // Claim 4 (parser shape): with the Stolen Uniform registry
+        // `[creature you control, Equipment]`, "that Equipment" → slot 1 and
+        // "the chosen creature" → slot 0, disambiguated purely by type.
+        let slots = vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Equipment".to_string())],
+                controller: None,
+                properties: vec![],
+            }),
+        ];
+        let (equip, rest) =
+            parse_target_with_slots("that Equipment until end of turn", slots.clone());
+        assert_eq!(equip, TargetFilter::ParentTargetSlot { index: 1 });
+        assert_eq!(rest, " until end of turn");
+        let (creature, _) = parse_target_with_slots("the chosen creature.", slots);
+        assert_eq!(creature, TargetFilter::ParentTargetSlot { index: 0 });
     }
 
     #[test]
@@ -9676,6 +10356,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_context_that_permanent_or_player_declines() {
+        assert_eq!(parse_event_context_ref("that permanent or player"), None);
+        assert_eq!(parse_event_context_ref("that permanent or a player"), None);
+    }
+
+    #[test]
     fn parse_event_context_returns_none_for_non_event() {
         assert_eq!(parse_event_context_ref("target creature"), None);
         assert_eq!(parse_event_context_ref("any target"), None);
@@ -9702,13 +10388,6 @@ mod tests {
         let (filter, rem) = parse_event_context_ref("that player and you gain 2 life").unwrap();
         assert_eq!(filter, TargetFilter::TriggeringPlayer);
         assert_eq!(rem, " and you gain 2 life");
-
-        // "that permanent or player" — longest-match-first, no bogus " or player" remainder
-        let (filter, rem) =
-            parse_event_context_ref("that permanent or player and the damage can't be prevented")
-                .unwrap();
-        assert_eq!(filter, TargetFilter::TriggeringSource);
-        assert_eq!(rem, " and the damage can't be prevented");
 
         // "that source" with remainder
         let (filter, rem) = parse_event_context_ref("that source and you draw a card").unwrap();
@@ -13057,6 +13736,87 @@ mod tests {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
+        }
+    }
+
+    /// CR 109.2: A leading universal quantifier ("all"/"each"/"every") ranging
+    /// over a type/subtype subject must be stripped to reach the type word — it
+    /// must NOT leak into the subtype string (e.g. Subtype("Each Vehicle")) and
+    /// must NOT add `FilterProp::Another` (it selects the source too, unlike
+    /// "other"). Consumers of `parse_type_phrase` that exercise this: the
+    /// "sacrifice all <type> you control" additional/activation cost filters
+    /// (Soulblast — creatures; Kaervek's Spite — permanents; Tomb of Urami —
+    /// lands) and the "Whenever all <type> you control attack" trigger
+    /// `valid_card` (Mob Mentality — non-Wall creatures). Before this fix those
+    /// filters were left empty/untyped (matching every object) or the trigger
+    /// failed to classify.
+    #[test]
+    fn parse_type_phrase_universal_quantifier_stripped_no_leak() {
+        for (text, subtype) in [
+            ("each Vehicle you control", "Vehicle"),
+            ("all Cats you control", "Cat"),
+            ("every Skeleton you control", "Skeleton"),
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(subtype.to_string())),
+                "expected Subtype(\"{subtype}\") for '{text}', got {:?}",
+                tf.type_filters
+            );
+            // The quantifier must NOT survive inside the subtype string.
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+                "quantifier leaked into subtype for '{text}': {:?}",
+                tf.type_filters
+            );
+            // Universal quantifiers select the source too — no Another exclusion.
+            assert!(
+                !tf.properties.contains(&FilterProp::Another),
+                "unexpected Another for '{text}': {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+
+        // "all/each/every OTHER <type>" must strip the quantifier AND still carry
+        // the type plus `FilterProp::Another` (source excluded) — the quantifier
+        // must not leave the "other" exclusion stranded. Covers "each other
+        // creature" / "all other creatures" (review-flagged gap).
+        for text in [
+            "each other creature you control",
+            "all other creatures you control",
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature for '{text}', got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+                "quantifier/other leaked into subtype for '{text}': {:?}",
+                tf.type_filters
+            );
+            // "other" excludes the source → Another IS present here.
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "expected Another for '{text}': {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
         }
     }
 

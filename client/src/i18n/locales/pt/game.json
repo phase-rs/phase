@@ -4,6 +4,13 @@
     "collapse": "Recolher progresso de resolução",
     "expand": "Expandir progresso de resolução"
   },
+  "debugCreate": {
+    "tokenPower": "Power",
+    "tokenToughness": "Toughness",
+    "tokenPowerPlaceholder": "Power",
+    "tokenToughnessPlaceholder": "Toughness",
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
   "card": {
     "faceDownName": "Carta virada para baixo",
     "loading": "Carregando {{name}}",
@@ -16,6 +23,8 @@
     "holdCtrlFront": "Segure Ctrl para a face dianteira",
     "holdCtrlFlip": "Segure Ctrl para virar",
     "flip": "Virar",
+    "report": "Relatar um problema",
+    "reported": "Relatado ✓",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -80,7 +89,26 @@
     "autoPassing": "Passando Automaticamente até a Etapa Final...",
     "resolvingStack": "Resolvendo a Pilha..."
   },
+  "cardReport": {
+    "title": "Relatar um problema com uma carta",
+    "subtitle": "Escolha a carta que não está funcionando corretamente.",
+    "search": "Buscar cartas…",
+    "empty": "Nenhuma carta relatável à vista.",
+    "zone": {
+      "Stack": "Pilha",
+      "Battlefield": "Campo de batalha",
+      "Hand": "Mão",
+      "Graveyard": "Cemitério",
+      "Exile": "Exílio",
+      "Command": "Zona de comando"
+    },
+    "emblemTag": "Emblema",
+    "allPlayers": "Todos",
+    "allZones": "Todas as zonas",
+    "cancel": "Cancelar"
+  },
   "board": {
+    "reportCard": "Relatar um problema com uma carta",
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
     "changeBackground": "Alterar plano de fundo…",
     "customizeLayout": "Personalizar layout…",
@@ -249,6 +277,7 @@
     "confirmDistribute_other": "Declarar {{count}} Atacantes"
   },
   "fullControl": {
+    "label": "Controle",
     "on": "Controle Total Ativado",
     "off": "Controle Total Desativado",
     "tooltip": "Mantenha as janelas de prioridade em vez de deixar pontos tranquilos passarem automaticamente. Atalho: F."
@@ -287,6 +316,9 @@
     "cleanupDescription": "O dano se dissipa e o tamanho máximo da mão é verificado.",
     "tooltipStopSet": "Parada definida: clique para remover esta parada de passe automático.",
     "tooltipNoStop": "Nenhuma parada definida: clique para pausar o passe automático aqui.",
+    "scopeAllTurns": "Para em todos os turnos.",
+    "scopeOwnTurn": "Para apenas nos seus turnos.",
+    "scopeOpponentsTurns": "Para apenas nos turnos dos oponentes.",
     "tooltipCurrentPhase": "Fase atual.",
     "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -325,6 +357,18 @@
     "tooltip_one": "Passe o mouse para pré-visualizar, clique para ver",
     "tooltip_other": "{{count}} encantamentos — passe o mouse para pré-visualizar, clique para ver"
   },
+  "counterTooltip": {
+    "summary_one": "1 marcador {{label}}\n{{description}}",
+    "summary_other": "{{count}} marcadores {{label}}\n{{description}}",
+    "descriptions": {
+      "p1p1": "Cada marcador +1/+1 dá +1/+1 à permanente.",
+      "m1m1": "Cada marcador -1/-1 dá -1/-1 à permanente.",
+      "loyalty": "Marcadores de lealdade acompanham a lealdade de um planeswalker e são adicionados ou removidos por habilidades de lealdade.",
+      "lore": "Marcadores de conhecimento acompanham o progresso dos capítulos de uma Saga. Adicionar um marcador geralmente desencadeia a próxima habilidade de capítulo.",
+      "stun": "Se uma permanente com um marcador de atordoamento fosse desvirar, remova um marcador de atordoamento dela em vez disso.",
+      "generic": "Marcadores {{label}} são marcadores nomeados usados por efeitos de cards."
+    }
+  },
   "badges": {
     "monarch": "Monarca",
     "monarchTooltip": "O Monarca — compra uma carta extra no fim do turno",
@@ -336,10 +380,10 @@
     "dungeonTooltip": "Aventurando-se em {{name}} — sala {{room}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",
     "poisonAriaLabel_other": "{{count}} marcadores de veneno",
-    "poisonTooltip": "Marcadores de veneno: {{count}}",
+    "poisonTooltip": "Marcadores de veneno: {{count}}\nUm jogador com dez ou mais marcadores de veneno perde o jogo.",
     "energyAriaLabel_one": "{{count}} marcador de energia",
     "energyAriaLabel_other": "{{count}} marcadores de energia",
-    "energyTooltip": "Energia: {{count}}",
+    "energyTooltip": "Marcadores de energia: {{count}}\nMarcadores de energia são um recurso do jogador gasto por habilidades de cards.",
     "ringAriaLabel": "O Anel o tenta (nível {{level}}), portador do Anel: {{bearer}}",
     "ringTooltip": "O Anel o tenta — nível {{level}}",
     "ringBearerTooltip": "Portador do Anel: {{name}}",
@@ -351,12 +395,12 @@
     "ringLevel4": "4. Quando ele causa dano de combate a um jogador, cada oponente perde 3 pontos de vida.",
     "radAriaLabel_one": "{{count}} marcador de radiação",
     "radAriaLabel_other": "{{count}} marcadores de radiação",
-    "radTooltip": "Marcadores de radiação: {{count}}",
+    "radTooltip": "Marcadores de radiação: {{count}}\nNo início da fase principal pré-combate daquele jogador, ele tritura cards igual ao número de marcadores rad, depois perde vida para cada card que não seja terreno triturado dessa forma.",
     "experienceAriaLabel_one": "{{count}} contador de experiência",
     "experienceAriaLabel_other": "{{count}} contadores de experiência",
-    "experienceTooltip": "Contadores de experiência: {{count}}",
+    "experienceTooltip": "Marcadores de experiência: {{count}}\nMarcadores de experiência são marcadores de jogador que habilidades de cards usam para escalar efeitos.",
     "speedAriaLabel": "Velocidade {{value}}",
-    "speedTooltip": "Velocidade: {{value}}",
+    "speedTooltip": "Velocidade: {{value}}\nVelocidade acompanha o progresso de Ligue seus motores. Ela pode aumentar até a velocidade máxima 4.",
     "condCantWin": "Não pode vencer o jogo",
     "condCantGainLife": "Não pode ganhar vida",
     "condCantLoseLife": "Não pode perder vida",
@@ -445,6 +489,9 @@
     "free": "Grátis",
     "chooseXTitle": "Escolha um valor para X",
     "chooseXAria": "Escolher valor de X",
+    "chooseXInputAria": "Inserir valor de X",
+    "decreaseX": "Diminuir valor de X",
+    "increaseX": "Aumentar valor de X",
     "xEquals": "X = {{value}}",
     "minMax": "mín {{min}} / máx {{max}}",
     "maxOnly": "máx {{max}}",
@@ -562,6 +609,22 @@
     "paidKickedTimes": "kicker ×{{count}}",
     "paidAdditionalCost": "custo extra",
     "paidConvoked": "convocadas ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Cessões de prioridade",
+    "menuHeader": "Passar automaticamente este gatilho",
+    "menuExplainer": "Pula a pausa em que o jogo para para perguntar a você toda vez que este gatilho é colocado na pilha. Você ainda pode responder a outras coisas.",
+    "yieldThis": "Apenas este",
+    "yieldThisHint": "Apenas este {{source}}, não outras cópias",
+    "yieldAllCopies": "Todas as cópias",
+    "allCopiesHint": "Cada {{source}}, incluindo as novas",
+    "revoke": "Revogar",
+    "revokeHint": "Voltar a parar neste gatilho",
+    "clearAll": "Limpar tudo",
+    "menuButton": "Passar automaticamente este gatilho",
+    "menuButtonActive": "Passando automaticamente — alterar ou revogar",
+    "menuButtonShort": "Auto-passar",
+    "menuButtonShortActive": "Passando"
   },
   "targeting": {
     "choosePermanentToCopy": "Escolha um permanente para copiar",
@@ -915,7 +978,8 @@
       "title": "Escolher Custo de Ativação"
     },
     "debug": {
-      "modeBanner": "MODO DE DEPURAÇÃO - Clique em qualquer carta"
+      "modeBanner": "MODO DE DEPURAÇÃO - Clique em qualquer carta",
+      "modeButtonOff": "MODO DE CLIQUE DESLIGADO"
     }
   },
   "gameProvider": {
@@ -966,6 +1030,8 @@
     },
     "deckPreview": {
       "editDeck": "Editar {{name}}",
+      "randomTitle": "Deck aleatório",
+      "randomDescription": "Um deck compatível será escolhido quando a partida começar.",
       "cardCount_one": "{{count}} carta",
       "cardCount_other": "{{count}} cartas",
       "unknownBadge": "Desconhecida {{count}}",
@@ -987,6 +1053,13 @@
     }
   },
   "cardChoice": {
+    "eachPlayerCopyChosen": {
+      "title": "Choose creatures to copy",
+      "prompt": "The first creature you choose is copied; if you choose a second, its power becomes +1/+1 counters on the copy.",
+      "confirm": "Confirmar",
+      "copied": "copied",
+      "scaler": "scaler"
+    },
     "badges": {
       "choose": "Escolher",
       "selected": "Selecionada",
@@ -1455,6 +1528,11 @@
     "dashAltLabel": "Conjurar com Dash",
     "dashAltSuffix": "(ganha ímpeto, volta para a mão na etapa final)",
     "dashSubtitle": "Conjure {{name}} normalmente ou use seu custo de Dash.",
+    "faceDownEyebrow": "Virada para baixo",
+    "faceDownNormalLabel": "Conjurar Normalmente",
+    "faceDownAltLabel": "Conjurar Virada para Baixo",
+    "faceDownAltSuffix": "(criatura 2/2 até ser virada para cima)",
+    "faceDownSubtitle": "Conjure {{name}} normalmente ou conjure-a virada para baixo como uma criatura 2/2 que pode ser virada para cima mais tarde.",
     "evokeEyebrow": "Evocar",
     "evokeNormalLabel": "Conjurar Normalmente",
     "evokeAltLabel": "Conjurar com Evocar",
@@ -1586,6 +1664,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantFreerunning": "Conjurar com Freerunning",
     "variantFuse": "Conjurar com Fusão",
     "variantFallback": "Conjurar com {{type}}"
   },
@@ -1698,7 +1777,10 @@
       "twoColors": "Escolha Duas Cores",
       "numberRange": "Escolha um Número",
       "labeled": "Faça uma Escolha",
+      "cardPredicate": "Escolha um Tipo de Carta",
+      "cardPredicateGuess": "Adivinhe um Tipo de Carta",
       "keyword": "Escolha uma Habilidade",
+      "counterKind": "Escolha um Marcador",
       "fallback": "Faça uma Escolha"
     },
     "searchSubtitle": "Digite para buscar em todas as cartas",
@@ -1875,6 +1957,11 @@
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",
@@ -1957,6 +2044,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

@@ -9,7 +9,7 @@ use nom::Parser;
 
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
-    try_parse_exile_top_each_library_with_collection_counter,
+    try_parse_each_player_copy_chosen, try_parse_exile_top_each_library_with_collection_counter,
     try_parse_grant_graveyard_keyword_to_target,
 };
 use super::oracle_ir::context::ParseContext;
@@ -39,7 +39,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
+    CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
     ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
     RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition,
@@ -48,7 +48,8 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::PlayerActionKind;
+use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
@@ -1029,7 +1030,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // Extract intervening-if condition from effect text first — a
                 // leading "if X, " can hide the "you may " optional marker behind
                 // the if-clause.
-                let (without_if, cond) = extract_if_condition(&effect_text);
+                let (without_if, cond) =
+                    extract_if_condition_with_card_name(&effect_text, card_name);
                 (without_if, cond, None)
             }
         };
@@ -1091,6 +1093,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
+        in_trigger: true,
         ..Default::default()
     };
 
@@ -1156,6 +1159,16 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // whole two-sentence shape parses, so a card with an unparsed
                 // target filter stays an honest Unimplemented rather than misparsing.
                 try_parse_grant_graveyard_keyword_to_target(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
+            .or_else(|| {
+                // CR 101.4 + CR 707.2 + CR 122.1: whole-body "each player chooses …
+                // creates a token copy of the first … (then scales by the second)"
+                // (WHO phenomena). Fail-closed multi-sentence detector; sees the
+                // full pre-split body. Placed before the terminal
+                // `parse_effect_chain_ir` fallthrough so an unparsed shape stays an
+                // honest Unimplemented rather than misparsing.
+                try_parse_each_player_copy_chosen(&effect_for_parse, AbilityKind::Spell)
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
@@ -1238,9 +1251,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let execute = match &ir.body {
         Some(TriggerBody::EffectChain(chain_ir)) => {
             let mut ability = lower_effect_chain_ir(chain_ir);
-            // CR 702.179c-d: fold trailing speed-floor sentences into the
-            // preceding `ChangeSpeed` effect and drop the orphan node.
-            crate::parser::oracle_effect::fold_speed_floor_sentences(&mut ability);
+            crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
             if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
                 && matches!(
                     ability.effect.as_ref(),
@@ -1765,6 +1776,98 @@ fn constrain_triggering_spell_with_nth_filter(def: &mut TriggerDefinition) {
             filters: vec![existing, filter],
         },
     });
+}
+
+/// CR 601.2a + CR 603.4: Recognize the disjunctive "first-of-type this turn"
+/// intervening-if — "if it's the first instant spell, the first sorcery spell,
+/// or the first Otter spell other than ~ you've cast this turn". Each disjunct
+/// binds the triggering spell to its type AND to the ordinal-of-type count via a
+/// composed `And(TriggeringSpellMatchesFilter(filter),
+/// QuantityComparison(SpellsCastThisTurn{Controller, filter} == ordinal))`,
+/// collected into `TriggerCondition::Or`. Requires >= 2 disjuncts so a
+/// single-disjunct card (Vengevine, the NthSpellThisTurn constraint class) falls
+/// through to the untouched fire-time `TriggerConstraint::NthSpellThisTurn` path.
+fn parse_disjunctive_first_spell_intervening_if<'a>(
+    input: &'a str,
+    card_name: &str,
+) -> OracleResult<'a, TriggerCondition> {
+    let (mut rest, _) = alt((tag("if it's the "), tag("if it is the "))).parse(input)?;
+    let mut disjuncts = Vec::new();
+    loop {
+        let (next, disjunct) = parse_first_spell_disjunct(rest, card_name)?;
+        disjuncts.push(disjunct);
+        rest = next;
+        // Disjunct separator: ", the " / ", or the " continues to the next filter.
+        match alt((tag::<_, _, OracleError<'_>>(", or the "), tag(", the "))).parse(rest) {
+            Ok((next, _)) => rest = next,
+            Err(_) => break,
+        }
+    }
+    // Only a genuine >= 2-way OR belongs here; a single disjunct is the
+    // constraint path's (NthSpellThisTurn) job.
+    if disjuncts.len() < 2 {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" you've cast this turn"),
+        tag(" you cast this turn"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(rest)?;
+    Ok((
+        rest,
+        TriggerCondition::Or {
+            conditions: disjuncts,
+        },
+    ))
+}
+
+/// One disjunct of the disjunctive first-of-type intervening-if:
+/// "first [type] spell" optionally followed by " other than ~". The self-name
+/// exclusion emits `Not(Named{card_name})` on the filter — the oracle normalizes
+/// the card's own name to "~", and spell-history / spell-object name matching
+/// keys on the full card name (CR 201.2). The same filter appears in both the
+/// `TriggeringSpellMatchesFilter` anchor and the `SpellsCastThisTurn` count.
+fn parse_first_spell_disjunct<'a>(
+    input: &'a str,
+    card_name: &str,
+) -> OracleResult<'a, TriggerCondition> {
+    let (n, rest) = parse_ordinal(input).ok_or_else(|| oracle_err(input))?;
+    let (rest, type_text) = take_until(" spell").parse(rest)?;
+    let (rest, _) = tag(" spell").parse(rest)?;
+    let (rest, exclusion) = opt(tag::<_, _, OracleError<'_>>(" other than ~")).parse(rest)?;
+    let base = type_only_filter(type_text.trim()).ok_or_else(|| oracle_err(type_text))?;
+    let filter = match exclusion {
+        Some(_) => TargetFilter::And {
+            filters: vec![
+                base,
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Named {
+                        name: card_name.to_string(),
+                    }),
+                },
+            ],
+        },
+        None => base,
+    };
+    let disjunct = TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::TriggeringSpellMatchesFilter {
+                filter: filter.clone(),
+            },
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(filter),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: n as i32 },
+            },
+        ],
+    };
+    Ok((rest, disjunct))
 }
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
@@ -3678,12 +3781,28 @@ fn parse_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerC
 /// Extract an intervening-if condition from effect text.
 /// Returns (cleaned effect text, optional condition).
 ///
+/// Card-name-agnostic wrapper for the trigger-condition unit tests, which don't
+/// carry the self-name. The self-name is only needed by the disjunctive
+/// first-of-type recognizer's "other than ~" self-exclusion, which never fires
+/// for these single-condition inputs; production trigger parsing routes through
+/// [`extract_if_condition_with_card_name`] with the real card name.
+#[cfg(test)]
+fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
+    extract_if_condition_with_card_name(text, "")
+}
+
+/// Extract an intervening-if condition from effect text.
+/// Returns (cleaned effect text, optional condition).
+///
 /// Architecture: delegates to `parse_inner_condition` (the shared nom combinator)
 /// via the `static_condition_to_trigger_condition` bridge for ALL game-state
 /// conditions. Only source-referential patterns that require the trigger source
 /// as context ("if you cast it", "if it's attacking", ninjutsu costs, "if it was a
 /// [type]", defending player) are handled directly here.
-fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
+fn extract_if_condition_with_card_name(
+    text: &str,
+    card_name: &str,
+) -> (String, Option<TriggerCondition>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -3712,6 +3831,23 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         if lower[..first_if].contains(". ") {
             return (text.to_string(), None);
         }
+    }
+
+    // CR 601.2a + CR 603.4: disjunctive "if it's the first [type] spell, the first
+    // [type] spell, or the first [type] spell other than ~ you've cast this turn"
+    // intervening-if (Alania, Divergent Storm). Each disjunct lowers to
+    // And(TriggeringSpellMatchesFilter(type), SpellsCastThisTurn{You,type} == n),
+    // collected into `TriggerCondition::Or`. The ≥2-disjunct guard inside the
+    // recognizer keeps single-disjunct cards (Vengevine + the NthSpellThisTurn
+    // constraint class) on the untouched fire-time `TriggerConstraint` path.
+    if let Some((prefix, condition, rest)) = scan_preceded(&lower, |i| {
+        parse_disjunctive_first_spell_intervening_if(i, card_name)
+    }) {
+        let clause_len = lower.len() - prefix.len() - rest.len();
+        return (
+            strip_condition_clause(text, prefix.len(), clause_len),
+            Some(condition),
+        );
     }
 
     // --- Source-referential patterns (cannot be StaticConditions) ---
@@ -3882,6 +4018,22 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     owner: None,
                 }),
             }),
+        );
+    }
+
+    // CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" — intervening-if
+    // on discard triggers whose subject is the discarded card (Anje Falkenrath: "if it has
+    // madness"). MUST precede the zone-change-object "if it " arms below, which would
+    // otherwise mis-route this predicate.
+    if let Some((before, condition, rest)) = scan_preceded(
+        &lower,
+        parse_event_object_has_alt_cost_keyword_intervening_if,
+    ) {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
         );
     }
 
@@ -4266,7 +4418,7 @@ fn try_extract_zone_change_object_filter_condition(
 /// ("Whenever your opponents are dealt combat damage, if any of that damage
 /// was dealt by a Warrior, ..."). The source phrase reuses the same
 /// `parse_target` + " or " + `merge_or_filters` chain as the
-/// `OpponentDealtCombatDamage { source }` PlayerFilter so a `~ or a Dragon`
+/// `OpponentDealtDamage { source }` PlayerFilter so a `~ or a Dragon`
 /// style disjunction composes uniformly.
 fn try_extract_event_damage_source_condition(
     lower: &str,
@@ -4302,7 +4454,7 @@ fn try_extract_event_damage_source_condition(
 /// CR 120.1 + CR 608.2i: Fold a "X or Y or ..." damage-source phrase into a
 /// single `TargetFilter` via `parse_target` + `merge_or_filters`. Mirrors
 /// `parse_source_chain_phrase` in `oracle_quantity.rs` (the
-/// `OpponentDealtCombatDamage { source }` builder) so source-restriction
+/// `OpponentDealtDamage { source }` builder) so source-restriction
 /// parsing stays consistent across the quantity and trigger-condition layers.
 fn parse_event_damage_source_chain(phrase: &str) -> TargetFilter {
     let (first, rest) = super::oracle_target::parse_target(phrase.trim());
@@ -4325,6 +4477,26 @@ fn parse_zone_change_object_token_contraction_intervening_if(
     let (rest, _) = tag("if it's not a ").parse(input)?;
     let (rest, _) = tag("token").parse(rest)?;
     Ok((rest, zone_change_object_token_condition(true)))
+}
+
+/// CR 603.4 + CR 701.9a + CR 702.35a: Build an event-object intervening-if
+/// filter for a named alt-cost keyword on the triggering object.
+fn event_object_has_alt_cost_keyword_condition(keyword: KeywordKind) -> TriggerCondition {
+    TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::HasKeywordKind { value: keyword }]),
+        ),
+    }
+}
+
+/// CR 603.4 + CR 701.9a + CR 702.35a: "if it has <alt-cost keyword>" on
+/// event-object intervening-ifs (e.g. discard triggers: "if it has madness").
+fn parse_event_object_has_alt_cost_keyword_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if it has ").parse(input)?;
+    let (rest, keyword) = nom_primitives::parse_alt_cost_keyword_name_to_kind.parse(rest)?;
+    Ok((rest, event_object_has_alt_cost_keyword_condition(keyword)))
 }
 
 /// CR 603.4 + CR 603.6a + CR 208.1: Entering-object intervening-if comparing the
@@ -7569,6 +7741,21 @@ fn parse_damage_to_its_owner(after_verb: &str) -> OracleResult<'_, ()> {
     Ok((rest, ()))
 }
 
+/// CR 115.10a + CR 120.1 + CR 120.3: Recognize a mixed non-target damage
+/// recipient ("to a permanent or player") without lowering it to a
+/// `valid_target` filter. The exact recipient is carried by the `DamageDealt`
+/// event and later used by DealDamage-local `EventTarget` resolution.
+fn parse_damage_to_permanent_or_player(after_verb: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        preceded(
+            tag::<_, _, OracleError<'_>>("to "),
+            alt((tag("a permanent or player"), tag("a permanent or a player"))),
+        ),
+    ))
+    .parse(after_verb.trim_start())
+}
+
 /// CR 603.6a + CR 110.5b: After consuming the `"enter"` prefix in a ChangesZone
 /// trigger clause, recognize an optional tapped-state rider — `"enters tapped"`
 /// or `"enters untapped"` — and produce the corresponding intervening-if
@@ -8204,6 +8391,11 @@ fn try_parse_event(
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Ref { qty: recipient_pt },
                 });
+            } else if parse_damage_to_permanent_or_player(after_damage).is_ok() {
+                // CR 115.10a + CR 120.1 + CR 120.3: mixed object/player
+                // recipient ("to a permanent or player") is not a target
+                // filter. The concrete recipient is the DamageDealt event
+                // target.
             } else if let Ok((_, filter)) = parse_object_recipient_filter(after_damage) {
                 // CR 120.3: bare object recipient ("to a creature") — gate the
                 // matcher's recipient check on the damaged object's type (Strax +
@@ -9567,6 +9759,14 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
         def.damage_amount = threshold;
         return Some((TriggerMode::DamageDone, def));
     }
+    // CR 115.10a + CR 120.1 + CR 120.3: "to a permanent or player" scopes the
+    // trigger to damage events with any permanent/player recipient, but does not
+    // create a static `valid_target` filter. The event carries the exact
+    // recipient for the resolving effect.
+    if parse_damage_to_permanent_or_player(after_damage).is_ok() {
+        def.damage_amount = threshold;
+        return Some((TriggerMode::DamageDone, def));
+    }
     // CR 120.3: bare object recipient ("to a creature") — scope valid_target. The
     // terminator guard inside `parse_object_recipient_filter` declines "creature
     // or player"/"creature or opponent", which then reach the player-axis
@@ -9604,20 +9804,25 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 ///   * head noun       — "source" | supported object type head nouns
 ///   * controller      — optional " you control" → `ControllerRef::You`
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
-    // CR 109.4: leading article is mandatory in printed damage-source phrases
-    // ("a source", "an opponent's source" — the latter not in any printed card
-    // today, deferred). Word boundary on the trailing space.
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("a "),
-        tag::<_, _, OracleError<'_>>("an "),
+    // CR 109.4: printed damage-source phrases either use an article
+    // ("a source") or the article-less determiner "another source" (Ghyrson).
+    // Parse "another" on the same axis as the article so it can feed the
+    // existing `FilterProp::Another` runtime evaluator.
+    let (rest, another) = alt((
+        value(
+            Some(FilterProp::Another),
+            tag::<_, _, OracleError<'_>>("another "),
+        ),
+        value(None, tag::<_, _, OracleError<'_>>("a ")),
+        value(None, tag::<_, _, OracleError<'_>>("an ")),
     ))
     .parse(input)?;
 
-    // Optional "another " → FilterProp::Another. CR 109.4 governs object
+    // Optional post-article "another " → FilterProp::Another. CR 109.4 governs object
     // identity in references; "another" reads "an object distinct from the
     // ability source" and is enforced by `FilterProp::Another` at the
     // `game/filter.rs` runtime evaluator.
-    let (rest, another) = opt(value(
+    let (rest, post_article_another) = opt(value(
         FilterProp::Another,
         tag::<_, _, OracleError<'_>>("another "),
     ))
@@ -9711,7 +9916,7 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
         typed = typed.controller(c);
     }
     let mut props = Vec::new();
-    if let Some(p) = another {
+    if let Some(p) = another.or(post_article_another) {
         props.push(p);
     }
     if let Some(p) = renowned {
@@ -11373,7 +11578,15 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     {
         def.valid_target = Some(TargetFilter::SourceChosenPlayer);
     }
-    if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
+    // CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
+    // names one unique step — the starting player's first upkeep — so the trigger
+    // fires exactly once. Modeled as OncePerGame: the source (a plane/scheme or
+    // other permanent present at game start) fires the first time its upkeep
+    // trigger is checked and never again. Checked before the "each turn" arm
+    // because "of the game" and "each turn" are mutually exclusive phrasings.
+    if scan_contains(phase_text, "first upkeep of the game") {
+        def.constraint = Some(TriggerConstraint::OncePerGame);
+    } else if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
         def.constraint = Some(TriggerConstraint::MaxTimesPerTurn { max: 1 });
     }
     // "each player's upkeep" / "each upkeep" / "the end step" → no constraint (fires every turn)
@@ -12348,17 +12561,46 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 701.30b-c: "whenever you clash" fires when the controller of the
     // trigger source is either player participating in a clash.
     // Cards: Entangling Trap, Rebellion of the Flamekin.
-    if all_consuming(preceded(
+    //
+    // CR 701.30d + CR 603.4: an optional "...and win" tail (Sylvan Echoes)
+    // narrows the trigger so it fires ONLY when the controller won the clash.
+    // The win requirement rides on `clash_result` into trigger MATCHING (checked
+    // when the clash event occurs), so a lost or tied clash never creates a
+    // pending trigger — rather than gating the effect at resolution.
+    if let Ok((tail, ())) = preceded(
         alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
         value((), (tag("you"), space1, tag("clash"))),
-    ))
+    )
     .parse(lower)
-    .is_ok()
     {
-        let mut def = make_base();
-        def.mode = TriggerMode::Clashed;
-        def.valid_target = Some(TargetFilter::Controller);
-        return Some((TriggerMode::Clashed, def));
+        // Empty residual = plain "you clash" (any outcome). A " and win" residual
+        // = the win-required shape (Sylvan Echoes). Any other residual is a
+        // different clause we decline so a later dispatcher can try it.
+        let clash_result = if tail.is_empty() {
+            Some(None)
+        } else if all_consuming(value(
+            (),
+            (
+                space1,
+                tag::<_, _, OracleError<'_>>("and"),
+                space1,
+                tag("win"),
+            ),
+        ))
+        .parse(tail)
+        .is_ok()
+        {
+            Some(Some(ClashResult::Won))
+        } else {
+            None
+        };
+        if let Some(clash_result) = clash_result {
+            let mut def = make_base();
+            def.mode = TriggerMode::Clashed;
+            def.valid_target = Some(TargetFilter::Controller);
+            def.clash_result = clash_result;
+            return Some((TriggerMode::Clashed, def));
+        }
     }
 
     // CR 701.30: "whenever a player clashes" — fires for any clashing player.
@@ -12837,6 +13079,16 @@ fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
                 TypedFilter::new(TypeFilter::Card).properties(vec![prop]),
             ));
         }
+    }
+    if all_consuming(tag::<_, _, OracleError<'_>>("kicked"))
+        .parse(qualifier)
+        .is_ok()
+    {
+        // CR 702.33d: A spell whose controller declared any kicker payment has
+        // been kicked; use the existing cast snapshot filter for kicked spells.
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::WasKicked]),
+        ));
     }
     let (filter, remainder) = parse_type_phrase(qualifier);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
@@ -14871,6 +15123,180 @@ mod modal_spell_cast_trigger_tests {
         assert!(
             !valid_card_props(trigger.valid_card.as_ref()).contains(&FilterProp::Modal),
             "a plain 'you cast a spell' trigger must not gain FilterProp::Modal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ood_sphere_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        ContinuousModification, Duration, Effect, PlayerScope, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::{StaticMode, StaticModeKind};
+    use crate::types::TriggerMode;
+
+    const OOD_SPHERE_ORACLE: &str = "Song of the Ood \u{2014} Noncreature spells have convoke. (A player's creatures can help cast those spells. Each creature they tap while casting a noncreature spell pays for {1} or one mana of that creature's color.)\nRed-Eye \u{2014} Whenever chaos ensues, for each opponent, goad up to one target creature that opponent controls. Until your next turn, those creatures can't become tapped unless they're being declared as attackers.";
+
+    fn parse_ood_sphere() -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(
+            OOD_SPHERE_ORACLE,
+            "Ood Sphere",
+            &[],
+            &["Plane".into()],
+            &["Horsehead Nebula".into()],
+        )
+    }
+
+    fn effect_is_unimplemented(effect: &Effect) -> bool {
+        matches!(effect, Effect::Unimplemented { .. })
+    }
+
+    fn flatten_chain(def: &crate::types::ability::AbilityDefinition) -> Vec<&Effect> {
+        let mut out = Vec::new();
+        let mut node = Some(def);
+        while let Some(d) = node {
+            out.push(&*d.effect);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// Defect 1: the "Noncreature spells have convoke." static must be a functional
+    /// casting-keyword grant, not the runtime-inert anthem AddKeyword.
+    #[test]
+    fn song_of_the_ood_static_grants_cast_with_keyword_convoke() {
+        let parsed = parse_ood_sphere();
+        let statics = &parsed.statics;
+        assert_eq!(statics.len(), 1, "exactly one static: {statics:?}");
+        assert_eq!(
+            statics[0].mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Convoke
+            },
+            "must be CastWithKeyword, not anthem AddKeyword: {:?}",
+            statics[0]
+        );
+    }
+
+    /// Defect 2: the Red-Eye trigger's second sentence must lower to a real
+    /// "can't become tapped" continuous grant, NOT `Effect::Unimplemented`.
+    #[test]
+    fn red_eye_cant_become_tapped_sub_ability_grants_cant_tap_static() {
+        let parsed = parse_ood_sphere();
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::ChaosEnsues))
+            .expect("ChaosEnsues trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+
+        // Head effect is Goad.
+        assert!(
+            matches!(*execute.effect, Effect::Goad { .. }),
+            "head effect must be Goad, got {:?}",
+            execute.effect
+        );
+
+        // The sub-ability lowers the second sentence.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Red-Eye must carry a can't-become-tapped sub-ability");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*sub.effect
+        else {
+            panic!(
+                "sub-ability effect must be GenericEffect, got {:?}",
+                sub.effect
+            );
+        };
+        assert_eq!(
+            *target,
+            Some(TargetFilter::ParentTarget),
+            "GenericEffect must apply to the goaded creatures (ParentTarget)"
+        );
+        assert_eq!(
+            *duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            }),
+            "restriction lasts until the controller's next turn"
+        );
+        let inner: &StaticDefinition = static_abilities
+            .iter()
+            .find_map(|sd| {
+                sd.modifications.iter().find_map(|m| match m {
+                    ContinuousModification::GrantStaticAbility { definition } => {
+                        Some(&**definition)
+                    }
+                    _ => None,
+                })
+            })
+            .expect("GenericEffect must grant a static ability");
+        assert_eq!(
+            inner.mode,
+            StaticMode::CantTap,
+            "granted static must be CantTap, got {:?}",
+            inner.mode
+        );
+        assert_eq!(inner.mode.kind(), StaticModeKind::CantTap);
+    }
+
+    /// Full-card gate: zero `Unimplemented` across every ability, trigger, and
+    /// the trigger's sub-ability chain.
+    #[test]
+    fn ood_sphere_has_no_unimplemented() {
+        let parsed = parse_ood_sphere();
+        for ability in &parsed.abilities {
+            for effect in flatten_chain(ability) {
+                assert!(
+                    !effect_is_unimplemented(effect),
+                    "ability effect is Unimplemented: {effect:?}"
+                );
+            }
+        }
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_ref() {
+                for effect in flatten_chain(execute) {
+                    assert!(
+                        !effect_is_unimplemented(effect),
+                        "trigger effect is Unimplemented: {effect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Negative: only the declared-as-attackers exemption is captured. A
+    /// different "unless" rider must fall through to the strict-failure fallback.
+    #[test]
+    fn other_unless_rider_falls_through_to_unimplemented() {
+        // Reuse the parser via a synthetic trigger whose second sentence carries a
+        // non-attacker rider — it must remain Unimplemented (fail closed).
+        let parsed = parse_oracle_text(
+            "Whenever chaos ensues, goad up to one target creature. Until your next turn, those creatures can't become tapped unless you pay {2}.",
+            "Test Plane",
+            &[],
+            &["Plane".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::ChaosEnsues))
+            .expect("ChaosEnsues trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let has_unimplemented = flatten_chain(execute)
+            .iter()
+            .any(|e| effect_is_unimplemented(e));
+        assert!(
+            has_unimplemented,
+            "a non-attacker 'unless' rider must fail closed to Unimplemented, not be silently dropped"
         );
     }
 }

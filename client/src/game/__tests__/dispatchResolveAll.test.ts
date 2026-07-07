@@ -3,13 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BatchResolveResult, GameState } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory";
 import { dispatchResolveAll } from "../dispatch";
 
 // A Priority-on-the-storming-player WaitingFor (active player holds priority).
-const priorityWf = { type: "Priority", data: { player: 0 } } as unknown as BatchResolveResult["waitingFor"];
+const priorityWf: BatchResolveResult["waitingFor"] = buildPriorityWaitingFor();
 
 function stateWithStack(len: number): GameState {
-  return { waiting_for: priorityWf, stack: new Array(len).fill(0), turn: { active_player: 0 } } as unknown as GameState;
+  return buildGameState({
+    waiting_for: priorityWf,
+    stack: Array.from({ length: len }, (_, index) => buildStackEntry({ id: index + 1 })),
+  });
 }
 
 function chunk(itemsResolved: number, total: number): BatchResolveResult {

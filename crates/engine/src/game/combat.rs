@@ -6,7 +6,7 @@ use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
-use crate::types::ability::{StaticDefinition, TargetRef};
+use crate::types::ability::{StaticDefinition, TargetFilter, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -429,6 +429,25 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
     true
 }
 
+/// CR 509.1h: mark a current attacker as blocked purely by effect, without
+/// assigning any blocking creature. The attacker becomes (and remains) blocked
+/// even though `blocker_assignments` / `blocker_to_attacker` stay empty; per
+/// CR 510.1c a blocked creature with no creatures blocking it assigns no combat
+/// damage. Emits no event (the caller decides whether the CR 509.3c precondition
+/// is met). Returns `false` if `oid` is not a current attacker.
+pub fn mark_attacker_blocked(state: &mut GameState, oid: ObjectId) -> bool {
+    let Some(combat) = state.combat.as_mut() else {
+        return false;
+    };
+    let Some(info) = combat.attackers.iter_mut().find(|a| a.object_id == oid) else {
+        return false;
+    };
+    info.blocked = true;
+    // CR 613.1f: `FilterProp::Blocked` grants may now apply; re-evaluate layers.
+    state.layers_dirty.mark_full();
+    true
+}
+
 /// Validate attacker declarations per CR 508.1.
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
@@ -545,6 +564,16 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         if has_summoning_sickness(obj) {
             return Err(format!("{:?} has summoning sickness", id));
         }
+
+        // CR 508.1c + CR 611.2c: additional-combat attacker restriction
+        // (Last Night Together: "Only the chosen creatures can attack during
+        // that combat phase"; Bumi: "Only land creatures..."). No-op outside a
+        // restricted combat phase.
+        if !passes_combat_attacker_restriction(state, id) {
+            return Err(format!(
+                "{id:?} can't attack during this combat phase (CR 508.1c)"
+            ));
+        }
     }
 
     // CR 506.5 + CR 508.1c: CombatAlone(Attack, NeedsCompanion) — creature must
@@ -587,6 +616,47 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     }
 
     Ok(())
+}
+
+/// CR 508.1c + CR 611.2c: A creature may be declared as an attacker during a
+/// restricted additional combat phase (Last Night Together / Bumi) only if it
+/// matches the active filter. The restriction is a rules-modifying continuous
+/// effect (re-evaluated per declaration), so it correctly covers creatures that
+/// entered after the scheduling spell resolved (`Typed` subjects) while a
+/// fixed `TrackedSet`/`SpecificObject` membership stays constant. `None` (no
+/// restriction) permits every creature. This is the single shared authority the
+/// candidate-set query, the declaration gate, and the AI fallback all route
+/// through.
+pub fn passes_combat_attacker_restriction(state: &GameState, obj_id: ObjectId) -> bool {
+    match &state.current_combat_attacker_restriction {
+        None => true,
+        // CR 500.10a + CR 508.1c: the restricted extra combat phase is only ever
+        // added to the active player's turn (the scheduling spell's controller),
+        // so a controller-relative restriction subject ("creatures you control")
+        // resolves `ControllerRef::You` against the active player. A bare
+        // `FilterContext::neutral()` carries no `source_controller` and would make
+        // such a restriction match nothing, wrongly excluding the active player's
+        // creatures.
+        // CR 611.2c: use the actual scheduling spell's ObjectId (stored on
+        // `ExtraPhase.attacker_restriction_source` and propagated to
+        // `current_combat_attacker_restriction_source`) so source-relative
+        // restriction predicates resolve against the correct object rather than
+        // the dummy `ObjectId(0)` sentinel. The current concrete-set / Typed
+        // subjects (Last Night Together's chosen set, Bumi's "land creatures")
+        // are unaffected by the source; this correctly future-proofs
+        // controller-scoped and source-colour subjects.
+        Some(filter) => matches_target_filter(
+            state,
+            obj_id,
+            filter,
+            &FilterContext::from_source_with_controller(
+                state
+                    .current_combat_attacker_restriction_source
+                    .unwrap_or(ObjectId(0)),
+                state.active_player,
+            ),
+        ),
+    }
 }
 
 /// CR 508.1c: The global "no more than N creatures can attack each combat" cap
@@ -752,7 +822,7 @@ pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, Stat
         .filter(|(_, def)| {
             matches!(
                 def.mode,
-                StaticMode::MustBeBlocked | StaticMode::MustBeBlockedByAll
+                StaticMode::MustBeBlocked { .. } | StaticMode::MustBeBlockedByAll { .. }
             )
         })
         .map(|(src, def)| (src.id, def.clone()))
@@ -912,24 +982,68 @@ fn blocker_has_cant_block_static_from_precomputed(
         .is_some()
 }
 
-/// CR 509.1c: precomputed-slice variant of `attacker_has_must_be_blocked`.
-fn attacker_has_must_be_blocked_from_precomputed(
-    state: &GameState,
+/// CR 509.1c: each `MustBeBlocked` requirement functioning on `attacker_id`,
+/// paired with its optional blocker filter (`None` = any blocker satisfies the
+/// requirement; `Some(filter)` = only a blocker matching `filter` does) and the
+/// source id (re-resolves the controller for `FilterContext`). The bare and
+/// filtered forms are the same CR 509.1c blocking requirement parameterized on
+/// the blocker-set axis; `MustBeBlockedByAll` is a distinct requirement handled
+/// by its own loop.
+fn must_be_blocked_requirements_for_attacker<'a>(
+    state: &'a GameState,
     attacker_id: ObjectId,
-    precomputed: &[(ObjectId, StaticDefinition)],
-) -> bool {
+    precomputed: &'a [(ObjectId, StaticDefinition)],
+) -> impl Iterator<Item = (Option<&'a TargetFilter>, ObjectId, Option<PlayerId>)> + 'a {
+    // CR 611.2c + CR 109.5: the third element is the installing-player anchor
+    // snapshotted at graft time (`StaticDefinition::source_controller`). `None`
+    // = resolve the controller from the carrier (permanent-static lures).
     must_be_blocked_statics_for_attacker_from_precomputed(state, attacker_id, precomputed)
-        .any(|(def, _)| def.mode == StaticMode::MustBeBlocked)
+        .filter_map(|(def, src_id)| match &def.mode {
+            StaticMode::MustBeBlocked { by } => Some((by.as_ref(), src_id, def.source_controller)),
+            _ => None, // MustBeBlockedByAll handled by its own loop
+        })
 }
 
-/// CR 509.1c: precomputed-slice variant of `attacker_has_must_be_blocked_by_all`.
-fn attacker_has_must_be_blocked_by_all_from_precomputed(
-    state: &GameState,
+/// CR 509.1c: each `MustBeBlockedByAll` requirement functioning on `attacker_id`,
+/// paired with its optional blocker filter (`None` = every idle able creature
+/// must block — the bare Lure form; `Some(filter)` = only idle able creatures
+/// matching `filter` are compelled — Talruum Piper "creatures with flying",
+/// Marble Priest "Walls") and the source id (re-resolves the controller for
+/// `FilterContext`). Mirrors `must_be_blocked_requirements_for_attacker`;
+/// `MustBeBlockedByAll` is a distinct requirement from `MustBeBlocked`.
+fn must_be_blocked_by_all_requirements_for_attacker<'a>(
+    state: &'a GameState,
     attacker_id: ObjectId,
-    precomputed: &[(ObjectId, StaticDefinition)],
-) -> bool {
+    precomputed: &'a [(ObjectId, StaticDefinition)],
+) -> impl Iterator<Item = (Option<&'a TargetFilter>, ObjectId, Option<PlayerId>)> + 'a {
+    // CR 611.2c + CR 109.5: the third element is the installing-player anchor
+    // snapshotted at graft time (`StaticDefinition::source_controller`). `None`
+    // = resolve the controller from the carrier (permanent-static lures).
     must_be_blocked_statics_for_attacker_from_precomputed(state, attacker_id, precomputed)
-        .any(|(def, _)| def.mode == StaticMode::MustBeBlockedByAll)
+        .filter_map(|(def, src_id)| match &def.mode {
+            StaticMode::MustBeBlockedByAll { blockers } => {
+                Some((blockers.as_ref(), src_id, def.source_controller))
+            }
+            _ => None, // MustBeBlocked handled by its own loop
+        })
+}
+
+/// CR 509.1c + CR 109.5: Build the `FilterContext` used to evaluate a granted
+/// blocker filter. When the requirement carries an installing-player `anchor`
+/// (a controller-relative filter grafted onto a target by a one-shot effect,
+/// e.g. You Look Upon the Tarrasque — CR 611.2c locks the anchor at
+/// materialization), evaluate "your opponents" relative to the SPELL
+/// controller. Otherwise (`None` anchor — permanent-static lures) resolve the
+/// controller from the carrier object, unchanged.
+fn blocker_filter_context(
+    state: &GameState,
+    src_id: ObjectId,
+    anchor: Option<PlayerId>,
+) -> FilterContext<'_> {
+    anchor.map_or_else(
+        || FilterContext::from_source(state, src_id),
+        |controller| FilterContext::from_source_with_controller(src_id, controller),
+    )
 }
 
 /// CR 509.1b + CR 609.4 + CR 702.28b: A creature without shadow normally can't
@@ -1375,9 +1489,15 @@ pub fn validate_blockers_for_player(
         }
     }
 
-    // CR 509.1c: MustBeBlocked — if a creature with "must be blocked if able" is attacking,
-    // the defending player must assign at least one blocker to it, provided a legal blocker
-    // exists that isn't already required elsewhere.
+    // CR 509.1c: MustBeBlocked — if a creature with a "must be blocked if able"
+    // requirement is attacking, the defending player must obey it by assigning a
+    // qualifying blocker whenever one is able. Each requirement on the attacker
+    // is enforced independently (an attacker may carry both a bare and a filtered
+    // requirement): `by == None` ⇒ any assigned blocker satisfies it; `by ==
+    // Some(filter)` ⇒ only an assigned blocker matching `filter` does (Ace's
+    // Baseball Bat: a Dalek; Slayer's Cleaver: an Eldrazi). Uses the engine's
+    // existing per-attacker greedy approximation of the CR 509.1c requirement-
+    // maximization rule, applied uniformly to the bare and filtered forms.
     if let Some(combat) = &state.combat {
         // Collect all assigned blocker IDs for quick lookup
         let assigned_blockers: std::collections::HashSet<ObjectId> = assignments
@@ -1391,29 +1511,69 @@ pub fn validate_blockers_for_player(
             }
             let attacker_id = attacker_info.object_id;
 
-            if !attacker_has_must_be_blocked_from_precomputed(state, attacker_id, &must_be_blocked)
-            {
-                continue;
-            }
+            let requirements: Vec<(Option<&TargetFilter>, ObjectId, Option<PlayerId>)> =
+                must_be_blocked_requirements_for_attacker(state, attacker_id, &must_be_blocked)
+                    .collect();
 
-            // Already has at least one blocker assigned — constraint satisfied
-            if blockers_per_attacker.contains_key(&attacker_id) {
-                continue;
-            }
-
-            // Check if any unassigned defending creature could legally block this attacker.
-            // If so, the assignment is invalid because that creature should have been assigned.
-            let has_available_blocker = state.battlefield.iter().any(|id| {
-                if assigned_blockers.contains(id) {
-                    return false;
+            for (by, src_id, anchor) in requirements {
+                // CR 509.1c: the requirement is obeyed if a qualifying blocker is
+                // already assigned to this attacker — `None` ⇒ any assigned
+                // blocker; `Some(filter)` ⇒ an assigned blocker matching `filter`.
+                let satisfied = blockers_per_attacker
+                    .get(&attacker_id)
+                    .is_some_and(|blockers| {
+                        blockers.iter().any(|blocker_id| match by {
+                            None => true,
+                            Some(filter) => matches_target_filter(
+                                state,
+                                *blocker_id,
+                                filter,
+                                &blocker_filter_context(state, src_id, anchor),
+                            ),
+                        })
+                    });
+                if satisfied {
+                    continue;
                 }
-                let Some(obj) = state.objects.get(id) else {
-                    return false;
-                };
-                obj.controller == player
-                    && obj.card_types.core_types.contains(&CoreType::Creature)
-                    && !obj.tapped
-                    && can_block_pair_with_precomputed(
+
+                // Check if any defending creature not yet assigned to THIS
+                // attacker could legally block it AND (for the filtered form)
+                // match the filter. If so, the declaration is illegal because
+                // that creature should have been assigned. CR 509.1b: a
+                // creature that can't legally block doesn't make the
+                // requirement obey-able.
+                //
+                // CR 509.1c: a creature already blocking another attacker is
+                // still "able" to block this one if it has spare block
+                // capacity granted by ExtraBlockers — mirror of the
+                // MustBeBlockedByAll path at line ~1496 above.
+                let has_available_blocker = state.battlefield.iter().any(|id| {
+                    // Skip creatures already assigned to this specific attacker
+                    // — they're already counted in the `satisfied` check above.
+                    if blockers_per_attacker
+                        .get(&attacker_id)
+                        .is_some_and(|blockers| blockers.contains(id))
+                    {
+                        return false;
+                    }
+                    let Some(obj) = state.objects.get(id) else {
+                        return false;
+                    };
+                    if obj.controller != player
+                        || !obj.card_types.core_types.contains(&CoreType::Creature)
+                        || obj.tapped
+                    {
+                        return false;
+                    }
+                    // A creature blocking other attacker(s) is only "able" to
+                    // also block this one if it has spare block capacity.
+                    // CR 509.1c: a blocker at its per-creature limit cannot
+                    // take on an additional block.
+                    let assigned_count = attackers_per_blocker.get(id).copied().unwrap_or(0);
+                    if assigned_count >= extra_block_limit(state, obj) {
+                        return false;
+                    }
+                    can_block_pair_with_precomputed(
                         state,
                         *id,
                         attacker_id,
@@ -1421,14 +1581,25 @@ pub fn validate_blockers_for_player(
                         &block_restriction,
                         &blocker_allowed,
                         can_block_shadow_exists,
-                    )
-            });
+                    ) && match by {
+                        None => true,
+                        Some(filter) => matches_target_filter(
+                            state,
+                            *id,
+                            filter,
+                            &blocker_filter_context(state, src_id, anchor),
+                        ),
+                    }
+                });
 
-            if has_available_blocker {
-                return Err(format!(
-                    "{:?} must be blocked if able (CR 509.1c)",
-                    attacker_id
-                ));
+                if has_available_blocker {
+                    return Err(match by {
+                        None => format!("{attacker_id:?} must be blocked if able (CR 509.1c)"),
+                        Some(_) => format!(
+                            "{attacker_id:?} must be blocked by a qualifying creature if able (CR 509.1c)"
+                        ),
+                    });
+                }
             }
         }
 
@@ -1446,48 +1617,73 @@ pub fn validate_blockers_for_player(
                 continue;
             }
             let attacker_id = attacker_info.object_id;
-            if !attacker_has_must_be_blocked_by_all_from_precomputed(
-                state,
-                attacker_id,
-                &must_be_blocked,
-            ) {
-                continue;
-            }
-            // Any untapped defender with spare block capacity that could legally
-            // block the lured attacker should have been declared as its blocker.
-            let has_idle_able_blocker = state.battlefield.iter().any(|id| {
-                if blockers_per_attacker
-                    .get(&attacker_id)
-                    .is_some_and(|blockers| blockers.contains(id))
-                {
-                    return false;
+
+            // Collect the requirements before the inner `state.battlefield` iter
+            // to drop the precomputed borrow (mirrors the sibling collect at
+            // ~1479-1481 for the MustBeBlocked loop).
+            let requirements: Vec<(Option<&TargetFilter>, ObjectId, Option<PlayerId>)> =
+                must_be_blocked_by_all_requirements_for_attacker(
+                    state,
+                    attacker_id,
+                    &must_be_blocked,
+                )
+                .collect();
+
+            for (blockers, src_id, anchor) in requirements {
+                // Any untapped defender with spare block capacity that could
+                // legally block the lured attacker should have been declared as
+                // its blocker. `blockers == None` ⇒ every idle able creature is
+                // compelled (unchanged Lure); `Some(filter)` ⇒ only idle able
+                // creatures matching `filter` are compelled — non-matching
+                // creatures stay legal to leave off. CR 509.1c.
+                let has_idle_able_blocker = state.battlefield.iter().any(|id| {
+                    if blockers_per_attacker
+                        .get(&attacker_id)
+                        .is_some_and(|assigned| assigned.contains(id))
+                    {
+                        return false;
+                    }
+                    let Some(obj) = state.objects.get(id) else {
+                        return false;
+                    };
+                    if obj.controller != player
+                        || !obj.card_types.core_types.contains(&CoreType::Creature)
+                        || obj.tapped
+                        || !can_block_pair_with_precomputed(
+                            state,
+                            *id,
+                            attacker_id,
+                            &blocker_restriction,
+                            &block_restriction,
+                            &blocker_allowed,
+                            can_block_shadow_exists,
+                        )
+                    {
+                        return false;
+                    }
+                    let assigned_count = attackers_per_blocker.get(id).copied().unwrap_or(0);
+                    assigned_count < extra_block_limit(state, obj)
+                        // CR 509.1c: filtered lure — only creatures matching the
+                        // filter carry the "must block" requirement.
+                        && blockers.is_none_or(|f| {
+                            matches_target_filter(
+                                state,
+                                *id,
+                                f,
+                                &blocker_filter_context(state, src_id, anchor),
+                            )
+                        })
+                });
+                if has_idle_able_blocker {
+                    return Err(match blockers {
+                        None => format!(
+                            "{attacker_id:?} must be blocked by every creature able to block it (CR 509.1c)"
+                        ),
+                        Some(_) => format!(
+                            "{attacker_id:?} must be blocked by every qualifying creature able to block it (CR 509.1c)"
+                        ),
+                    });
                 }
-                let Some(obj) = state.objects.get(id) else {
-                    return false;
-                };
-                if obj.controller != player
-                    || !obj.card_types.core_types.contains(&CoreType::Creature)
-                    || obj.tapped
-                    || !can_block_pair_with_precomputed(
-                        state,
-                        *id,
-                        attacker_id,
-                        &blocker_restriction,
-                        &block_restriction,
-                        &blocker_allowed,
-                        can_block_shadow_exists,
-                    )
-                {
-                    return false;
-                }
-                let assigned_count = attackers_per_blocker.get(id).copied().unwrap_or(0);
-                assigned_count < extra_block_limit(state, obj)
-            });
-            if has_idle_able_blocker {
-                return Err(format!(
-                    "{:?} must be blocked by every creature able to block it (CR 509.1c)",
-                    attacker_id
-                ));
             }
         }
 
@@ -3041,6 +3237,9 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                 // sickness — folds in Haste at query time without duplicating
                 // the flag/keyword logic here.
                 && !has_summoning_sickness(obj)
+                // CR 508.1c + CR 611.2c: additional-combat attacker restriction
+                // (Last Night Together / Bumi). No-op outside a restricted combat.
+                && passes_combat_attacker_restriction(state, *id)
             {
                 Some(*id)
             } else {
@@ -3964,6 +4163,54 @@ mod tests {
             scans, 0,
             "no static-ability whole-board scan on a vanilla board"
         );
+    }
+
+    /// CR 508.1c + CR 611.2c: a restricted additional combat phase (Bumi,
+    /// Unleashed: "Only land creatures can attack during that combat phase")
+    /// admits only creatures matching the active filter. Because the restriction
+    /// is rules-modifying (re-evaluated per declaration), it covers creatures
+    /// independent of when they entered. Exercises the full enforcement path:
+    /// candidate query, declaration gate, and the clear-on-end semantics.
+    #[test]
+    fn restricted_combat_filters_candidates_and_declarations() {
+        use crate::parser::oracle_ir::context::ParseContext;
+        use crate::parser::oracle_target::parse_target_with_ctx;
+
+        let mut state = setup();
+        let land_creature = create_creature(&mut state, PlayerId(0), "Dryad Arbor", 1, 1);
+        state
+            .objects
+            .get_mut(&land_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let plain_creature = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // No restriction: both creatures are valid attackers.
+        assert!(get_valid_attacker_ids(&state).contains(&land_creature));
+        assert!(get_valid_attacker_ids(&state).contains(&plain_creature));
+
+        // Bumi-style restriction: only land creatures may attack.
+        let (filter, _) = parse_target_with_ctx("land creatures", &mut ParseContext::default());
+        state.current_combat_attacker_restriction = Some(filter);
+
+        let valid = get_valid_attacker_ids(&state);
+        assert!(valid.contains(&land_creature), "land creature may attack");
+        assert!(
+            !valid.contains(&plain_creature),
+            "non-land creature excluded by the restriction"
+        );
+        assert!(validate_attackers(&state, &[land_creature]).is_ok());
+        assert!(
+            validate_attackers(&state, &[plain_creature]).is_err(),
+            "declaring a non-land attacker is illegal under the restriction"
+        );
+
+        // CR 511.3: clearing the restriction re-admits the non-land creature.
+        state.current_combat_attacker_restriction = None;
+        assert!(get_valid_attacker_ids(&state).contains(&plain_creature));
+        assert!(validate_attackers(&state, &[plain_creature]).is_ok());
     }
 
     /// CR 604.1: `has_potential_attackers` gates the same three per-permanent
@@ -6775,7 +7022,7 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon));
+        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon), None);
 
         // Exactly one Direction persists, and it is Right.
         assert_eq!(
@@ -6879,7 +7126,7 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Left", Some(teyo));
+        bind_named_choice(&mut state, &labeled, "Left", Some(teyo), None);
         assert_eq!(
             state.objects.get(&teyo).unwrap().chosen_direction(),
             Some(SeatDirection::Left),
@@ -6986,9 +7233,11 @@ mod tests {
         aura_obj.card_types.core_types.push(CoreType::Enchantment);
         aura_obj.attached_to = Some(attacker.into());
         aura_obj.static_definitions.push(
-            StaticDefinition::new(StaticMode::MustBeBlocked).affected(TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
-            )),
+            StaticDefinition::new(StaticMode::MustBeBlocked { by: None }).affected(
+                TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                ),
+            ),
         );
 
         state.combat = Some(CombatState {
@@ -7737,7 +7986,9 @@ mod tests {
             .get_mut(&id)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::MustBeBlocked));
+            .push(StaticDefinition::new(StaticMode::MustBeBlocked {
+                by: None,
+            }));
     }
 
     #[test]
@@ -7780,13 +8031,140 @@ mod tests {
         assert!(validate_blockers(&state, &[]).is_ok());
     }
 
+    /// Helper: a `MustBeBlocked { by: Some(<Dalek>) }` requirement on `id`
+    /// (Ace's Baseball Bat: "must be blocked by a Dalek if able").
+    fn add_must_be_blocked_by_dalek(state: &mut GameState, id: ObjectId) {
+        let dalek = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::default().subtype("Dalek".to_string()),
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustBeBlocked {
+                by: Some(dalek),
+            }));
+    }
+
+    /// CR 509.1c: the FILTERED "must be blocked by a Dalek if able" requirement
+    /// (Ace's Baseball Bat) reaches and is enforced by the declare-blockers
+    /// validator: when the defender controls an untapped Dalek able to block, the
+    /// declaration is illegal unless a Dalek is assigned — a non-Dalek block does
+    /// not satisfy the requirement. This is the runtime proof that the parsed
+    /// `MustBeBlocked { by: Some(Dalek) }` static reaches `validate_blockers`.
+    #[test]
+    fn must_be_blocked_by_subtype_requires_matching_blocker() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Ace", 3, 3);
+        add_must_be_blocked_by_dalek(&mut state, attacker);
+        let dalek = create_creature(&mut state, PlayerId(1), "Dalek Drone", 2, 2);
+        state
+            .objects
+            .get_mut(&dalek)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Dalek".to_string());
+        let non_dalek = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // No blockers: illegal — an able Dalek is left idle.
+        assert!(validate_blockers(&state, &[]).is_err());
+        // Only the non-Dalek blocks: still illegal — the requirement is unobeyed
+        // while a Dalek is able to block.
+        assert!(validate_blockers(&state, &[(non_dalek, attacker)]).is_err());
+        // The Dalek blocks: legal — the requirement is obeyed.
+        assert!(validate_blockers(&state, &[(dalek, attacker)]).is_ok());
+        // Both blockers assigned (Dalek satisfies it): legal.
+        assert!(validate_blockers(&state, &[(dalek, attacker), (non_dalek, attacker)]).is_ok());
+    }
+
+    /// CR 509.1c: a Dalek already blocking another attacker but with spare
+    /// block capacity (ExtraBlockers) is still "able" to satisfy the filtered
+    /// `MustBeBlocked { by: Some(Dalek) }` requirement. Not assigning it is
+    /// illegal; assigning it to both attackers is legal.
+    #[test]
+    fn must_be_blocked_filtered_counts_multi_blocker_spare_capacity() {
+        let mut state = setup();
+        let ace = create_creature(&mut state, PlayerId(0), "Ace's Bat", 3, 3);
+        add_must_be_blocked_by_dalek(&mut state, ace);
+        let other_attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // A Dalek with ExtraBlockers { count: Some(1) } — can block 2 creatures.
+        let dalek = create_creature(&mut state, PlayerId(1), "Dalek Drone", 2, 2);
+        state
+            .objects
+            .get_mut(&dalek)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Dalek".to_string());
+        state
+            .objects
+            .get_mut(&dalek)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: Some(1),
+            }));
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(ace, PlayerId(1)),
+                AttackerInfo::attacking_player(other_attacker, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        // Dalek blocks the other attacker but not Ace — illegal: the Dalek has
+        // spare capacity and could also block Ace.
+        assert!(
+            validate_blockers(&state, &[(dalek, other_attacker)]).is_err(),
+            "Dalek with spare capacity blocking elsewhere must still cover Ace"
+        );
+        // Dalek blocks both — legal: Dalek satisfies the filtered requirement,
+        // and its spare-capacity slot is used for the other attacker.
+        assert!(
+            validate_blockers(&state, &[(dalek, ace), (dalek, other_attacker)]).is_ok(),
+            "Dalek assigned to both attackers should be legal"
+        );
+    }
+
+    /// CR 509.1c "if able": with NO able Dalek, the filtered requirement is
+    /// satisfied vacuously — the defender may block with anything or not block.
+    #[test]
+    fn must_be_blocked_by_subtype_vacuous_when_no_dalek_able() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Ace", 3, 3);
+        add_must_be_blocked_by_dalek(&mut state, attacker);
+        // Defender controls only a non-Dalek creature.
+        let non_dalek = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // No Dalek able → requirement vacuously satisfied: an empty block is
+        // legal, and a non-Dalek block is also legal.
+        assert!(validate_blockers(&state, &[]).is_ok());
+        assert!(validate_blockers(&state, &[(non_dalek, attacker)]).is_ok());
+    }
+
     fn add_must_be_blocked_by_all(state: &mut GameState, id: ObjectId) {
         state
             .objects
             .get_mut(&id)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::MustBeBlockedByAll));
+            .push(StaticDefinition::new(StaticMode::MustBeBlockedByAll {
+                blockers: None,
+            }));
     }
 
     #[test]
@@ -7832,7 +8210,7 @@ mod tests {
         let lure = parsed
             .statics
             .into_iter()
-            .find(|s| s.mode == StaticMode::MustBeBlockedByAll)
+            .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
             .expect(
                 "parser must produce a permanent MustBeBlockedByAll static for Ochran Assassin",
             );
@@ -7886,6 +8264,487 @@ mod tests {
         // The lone untapped able blocker must block; the tapped one is exempt.
         assert!(validate_blockers(&state, &[]).is_err());
         assert!(validate_blockers(&state, &[(able, attacker)]).is_ok());
+    }
+
+    /// Install a filtered `MustBeBlockedByAll { blockers: Some(filter) }` lure on
+    /// `id` (the Talruum Piper / Marble Priest class). Mirrors
+    /// `add_must_be_blocked_by_all` but carries the blocker filter.
+    fn add_filtered_must_be_blocked_by_all(
+        state: &mut GameState,
+        id: ObjectId,
+        filter: TargetFilter,
+    ) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustBeBlockedByAll {
+                blockers: Some(filter),
+            }));
+    }
+
+    /// CR 509.1c: the flying-only lure filter (Talruum Piper: "creatures with
+    /// flying"). Structurally the shape the parser emits for that line.
+    fn flying_lure_filter() -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::WithKeyword {
+                value: Keyword::Flying,
+            }]),
+        )
+    }
+
+    /// R1 — CR 509.1c END-TO-END: Talruum Piper's "All creatures with flying able
+    /// to block ~ do so" compels ONLY fliers, not every able blocker. The static
+    /// is produced by the real parser (`parse_oracle_text`), then driven through
+    /// `validate_blockers`.
+    ///
+    /// Revert-discrimination:
+    /// - the `Some(flying)` reach-guard fails if the parser's slot-B filter is
+    ///   reverted (the mode would be `blockers: None`);
+    /// - the final `Ok` arm (assigning only the flier is legal, the non-flier is
+    ///   NOT forced) fails if the combat conjunct is reverted (an unfiltered lure
+    ///   would still force the non-flier and return `Err`).
+    #[test]
+    fn parsed_talruum_piper_flying_lure_forces_only_fliers() {
+        let parsed = crate::parser::parse_oracle_text(
+            "All creatures with flying able to block Talruum Piper do so.",
+            "Talruum Piper",
+            &[],
+            &["Creature".to_string()],
+            &["Minotaur".to_string()],
+        );
+        let lure = parsed
+            .statics
+            .into_iter()
+            .find(|s| matches!(s.mode, StaticMode::MustBeBlockedByAll { .. }))
+            .expect("parser must produce a permanent MustBeBlockedByAll static for Talruum Piper");
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Talruum Piper", 3, 3);
+        let src_id = attacker;
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(lure);
+
+        let flier = create_creature(&mut state, PlayerId(1), "Bird", 2, 2);
+        state
+            .objects
+            .get_mut(&flier)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let non_flier = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        // Reach-guard: the installed static is Some(flying) and the filter
+        // matches the flier but not the non-flier — proving both objects reach
+        // the filtered conjunct with the expected discrimination.
+        let installed = &state.objects.get(&attacker).unwrap().static_definitions[0];
+        let StaticMode::MustBeBlockedByAll { blockers: Some(f) } = &installed.mode else {
+            panic!("expected Some(filter), got {:?}", installed.mode);
+        };
+        let ctx = FilterContext::from_source(&state, src_id);
+        assert!(
+            matches_target_filter(&state, flier, f, &ctx),
+            "flier must match the flying lure filter"
+        );
+        assert!(
+            !matches_target_filter(&state, non_flier, f, &ctx),
+            "non-flier must NOT match the flying lure filter"
+        );
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // No blockers: illegal — the flier is idle, able, and matches.
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "leaving the compelled flier idle must be illegal"
+        );
+        // Blocking with only the non-flier: still illegal — the flier is idle.
+        assert!(
+            validate_blockers(&state, &[(non_flier, attacker)]).is_err(),
+            "the flier is still idle & able & matches, so this is illegal"
+        );
+        // Blocking with only the flier: legal — the non-flier is NOT forced.
+        // This arm breaks if the combat filter conjunct is reverted.
+        assert!(
+            validate_blockers(&state, &[(flier, attacker)]).is_ok(),
+            "the non-flier is not compelled, so blocking with only the flier is legal"
+        );
+    }
+
+    /// CR 509.1c + CR 611.2c + CR 109.5 (PR #5131 [MED] follow-up): the ONE-SHOT
+    /// filtered lure — You Look Upon the Tarrasque, "All creatures your opponents
+    /// control able to block that creature this turn do so" — must evaluate its
+    /// controller-relative "your opponents" filter relative to the SPELL
+    /// controller (the caster), NOT the target creature's controller. The
+    /// one-shot grafts a `MustBeBlockedByAll { blockers: Some(Opponent) }` static
+    /// onto the TARGET permanent via `AddStaticMode`. Without the
+    /// `source_controller` anchor snapshotted at graft time, combat re-derives
+    /// the filter context from the target's controller, so casting the spell on
+    /// an opponent's creature compels the CASTER's own creatures (wrong).
+    ///
+    /// Revert-discrimination: `caster_creature` is P0's own creature. Buggy
+    /// anchor (`from_source(target)` → source_controller = P1) makes P0 an
+    /// "opponent" of P1, wrongly compelling `caster_creature`, so
+    /// `validate_blockers(&state, &[]).is_err()`. Fixed anchor (P0) means P0 is
+    /// not its own opponent, `caster_creature` is not compelled, and the empty
+    /// declaration is legal. The `is_ok()` arm flips to `is_err()` on revert.
+    #[test]
+    fn parsed_tarrasque_one_shot_lure_evaluates_opponents_from_caster_seat() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetRef};
+
+        // 3-player state: P0 caster, P1 target-controller, P2 other opponent.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1); // P1 is the attacking player
+
+        // The target of the spell: a creature P1 controls.
+        let target = create_creature(&mut state, PlayerId(1), "Lured Attacker", 3, 3);
+        // P0's own creature — must NOT be compelled (P0 is the caster, not its
+        // own opponent).
+        let caster_creature = create_creature(&mut state, PlayerId(0), "Caster's Bear", 2, 2);
+        // P2's creature — a genuine opponent-of-P0, used as the multiplayer
+        // reach-guard (must match the "your opponents" filter from P0's seat).
+        let p2_creature = create_creature(&mut state, PlayerId(2), "Rival's Bear", 2, 2);
+
+        // Production parse of the real Oracle text (verbatim; matches
+        // oracle_effect/tests.rs `mass_forced_block_filtered_opponents_control`).
+        let mut effect = crate::parser::oracle_effect::parse_effect(
+            "All creatures your opponents control able to block that creature this turn do so",
+        );
+        // Pin the grafted static to the specific target creature (the subject
+        // "that creature" resolves to the declared target); the inner
+        // AddStaticMode blockers:Some(Typed{Opponent}) is left intact.
+        match &mut effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                for sd in static_abilities.iter_mut() {
+                    sd.affected = Some(TargetFilter::SpecificObject { id: target });
+                }
+            }
+            other => panic!("expected GenericEffect from parser, got {other:?}"),
+        }
+
+        // Resolve as a spell cast by P0 targeting P1's creature, then materialize
+        // the transient continuous effect onto the target's static_definitions.
+        let ability =
+            ResolvedAbility::new(effect, vec![TargetRef::Object(target)], target, PlayerId(0))
+                .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        // Anchor reach-guard: the grafted static on the target carries the
+        // installing player (P0) as its source_controller.
+        let installed = state
+            .objects
+            .get(&target)
+            .unwrap()
+            .static_definitions
+            .iter_all()
+            .find(|sd| matches!(sd.mode, StaticMode::MustBeBlockedByAll { .. }))
+            .expect("grafted MustBeBlockedByAll must be installed on the target");
+        assert_eq!(
+            installed.source_controller,
+            Some(PlayerId(0)),
+            "grafted one-shot lure must snapshot the spell controller (P0) as anchor"
+        );
+        let StaticMode::MustBeBlockedByAll { blockers: Some(f) } = &installed.mode else {
+            panic!("expected Some(filter), got {:?}", installed.mode);
+        };
+        let f = f.clone();
+
+        // Context divergence reach-guard: the fixed context (anchored to P0)
+        // compels P2's creature (a real opponent of P0) but NOT P0's own; the
+        // buggy context (anchored to the target's controller P1) instead compels
+        // P0's creature. This isolates the fix to exactly the anchor.
+        let ctx_fixed = FilterContext::from_source_with_controller(target, PlayerId(0));
+        assert!(
+            matches_target_filter(&state, p2_creature, &f, &ctx_fixed),
+            "from P0's seat, P2's creature is an opponent's creature"
+        );
+        assert!(
+            !matches_target_filter(&state, caster_creature, &f, &ctx_fixed),
+            "from P0's seat, P0's own creature is NOT an opponent's creature"
+        );
+        let ctx_buggy = FilterContext::from_source(&state, target);
+        assert!(
+            matches_target_filter(&state, caster_creature, &f, &ctx_buggy),
+            "the buggy target-anchored context wrongly counts P0 as an opponent-of-P1"
+        );
+
+        // Geometry: P1's creature attacks P0, so P0 is the defending player and
+        // P0's own `caster_creature` is the candidate blocker under scrutiny.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(target, PlayerId(0))],
+            ..Default::default()
+        });
+
+        // Revert-failing assertion: with the correct anchor (P0), P0's own
+        // creature is NOT compelled, so declaring no blockers is legal. On revert
+        // the buggy anchor (P1) would compel `caster_creature` and this flips to
+        // Err.
+        assert!(
+            validate_blockers(&state, &[]).is_ok(),
+            "the caster's own creature must not be compelled by 'your opponents' evaluated from the caster's seat"
+        );
+    }
+
+    /// CR 611.2c + CR 509.1c (PR #5131 [MED] follow-up): two DIFFERENT casters
+    /// applying the SAME controller-relative one-shot lure ("All creatures your
+    /// opponents control able to block that creature this turn do so") to ONE
+    /// target must each install a distinct static requirement. Both grafts
+    /// produce an identical `MustBeBlockedByAll { blockers: Some(Opponent) }`
+    /// mode, but carry different `source_controller` anchors (each anchor a
+    /// separate CR 509.1c requirement — one "your opponents" set per caster).
+    /// The `AddStaticMode` idempotency guard keys on the FULL grafted definition
+    /// (`sd == &def`), so the second caster's anchor is NOT collapsed by a
+    /// mode-only dedup.
+    ///
+    /// Geometry (discriminates the second anchor): the target T (controlled by
+    /// P1) attacks P0, so P0 is the defending player. The candidate blocker C is
+    /// P0's OWN creature — an opponent of P2 but NOT of P0. P0's own anchor does
+    /// NOT compel C (P0 is not its own opponent); only P2's surviving anchor
+    /// compels C. So C left idle makes the empty declaration illegal purely on
+    /// P2's anchor.
+    ///
+    /// Revert-discrimination against a mode-only guard (`sd.mode ==
+    /// resolved_mode`): under that buggy guard P2's install is dropped (same
+    /// mode as P0's already-installed static), so only ONE anchor (P0) survives.
+    /// Then C is uncompelled and `validate_blockers(&[])` returns Ok.
+    /// - Assertion #1 (two distinct anchors present) fails: only Some(P0) exists.
+    /// - Assertion #2 (`validate_blockers(&[]).is_err()`) flips to Ok and fails.
+    #[test]
+    fn two_casters_same_lure_on_one_target_each_anchor_enforced() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetRef};
+
+        // 3-player FFA: P0 = caster A, P2 = caster B, P1 = target's controller.
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1); // P1 is the attacking player.
+
+        // The single lure target: a creature P1 controls that will attack P0.
+        let target = create_creature(&mut state, PlayerId(1), "Lured Attacker", 3, 3);
+        // Candidate blocker C: P0's OWN creature. Opponent-of-P2 but not of P0,
+        // so it is compelled ONLY by P2's anchor. It can legally block T (T
+        // attacks P0, C is controlled by the defending player P0).
+        let caster_a_creature = create_creature(&mut state, PlayerId(0), "A's Bear", 2, 2);
+
+        // Build one production `AddStaticMode` graft for a given caster seat,
+        // driven through the REAL resolve → evaluate_layers pipeline (verbatim
+        // Oracle text), pinned to the single target `target`.
+        let resolve_lure_from = |state: &mut GameState, caster: PlayerId| {
+            let mut effect = crate::parser::oracle_effect::parse_effect(
+                "All creatures your opponents control able to block that creature this turn do so",
+            );
+            match &mut effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    for sd in static_abilities.iter_mut() {
+                        sd.affected = Some(TargetFilter::SpecificObject { id: target });
+                    }
+                }
+                other => panic!("expected GenericEffect from parser, got {other:?}"),
+            }
+            let ability =
+                ResolvedAbility::new(effect, vec![TargetRef::Object(target)], target, caster)
+                    .duration(Duration::UntilEndOfTurn);
+            resolve(state, &ability, &mut Vec::new()).unwrap();
+            evaluate_layers(state);
+        };
+
+        // Caster A (P0) then caster B (P2) each resolve the same lure on T. Both
+        // grafts flow through the same `AddStaticMode` idempotency guard.
+        resolve_lure_from(&mut state, PlayerId(0));
+        resolve_lure_from(&mut state, PlayerId(2));
+
+        // Assertion #1 — two distinct anchors coexist on the target. Under the
+        // mode-only guard the second (P2) install is dropped as a duplicate mode,
+        // leaving only Some(P0); this assertion then fails.
+        let anchors: std::collections::HashSet<Option<PlayerId>> = state
+            .objects
+            .get(&target)
+            .unwrap()
+            .static_definitions
+            .iter_all()
+            .filter(|sd| matches!(sd.mode, StaticMode::MustBeBlockedByAll { .. }))
+            .map(|sd| sd.source_controller)
+            .collect();
+        assert!(
+            anchors.contains(&Some(PlayerId(0))) && anchors.contains(&Some(PlayerId(2))),
+            "both caster anchors must persist: expected Some(P0) and Some(P2), got {anchors:?}"
+        );
+        assert_eq!(
+            anchors.len(),
+            2,
+            "exactly the two distinct caster anchors (no collapse, no multiplication), got {anchors:?}"
+        );
+
+        // Geometry: T (P1's creature) attacks P0, so P0 is the defending player
+        // and P0's own `caster_a_creature` is the candidate blocker.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(target, PlayerId(0))],
+            ..Default::default()
+        });
+
+        // Positive reach-guard: C actually CAN legally block T, so any Err below
+        // is a compulsion, not an unrelated block restriction.
+        assert!(
+            can_block_pair(&state, caster_a_creature, target),
+            "P0's own creature must be able to legally block the attacker"
+        );
+
+        // Assertion #2 (the behavioral one) — with C idle, the declaration is
+        // illegal, driven SOLELY by P2's surviving anchor (C is not compelled by
+        // P0's own anchor). Under the mode-only guard P2's anchor is dropped, C
+        // is uncompelled, and this returns Ok → the assertion fails on revert.
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "P0's own creature is compelled by caster B (P2)'s 'your opponents' anchor and must not be left idle"
+        );
+
+        // Attribution control: assigning C to block T satisfies P2's anchor, and
+        // no other creature is compelled here (P0's anchor compels none of P0's
+        // own creatures), so the declaration becomes legal. This proves the Err
+        // above was C's compulsion under P2's anchor specifically.
+        assert!(
+            validate_blockers(&state, &[(caster_a_creature, target)]).is_ok(),
+            "assigning P0's compelled creature to the attacker satisfies P2's anchor and is legal"
+        );
+    }
+
+    /// H1 — CR 509.1c: two disjoint filtered lures on two attackers are each
+    /// honored against their own filter. Piper compels fliers; a Wall-lure compels
+    /// Walls. A declaration is legal only when every compelled creature blocks its
+    /// own lure.
+    #[test]
+    fn two_disjoint_filtered_lures_each_honored() {
+        let mut state = setup();
+        let piper = create_creature(&mut state, PlayerId(0), "Talruum Piper", 3, 3);
+        add_filtered_must_be_blocked_by_all(&mut state, piper, flying_lure_filter());
+        let wall_lure = create_creature(&mut state, PlayerId(0), "Marble Priest", 2, 2);
+        add_filtered_must_be_blocked_by_all(
+            &mut state,
+            wall_lure,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Subtype(
+                    "Wall".to_string(),
+                )],
+                controller: None,
+                properties: vec![],
+            }),
+        );
+
+        let flier = create_creature(&mut state, PlayerId(1), "Bird", 2, 2);
+        state
+            .objects
+            .get_mut(&flier)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let wall = create_creature(&mut state, PlayerId(1), "Wall of Stone", 0, 8);
+        state
+            .objects
+            .get_mut(&wall)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Wall".to_string());
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(piper, PlayerId(1)),
+                AttackerInfo::attacking_player(wall_lure, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        // Neither compelled creature blocks its lure: illegal.
+        assert!(validate_blockers(&state, &[]).is_err());
+        // Flier blocks Piper but Wall doesn't block its lure: still illegal.
+        assert!(validate_blockers(&state, &[(flier, piper)]).is_err());
+        // Each compelled creature blocks its own lure: legal.
+        assert!(
+            validate_blockers(&state, &[(flier, piper), (wall, wall_lure)]).is_ok(),
+            "each compelled creature blocking its own lure must be legal"
+        );
+    }
+
+    /// H2 — CR 509.1c "able to": when the only filter-matching creature is tapped,
+    /// the filtered lure is vacuously satisfied (an empty block is legal).
+    #[test]
+    fn filtered_lure_with_only_tapped_match_is_vacuously_ok() {
+        let mut state = setup();
+        let piper = create_creature(&mut state, PlayerId(0), "Talruum Piper", 3, 3);
+        add_filtered_must_be_blocked_by_all(&mut state, piper, flying_lure_filter());
+
+        let tapped_flier = create_creature(&mut state, PlayerId(1), "Bird", 2, 2);
+        {
+            let obj = state.objects.get_mut(&tapped_flier).unwrap();
+            obj.keywords.push(Keyword::Flying);
+            obj.tapped = true;
+        }
+        // A non-flier is untapped but not compelled.
+        let _non_flier = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(piper, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // The only flier is tapped (not "able"), so no creature is compelled.
+        assert!(
+            validate_blockers(&state, &[]).is_ok(),
+            "a tapped-only match leaves the filtered lure vacuously satisfied"
+        );
+    }
+
+    /// H3 — CR 509.1c: a non-matching idle creature is never forced by a filtered
+    /// lure. With no flier on board at all, blocking with nothing is legal even
+    /// though an able non-flier is idle.
+    #[test]
+    fn filtered_lure_never_forces_non_matching_idle_creature() {
+        let mut state = setup();
+        let piper = create_creature(&mut state, PlayerId(0), "Talruum Piper", 3, 3);
+        add_filtered_must_be_blocked_by_all(&mut state, piper, flying_lure_filter());
+        // Only a non-flier is available.
+        let _non_flier = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(piper, PlayerId(1))],
+            ..Default::default()
+        });
+
+        assert!(
+            validate_blockers(&state, &[]).is_ok(),
+            "a non-matching idle creature is never compelled by the filtered lure"
+        );
+    }
+
+    /// C1 — coverage: both the unfiltered (`None`) and filtered (`Some`) shapes of
+    /// `MustBeBlockedByAll` are data-carrying statics (coverage via
+    /// `is_data_carrying_static`, not the registry).
+    #[test]
+    fn must_be_blocked_by_all_both_shapes_are_data_carrying() {
+        use crate::game::coverage::is_data_carrying_static;
+        assert!(is_data_carrying_static(&StaticMode::MustBeBlockedByAll {
+            blockers: None
+        }));
+        assert!(is_data_carrying_static(&StaticMode::MustBeBlockedByAll {
+            blockers: Some(flying_lure_filter())
+        }));
     }
 
     #[test]
@@ -8034,10 +8893,10 @@ mod tests {
         let attacker = create_creature(&mut state, PlayerId(0), "Lure Beast", 3, 3);
         let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
-        let static_def = StaticDefinition::new(StaticMode::MustBeBlocked)
+        let static_def = StaticDefinition::new(StaticMode::MustBeBlocked { by: None })
             .affected(TargetFilter::SpecificObject { id: attacker })
             .modifications(vec![ContinuousModification::AddStaticMode {
-                mode: StaticMode::MustBeBlocked,
+                mode: StaticMode::MustBeBlocked { by: None },
             }]);
         let ability = ResolvedAbility::new(
             Effect::GenericEffect {

@@ -38,9 +38,9 @@ use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_p
 use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
-    DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, ThisWayCause, TypeFilter,
-    TypedFilter, ZoneRef,
+    DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
+    ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -331,7 +331,47 @@ pub(crate) fn parse_quantity_ref_with_context(
                 return Some(QuantityRef::TrackedSetAggregate {
                     function: func,
                     property: prop,
+                    source: TrackedAnaphorSource::ChainSet,
                 });
+            }
+        }
+        // CR 608.2c + CR 603.2c + CR 603.10a: batched-dies-trigger anaphor. In a
+        // batched "whenever one or more creatures … die" trigger, "those
+        // creatures" references the triggering event batch (its dying subjects),
+        // NOT a live zone filter or a chain-published set. Matched before
+        // `parse_type_phrase_with_ctx` so the anaphor isn't mis-read as a type
+        // phrase (bare "creatures" would otherwise parse as a filter).
+        //
+        // Scoped narrowly because this parser is context-free and cannot see
+        // whether the enclosing ability is a batched *dies* trigger:
+        //   * "those creatures" ONLY (not "those cards"/"those permanents").
+        //     "those cards" is overloaded — it also names a mill set ("you mill
+        //     three cards, then … the total mana value of those cards":
+        //     Combustible Gearhulk, Palantír of Orthanc) or a chosen target set
+        //     (Command the Dreadhorde), where TriggeringBatch resolves to the
+        //     wrong/empty event set.
+        //   * Sum ("the total <prop> OF those creatures") ONLY, never Max/Min
+        //     ("the greatest <prop> AMONG those creatures"). The "greatest …
+        //     among those creatures" idiom is an ATTACK batch (Shriekwood
+        //     Devourer: "whenever you attack with one or more creatures … the
+        //     greatest power among those creatures"), whose multi-attacker
+        //     `AttackersDeclared` fan-out `extract_source_from_event` does not yet
+        //     resolve (it collapses >1 attacker to `None`). Plan §8 defers attack
+        //     batches; mapping it here would silently resolve to 0.
+        // With both gates, the sole card enabled is The Skullspore Nexus (Benthic
+        // Anomaly / Dracoplasm route their "those creatures" through the
+        // copy/"becomes" paths, not this quantity parser) — measured.
+        if matches!(func, AggregateFunction::Sum) {
+            if let Ok((anaphor_rest, _)) =
+                tag::<_, _, OracleError<'_>>("those creatures").parse(rest)
+            {
+                if anaphor_rest.trim().is_empty() {
+                    return Some(QuantityRef::TrackedSetAggregate {
+                        function: func,
+                        property: prop,
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                    });
+                }
             }
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
@@ -424,33 +464,15 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
-        // CR 104.3: "players who have lost the game" (Rampant Frogantua quantity form).
-        if let Ok((remainder, ())) = value(
-            (),
-            (
-                alt((
-                    tag::<_, _, OracleError<'_>>("players who have "),
-                    tag("player who has "),
-                )),
-                tag("lost the game"),
-            ),
-        )
-        .parse(rest)
-        {
-            if remainder.trim().is_empty() {
-                return Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::HasLostTheGame,
-                });
-            }
-        }
-        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage
-        // [this turn]". The trailing " this turn" suffix is optional because
-        // upstream callers may strip durations before this parser sees the
-        // phrase. PlayerCount{OpponentDealtCombatDamage} is inherently scoped
-        // to this turn through `state.damage_dealt_this_turn`.
-        if let Ok((_, source)) = parse_opponent_dealt_combat_damage_clause(rest) {
+        // CR 120.1 + CR 510.1 + CR 120.2a/120.2b: "opponents that were dealt
+        // [combat|noncombat] damage [this turn]". The trailing " this turn"
+        // suffix is optional because upstream callers may strip durations before
+        // this parser sees the phrase. PlayerCount{OpponentDealtDamage} is
+        // inherently scoped to this turn through `state.damage_dealt_this_turn`.
+        if let Ok((_, (kind, source))) = parse_opponent_dealt_damage_clause(rest) {
             return Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind,
                     source: source.map(Box::new),
                 },
             });
@@ -1253,23 +1275,35 @@ fn parse_counters_removed_phrase(input: &str) -> nom::IResult<&str, (), OracleEr
     Ok((input, ()))
 }
 
-/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Parse "[your] opponents who were
-/// dealt combat damage [by <source>] [this turn]" into the optional source
-/// filter. Returns `Ok((_, None))` for the unfiltered class (Tymna the Weaver,
-/// Moonshae Pixie) and `Ok((_, Some(f)))` for a `by <source>` restriction
-/// (Estinien Varlineau: "by ~ or a Dragon" → `Or[SelfRef, Typed{Dragon}]`).
-/// `Err` means the clause did not match. The whole clause must be consumed
-/// (explicit `eof`) so trailing unrecognized text doesn't silently drop.
-fn parse_opponent_dealt_combat_damage_clause(
+/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Parse "[your]
+/// opponents who were dealt [combat|noncombat] damage [by <source>] [this turn]"
+/// into the `(DamageKindFilter, Option<TargetFilter>)` pair. The damage-kind
+/// axis is parameterized: "combat damage" → `CombatOnly` (Tymna the Weaver),
+/// "noncombat damage" → `NoncombatOnly`, bare "damage" → `Any` (Furious
+/// Spinesplitter, You've Been Caught Stealing). Source `None` = unfiltered;
+/// `Some(f)` = a `by <source>` restriction (Estinien Varlineau: "by ~ or a
+/// Dragon" → `Or[SelfRef, Typed{Dragon}]`). `Err` means the clause did not
+/// match. The whole clause must be consumed (explicit `eof`) so trailing
+/// unrecognized text doesn't silently drop.
+fn parse_opponent_dealt_damage_clause(
     input: &str,
-) -> OracleResult<'_, Option<TargetFilter>> {
+) -> OracleResult<'_, (DamageKindFilter, Option<TargetFilter>)> {
     let (input, _) = opt(tag("your ")).parse(input)?;
     let (input, _) = alt((tag("opponents"), tag("opponent"))).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     let (input, _) = alt((tag("that"), tag("who"))).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     let (input, _) = alt((tag("were"), tag("was"))).parse(input)?;
-    let (input, _) = tag(" dealt combat damage").parse(input)?;
+    let (input, _) = tag(" dealt ").parse(input)?;
+    // CR 120.2a/120.2b: the damage-kind literal. Order matters — the
+    // combat/noncombat qualifiers precede the bare "damage" so they win; the
+    // three literals start with c/n/d, so no prefix collision.
+    let (input, kind) = alt((
+        value(DamageKindFilter::CombatOnly, tag("combat damage")),
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat damage")),
+        value(DamageKindFilter::Any, tag("damage")),
+    ))
+    .parse(input)?;
     // CR 120.9: optional "by <source>" restriction. The source phrase is
     // isolated from the optional trailing " this turn" with a combinator
     // (`take_until` / `eof`), then parsed via the `parse_target` + " or " +
@@ -1277,7 +1311,7 @@ fn parse_opponent_dealt_combat_damage_clause(
     let (input, source) = opt(preceded(tag(" by "), parse_damage_source_chain)).parse(input)?;
     let (input, _) = opt(tag(" this turn")).parse(input)?;
     let (input, _) = eof.parse(input)?;
-    Ok((input, source))
+    Ok((input, (kind, source)))
 }
 
 /// CR 120.9 + CR 608.2i: Parse a damage-source phrase ("~", "a Dragon", "~ or a
@@ -2702,16 +2736,6 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
-    // CR 106.1 + CR 109.1: "color among [type-phrase]" — distinct colors among
-    // matching objects. Used by Faeburrow Elder's "+1/+1 for each color among
-    // permanents you control" and by the Converge mechanic adjacent class.
-    if let Ok((after_among, _)) = tag::<_, _, OracleError<'_>>("color among ").parse(clause) {
-        let (filter, remainder) = parse_type_phrase(after_among);
-        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Some(QuantityRef::DistinctColorsAmongPermanents { filter });
-        }
-    }
-
     if let Ok((rest, (relation, action))) = parse_optional_offer_accepted_clause(clause) {
         if rest.is_empty() {
             return Some(QuantityRef::PlayerCount {
@@ -2806,13 +2830,6 @@ fn parse_for_each_clause_with_they_controller(
         return Some(QuantityRef::TrackedSetSize);
     }
 
-    // "opponent who lost life this turn"
-    if clause.contains("opponent") && clause.contains("lost life") {
-        return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentLostLife,
-        });
-    }
-
     // CR 121.1 / CR 403.3: "opponent who drew N or more cards this turn" and
     // "opponent who had N or more [type] enter the battlefield under their
     // control this turn" (Smuggler's Share class).
@@ -2820,56 +2837,14 @@ fn parse_for_each_clause_with_they_controller(
         return Some(qty);
     }
 
-    // "opponent who gained life this turn"
-    if clause.contains("opponent") && clause.contains("gained life") {
+    // CR 120.1 + CR 510.1 + CR 120.2a/120.2b: "opponent that was dealt
+    // [combat|noncombat] damage this turn" / "opponent who was dealt ... damage
+    // this turn". Mirrors the lost-life / gained-life arms above, but consumes
+    // the full clause instead of doing substring dispatch.
+    if let Ok((_, (kind, source))) = parse_opponent_dealt_damage_clause(clause) {
         return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentGainedLife,
-        });
-    }
-
-    // CR 104.3: "player(s) who have/has lost the game" (Rampant Frogantua).
-    if let Some(((), rest)) = nom_on_lower(clause, clause, |i| {
-        value(
-            (),
-            (
-                alt((tag("player "), tag("players "))),
-                alt((tag("who "), tag("that "))),
-                alt((tag("has "), tag("have "))),
-                tag("lost the game"),
-            ),
-        )
-        .parse(i)
-    }) {
-        if rest.is_empty() {
-            return Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            });
-        }
-    }
-
-    // CR 106.4: "unspent [color] mana you have" (Omnath, Locus of Mana) — the
-    // amount of floating mana of that color (or any color) in the controller's
-    // pool. A bare color word is optional, so "unspent mana you have" counts
-    // all colors.
-    if let Some((color, rest)) = nom_on_lower(clause, clause, |i| {
-        let (i, _) = tag::<_, _, OracleError<'_>>("unspent ").parse(i)?;
-        let (i, color) = opt(nom_primitives::parse_color).parse(i)?;
-        let (i, _) = opt(tag::<_, _, OracleError<'_>>(" ")).parse(i)?;
-        let (i, _) = tag::<_, _, OracleError<'_>>("mana you have").parse(i)?;
-        Ok((i, color))
-    }) {
-        if rest.trim().is_empty() {
-            return Some(QuantityRef::UnspentMana { color });
-        }
-    }
-
-    // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
-    // / "opponent who was dealt combat damage this turn". Mirrors the
-    // lost-life / gained-life arms above, but consumes the full clause instead
-    // of doing substring dispatch.
-    if let Ok((_, source)) = parse_opponent_dealt_combat_damage_clause(clause) {
-        return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentDealtCombatDamage {
+            filter: PlayerFilter::OpponentDealtDamage {
+                kind,
                 source: source.map(Box::new),
             },
         });
@@ -3067,8 +3042,16 @@ fn for_each_anaphor_context(ctx: &ParseContext, they_controller: &ControllerRef)
 /// only needing the count. This preserves object identity for patterns such as
 /// "for each token you control that entered this turn, create a token that's a
 /// copy of it".
+#[allow(dead_code)]
 pub(crate) fn parse_for_each_object_filter_clause(clause: &str) -> Option<TargetFilter> {
-    match parse_for_each_clause(clause)? {
+    parse_for_each_object_filter_clause_with_context(clause, &ParseContext::default())
+}
+
+pub(crate) fn parse_for_each_object_filter_clause_with_context(
+    clause: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    match parse_for_each_clause_with_context(clause, ctx)? {
         QuantityRef::ObjectCount { filter } => Some(filter),
         QuantityRef::EnteredThisTurn { filter } => {
             Some(add_filter_property(filter, FilterProp::EnteredThisTurn))
@@ -3164,7 +3147,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
-        RoundingMode, TypeFilter, TypedFilter,
+        RoundingMode, SubtypeExclusion, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -3639,9 +3622,56 @@ mod tests {
             assert_eq!(
                 parse_for_each_clause(phrase),
                 Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }),
-                "phrase {phrase:?} must consume as OpponentDealtCombatDamage"
+                "phrase {phrase:?} must consume as OpponentDealtDamage{{CombatOnly}}"
+            );
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_dealt_any_damage_is_player_count_any() {
+        // CR 120.2a/120.2b: bare "damage" (no combat/noncombat qualifier) →
+        // DamageKindFilter::Any. Furious Spinesplitter, You've Been Caught
+        // Stealing. Positive reach-guard: the phrase resolves to a PlayerCount
+        // over the OpponentDealtDamage filter (not None / a Fixed fall-through).
+        for phrase in [
+            "opponent that was dealt damage this turn",
+            "opponent who was dealt damage this turn",
+            "opponents who were dealt damage",
+        ] {
+            assert_eq!(
+                parse_for_each_clause(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::Any,
+                        source: None
+                    },
+                }),
+                "phrase {phrase:?} must consume as OpponentDealtDamage{{Any}}"
+            );
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_dealt_noncombat_damage_is_player_count_noncombat() {
+        // CR 120.2b: "noncombat damage" qualifier → DamageKindFilter::NoncombatOnly.
+        for phrase in [
+            "opponent that was dealt noncombat damage this turn",
+            "opponents who were dealt noncombat damage",
+        ] {
+            assert_eq!(
+                parse_for_each_clause(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::NoncombatOnly,
+                        source: None
+                    },
+                }),
+                "phrase {phrase:?} must consume as OpponentDealtDamage{{NoncombatOnly}}"
             );
         }
     }
@@ -4429,7 +4459,7 @@ mod tests {
 
     /// CR 120.1 + CR 510.1: Tymna the Weaver — "the number of opponents that
     /// were dealt combat damage this turn" must route to the dedicated
-    /// `PlayerCount { OpponentDealtCombatDamage }` and NOT fall through into
+    /// `PlayerCount { OpponentDealtDamage }` and NOT fall through into
     /// the generic type-phrase fallback that produces an empty `ObjectCount`
     /// (the latter matched every battlefield object and drained the deck).
     #[test]
@@ -4441,14 +4471,17 @@ mod tests {
             qty,
             QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }
             }
         );
     }
 
     /// Symmetric singular form ("opponent that was dealt combat damage this
-    /// turn") must hit the same `PlayerFilter::OpponentDealtCombatDamage` arm.
+    /// turn") must hit the same `PlayerFilter::OpponentDealtDamage` arm.
     #[test]
     fn cda_quantity_opponent_singular_dealt_combat_damage() {
         let qty =
@@ -4458,7 +4491,10 @@ mod tests {
             qty,
             QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }
             }
         );
@@ -4467,11 +4503,11 @@ mod tests {
     /// CR 120.1 + CR 510.1: Upstream `strip_trailing_duration` removes the
     /// "this turn" suffix before the draw-count parser path reaches
     /// `parse_quantity_ref`. The phrase must still resolve to
-    /// `PlayerFilter::OpponentDealtCombatDamage` without the suffix —
+    /// `PlayerFilter::OpponentDealtDamage` without the suffix —
     /// otherwise cards like Moonshae Pixie ("draw cards equal to the number
     /// of opponents who were dealt combat damage this turn") regress to
     /// `Effect::Unimplemented`. The "this turn" tail is informational at
-    /// this layer: `PlayerCount{OpponentDealtCombatDamage}` already queries
+    /// this layer: `PlayerCount{OpponentDealtDamage}` already queries
     /// `state.damage_dealt_this_turn`.
     #[test]
     fn cda_quantity_opponents_dealt_combat_damage_strip_suffix() {
@@ -4487,10 +4523,13 @@ mod tests {
                 qty,
                 QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                        filter: PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
+                            source: None
+                        },
                     }
                 },
-                "phrase {phrase:?} must route to OpponentDealtCombatDamage",
+                "phrase {phrase:?} must route to OpponentDealtDamage",
             );
         }
     }
@@ -4511,7 +4550,8 @@ mod tests {
         assert_eq!(
             qty,
             QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(TargetFilter::Or {
                         filters: vec![
                             TargetFilter::SelfRef,
@@ -4536,7 +4576,8 @@ mod tests {
         assert_eq!(
             qty,
             QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(TargetFilter::SelfRef)),
                 },
             }
@@ -4556,9 +4597,12 @@ mod tests {
             assert_eq!(
                 parse_quantity_ref(phrase),
                 Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                    filter: PlayerFilter::OpponentDealtDamage {
+                        kind: DamageKindFilter::CombatOnly,
+                        source: None
+                    },
                 }),
-                "phrase {phrase:?} must parse to unfiltered OpponentDealtCombatDamage"
+                "phrase {phrase:?} must parse to unfiltered OpponentDealtDamage"
             );
         }
     }
@@ -4744,10 +4788,11 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: TrackedAnaphorSource::ChainSet,
                     }
                 }
             ),
-            "expected TrackedSetAggregate(Sum, ManaValue), got {qty:?}"
+            "expected TrackedSetAggregate(Sum, ManaValue, ChainSet), got {qty:?}"
         );
 
         // The "the exiled cards" anaphor variant maps to the same set.
@@ -4759,10 +4804,56 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: TrackedAnaphorSource::ChainSet,
                     }
                 }
             ),
-            "expected TrackedSetAggregate(Sum, ManaValue) for 'the exiled cards', got {qty2:?}"
+            "expected TrackedSetAggregate(Sum, ManaValue, ChainSet) for 'the exiled cards', got {qty2:?}"
+        );
+    }
+
+    #[test]
+    fn cda_quantity_total_power_of_those_creatures_is_triggering_batch_aggregate() {
+        // CR 603.2c + CR 603.10a + CR 608.2c: the batched-trigger anaphor "those
+        // creatures" aggregates the total power over the CURRENT triggering event
+        // batch (the nontoken creatures that died this trigger), NOT a live zone
+        // filter or the chain-published tracked set. Baseline was `None` (measured
+        // before this change); this drives The Skullspore Nexus's dies trigger.
+        let qty = parse_cda_quantity("the total power of those creatures")
+            .expect("'the total power of those creatures' must now parse (was None)");
+        assert!(
+            matches!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                    }
+                }
+            ),
+            "expected TrackedSetAggregate(Sum, Power, TriggeringBatch), got {qty:?}"
+        );
+
+        // Scoping guard: the overloaded "those cards" form must NOT map to the
+        // triggering batch. It also names mill sets ("you mill three cards, then
+        // … the total mana value of those cards": Combustible Gearhulk, Palantír
+        // of Orthanc) and chosen target sets (Command the Dreadhorde), where a
+        // context-free TriggeringBatch mapping is a rules-incorrect misparse.
+        // Keep it out of the batch anaphor until a trigger-context-gated pass.
+        let cards = parse_cda_quantity("the total mana value of those cards");
+        assert!(
+            !matches!(
+                cards,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetAggregate {
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                        ..
+                    }
+                })
+            ),
+            "'those cards' must NOT map to a TriggeringBatch aggregate (overloaded \
+             mill/chosen anaphor), got {cards:?}"
         );
     }
 
@@ -5805,23 +5896,6 @@ mod tests {
         );
     }
 
-    /// CR 106.1 + CR 109.1: "for each color among permanents you control" must
-    /// lower to `DistinctColorsAmongPermanents`, not `ObjectCount` over a bogus
-    /// "color" subject. Faeburrow Elder class.
-    #[test]
-    fn for_each_color_among_permanents() {
-        let qty = parse_for_each_clause("color among permanents you control").unwrap();
-        match qty {
-            QuantityRef::DistinctColorsAmongPermanents { filter } => {
-                assert!(
-                    matches!(filter, TargetFilter::Typed(_)),
-                    "expected Typed filter, got {filter:?}"
-                );
-            }
-            other => panic!("Expected DistinctColorsAmongPermanents, got {other:?}"),
-        }
-    }
-
     /// CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it"
     /// lowers to `ObjectCount` over a filter that includes `FilterProp::Counters`,
     /// not `CountersOnSelf` over a bogus counter-type string. Inspiring Call class.
@@ -6369,49 +6443,6 @@ mod tests {
                 },
             }),
             "milled card's mana value must resolve to ObjectManaValue{{CostPaidObject}}"
-        );
-    }
-
-    /// CR 119.3 + CR 700.1: "for each of your opponents who lost life this
-    /// turn" → `PlayerCount { OpponentLostLife }` (Belbe, Corrupted Observer).
-    #[test]
-    fn parse_for_each_opponents_who_lost_life() {
-        let qty = parse_for_each_clause("of your opponents who lost life this turn")
-            .expect("for-each opponent-lost-life clause must parse");
-        assert_eq!(
-            qty,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentLostLife,
-            }
-        );
-        let gained = parse_for_each_clause("opponents who gained life this turn")
-            .expect("for-each opponent-gained-life clause must parse");
-        assert_eq!(
-            gained,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentGainedLife,
-            }
-        );
-    }
-
-    /// CR 104.3: "for each player who has lost the game" (Rampant Frogantua).
-    #[test]
-    fn parse_for_each_player_who_has_lost_the_game() {
-        let qty = parse_for_each_clause("player who has lost the game")
-            .expect("lost-game for-each clause must parse");
-        assert_eq!(
-            qty,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            }
-        );
-        let number = parse_quantity_ref("the number of players who have lost the game")
-            .expect("lost-game number-of clause must parse");
-        assert_eq!(
-            number,
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::HasLostTheGame,
-            }
         );
     }
 
@@ -7244,5 +7275,106 @@ mod tests {
                 },
             }
         );
+    }
+
+    // --- CDA counted-quantity refs (Control Win Condition, Subgoyf) ---
+
+    fn ref_of(qty: QuantityRef) -> Option<QuantityExpr> {
+        Some(QuantityExpr::Ref { qty })
+    }
+
+    /// CR 500: Control Win Condition — "the number of turns you've taken this
+    /// game" resolves to the per-player `TurnsTaken` ref (parser gap before this
+    /// change: the CDA path had no "turns you've taken" arm).
+    #[test]
+    fn cda_turns_taken_this_game_is_turns_taken_ref() {
+        assert_eq!(
+            parse_cda_quantity("the number of turns you've taken this game"),
+            ref_of(QuantityRef::TurnsTaken)
+        );
+        // "you have taken" and the missing "this game" tail both still parse.
+        assert_eq!(
+            parse_cda_quantity("the number of turns you have taken"),
+            ref_of(QuantityRef::TurnsTaken)
+        );
+    }
+
+    /// Negative: "the number of turns" with no possessor must NOT be read as
+    /// TurnsTaken — the "you've/you have taken" possessor is load-bearing.
+    #[test]
+    fn cda_turns_without_possessor_is_not_turns_taken() {
+        assert_ne!(
+            parse_cda_quantity("the number of turns"),
+            ref_of(QuantityRef::TurnsTaken)
+        );
+    }
+
+    /// CR 205.3 + CR 604.3: Subgoyf's full quantity tail — "the number of
+    /// different subtypes other than creature types among cards in all
+    /// graveyards" → `DistinctSubtypes { Zone{Graveyard, All}, CreatureTypes }`.
+    #[test]
+    fn cda_distinct_subtypes_among_all_graveyards() {
+        assert_eq!(
+            parse_cda_quantity(
+                "the number of different subtypes other than creature types among cards in all graveyards"
+            ),
+            ref_of(QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+                exclude: SubtypeExclusion::CreatureTypes,
+            })
+        );
+    }
+
+    /// Negative: "different subtypes among ..." WITHOUT the "other than creature
+    /// types" rider parses with `exclude: None`, not `CreatureTypes`.
+    #[test]
+    fn cda_distinct_subtypes_without_rider_excludes_nothing() {
+        assert_eq!(
+            parse_cda_quantity("the number of different subtypes among cards in all graveyards"),
+            ref_of(QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+                exclude: SubtypeExclusion::None,
+            })
+        );
+    }
+
+    /// Negative: the sibling "card types among cards in ..." phrase must still
+    /// route to `DistinctCardTypes` — the new subtype arm does not steal it.
+    #[test]
+    fn cda_card_types_still_distinct_card_types() {
+        assert_eq!(
+            parse_cda_quantity("the number of card types among cards in all graveyards"),
+            ref_of(QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+            })
+        );
+    }
+
+    /// Honest gaps: ETB-snapshot and flavor-text CDA tails have no live ref and
+    /// MUST remain `None` (no green-wash). Forcing a live ref would misread
+    /// these (a live recount reads 0 for sacrificed-Forest / life-paid cards).
+    #[test]
+    fn cda_gapped_cards_remain_unparsed() {
+        // Graveyard Busybody — "cards with flavor text in your graveyards"
+        assert_eq!(
+            parse_cda_quantity("the number of cards with flavor text in your graveyards"),
+            None
+        );
+        // Wood Elemental — "Forests sacrificed as it entered" (ETB snapshot)
+        assert_eq!(
+            parse_cda_quantity("the number of Forests sacrificed as it entered"),
+            None
+        );
+        // Minion of the Wastes — "the life paid as it entered" (ETB snapshot)
+        assert_eq!(parse_cda_quantity("the life paid as it entered"), None);
     }
 }

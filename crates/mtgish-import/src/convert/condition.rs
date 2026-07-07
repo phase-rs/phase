@@ -152,6 +152,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
             AbilityCondition::TargetMatchesFilter {
                 filter: crate::convert::filter::spells_to_filter(spells)?,
                 use_lki: false,
+                subject_slot: None,
             }
         }
         _ => {
@@ -688,6 +689,7 @@ fn permanent_filter_to_ability(
         PermanentAxis::Target => AbilityCondition::TargetMatchesFilter {
             filter,
             use_lki: false,
+            subject_slot: None,
         },
     })
 }
@@ -1062,6 +1064,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::OriginalController => "OriginalController",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
         TargetFilter::SelfRef => "SelfRef",
+        TargetFilter::GrantingObject => "GrantingObject",
         TargetFilter::SourceOrPaired => "SourceOrPaired",
         TargetFilter::Typed(_) => "Typed",
         TargetFilter::Not { .. } => "Not",
@@ -1100,6 +1103,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Owner => "Owner",
         TargetFilter::SourceChosenPlayer => "SourceChosenPlayer",
         TargetFilter::EventTarget => "EventTarget",
+        TargetFilter::PlayerWhoChoseLabel { .. } => "PlayerWhoChoseLabel",
     }
 }
 
@@ -1168,6 +1172,13 @@ pub struct TriggerCondExt {
 /// engine variants in a separate round).
 pub fn convert_trigger_with_etb_filter(c: &Condition) -> ConvResult<TriggerCondExt> {
     match c {
+        // CR 603.4 + CR 701.9a: "if the discarded card [passes predicate]" on a
+        // discard trigger — lower onto `valid_card` so `match_discarded` gates
+        // the event object (Anje Falkenrath's madness rider).
+        Condition::DiscardedCardPassesFilter(cards) => Ok(TriggerCondExt {
+            condition: None,
+            valid_card: Some(crate::convert::filter::cards_to_filter(cards)?),
+        }),
         Condition::EnteringPermanentPassesFilter(pred) => {
             // Try the event-object condition path first; fall through to the
             // legacy valid_card route only for predicates that still cannot be
@@ -3753,7 +3764,9 @@ mod tests {
         let converted = convert_ability(&condition).unwrap();
 
         match converted {
-            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+            AbilityCondition::TargetMatchesFilter {
+                filter, use_lki, ..
+            } => {
                 assert!(!use_lki);
                 assert!(matches!(
                     filter,

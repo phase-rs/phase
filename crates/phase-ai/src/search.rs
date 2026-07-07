@@ -152,6 +152,10 @@ pub fn choose_action_with_session(
         _ => {}
     }
 
+    if let Some(action) = random_card_predicate_guess(state, ai_player, rng) {
+        return Some(action);
+    }
+
     // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
     // dedicated simple-eval heuristic rather than going through the tactical
     // policy registry. Punishment value vs counter value.
@@ -200,6 +204,23 @@ pub fn choose_action_with_session(
         }
     }
 
+    // CR 608.2d (hidden information): the guesser has no legal access to the
+    // committed value / chosen-card identity — it is genuinely a guess. The AI
+    // MUST NOT score guess branches via `score_candidates` (eval/search runs on
+    // the UNFILTERED GameState and would read the secret, always guessing
+    // correctly). Uniform random is rules-fair and the information-theoretic
+    // optimum, and uses the caller-owned RNG so seeded measurement runs remain
+    // reproducible. Parallel to the TributeChoice / SearchChoice / ChooseManaColor
+    // pre-emptions above.
+    if let WaitingFor::OpponentGuess { ref options, .. } = state.waiting_for {
+        use rand::seq::IndexedRandom;
+        if let Some(choice) = options.choose(rng) {
+            return Some(GameAction::ChooseOption {
+                choice: choice.clone(),
+            });
+        }
+    }
+
     if let Some(action) = fast_priority_action(state, ai_player) {
         return Some(action);
     }
@@ -222,6 +243,41 @@ pub fn choose_action_with_session(
         emit_decision_trace(state, ai_player, config, action, session);
     }
     chosen
+}
+
+fn random_card_predicate_guess(
+    state: &GameState,
+    ai_player: PlayerId,
+    rng: &mut impl Rng,
+) -> Option<GameAction> {
+    let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        source_id: Some(source_id),
+        persist_player: _,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    if *player != ai_player || !choice_type.is_card_predicate_guess() {
+        return None;
+    }
+    let source = state.objects.get(source_id)?;
+    if source.controller == ai_player || options.is_empty() {
+        return None;
+    }
+    let index = rng.random_range(0..options.len());
+    let choice = options[index].clone();
+    tracing::info!(
+        target: "phase_ai::choice",
+        ai_player = ai_player.0,
+        source_id = source_id.0,
+        source_name = %source.name,
+        guess = %choice,
+        "AI randomly guessed card predicate"
+    );
+    Some(GameAction::ChooseOption { choice })
 }
 
 fn fast_priority_action(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
@@ -774,6 +830,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::UnlessBounceChoice { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
+        // CR 701.4a + CR 608.2d: Behold requires EXACTLY one beholdable object —
+        // an empty selection is illegal. Take the first candidate (any legal pick
+        // resolves the prompt; the evaluated candidate enumerator picks properly).
+        WaitingFor::BeholdChoice { choices, .. } => choices
+            .first()
+            .map(|&id| GameAction::SelectCards { cards: vec![id] }),
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first
         // `keep_count` flips (always in range, since keep_count <= results.len()).
         WaitingFor::CoinFlipKeepChoice { keep_count, .. } => Some(GameAction::SelectCoinFlips {
@@ -925,6 +987,15 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Named choice: pick the first option if available.
         WaitingFor::NamedChoice { options, .. } => {
+            options.first().map(|choice| GameAction::ChooseOption {
+                choice: choice.clone(),
+            })
+        }
+
+        // CR 608.2d: opponent-guess fallback — any printed guess is legal. The
+        // hidden-info determinization in `choose_action` already pre-empts this
+        // for the live AI; this is only the deadlock-safe escape hatch.
+        WaitingFor::OpponentGuess { options, .. } => {
             options.first().map(|choice| GameAction::ChooseOption {
                 choice: choice.clone(),
             })
@@ -1127,8 +1198,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             player,
             actor,
             controller,
+            candidate_objects,
             ..
         } => {
+            // CR 701.38b: object-pool votes (Council's Judgment, Prime
+            // Minister's Cabinet Room) submit a ballot by candidate index, not
+            // by option word — the engine's `handle_resolution_choice` rejects
+            // `ChooseOption` whenever `candidate_objects` is non-empty. The
+            // deadlock-safety fallback must mirror that shape, so vote for the
+            // first candidate object rather than emitting an action the engine
+            // would reject.
+            if !candidate_objects.is_empty() {
+                return Some(GameAction::SubmitVoteCandidate { candidate_index: 0 });
+            }
             // The friend-or-foe heuristic only fires when the controller is
             // labeling other players (the delegated shape) — matching
             // `VoteActor::Delegated(actor)` where `actor == controller` is
@@ -1189,6 +1271,21 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
             targets: Vec::new(),
         }),
+
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — an empty pick is
+        // illegal (min >= 1), so pick the first `min` eligible objects.
+        WaitingFor::EachPlayerCopyChosenSelection { eligible, min, .. } => {
+            let targets: Vec<_> = eligible
+                .iter()
+                .take((*min).max(1) as usize)
+                .cloned()
+                .collect();
+            if targets.is_empty() {
+                None
+            } else {
+                Some(GameAction::SelectTargets { targets })
+            }
+        }
 
         // Copy retarget: keep copied targets when all slots already have a
         // current value; freshly cast prepare/paradigm copies start empty, so
@@ -1444,6 +1541,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
             .into_iter()
             .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),
+        WaitingFor::RemoveCountersChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseCountersToRemove { .. })),
 
         // Remaining pending-cast states are caught by the has_pending_cast
         // guard above. This arm is structurally unreachable but required
@@ -1457,6 +1557,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             ..
         }
         | WaitingFor::BlightChoice { .. }
+        | WaitingFor::CostTypeChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard
@@ -2758,6 +2859,7 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
+    use engine::types::ability::ChoiceType;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
         Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
@@ -4453,6 +4555,9 @@ mod tests {
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::Delegated(controller),
             tally_mode: engine::types::ability::VoteTally::PerVote,
+            candidate_objects: engine::im::Vector::new(),
+            outcome_template: None,
+            visibility: engine::types::ability::VoteVisibility::Open,
         }
     }
 
@@ -4484,6 +4589,77 @@ mod tests {
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "foe"),
             "AI labeling opponent must pick foe, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn ai_land_nonland_opponent_guess_uses_rng() {
+        let mut state = make_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+            persist_player: None,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut saw_land = false;
+        let mut saw_nonland = false;
+
+        for seed in 0..64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            match choose_action(&state, PlayerId(1), &config, &mut rng) {
+                Some(GameAction::ChooseOption { choice }) if choice == "Land" => saw_land = true,
+                Some(GameAction::ChooseOption { choice }) if choice == "Nonland" => {
+                    saw_nonland = true;
+                }
+                other => panic!("expected Land/Nonland ChooseOption, got {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_land && saw_nonland,
+            "seeded AI guesses must exercise both Land and Nonland"
+        );
+    }
+
+    #[test]
+    fn ai_regular_land_nonland_choice_does_not_use_guess_randomizer() {
+        let mut state = make_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Abundance".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicate {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+            persist_player: None,
+        };
+        let mut rng = SmallRng::seed_from_u64(1);
+
+        assert!(
+            random_card_predicate_guess(&state, PlayerId(1), &mut rng).is_none(),
+            "ordinary land/nonland kind choices are strategic choices, not random guesses"
         );
     }
 
@@ -4593,6 +4769,9 @@ mod tests {
             source_id: ObjectId(1),
             actor: engine::types::game_state::VoteActor::SubjectActs,
             tally_mode: engine::types::ability::VoteTally::PerVote,
+            candidate_objects: engine::im::Vector::new(),
+            outcome_template: None,
+            visibility: engine::types::ability::VoteVisibility::Open,
         };
         let action = fallback_action(&state).expect("fallback returns an action");
         assert!(

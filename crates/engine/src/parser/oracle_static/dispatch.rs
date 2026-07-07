@@ -523,6 +523,11 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 305.6 + CR 607.2d: land-axis counterpart — "Lands you control are the
+    // chosen type in addition to their other types" (Realmwright).
+    if let Some(def) = parse_chosen_land_type_static(&tp, &text) {
+        return Some(def);
+    }
     // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
     if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
         return Some(def);
@@ -629,7 +634,19 @@ pub(crate) fn parse_static_line_inner(
                     return Some(def);
                 }
             }
-            if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
+            if let Some(mut def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip)
+            {
+                // CR 611.3a: the split stripped the "as long as <condition>" gate
+                // from the canonical rewrite, so the recursed effect parser (e.g.
+                // DoubleTriggers, which carries no condition of its own) never sees
+                // it. Re-attach the split condition whenever the recursed def
+                // didn't derive one itself — this restores the gate for the whole
+                // class of split inverted-as-long-as statics, not just Cloud.
+                if def.condition.is_none() {
+                    if let Some(condition) = parse_static_condition(&split.condition_text) {
+                        def.condition = Some(condition);
+                    }
+                }
                 return Some(def.description(text.to_string()));
             }
             // CR 601.3b + CR 702.8a: Inverted flash-grant conditional:
@@ -1031,10 +1048,27 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 205.1a + CR 613.1f: Imprisoned-in-the-Moon — "Enchanted <subject> is a
+    // colorless [<subtype>...] <type> with "<ability>" and loses all other card
+    // types and abilities." Must precede parse_enchanted_is_type, whose base-P/T
+    // split does not model the with-"<ability>" clause (issue #4770).
+    if let Some(def) = parse_enchanted_becomes_type_with_ability(&tp, &text) {
+        return Some(def);
+    }
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.
     if let Some(def) = parse_enchanted_is_type(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 613.1d (Layer 4) + CR 205.1b: "[Enchanted|Equipped] <subject> isn't a
+    // <type> and is a <type> in addition to its other types" — attached-permanent
+    // type SWAP (Luxior: equipped planeswalker loses Planeswalker, gains
+    // Creature). Placed after `parse_enchanted_is_type` (whose "is a" copula
+    // parse rejects the "isn't a ..." lead) and before the generic
+    // enchanted/equipped predicate arms so the type-removal clause is preserved.
+    if let Some(def) = parse_attached_isnt_and_is_type(&tp, &text) {
         return Some(def);
     }
 
@@ -1220,6 +1254,16 @@ pub(crate) fn parse_static_line_inner(
     // `parse_land_type_change` — color-rejected "All lands are Plains."-shaped
     // lines fall through to that branch correctly.
     if let Some(def) = parse_all_subject_are_color(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
+    // — supertype sibling of the color path (Leyline of Singularity "All nonland
+    // permanents are legendary", Melting "All lands are no longer snow"). The
+    // supertype predicate (legendary/basic/snow) is disjoint from color and
+    // land-type words, so this is order-safe here; it precedes `parse_land_type_change`
+    // so "All lands are basic" (supertype) is not probed as a land-type line.
+    if let Some(def) = parse_subject_is_supertype(&tp, &text) {
         return Some(def);
     }
 
@@ -1470,6 +1514,16 @@ pub(crate) fn parse_static_line_inner(
         if let Some(result) = parse_typed_you_control(tp.original, tp.lower, false) {
             return Some(result);
         }
+    }
+
+    // CR 611.3 + CR 613.1 + CR 613.4b: "All <X> and all <Y> are <predicate>" —
+    // a compound-subject animation where one predicate applies to every object
+    // matching either subject (Life and Limb). Must precede parse_land_animation
+    // (which splits on "are" and would claim only the first subject with an
+    // incomplete predicate); the " and all " conjunction + Or-subject guard keep
+    // single-subject animation lines falling through to parse_land_animation.
+    if let Some(def) = parse_compound_all_subjects_type_change(&tp, &text) {
+        return Some(def);
     }
 
     // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
@@ -2865,13 +2919,35 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "must be blocked if able" (CR 509.1b) ---
+    // --- "must be blocked [by <quality>] if able" (CR 509.1c) ---
     if nom_primitives::scan_contains(tp.lower, "must be blocked") {
-        return Some(
-            StaticDefinition::new(StaticMode::MustBeBlocked)
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
+        // CR 509.1c: classify the OPTIONAL "by <quality>" conjunct so a present
+        // quality is never silently weakened to the bare "any blocker" (None)
+        // requirement. Mirrors the attached-grant paths (grammar.rs / shared.rs)
+        // which distinguish the same three cases via the shared conjunct helper:
+        //   * Recognized quality   → typed `MustBeBlocked { by: Some(filter) }`.
+        //   * Unrecognized quality → leave the line Unimplemented (`return None`);
+        //     emitting `by: None` here would force a block by ANY creature and
+        //     drop the quality restriction. Falling through surfaces the gap to
+        //     coverage instead of weakening the requirement.
+        //   * No quality (bare "must be blocked if able") → `by: None`.
+        match extract_must_be_blocked_by_conjunct(tp.lower) {
+            Some(MustBeBlockedByConjunct::Recognized(filter)) => {
+                return Some(
+                    StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
+                        .affected(TargetFilter::SelfRef)
+                        .description(text.to_string()),
+                );
+            }
+            Some(MustBeBlockedByConjunct::Unrecognized(_)) => return None,
+            None => {
+                return Some(
+                    StaticDefinition::new(StaticMode::MustBeBlocked { by: None })
+                        .affected(TargetFilter::SelfRef)
+                        .description(text.to_string()),
+                );
+            }
+        }
     }
 
     // --- "can't gain life" (CR 119.7) ---
@@ -2946,6 +3022,14 @@ pub(crate) fn parse_static_line_inner(
     // E.g., "Creature spells you cast have convoke."
     // Also: "Creature cards you own that aren't on the battlefield have flash."
     if let Some(def) = parse_spells_have_keyword(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "<type> cards in your hand [without <kw>] have <kw>. Its <kw> cost is
+    // equal to its mana cost reduced by {N}." (CR 702.143d + CR 702 alt-cost
+    // off-zone family) — Singing Towers of Darillium grants foretell with a
+    // per-recipient derived cost.
+    if let Some(def) = parse_hand_cards_have_derived_cost_keyword(&text) {
         return Some(def);
     }
 

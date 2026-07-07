@@ -13,26 +13,40 @@ import {
   getBattlefieldSacrificeChoice,
   getWaitingForObjectChoiceIds,
   getOpponentIds,
+  getSeatCount,
+  isSplitBoardActive,
   isOneOnOne,
   resolveFocusedOpponent,
 } from "../../viewmodel/gameStateView.ts";
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { ArchenemyPanel } from "./ArchenemyPanel.tsx";
 import { CombatLine } from "./CombatLine.tsx";
+import { OpponentSeatPane } from "./OpponentSeatPane.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 import { PlanechasePanel } from "./PlanechasePanel.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 
 interface GameBoardProps {
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
+  showOpponentCards?: boolean;
+  onKickPlayer?: (playerId: PlayerId) => void;
+  onViewZone?: (zone: "graveyard" | "exile" | "library", playerId: PlayerId) => void;
 }
 
-export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoardProps) {
+export const GameBoard = memo(function GameBoard({
+  oppHud,
+  playerHud,
+  showOpponentCards = false,
+  onKickPlayer,
+  onViewZone = () => {},
+}: GameBoardProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const localPlayerId = usePlayerId();
   const myId = usePerspectivePlayerId();
@@ -54,15 +68,24 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
     () => (focusedId == null ? null : buildPlayerBattlefieldView(gameState, focusedId)),
     [gameState, focusedId],
   );
+  const opponentBattlefieldViews = useMemo(() => {
+    return new Map(
+      opponents.map((opponentId) => [
+        opponentId,
+        buildPlayerBattlefieldView(gameState, opponentId),
+      ]),
+    );
+  }, [gameState, opponents]);
+  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
 
   const sortedPlayerCreatures = useMemo(() => {
-    if (!focusedBattlefieldView) return undefined;
+    if (splitBoardActive || !focusedBattlefieldView) return undefined;
     return sortCreaturesForBlockers(
       playerBattlefieldView.creatures,
       focusedBattlefieldView.creatures,
       blockerAssignments,
     );
-  }, [playerBattlefieldView, focusedBattlefieldView, blockerAssignments]);
+  }, [splitBoardActive, playerBattlefieldView, focusedBattlefieldView, blockerAssignments]);
 
   const boardInteractionState = useMemo(() => {
     const validTargetObjectIds = new Set<number>();
@@ -249,6 +272,33 @@ export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoar
             // with `undefined` in the interim.
             <div className="flex flex-1 items-center justify-center" />
           )
+        ) : splitBoardActive ? (
+          <div className="flex min-h-0 basis-[60%] flex-col overflow-visible pt-[var(--game-split-safe-top,0px)]">
+            {opponents.length > 0 ? (
+              <div
+                className="grid min-h-0 min-w-0 flex-1 items-stretch gap-1 overflow-visible px-1"
+                style={{ gridTemplateColumns: `repeat(${opponents.length}, minmax(0, 1fr))` }}
+              >
+                {opponents.map((opponentId) => (
+                  <OpponentSeatPane
+                    key={opponentId}
+                    playerId={opponentId}
+                    battlefieldView={
+                      opponentBattlefieldViews.get(opponentId)
+                      ?? buildPlayerBattlefieldView(gameState, opponentId)
+                    }
+                    showCards={showOpponentCards}
+                    onKickPlayer={onKickPlayer}
+                    onViewZone={onViewZone}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <span className="text-xs text-gray-600">{t("board.clickOpponent")}</span>
+              </div>
+            )}
+          </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
             {/* Keep opponent controls above overflowing command-zone cards.

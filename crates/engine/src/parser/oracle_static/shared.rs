@@ -371,21 +371,19 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
 /// Equipment is never an attacker, so the static never fires, and the keyword
 /// would land on the Equipment rather than the host.
 ///
-/// Returns a `Vec` so that any conjunct of the effect predicate which
-/// `push_grant_clause_modifications` cannot model (e.g. "must be blocked by a
-/// Dalek if able") is surfaced as a sibling `Effect::Unimplemented` residual,
-/// rather than being silently dropped. The residual makes coverage mark the card
-/// partially unsupported (`is_static_supported`) and the swallow check defer
-/// (`any_ability_has_unimplemented`) — an honest signal independent of the
-/// whole-card `"condition":{` suppression that the supported static's gate would
-/// otherwise trip in `detect_condition_if`.
-///
-/// DEFER: typed "must be blocked by <filter> if able" requires parameterizing
-/// the `MustBeBlocked`/`MustBeBlockedByAll` requirement family with a blocker
-/// filter — /add-engine-variant Stage-2 REFUSE_WITH_REFACTOR (~80 sites). Until
-/// then the dropped conjunct rides as an `Effect::Unimplemented` residual. An
-/// `Unrecognized`-condition companion is NOT used: it would suppress
-/// `detect_condition_if` (cond_markers include `"condition":{`) AND be
+/// Returns a `Vec` so that each conjunct of the effect predicate is modeled
+/// independently: the P/T + keyword grants merge into one gated `Continuous`
+/// static, recognized combat requirements ("must be blocked if able", "is
+/// goaded") become gated rule-statics, and the FILTERED "must be blocked by a
+/// Dalek if able" conjunct lowers to the typed `MustBeBlocked { by: Some(filter)
+/// }` requirement gated on the same combat condition (CR 509.1c). Only a
+/// conjunct that none of these recognize is surfaced as a sibling
+/// `Effect::Unimplemented` residual rather than being silently dropped — an
+/// honest coverage signal (`is_static_supported` / `any_ability_has_unimplemented`)
+/// independent of the whole-card `"condition":{` suppression that the supported
+/// static's gate would otherwise trip in `detect_condition_if`. An
+/// `Unrecognized`-condition companion is NOT used for residuals: it would
+/// suppress `detect_condition_if` (cond_markers include `"condition":{`) AND be
 /// runtime-active (`layers.rs` evaluates `Unrecognized => true`). CR 509.1c.
 pub(crate) fn try_parse_inverted_attached_combat_grant(
     split: &InvertedSplit,
@@ -469,8 +467,8 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         // if able", "attacks each combat if able", "is goaded"). Recover it via the
         // rule-static predicate combinator and emit a sibling rule-static gated on the
         // same combat condition — modeled, not an `Unimplemented` residual. (The
-        // FILTERED "must be blocked by a Dalek if able" form is NOT recognized by the
-        // combinator, so it correctly falls through to the residual below.)
+        // FILTERED "must be blocked by a Dalek if able" form is handled by the typed
+        // `MustBeBlocked { by }` branch below, not this bare-form combinator.)
         let residual_lower = residual_text.to_lowercase();
         if let Ok((rest, predicate)) =
             all_consuming(parse_rule_static_predicate_nom).parse(residual_lower.trim())
@@ -482,24 +480,29 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
             continue;
         }
 
+        // CR 509.1c: the FILTERED "must be blocked by <quality> if able" conjunct
+        // (Ace's Baseball Bat: "must be blocked by a Dalek if able") lowers to the
+        // typed `MustBeBlocked { by: Some(filter) }` requirement, gated on the same
+        // combat condition as the grant (so it inherits the "as long as ~ is
+        // attacking" gate). Modeled, not an `Unimplemented` residual.
+        if let Some(filter) = parse_must_be_blocked_by_filter(&residual_lower) {
+            defs.push(
+                StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
+                    .affected(affected.clone())
+                    .condition(gate.clone())
+                    .description(residual_text.clone()),
+            );
+            continue;
+        }
+
         // CR 509.1c: surface the still-unmodeled conjunct as an `Effect::Unimplemented`
         // residual carried in a `GrantAbility` modification so coverage flags it and
         // the swallow check defers (see fn-level note). The stable category key
         // groups the gap in coverage; the raw conjunct text is the diagnostic.
-        defs.push(
-            StaticDefinition::continuous()
-                .affected(affected.clone())
-                .modifications(vec![ContinuousModification::GrantAbility {
-                    definition: Box::new(AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        crate::types::ability::Effect::unimplemented(
-                            "attached_grant_unmodeled_conjunct",
-                            residual_text.clone(),
-                        ),
-                    )),
-                }])
-                .description(residual_text),
-        );
+        defs.push(attached_grant_unmodeled_conjunct_residual(
+            affected.clone(),
+            &residual_text,
+        ));
     }
 
     defs
@@ -541,50 +544,90 @@ pub(crate) fn parse_attached_subject_qualifier(condition_lower: &str) -> Option<
     Some(filter)
 }
 
-pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+/// CR 113.6b: Whether `filter` scopes to cards you own/control in `zone` — the
+/// zone a granted cast keyword functions from. Generalized from the
+/// graveyard-only predicate so the same shape validates hand grants (foretell,
+/// miracle) against `Zone::Hand`.
+pub(crate) fn target_filter_is_your_zone(filter: &TargetFilter, zone: Zone) -> bool {
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::You)
-                && tf.properties.iter().any(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::InZone {
-                            zone: Zone::Graveyard
-                        }
-                    )
-                })
+                && tf
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == zone))
         }
-        TargetFilter::Or { filters } => filters.iter().all(target_filter_is_your_graveyard),
+        TargetFilter::Or { filters } => filters.iter().all(|f| target_filter_is_your_zone(f, zone)),
         _ => false,
     }
 }
 
+/// Thin wrapper preserving the graveyard-specific call sites (no churn) —
+/// delegates to the generalized `target_filter_is_your_zone`.
+pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+    target_filter_is_your_zone(filter, Zone::Graveyard)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GraveyardGrantedKeywordKind {
+pub(crate) enum GrantedCastKeywordKind {
     Flashback,
     Escape,
     Mayhem,
     Scavenge,
     Encore,
+    /// CR 702.143a: Foretell functions from hand (Dream Devourer grant).
+    Foretell,
+    /// CR 702.94a: Miracle functions from hand (Aminatou, Veil Piercer grant).
+    Miracle,
+    /// CR 702.128a: Naktamun ("Each creature card in your graveyard has
+    /// embalm. Its embalm cost is equal to its mana cost.") — the runtime
+    /// resolver (`resolve_self_cost_graveyard_activated_keyword`) already
+    /// concretizes `Keyword::Embalm(EmbalmCost::Mana(SelfManaCost))`; this was
+    /// a pure parser-recognition gap.
+    Embalm,
 }
 
-impl GraveyardGrantedKeywordKind {
+impl GrantedCastKeywordKind {
     pub(crate) fn matches_keyword(self, keyword: &Keyword) -> bool {
         match self {
-            GraveyardGrantedKeywordKind::Flashback => {
+            GrantedCastKeywordKind::Flashback => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Flashback
             }
-            GraveyardGrantedKeywordKind::Escape => {
+            GrantedCastKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
             }
             // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
-            GraveyardGrantedKeywordKind::Mayhem => {
+            GrantedCastKeywordKind::Mayhem => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
-            // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
-            // keywords share `KeywordKind::Unknown`, so match the variant directly.
-            GraveyardGrantedKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
-            GraveyardGrantedKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            // CR 702.97 (Scavenge) / CR 702.141 (Encore) / CR 702.128 (Embalm):
+            // activated graveyard keywords share `KeywordKind::Unknown`, so
+            // match the variant directly.
+            GrantedCastKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
+            GrantedCastKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            GrantedCastKeywordKind::Embalm => matches!(keyword, Keyword::Embalm(_)),
+            // CR 702.143a / CR 702.94a: hand-zone cast keywords.
+            GrantedCastKeywordKind::Foretell => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Foretell
+            }
+            GrantedCastKeywordKind::Miracle => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Miracle
+            }
+        }
+    }
+
+    /// CR 113.6b: The zone this granted cast keyword functions from. The gate in
+    /// `keyword_grant.rs` uses it to decline zone mismatches (foretell-in-graveyard,
+    /// flashback-in-hand).
+    pub(crate) fn grant_zone(self) -> Zone {
+        match self {
+            GrantedCastKeywordKind::Flashback
+            | GrantedCastKeywordKind::Escape
+            | GrantedCastKeywordKind::Mayhem
+            | GrantedCastKeywordKind::Scavenge
+            | GrantedCastKeywordKind::Encore
+            | GrantedCastKeywordKind::Embalm => Zone::Graveyard,
+            GrantedCastKeywordKind::Foretell | GrantedCastKeywordKind::Miracle => Zone::Hand,
         }
     }
 }
@@ -676,6 +719,16 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
     if let Some(rest) = nom_tag_tp(tp, "equipped creature ") {
         return Some((
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+            rest.original,
+        ));
+    }
+    // An Equipment that can attach to a non-creature permanent (e.g. Luxior,
+    // Giada's Gift equips a planeswalker) addresses the "equipped permanent" —
+    // the widest attached-Equipment subject. Mirrors the "enchanted permanent"
+    // arm above with `EquippedBy`.
+    if let Some(rest) = nom_tag_tp(tp, "equipped permanent ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EquippedBy])),
             rest.original,
         ));
     }
@@ -1024,7 +1077,34 @@ pub(crate) fn parse_tiered_enters_with_additional_counters_pattern(
     parse_tiered_enters_with_additional_counters_parts(&tp).map(|(_, pattern)| pattern)
 }
 
+/// CR 207.2c: An ability word is italicized flavor text with no rules meaning
+/// (e.g. `Chroma`, `Metalcraft`, `Fateful hour`, and the set-specific `Protector`
+/// / `Proclamator Hailer`). The subject-anchored static parsers match their
+/// subject at the *start* of the line, so a leading ability-word label like
+/// `"Chroma — Each creature you control gets ..."` prevents them from firing and
+/// the whole static silently drops. When the ordinary dispatch classifies
+/// nothing, strip a *recognized* ability-word label — whitelist-gated through the
+/// shared `is_known_ability_word` authority, exactly as the token-grant path in
+/// `keyword_grant.rs` does — and re-enter the dispatch once on the body.
+///
+/// This is a strict fallback: any line the dispatch already parses is returned
+/// untouched, so no existing coverage can regress. The stripped body carries no
+/// further label, so `strip_ability_word_with_name` yields `None` on the retry
+/// and the recursion terminates after a single hop.
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
+    let defs = parse_static_line_multi_dispatch(text);
+    if !defs.is_empty() {
+        return defs;
+    }
+    if let Some((ability_word, body)) = super::oracle_modal::strip_ability_word_with_name(text) {
+        if super::oracle_modal::is_known_ability_word(&ability_word) {
+            return parse_static_line_multi_dispatch(&body);
+        }
+    }
+    defs
+}
+
+fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
@@ -1062,6 +1142,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // non-static prose to the single-sentence fallback below.
     if let Some(defs) = parse_multi_sentence_statics(&stripped) {
         return defs;
+    }
+
+    // CR 116.2d: "ignore this effect" actions from static abilities are special
+    // actions. Until the engine models that priority-time action, the static
+    // parser must fail closed instead of exporting the lock while dropping the
+    // opt-out sentence.
+    if nom_primitives::scan_contains(&lower, "ignore this effect until end of turn") {
+        return Vec::new();
     }
 
     // CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
@@ -2657,6 +2745,167 @@ fn parse_shared_controller_compound_subject_filter(subject: &TextPair<'_>) -> Op
     Some(TargetFilter::Or { filters })
 }
 
+/// CR 702.143d (and the CR 702 alternative-cost cast-from-off-zone family):
+/// parse "<type> cards in your hand [without <kw>] have <kw>. Its <kw> cost is
+/// equal to its mana cost reduced by {N}." into a continuous
+/// `AddKeywordWithDerivedCost` static (Singing Towers of Darillium). The granted
+/// keyword name selects the `CostBearingKeywordKind`, so a future
+/// "... have madness. Its madness cost is …" card reuses this branch with a
+/// different kind. Combinator dispatch throughout — the per-recipient "without
+/// foretell" dedup is enforced by the off-zone applier, so the leading "without
+/// <kw>" qualifier is consumed but not re-encoded in the affected filter.
+pub(crate) fn parse_hand_cards_have_derived_cost_keyword(text: &str) -> Option<StaticDefinition> {
+    let stripped = strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+    let tp = TextPair::new(&stripped, &lower);
+    let tp = nom_tag_tp(&tp, "each ").unwrap_or(tp);
+    let (type_tp, after_hand) = tp.split_around(" in your hand ")?;
+
+    fn kw_word(i: &str) -> OracleResult<'_, &str> {
+        take_while1(|c: char| c.is_ascii_alphabetic()).parse(i)
+    }
+    fn body(i: &str) -> OracleResult<'_, (&str, ManaCost)> {
+        // Optional "without <kw> " qualifier before "has/have <kw>".
+        let (i, _) = opt((tag("without "), kw_word, tag(" ")).map(|_| ())).parse(i)?;
+        let (i, _) = alt((tag("has "), tag("have "))).parse(i)?;
+        let (i, kw1) = kw_word(i)?;
+        let (i, _) = tag(". its ").parse(i)?;
+        let (i, kw2) = kw_word(i)?;
+        let (i, _) = tag(" cost is equal to its mana cost reduced by ").parse(i)?;
+        let (i, reduction) = nom_primitives::parse_mana_cost(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        if !kw1.eq_ignore_ascii_case(kw2) {
+            return Err(nom::Err::Error(OracleError::new(
+                i,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((i, (kw1, reduction)))
+    }
+    let (_, (kw_name, reduction)) = body(after_hand.lower).ok()?;
+
+    let kind = crate::types::keywords::CostBearingKeywordKind::from_name(kw_name)?;
+
+    // Affected: the parsed type phrase (e.g. "nonland card"), owned by "you",
+    // restricted to your hand. The off-zone applier reads each recipient's mana
+    // cost to derive the granted cost.
+    let (base_filter, rest) = parse_type_phrase(type_tp.original.trim());
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(mut typed) = base_filter else {
+        return None;
+    };
+    typed = typed.controller(ControllerRef::You);
+    typed.properties.push(FilterProp::InAnyZone {
+        zones: vec![Zone::Hand],
+    });
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(typed))
+            .modifications(vec![ContinuousModification::AddKeywordWithDerivedCost {
+                kind,
+                derivation: crate::types::ability::CostDerivation::ManaCostReducedBy(reduction),
+            }])
+            .description(text.to_string()),
+    )
+}
+
+/// CR 607.2d / CR 607.2m (by analogy): parse "<type> controlled by players who
+/// last chose <label>" into the base type filter carrying
+/// `FilterProp::ControllerChoseLabel`. Splits on the "controlled by player[s]
+/// who last chose " head, parses the leading type phrase (must fully consume),
+/// and canonicalizes the trailing anchor label. Returns `None` for any other
+/// shape so it never shadows the generic subject parser.
+fn parse_controlled_by_anchor_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    let (type_tp, label_tp) = subject
+        .split_around(" controlled by players who last chose ")
+        .or_else(|| subject.split_around(" controlled by player who last chose "))?;
+    let (type_filter, rest) = parse_type_phrase(type_tp.original.trim());
+    if !rest.trim().is_empty() || matches!(type_filter, TargetFilter::Any) {
+        return None;
+    }
+    let label = canonicalize_anchor_label(label_tp.original.trim());
+    if label.is_empty() {
+        return None;
+    }
+    Some(merge_filter_prop(
+        type_filter,
+        FilterProp::ControllerChoseLabel { label },
+    ))
+}
+
+/// True when `filter` is a typed filter carrying a creature subtype constraint.
+/// The gate for the bare tribal compound below, so a generic
+/// "creatures and <X>" compound is left to the type-phrase fallback.
+fn filter_carries_subtype(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(_)))
+    )
+}
+
+/// CR 205.3m: True when the branch text explicitly names creatures. This gate
+/// keeps the bare tribal compound to CREATURE anthems (Verdeloth's "Saproling
+/// creatures" / "Treefolk creatures") and off subjects whose subtype belongs to
+/// a different set — Life and Limb's "All Forests and all Saprolings", where
+/// "Forests" is a LAND subtype that this creature-tribal helper must not
+/// reinterpret as a creature (#5147). `filter_carries_subtype` alone accepts any
+/// subtype (including land/artifact), so the explicit head noun is required.
+fn branch_names_creatures(original: &str) -> bool {
+    original
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("creature") || w.eq_ignore_ascii_case("creatures"))
+}
+
+/// CR 611.3a: A bare (battlefield-wide, no-controller) compound tribal anthem
+/// subject where each branch carries its own creature subtype and the second may
+/// take a per-branch "other" source exclusion — "<subtype> creatures and [other]
+/// <subtype> creatures" (Verdeloth the Ancient: "Saproling creatures and other
+/// Treefolk creatures get +1/+1"). The controller-scoped compound is handled by
+/// [`parse_shared_controller_compound_subject_filter`]; this is the tribal
+/// battlefield form. Each branch delegates to [`parse_continuous_subject_filter`]
+/// (so "other Treefolk creatures" picks up the `Another` source exclusion via the
+/// existing "other " arm), and the branches are OR'd. Both branches MUST resolve
+/// to subtype-scoped typed filters, so a generic "creatures and <X>" compound is
+/// left for the fallback rather than over-claimed.
+fn parse_bare_compound_subtype_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    // Controller-scoped compounds belong to the sibling handler above.
+    if parse_subject_suffix(subject, " you control").is_some()
+        || parse_subject_suffix(subject, " your opponents control").is_some()
+    {
+        return None;
+    }
+    let (left_lower, _, right_lower) = nom_primitives::scan_preceded(subject.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("and ")).parse(input)
+    })?;
+    let right_start = subject.lower.len() - right_lower.len();
+    let left_original = subject.original[..left_lower.len()].trim();
+    let right_original = subject.original[right_start..].trim();
+    if left_original.is_empty() || right_original.is_empty() {
+        return None;
+    }
+    // Both branches must explicitly name creatures (CR 205.3m) AND resolve to a
+    // subtype-scoped typed filter. The creature-term gate keeps this off subjects
+    // whose subtype belongs to another set — e.g. Life and Limb's "All Forests
+    // and all Saprolings", whose "Forests" is a LAND subtype that must remain a
+    // land subject, not be reinterpreted here as a creature (#5147).
+    if !branch_names_creatures(left_original) || !branch_names_creatures(right_original) {
+        return None;
+    }
+    let left_filter = parse_continuous_subject_filter(left_original)?;
+    let right_filter = parse_continuous_subject_filter(right_original)?;
+    if !filter_carries_subtype(&left_filter) || !filter_carries_subtype(&right_filter) {
+        return None;
+    }
+    let mut filters = Vec::new();
+    push_or_filter_branch(&mut filters, left_filter);
+    push_or_filter_branch(&mut filters, right_filter);
+    Some(TargetFilter::Or { filters })
+}
+
 pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -2675,7 +2924,22 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         return Some(filter);
     }
 
+    // CR 607.2d / CR 607.2m (by analogy): "<type> controlled by players who last
+    // chose <label>" — the object anthem subject keyed on the controller's
+    // durable anchor (Two Streams Facility's "Creatures controlled by players
+    // who last chose red waterfall get +2/+0 and have haste"). Runs before the
+    // "X and Y" compound split so the "who last chose ..." tail is not misread.
+    if let Some(filter) = parse_controlled_by_anchor_subject_filter(&tp) {
+        return Some(filter);
+    }
+
     if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&tp) {
+        return Some(filter);
+    }
+
+    // CR 611.3a: bare tribal compound "<subtype> creatures and [other] <subtype>
+    // creatures" (Verdeloth the Ancient) — no controller suffix.
+    if let Some(filter) = parse_bare_compound_subtype_subject_filter(&tp) {
         return Some(filter);
     }
 
@@ -3537,6 +3801,22 @@ fn merge_filter_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
     }
 }
 
+/// CR 607.2d / CR 607.2m (by analogy): canonicalize an anchor label ("green anchor") to the
+/// capitalized casing used by `ChoiceType::Labeled`'s option list ("Green
+/// anchor"), so the parsed static/filter/effect labels read identically to the
+/// choice options. Runtime matching (`player_last_chose_label`) is
+/// case-insensitive, so this is a readability/consistency canonicalization, not
+/// a correctness dependency. Capitalizes only the first character (anchor labels
+/// are "<color> <noun>", matching the printed "Green anchor" / "Red waterfall").
+pub(crate) fn canonicalize_anchor_label(label: &str) -> String {
+    let trimmed = label.trim().trim_end_matches('.').trim();
+    let mut chars = trimmed.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
     let (subject, attachment_prop) = strip_attachment_relative_clause(subject);
     let lower = subject.to_lowercase();
@@ -3557,6 +3837,25 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
 
     if matches!(tp.lower, "players" | "each player") {
         return Some(TargetFilter::Player);
+    }
+
+    // CR 607.2d / CR 607.2m (by analogy): "[each ]player[s] who last chose <label>"
+    // player-scope subject — the durable per-player anchor gate (Two Streams
+    // Facility's "Each player who last chose green anchor …"). Combinator strips
+    // the optional "each " prefix, then the "player[s] who last chose " head, and
+    // canonicalizes the trailing anchor label to match `ChoiceType::Labeled`'s
+    // capitalized option casing. Runs AFTER the plain "players"/"each player"
+    // arm so it never shadows the un-anchored player scope.
+    {
+        let cursor = nom_tag_tp(&tp, "each ").unwrap_or(tp);
+        if let Some(rest) = nom_tag_tp(&cursor, "players who last chose ")
+            .or_else(|| nom_tag_tp(&cursor, "player who last chose "))
+        {
+            let label = canonicalize_anchor_label(rest.original.trim());
+            if !label.is_empty() {
+                return Some(TargetFilter::PlayerWhoChoseLabel { label });
+            }
+        }
     }
 
     // CR 205.3 + CR 604.1: "All/Each <subtype>" universal-quantifier subject for a

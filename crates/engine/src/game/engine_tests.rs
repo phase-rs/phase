@@ -17,6 +17,7 @@ use crate::types::format::FormatConfig;
 use crate::types::game_state::CastingVariant;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
 
 /// Create a simple test ability definition.
@@ -94,6 +95,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
             damage_source: None,
+            excess: None,
         },
         vec![],
         source_id,
@@ -333,6 +335,7 @@ fn make_damage_ability(amount: i32, cost: Option<AbilityCost>) -> AbilityDefinit
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
     );
     if let Some(c) = cost {
@@ -1622,6 +1625,174 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
     );
 }
 
+/// Builds a face-down morph({3}) creature on `player`'s battlefield via the real
+/// `play_face_down` zone pipeline, which snapshots the real face — including the
+/// morph keyword and its {3} cost — into `back_face`. Returns its `ObjectId`.
+fn setup_face_down_morph(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(4200),
+        player,
+        "Secret Beast".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Beast".to_string()],
+        };
+        obj.power = Some(4);
+        obj.toughness = Some(5);
+        obj.keywords = vec![crate::types::keywords::Keyword::Morph(ManaCost::Cost {
+            generic: 3,
+            shards: vec![],
+        })];
+    }
+    let mut events = Vec::new();
+    crate::game::morph::play_face_down(state, player, id, &mut events).unwrap();
+    assert!(
+        state.objects[&id].face_down,
+        "setup: the morph creature must be face down before the turn-up test"
+    );
+    id
+}
+
+/// Adds `count` untapped green `ManaUnit`s restricted by `restriction` to
+/// `player`'s pool — the only mana in the game, so payment must draw from exactly
+/// these units.
+fn fund_restricted_pool(
+    state: &mut GameState,
+    player: PlayerId,
+    count: usize,
+    restriction: crate::types::mana::ManaRestriction,
+) {
+    let p = state.players.iter_mut().find(|p| p.id == player).unwrap();
+    for _ in 0..count {
+        p.mana_pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(4200),
+            false,
+            vec![restriction.clone()],
+        ));
+    }
+}
+
+/// R1 — CR 116.2b + CR 702.37e + CR 106.6: turn-face-up-restricted mana funds the
+/// morph turn-up special action. Pool = 3× green restricted to
+/// `OnlyForSpecialAction(TurnFaceUp)` (the sole mana source); the {3} morph cost
+/// is paid through `PaymentContext::SpecialAction(TurnFaceUp)`, the permanent
+/// flips face up, a `TurnedFaceUp` event fires, and the pool empties. This is the
+/// positive reach-guard proving the payment routes through the real
+/// `pay_special_action_mana_cost` site, so R2/R3's negatives aren't vacuous.
+#[test]
+fn turn_face_up_restricted_mana_funds_special_action() {
+    use crate::types::mana::{ManaRestriction, SpecialAction};
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+    fund_restricted_pool(
+        &mut state,
+        PlayerId(0),
+        3,
+        ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
+    );
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph })
+        .expect("turn-face-up-restricted mana must fund the morph turn-up special action");
+
+    assert!(
+        !state.objects[&morph].face_down,
+        "the permanent must be face up after paying the morph cost"
+    );
+    assert!(
+        result.events.iter().any(|e| matches!(
+            e,
+            GameEvent::TurnedFaceUp { object_id } if *object_id == morph
+        )),
+        "a TurnedFaceUp event must fire"
+    );
+    let pool = &state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(0))
+        .unwrap()
+        .mana_pool;
+    assert_eq!(
+        pool.total(),
+        0,
+        "the {{3}} morph cost must consume all 3 restricted units"
+    );
+}
+
+/// R2 (LOAD-BEARING charge proof) — CR 116.2b + CR 702.37e: the turn-up special
+/// action now CHARGES the morph cost. With an EMPTY pool and no mana sources the
+/// {3} cost is unpayable, so `apply(TurnFaceUp)` errors and the permanent STAYS
+/// face down.
+///
+/// Revert direction: reverting Step 2 (the handler payment) makes the turn-up
+/// free — `apply` returns `Ok` and the permanent flips face up. Both assertions
+/// below flip, so this is the discriminating proof the cost is actually charged.
+#[test]
+fn turn_face_up_empty_pool_cannot_pay_and_stays_face_down() {
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    assert!(
+        result.is_err(),
+        "with no mana the {{3}} morph turn-up cost must be unpayable: {result:?}"
+    );
+    assert!(
+        state.objects[&morph].face_down,
+        "an unpaid turn-up must leave the permanent face down"
+    );
+}
+
+/// R3 (context precision, hostile) — CR 106.6 + CR 116.2b: mana restricted to a
+/// DIFFERENT special action (`UnlockDoor`) must NOT pay a turn-face-up. Pool = 3×
+/// green restricted to `OnlyForSpecialAction(UnlockDoor)`; `ManaRestriction::
+/// allows` rejects the `SpecialAction(TurnFaceUp)` context, so the {3} cost is
+/// unpayable, the permanent stays face down, and the wrong-context units are
+/// untouched.
+///
+/// Revert direction: if the turn-up emitted the wrong context (`UnlockDoor`) or
+/// the restriction ignored the action, this would pay and flip — all three
+/// assertions flip.
+#[test]
+fn turn_face_up_rejects_unlock_door_restricted_mana() {
+    use crate::types::mana::{ManaRestriction, SpecialAction};
+    let mut state = setup_game_at_main_phase();
+    let morph = setup_face_down_morph(&mut state, PlayerId(0));
+    fund_restricted_pool(
+        &mut state,
+        PlayerId(0),
+        3,
+        ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor),
+    );
+
+    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    assert!(
+        result.is_err(),
+        "door-unlock-restricted mana must not pay a turn-face-up: {result:?}"
+    );
+    assert!(
+        state.objects[&morph].face_down,
+        "the permanent must stay face down when only wrong-context mana is available"
+    );
+    let pool = &state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(0))
+        .unwrap()
+        .mana_pool;
+    assert_eq!(
+        pool.total(),
+        3,
+        "unlock-restricted mana must not be consumed by a turn-up"
+    );
+}
+
 /// CR 116.2m + CR 709.5e + CR 118.7a: Inquisitive Glimmer — "Unlock costs
 /// you pay cost {1} less." Reduces the generic component of a Room door's
 /// unlock cost before payment, via the single-authority special-action
@@ -1812,7 +1983,10 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
         &mut state,
         PlayerId(0),
         GameAction::SetPhaseStops {
-            stops: vec![Phase::End],
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
         },
     );
 
@@ -1822,7 +1996,10 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
     );
     assert_eq!(
         state.phase_stops.get(&PlayerId(0)),
-        Some(&vec![Phase::End]),
+        Some(&vec![crate::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: crate::types::phase::PhaseStopScope::AllTurns,
+        }]),
         "expected actor (P0) preference to be written, not authorized submitter (P1)",
     );
     assert!(!state.phase_stops.contains_key(&PlayerId(1)));
@@ -1837,7 +2014,9 @@ fn cancel_auto_pass_routes_by_actor() {
     let mut state = setup_game_at_main_phase();
     state.auto_pass.insert(
         PlayerId(0),
-        crate::types::game_state::AutoPassMode::UntilEndOfTurn,
+        crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+            until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+        },
     );
     state.priority_player = PlayerId(1);
     state.waiting_for = WaitingFor::Priority {
@@ -1850,6 +2029,259 @@ fn cancel_auto_pass_routes_by_actor() {
     assert!(
         !state.auto_pass.contains_key(&PlayerId(0)),
         "P0's auto-pass should have been cancelled"
+    );
+}
+
+// --- GameAction::SetPriorityYield (CR 117.3d + CR 400.7 + CR 704.5d) ---
+
+/// Push a controller-owned `TriggeredAbility` entry onto the stack whose ability
+/// latched `incarnation` and `card_id` at push (the token itself is NOT inserted
+/// into `objects` — it models a ceased token per CR 704.5d).
+fn push_token_trigger(
+    state: &mut GameState,
+    source: ObjectId,
+    controller: PlayerId,
+    incarnation: Option<u64>,
+    card_id: Option<CardId>,
+) -> ObjectId {
+    let mut ability = ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        controller,
+    );
+    ability.source_incarnation = incarnation;
+    ability.source_card_id = card_id;
+    let entry_id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    state.stack.push_back(StackEntry {
+        id: entry_id,
+        source_id: source,
+        controller,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: source,
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: "Token".to_string(),
+            subject_match_count: None,
+            die_result: None,
+        },
+    });
+    entry_id
+}
+
+/// CR 400.7 identity latch: `Add` binds the target from the on-stack trigger,
+/// not from `state.objects`. A ceased token (absent from `objects`) whose
+/// dies-trigger is still on the stack must register a yield carrying the entry's
+/// latched incarnation. Reverting to an `objects`-based lookup would store
+/// nothing here.
+#[test]
+fn set_priority_yield_add_binds_from_stack_after_token_ceased() {
+    let mut state = setup_game_at_main_phase();
+    let source = ObjectId(500);
+    push_token_trigger(&mut state, source, PlayerId(0), Some(4), Some(CardId(77)));
+    assert!(
+        state.objects.get(&source).is_none(),
+        "reach-guard: the token source has ceased to exist"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::ThisObject,
+            },
+        },
+    )
+    .expect("SetPriorityYield is legal in any state");
+
+    assert_eq!(
+        state.priority_yields,
+        vec![crate::types::game_state::PriorityYield {
+            player: PlayerId(0),
+            target: crate::types::game_state::YieldTarget::ThisObject {
+                source_id: source,
+                incarnation: 4,
+            },
+        }],
+        "Add must bind the incarnation latched on the on-stack trigger",
+    );
+}
+
+/// `Add` is a benign no-op when no matching triggered entry is on the stack.
+#[test]
+fn set_priority_yield_add_no_op_without_matching_stack_entry() {
+    let mut state = setup_game_at_main_phase();
+    // A different source's trigger is on the stack (reach-guard: stack non-empty).
+    push_token_trigger(
+        &mut state,
+        ObjectId(500),
+        PlayerId(0),
+        Some(1),
+        Some(CardId(77)),
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: ObjectId(999),
+                scope: crate::types::game_state::YieldScope::ThisObject,
+            },
+        },
+    )
+    .expect("SetPriorityYield is legal in any state");
+
+    assert!(
+        state.priority_yields.is_empty(),
+        "Add for a source with no stack entry must not store a yield"
+    );
+}
+
+/// CR 400.7 None-boundary: a `ThisObject` add on a trigger with no latched
+/// incarnation no-ops, while an `AllCopies` add on the same trigger still stores.
+#[test]
+fn set_priority_yield_this_object_none_incarnation_no_ops_but_all_copies_works() {
+    let mut state = setup_game_at_main_phase();
+    let source = ObjectId(0); // synthetic game-rule trigger source
+    push_token_trigger(&mut state, source, PlayerId(0), None, Some(CardId(77)));
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::ThisObject,
+            },
+        },
+    )
+    .expect("legal");
+    assert!(
+        state.priority_yields.is_empty(),
+        "ThisObject add must no-op when the trigger latched no incarnation"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::AllCopies,
+            },
+        },
+    )
+    .expect("legal");
+    assert_eq!(
+        state.priority_yields.len(),
+        1,
+        "AllCopies add stores when the card identity is present"
+    );
+}
+
+/// CR 117.3d: `SetPriorityYield` is a per-player preference routed by `actor`,
+/// so a non-priority player may register a yield stored under THEIR seat. The
+/// authorization exemption is what allows this — a non-exempt action from the
+/// same wrong player is rejected as `WrongPlayer`.
+#[test]
+fn set_priority_yield_accepted_from_non_priority_actor() {
+    let mut state = setup_game_at_main_phase();
+    // Priority is P0's; P1 is not the priority holder.
+    let source = ObjectId(500);
+    push_token_trigger(&mut state, source, PlayerId(0), Some(2), Some(CardId(77)));
+
+    // Reach-guard: a non-exempt action from P1 in P0's priority window errors.
+    let unauthorized = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+    assert!(
+        matches!(unauthorized, Err(EngineError::WrongPlayer)),
+        "a non-priority player cannot pass priority (proves the auth gate is live)"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::Add {
+                source_id: source,
+                scope: crate::types::game_state::YieldScope::AllCopies,
+            },
+        },
+    )
+    .expect("SetPriorityYield is exempt from the priority-holder gate");
+
+    assert_eq!(state.priority_yields.len(), 1);
+    assert_eq!(
+        state.priority_yields[0].player,
+        PlayerId(1),
+        "the yield is stored under the acting player's seat, not the priority holder's"
+    );
+}
+
+/// CR 117.3d: an `UntilEndOfTurn` auto-pass session normally ends (Finish) when
+/// an opponent-controlled trigger tops the stack, so the player can respond.
+/// A matching yield keeps the session auto-passing (Pass) through that trigger;
+/// a non-yielded opponent trigger still Finishes.
+#[test]
+fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
+    let mut state = setup_game_at_main_phase();
+    state.auto_pass.insert(
+        PlayerId(0),
+        crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+            until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    let source = ObjectId(500);
+    push_token_trigger(&mut state, source, PlayerId(1), Some(4), Some(CardId(77)));
+
+    // Without a yield: the opponent trigger ends the session.
+    assert!(
+        matches!(
+            priority_auto_pass_decision(&state, PlayerId(0)),
+            AutoPassDecision::Finish
+        ),
+        "reach-guard: an un-yielded opponent top finishes the session"
+    );
+
+    // With a matching yield: keep auto-passing through it.
+    state.add_priority_yield(
+        PlayerId(0),
+        crate::types::game_state::YieldTarget::ThisObject {
+            source_id: source,
+            incarnation: 4,
+        },
+    );
+    assert!(
+        matches!(
+            priority_auto_pass_decision(&state, PlayerId(0)),
+            AutoPassDecision::Pass
+        ),
+        "CR 117.3d: a matching yield keeps the UntilEndOfTurn session passing"
+    );
+
+    // A different, non-yielded opponent trigger still finishes.
+    state.stack.clear();
+    push_token_trigger(
+        &mut state,
+        ObjectId(600),
+        PlayerId(1),
+        Some(9),
+        Some(CardId(88)),
+    );
+    assert!(
+        matches!(
+            priority_auto_pass_decision(&state, PlayerId(0)),
+            AutoPassDecision::Finish
+        ),
+        "a non-yielded opponent trigger still finishes the session"
     );
 }
 
@@ -6094,6 +6526,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         ),
         cost: crate::types::mana::ManaCost::NoCost,
         base_cost: None,
+        declared_mana_additions: Vec::new(),
         activation_cost: None,
         activation_ability_index: None,
         target_constraints: vec![],
@@ -6105,6 +6538,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         deferred_required_additional_cost: None,
         additional_cost_queue: Vec::new(),
         additional_cost_source: crate::types::game_state::SpellCostSource::Other,
+        additional_cost_payment_mode: None,
         deferred_modal_choice: None,
         deferred_target_selection: false,
         chosen_modes: Vec::new(),
@@ -6481,6 +6915,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         ),
         cost: crate::types::mana::ManaCost::NoCost,
         base_cost: None,
+        declared_mana_additions: Vec::new(),
         activation_cost: None,
         activation_ability_index: None,
         target_constraints: vec![],
@@ -6492,6 +6927,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         deferred_required_additional_cost: None,
         additional_cost_queue: Vec::new(),
         additional_cost_source: crate::types::game_state::SpellCostSource::Other,
+        additional_cost_payment_mode: None,
         deferred_modal_choice: None,
         deferred_target_selection: false,
         chosen_modes: Vec::new(),
@@ -7887,4 +8323,1435 @@ fn reorder_hand_succeeds_while_opponent_holds_priority() {
     );
     // Priority hasn't moved — reorder doesn't transition WaitingFor.
     assert_eq!(state.priority_player, PlayerId(1));
+}
+
+/// CR 305.1 + CR 116.2a + CR 401.5: A `OncePerTurn` `TopOfLibraryCastPermission`
+/// with `play_mode: Play` must consume its per-turn slot when a land is played
+/// from the library top (land play is a special action per CR 305.1/CR 116.2a;
+/// CR 401.5 governs top-of-library visibility during the action), and a second
+/// `PlayLand` from the same permission source must be rejected.
+#[test]
+fn once_per_turn_library_land_play_consumes_slot_and_blocks_second_play() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+
+    let perm_src = create_object(
+        &mut state,
+        CardId(9200),
+        player,
+        "Permission Source (test)".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode: crate::types::ability::CardPlayMode::Play,
+            frequency: CastFrequency::OncePerTurn,
+            alt_cost: None,
+        })
+        .affected(TargetFilter::Any);
+        let obj = state.objects.get_mut(&perm_src).unwrap();
+        obj.static_definitions.push(def.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+
+    let land1 = create_object(
+        &mut state,
+        CardId(9201),
+        player,
+        "Forest A".to_string(),
+        Zone::Library,
+    );
+    state
+        .objects
+        .get_mut(&land1)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    {
+        let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        pd.library.push_back(land1);
+    }
+
+    let land2 = create_object(
+        &mut state,
+        CardId(9202),
+        player,
+        "Forest B".to_string(),
+        Zone::Library,
+    );
+    state
+        .objects
+        .get_mut(&land2)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    {
+        let pd = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        pd.library.push_front(land2);
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land2,
+            card_id: CardId(9202),
+        },
+    )
+    .expect("first top-of-library land play must succeed");
+
+    assert!(
+        state.battlefield.contains(&land2),
+        "land2 must be on the battlefield after the first play"
+    );
+    assert!(
+        state
+            .top_of_library_cast_permissions_used
+            .contains(&perm_src),
+        "the OncePerTurn slot must be recorded after the land is moved"
+    );
+
+    let second = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land1,
+            card_id: CardId(9201),
+        },
+    );
+    assert!(
+        second.is_err(),
+        "second top-of-library land play under the same OncePerTurn source must be rejected"
+    );
+}
+
+// ===========================================================================
+// Face-down spell casting — CR 708.4 (morph CR 702.37c / disguise CR 702.168b)
+// ===========================================================================
+
+/// Build a face-UP creature carrying `keyword` (Morph / Megamorph / Disguise) in
+/// `player`'s hand, with printed mana cost `real_cost`. The FACE-DOWN cast cost
+/// is always {3} (CR 702.37c / 702.168a) regardless of `keyword`'s turn-up cost.
+fn add_face_down_castable_to_hand(
+    state: &mut GameState,
+    player: PlayerId,
+    keyword: crate::types::keywords::Keyword,
+    real_cost: ManaCost,
+) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(4300),
+        player,
+        "Secret Beast".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    let card_types = CardType {
+        supertypes: vec![],
+        core_types: vec![CoreType::Creature],
+        subtypes: vec!["Beast".to_string()],
+    };
+    // Set BOTH live and base characteristics: the layer system rebuilds the live
+    // fields from `base_*` each flush (layers.rs), and off-zone keyword queries
+    // read `base_keywords` (off_zone_characteristics.rs), so a live-only keyword
+    // would be wiped before the face-down offer block runs.
+    obj.card_types = card_types.clone();
+    obj.base_card_types = card_types;
+    obj.power = Some(4);
+    obj.toughness = Some(5);
+    obj.base_power = Some(4);
+    obj.base_toughness = Some(5);
+    obj.mana_cost = real_cost.clone();
+    obj.base_mana_cost = real_cost;
+    obj.keywords = vec![keyword.clone()];
+    obj.base_keywords = vec![keyword];
+    id
+}
+
+/// CR 702.37c + CR 601.2b: with both the printed cost and the {3} face-down cost
+/// affordable, casting a morph creature must present the face-down alternative
+/// cast (mirrors the Impending / Evoke offer contract).
+#[test]
+fn morph_creature_offers_face_down_alternative_cast() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("casting a morph creature must be accepted");
+
+    match &state.waiting_for {
+        WaitingFor::AlternativeCastChoice { keyword, .. } => assert_eq!(
+            *keyword,
+            crate::types::game_state::AlternativeCastKeyword::FaceDown,
+            "a morph creature must offer the FaceDown alternative cast"
+        ),
+        other => panic!("expected AlternativeCastChoice(FaceDown), got {other:?}"),
+    }
+}
+
+/// Non-vacuous reach-guard paired with the positive above: a creature with NO
+/// morph/megamorph/disguise keyword must NOT offer a face-down alternative cast
+/// — it casts normally straight to the stack.
+#[test]
+fn non_morph_creature_offers_no_face_down_cast() {
+    let mut state = setup_game_at_main_phase();
+    let vanilla = create_object(
+        &mut state,
+        CardId(4301),
+        PlayerId(0),
+        "Plain Beast".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&vanilla).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Beast".to_string()],
+        };
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = ManaCost::generic(2);
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&vanilla].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: vanilla,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("casting a vanilla creature must be accepted");
+
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::AlternativeCastChoice { .. }),
+        "a non-morph creature must not surface any alternative-cast choice, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        !state.objects[&vanilla].face_down,
+        "a normally-cast creature must not be face down"
+    );
+}
+
+/// CR 708.4 + CR 708.2: choosing the face-down cast puts a BLANK 2/2 face-down
+/// creature spell on the stack — no name, no subtypes, no printed mana cost — with
+/// the real card stashed in `back_face` (so visibility can redact it and it can be
+/// turned face up later).
+#[test]
+fn face_down_cast_puts_blank_2_2_on_stack() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast accepted");
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .expect("choosing face down must succeed");
+
+    let obj = &state.objects[&morph];
+    assert_eq!(
+        obj.zone,
+        Zone::Stack,
+        "the face-down spell must be on the stack"
+    );
+    assert!(
+        obj.face_down,
+        "the stack spell must be face down (CR 708.4)"
+    );
+    assert!(
+        obj.back_face.is_some(),
+        "the real card must be stashed in back_face (redaction + turn-up depend on it)"
+    );
+    assert_eq!(obj.power, Some(2), "CR 708.2: a face-down spell is a 2/2");
+    assert_eq!(
+        obj.toughness,
+        Some(2),
+        "CR 708.2: a face-down spell is a 2/2"
+    );
+    assert!(
+        obj.name.is_empty(),
+        "CR 708.2: a face-down spell has no name"
+    );
+    assert_eq!(
+        obj.card_types.core_types,
+        vec![CoreType::Creature],
+        "CR 708.2: a face-down spell is a creature and nothing else"
+    );
+    assert!(
+        obj.keywords
+            .iter()
+            .all(|k| !matches!(k, crate::types::keywords::Keyword::Morph(_))),
+        "CR 708.2: the face-down spell must not expose the real card's morph keyword"
+    );
+}
+
+/// CR 702.37c: "when the spell resolves, it enters the battlefield with the same
+/// characteristics the spell had" — a face-down spell resolves to a face-down 2/2
+/// PERMANENT (it does not flip face up on resolution). Verifies Slice D's
+/// zero-resolution-code claim end to end.
+#[test]
+fn face_down_cast_resolves_to_face_down_permanent() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast accepted");
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .expect("choosing face down must succeed");
+    // CR 405.5 + CR 608: both players pass to resolve the top of the stack.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    let obj = &state.objects[&morph];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "the face-down spell must resolve onto the battlefield"
+    );
+    assert!(
+        obj.face_down,
+        "CR 702.37c: the permanent enters and stays FACE DOWN (not flipped up)"
+    );
+    assert!(
+        obj.back_face.is_some(),
+        "the real card must still be stashed for the eventual turn-up"
+    );
+    assert_eq!(obj.power, Some(2), "the face-down permanent is a 2/2");
+}
+
+/// D10 CLOSURE (constraint 1) — CR 106.6 + CR 708.4: Tin Street Gossip's mana,
+/// restricted to "cast face-down spells or turn creatures face up"
+/// (`OnlyForAny([FaceDownSpell, TurnFaceUp])`), FUNDS a real face-down cast. The
+/// pool is the ONLY mana in the game, so the {3} can be paid only if the payment
+/// is recognized as a face-down spell (`SpellMeta.is_face_down == true`).
+///
+/// Revert direction (discriminating): if `is_face_down` were left `false` (the
+/// pre-feature hardcode), the `OnlyForFaceDownSpell` branch rejects this mana, the
+/// {3} is unpayable, and the cast fails — both assertions below flip.
+#[test]
+fn tin_street_gossip_restricted_mana_funds_face_down_cast() {
+    use crate::types::mana::{ManaRestriction, SpecialAction};
+    let mut state = setup_game_at_main_phase();
+    // Printed cost {5} is deliberately NOT payable by the restricted pool, so the
+    // ONLY way this cast can succeed is via the {3} face-down alternative.
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    fund_restricted_pool(
+        &mut state,
+        PlayerId(0),
+        3,
+        ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForFaceDownSpell,
+            ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
+        ]),
+    );
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("Tin Street Gossip's restricted mana must fund the {3} face-down cast");
+
+    assert!(
+        state.objects[&morph].face_down && state.objects[&morph].zone == Zone::Stack,
+        "the morph creature must be on the stack as a face-down spell"
+    );
+    let pool_total = state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(0))
+        .unwrap()
+        .mana_pool
+        .total();
+    assert_eq!(
+        pool_total, 0,
+        "the {{3}} must be paid FROM the 3 face-down-restricted units \
+         (the FaceDownSpell leaf is now live — D10 closed)"
+    );
+}
+
+/// CR 702.168a: a DISGUISE creature cast face down is a 2/2 WITH ward {2}; a plain
+/// morph creature is a 2/2 with NO ward. Discriminating on the ward profile
+/// selection.
+#[test]
+fn disguise_face_down_has_ward_morph_does_not() {
+    let cast_face_down = |keyword: crate::types::keywords::Keyword| {
+        let mut state = setup_game_at_main_phase();
+        let id =
+            add_face_down_castable_to_hand(&mut state, PlayerId(0), keyword, ManaCost::generic(5));
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+        let card_id = state.objects[&id].card_id;
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: id,
+                card_id,
+                targets: vec![],
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseAlternativeCast {
+                choice: crate::types::actions::AlternativeCastDecision::Alternative,
+            },
+        )
+        .unwrap();
+        state.objects[&id]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Ward(_)))
+    };
+
+    assert!(
+        cast_face_down(crate::types::keywords::Keyword::Disguise(
+            ManaCost::generic(4)
+        )),
+        "CR 702.168a: a disguise face-down 2/2 must have ward {{2}}"
+    );
+    assert!(
+        !cast_face_down(crate::types::keywords::Keyword::Morph(ManaCost::generic(4))),
+        "a morph face-down 2/2 must NOT have ward"
+    );
+}
+
+/// CR 708.9: if a face-down spell leaves the stack for any zone other than the
+/// battlefield, its owner reveals it. A countered face-down spell is turned face
+/// up as it is put into the graveyard. This behavior is inherited from the shared
+/// `apply_zone_exit_cleanup`, so this test guards that a face-down SPELL rides it.
+#[test]
+fn countered_face_down_spell_is_revealed_in_graveyard() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&morph].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .unwrap();
+    // Reach-guard: the spell really is a face-down spell before we counter it.
+    assert!(
+        state.objects[&morph].face_down && state.objects[&morph].back_face.is_some(),
+        "precondition: a face-down spell must be on the stack"
+    );
+
+    // Simulate a counter: move the stack spell to the graveyard.
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, morph, Zone::Graveyard, &mut events);
+
+    let obj = &state.objects[&morph];
+    assert_eq!(
+        obj.zone,
+        Zone::Graveyard,
+        "the countered spell goes to the graveyard"
+    );
+    assert!(
+        !obj.face_down,
+        "CR 708.9: the face-down spell must be revealed (turned face up) as it leaves the stack"
+    );
+    assert_eq!(
+        obj.name, "Secret Beast",
+        "the real card identity must be restored on reveal"
+    );
+}
+
+/// CR 708.4 + CR 708.6: while a spell is face down on the stack, its controller
+/// knows its identity but opponents see only a face-down 2/2 shell. The redaction
+/// is inherited from `visibility::filter_state_for_viewer` (which already iterates
+/// the stack for `face_down && back_face.is_some()` objects); this guards that a
+/// face-down SPELL rides that seam.
+#[test]
+fn face_down_spell_on_stack_is_redacted_to_opponents() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&morph].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .unwrap();
+    // Reach-guard: a face-down spell must actually be on the stack (else the
+    // redaction assertions below would pass vacuously against a non-face-down obj).
+    assert!(
+        state.objects[&morph].face_down
+            && state.objects[&morph].back_face.is_some()
+            && state.objects[&morph].zone == Zone::Stack,
+        "precondition: a face-down spell must be on the stack"
+    );
+
+    let controller_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+    let opponent_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+    assert_eq!(
+        controller_view.objects[&morph].name, "Secret Beast",
+        "CR 708.6: the controller sees the real card behind their own face-down spell"
+    );
+    assert_eq!(
+        opponent_view.objects[&morph].name, "Hidden Card",
+        "CR 708.4: opponents see only a face-down 2/2 shell, not the real card"
+    );
+    assert!(
+        opponent_view.objects[&morph].back_face.is_none(),
+        "the real identity must be stripped from the opponent's wire view"
+    );
+}
+
+/// Grant `player` a "you may cast creature cards from your graveyard" static
+/// (the GraveyardCastPermission class — Karador, Muldrotha, Lurrus) via a
+/// battlefield permanent, then move `morph` (already owned by `player`) into the
+/// graveyard. Returns after the card is castable from the graveyard by the
+/// general cast-permission machinery.
+fn grant_graveyard_creature_cast_and_bury(
+    state: &mut GameState,
+    player: PlayerId,
+    morph: ObjectId,
+) {
+    let source = create_object(
+        state,
+        CardId(4400),
+        player,
+        "Graveyard Enabler".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: crate::types::ability::CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+        );
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(state, morph, Zone::Graveyard, &mut events);
+}
+
+/// CR 702.37c / CR 702.168b: "You can use a morph/disguise ability to cast a card
+/// FROM ANY ZONE FROM WHICH YOU COULD NORMALLY CAST IT." A morph creature that is
+/// castable from the graveyard via a GraveyardCastPermission static (Karador /
+/// Muldrotha class) must still be offered the {3} face-down cast — the offer is no
+/// longer a hand-only special case; it routes through the general castable-zone
+/// authority (`prepare_spell_cast`).
+///
+/// Revert direction (discriminating): with the pre-fix `obj.zone == Zone::Hand`
+/// gate this graveyard morph card skips the face-down offer block entirely and
+/// falls through to the normal graveyard cast — no `AlternativeCastChoice` is
+/// surfaced, so the match below panics.
+#[test]
+fn morph_creature_in_graveyard_offers_and_casts_face_down() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    grant_graveyard_creature_cast_and_bury(&mut state, PlayerId(0), morph);
+    assert_eq!(
+        state.objects[&morph].zone,
+        Zone::Graveyard,
+        "precondition: the morph creature must be in the graveyard, not the hand"
+    );
+    // Enough to pay EITHER the {5} normal graveyard cast or the {3} face-down cast,
+    // so both are affordable and the engine must present the choice.
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("casting a graveyard-castable morph creature must be accepted");
+
+    match &state.waiting_for {
+        WaitingFor::AlternativeCastChoice { keyword, .. } => assert_eq!(
+            *keyword,
+            crate::types::game_state::AlternativeCastKeyword::FaceDown,
+            "a graveyard-castable morph creature must offer the FaceDown alternative cast"
+        ),
+        other => {
+            panic!("expected AlternativeCastChoice(FaceDown) from the graveyard, got {other:?}")
+        }
+    }
+
+    // End-to-end: choosing face down casts the GRAVEYARD card as a blank 2/2
+    // face-down creature spell (CR 708.2 / CR 708.4), proving the non-hand cast
+    // path executes, not just the offer.
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .expect("choosing face down from the graveyard must succeed");
+    let obj = &state.objects[&morph];
+    assert!(
+        obj.face_down && obj.zone == Zone::Stack,
+        "the graveyard morph must be on the stack as a face-down spell, got zone={:?} face_down={}",
+        obj.zone,
+        obj.face_down
+    );
+    assert_eq!(obj.power, Some(2), "CR 708.2: a face-down spell is a 2/2");
+    assert!(
+        obj.name.is_empty(),
+        "CR 708.2: a face-down spell has no name"
+    );
+}
+
+/// Non-vacuous reach-guard for the zone-generalized gate: being castable from the
+/// graveyard is NOT by itself sufficient — a creature with NO morph/megamorph/
+/// disguise keyword under the SAME GraveyardCastPermission must offer no face-down
+/// cast. Proves the offer still requires the keyword and isn't vacuously surfaced
+/// for every graveyard-castable creature.
+#[test]
+fn non_morph_creature_in_graveyard_offers_no_face_down_cast() {
+    let mut state = setup_game_at_main_phase();
+    let plain = create_object(
+        &mut state,
+        CardId(4401),
+        PlayerId(0),
+        "Plain Beast".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&plain).unwrap();
+        let card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Beast".to_string()],
+        };
+        obj.card_types = card_types.clone();
+        obj.base_card_types = card_types;
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        obj.mana_cost = ManaCost::generic(3);
+        obj.base_mana_cost = ManaCost::generic(3);
+    }
+    grant_graveyard_creature_cast_and_bury(&mut state, PlayerId(0), plain);
+    assert_eq!(
+        state.objects[&plain].zone,
+        Zone::Graveyard,
+        "precondition: the plain creature must be in the graveyard"
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    let card_id = state.objects[&plain].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: plain,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("casting a graveyard-castable vanilla creature must be accepted");
+
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::AlternativeCastChoice { .. }),
+        "a non-morph creature must not surface a face-down cast even when \
+         graveyard-castable, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        !state.objects[&plain].face_down,
+        "a normally-cast graveyard creature must not be face down"
+    );
+}
+
+/// CR 601.2i + CR 708.4: canceling a face-down cast during mana payment must roll
+/// the object back to its REAL face in its origin zone — not leave it blanked /
+/// nameless / no-cost. `continue_cast_face_down` blanks the object before payment,
+/// so a `CancelCast` from `WaitingFor::ManaPayment` has to reveal the stashed real
+/// card. Manual payment is used so the {3} face-down cost (mana value 3 > 0) pauses
+/// at `WaitingFor::ManaPayment` instead of auto-completing onto the stack.
+///
+/// Revert direction (discriminating): without the `CastingVariant::FaceDown`
+/// rollback branch in `handle_cancel_cast`, the object keeps `face_down = true`
+/// and its blank 2/2 characteristics (empty name, `NoCost` mana cost) — every
+/// restore assertion below flips.
+#[test]
+fn face_down_cast_cancel_at_mana_payment_restores_real_card() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Manual,
+        },
+    )
+    .expect("casting a morph creature must be accepted");
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .expect("choosing face down must succeed");
+
+    // Precondition: the cast is paused at mana payment with the object already
+    // blanked face down (so the cancel below has something real to restore).
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
+        "precondition: the {{3}} face-down cost must pause at mana payment, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        state.objects[&morph].face_down && state.objects[&morph].back_face.is_some(),
+        "precondition: the object must be blanked face down with the real card stashed"
+    );
+
+    // Back out of the cast during mana payment (CR 601.2i).
+    apply_as_current(&mut state, GameAction::CancelCast).expect("cancel must be accepted");
+
+    let obj = &state.objects[&morph];
+    assert!(
+        !obj.face_down,
+        "CR 601.2i: canceling the face-down cast must clear the face-down blank"
+    );
+    assert_eq!(
+        obj.name, "Secret Beast",
+        "the real card name must be restored on cancel, not left blank"
+    );
+    assert_eq!(
+        obj.mana_cost,
+        ManaCost::generic(5),
+        "the real printed mana cost must be restored on cancel, not NoCost"
+    );
+    assert_eq!(
+        obj.card_types.core_types,
+        vec![CoreType::Creature],
+        "the real card types must be restored on cancel"
+    );
+    assert!(
+        obj.back_face.is_none(),
+        "the face-down stash must be consumed once the real face is restored"
+    );
+    assert_eq!(
+        obj.zone,
+        Zone::Hand,
+        "CR 601.2i: the object returns to its origin zone (hand), not stranded on the stack"
+    );
+}
+
+/// Blocker C — CR 601.2f + CR 118.9a: a pending "cast the next spell without paying
+/// its mana cost" modifier (Omniscience-style one-shot) makes the FREE face-up
+/// normal cast legal even when the printed cost ({5}) is unpayable. That free
+/// normal cast must NOT be robbed by an auto-route to the {3} face-down cast: with
+/// both the (free) normal and the {3} face-down affordable, the engine must OFFER
+/// the choice rather than silently proceed face down.
+///
+/// Revert direction (discriminating): with the `WithoutPayingManaCost` short-circuit
+/// removed from `normal_cast_choice_cost_and_affordability`, the normal cost reverts
+/// to the unpayable printed {5} → `normal_affordable = false` → only the {3}
+/// face-down is affordable → the offer auto-routes face down, so `state.waiting_for`
+/// is NOT `AlternativeCastChoice` and the `other => panic!` below fires.
+#[test]
+fn morph_free_normal_cast_not_robbed_by_face_down_autoroute() {
+    let mut state = setup_game_at_main_phase();
+    // Printed {5} is strictly unpayable by 3 generic mana, so the ONLY legal
+    // face-up cast is the free one granted by the modifier below.
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    // "The next spell you cast this turn can be cast without paying its mana cost."
+    state
+        .pending_next_spell_modifiers
+        .push(crate::types::game_state::PendingNextSpellModifier {
+            player: PlayerId(0),
+            modifier: crate::types::game_state::NextSpellModifier::WithoutPayingManaCost,
+            spell_filter: None,
+            source_id: None,
+        });
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("casting a morph creature must be accepted");
+
+    // The engine must OFFER the choice (free normal vs {3} face down), NOT auto-route.
+    match &state.waiting_for {
+        WaitingFor::AlternativeCastChoice {
+            keyword,
+            normal_cost,
+            ..
+        } => {
+            assert_eq!(
+                *keyword,
+                crate::types::game_state::AlternativeCastKeyword::FaceDown,
+                "must offer the FaceDown alternative cast"
+            );
+            assert_eq!(
+                *normal_cost,
+                ManaCost::NoCost,
+                "the free normal cast must display NoCost (WithoutPayingManaCost), not printed {{5}}"
+            );
+        }
+        other => panic!("expected AlternativeCastChoice(FaceDown), got {other:?}"),
+    }
+    assert!(
+        !state.objects[&morph].face_down,
+        "the object must NOT have been blanked face down before the choice is made"
+    );
+
+    // Choose the free FACE-UP normal cast.
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Normal,
+        },
+    )
+    .expect("choosing the free normal cast must succeed");
+
+    let obj = &state.objects[&morph];
+    assert_eq!(obj.zone, Zone::Stack, "the spell must be on the stack");
+    assert!(
+        !obj.face_down,
+        "the normal cast must put the real card face UP, not a blank 2/2"
+    );
+    assert_eq!(
+        obj.name, "Secret Beast",
+        "the face-up spell must keep the real card's characteristics"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        3,
+        "the free normal cast must leave the {{3}} pool unspent (no {{3}} face-down cost paid)"
+    );
+}
+
+/// Blocker A — CR 118.6a + CR 702.37c / CR 702.168b: a card with NO mana cost
+/// (`ManaCost::NoCost`, e.g. an Aftermath//suspend-only or reverse-side morph)
+/// carrying an effective morph keyword is UNPAYABLE face up, but IS legally
+/// castable FACE DOWN for the fixed {3} alternative cost. The `Zone::Hand` NoCost
+/// rejection must let it through, and the offer must auto-route to the face-down
+/// {3} (the normal face-up path is unpayable, not free).
+///
+/// Revert direction (discriminating): remove the `Zone::Hand` morph exception (E2)
+/// and the cast is rejected at the NoCost gate — the `.expect` below panics.
+/// Remove the `normal_affordable` soundness guard (E3) and `can_pay_cost_after_
+/// auto_tap` reports the unpayable `NoCost` normal cast as affordable → the engine
+/// OFFERS a (bogus free) face-up cast instead of auto-routing → the object stays in
+/// hand, so `assert_eq!(obj.zone, Zone::Stack)` fails.
+#[test]
+fn nocost_morph_auto_casts_face_down_for_three() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::NoCost,
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    let card_id = state.objects[&morph].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("a NoCost morph with {3} available must be castable face down (CR 118.6a / 702.37c)");
+
+    let obj = &state.objects[&morph];
+    assert_eq!(
+        obj.zone,
+        Zone::Stack,
+        "the NoCost morph must auto-route onto the stack face down (no free face-up offer)"
+    );
+    assert!(obj.face_down, "CR 708.4: the spell must be face down");
+    assert_eq!(obj.power, Some(2), "CR 708.2: a face-down spell is a 2/2");
+    assert_eq!(
+        obj.toughness,
+        Some(2),
+        "CR 708.2: a face-down spell is a 2/2"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        0,
+        "the {{3}} face-down cost must actually have been paid"
+    );
+}
+
+/// Blocker A non-vacuity guard: a NoCost creature with NO morph/megamorph/disguise
+/// keyword has an unpayable cost and NO face-down permission, so it must be
+/// REJECTED from hand (CR 118.6). Proves the E2 exception is gated on the keyword,
+/// not on NoCost alone.
+#[test]
+fn nocost_non_morph_creature_rejected_from_hand() {
+    let mut state = setup_game_at_main_phase();
+    let vanilla = create_object(
+        &mut state,
+        CardId(4302),
+        PlayerId(0),
+        "Costless Beast".to_string(),
+        Zone::Hand,
+    );
+    {
+        let card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Beast".to_string()],
+        };
+        let obj = state.objects.get_mut(&vanilla).unwrap();
+        obj.card_types = card_types.clone();
+        obj.base_card_types = card_types;
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = ManaCost::NoCost;
+        obj.base_mana_cost = ManaCost::NoCost;
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    let card_id = state.objects[&vanilla].card_id;
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: vanilla,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "a NoCost non-morph creature has an unpayable cost and no face-down permission — CR 118.6"
+    );
+}
+
+/// Blocker A non-vacuity guard: a NoCost morph creature with only {2} available
+/// cannot afford the {3} face-down cost, so the exception does NOT fire and the
+/// unpayable-cost rejection stands (CR 118.6). Proves the E2 exception is gated on
+/// {3} affordability — it must not silently grant a free face-up cast.
+#[test]
+fn nocost_morph_without_three_mana_rejected() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::NoCost,
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+    let card_id = state.objects[&morph].card_id;
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "a NoCost morph with only {{2}} cannot pay the {{3}} face-down cost — the cast must be rejected, not made free face up"
+    );
+}
+
+/// Blocker A (E4) — CR 118.6a + CR 702.37c: the candidate/legal-action path must
+/// OFFER a NoCost morph whenever the {3} face-down cost is affordable. `can_cast_
+/// object_now` routes through `can_cast_prepared_now_with_probe`, whose `Zone::Hand`
+/// NoCost gate would otherwise report the card uncastable even though dispatch
+/// accepts it.
+///
+/// Revert direction (discriminating): remove the E4 morph exception and the NoCost
+/// gate returns false → `can_cast_prepared_now_with_probe` is false → (no other
+/// casting variant surfaces face down) `can_cast_object_now` returns false.
+#[test]
+fn nocost_morph_offered_as_legal_action() {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::NoCost,
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+    assert!(
+        casting::can_cast_object_now(&state, PlayerId(0), morph),
+        "a NoCost morph with {{3}} available must be surfaced as a legal cast (face down)"
+    );
+}
+
+// ===========================================================================
+// Blocker B — CR 708.4 + CR 601.3a: a characteristics-dependent cast prohibition
+// (`CantBeCast` naming the card, or matching its printed mana value) that blocks
+// the FACE-UP cast must NOT suppress the legal {3} FACE-DOWN cast. A face-down
+// spell is a nameless, mana-cost-less 2/2 (CR 708.2a), so a prohibition evaluated
+// against those blanked characteristics no longer applies.
+// ===========================================================================
+
+/// Which printed characteristic the `CantBeCast` prohibition keys on. Both axes
+/// match the FACE-UP card but not the blanked 2/2, so the fix must let the
+/// face-down cast through for either.
+#[derive(Clone, Copy)]
+enum ProhibitionAxis {
+    /// CR 201.2: `HasChosenName` naming "Secret Beast" (Meddling Mage / Nevermore).
+    ChosenName,
+    /// CR 202.3: mana value >= 5 — matches the printed {5} but not the face-down mv 0.
+    ManaValue,
+}
+
+/// Attach an `AllPlayers` `CantBeCast` prohibition (CR 101.2) to an enchantment on
+/// `controller`'s battlefield, keyed on `filter`. When `chosen_name` is set the
+/// source also carries that chosen card name so a `HasChosenName` filter (CR 201.2)
+/// resolves against it.
+fn add_cant_be_cast_source(
+    state: &mut GameState,
+    controller: PlayerId,
+    card_id: CardId,
+    filter: TargetFilter,
+    chosen_name: Option<&str>,
+) -> ObjectId {
+    let id = create_object(
+        state,
+        card_id,
+        controller,
+        "Meddler".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    // A concrete permanent type (no P/T, so no CR 704.5 SBA) — mirrors Nevermore.
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    if let Some(name) = chosen_name {
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CardName(
+                name.to_string(),
+            ));
+    }
+    obj.static_definitions.push(
+        StaticDefinition::new(StaticMode::CantBeCast {
+            who: crate::types::statics::ProhibitionScope::AllPlayers,
+        })
+        .affected(filter),
+    );
+    id
+}
+
+/// Build the Blocker B fixture: a Morph creature (printed {5}, name "Secret Beast")
+/// in P0's hand under an OPPONENT's `CantBeCast` prohibition keyed on `axis`, with
+/// `mana` colorless mana in P0's pool. `AllPlayers` scope still reaches P0.
+fn prohibited_morph_fixture(axis: ProhibitionAxis, mana: usize) -> (GameState, ObjectId, CardId) {
+    let mut state = setup_game_at_main_phase();
+    let morph = add_face_down_castable_to_hand(
+        &mut state,
+        PlayerId(0),
+        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        ManaCost::generic(5),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, mana);
+    let (filter, chosen) = match axis {
+        ProhibitionAxis::ChosenName => (TargetFilter::HasChosenName, Some("Secret Beast")),
+        ProhibitionAxis::ManaValue => (
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                crate::types::ability::FilterProp::Cmc {
+                    comparator: crate::types::ability::Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 5 },
+                },
+            ])),
+            None,
+        ),
+    };
+    add_cant_be_cast_source(&mut state, PlayerId(1), CardId(0x2C57), filter, chosen);
+    let card_id = state.objects[&morph].card_id;
+    (state, morph, card_id)
+}
+
+/// Shared body for both positive axes. Proves (a) the FACE-UP cast is genuinely
+/// prohibited (non-vacuity) and (b) the {3} FACE-DOWN cast still succeeds as a
+/// blank 2/2 (the discriminating claim).
+fn assert_prohibited_morph_still_casts_face_down(axis: ProhibitionAxis) {
+    // (a) NON-VACUITY — the FACE-UP (Normal) cast is genuinely prohibited (CR 101.2).
+    // Dispatch still OFFERS the face-down alternative (the fix under test); choosing the
+    // NORMAL cast then hits the prohibition at prepare time and is rejected.
+    let (mut up, morph, card_id) = prohibited_morph_fixture(axis, 5);
+    apply_as_current(
+        &mut up,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("dispatch must offer the face-down alt even though the face-up cast is prohibited");
+    assert!(
+        matches!(
+            up.waiting_for,
+            WaitingFor::AlternativeCastChoice {
+                keyword: crate::types::game_state::AlternativeCastKeyword::FaceDown,
+                ..
+            }
+        ),
+        "the {{3}} face-down alternative must be offered, got {:?}",
+        up.waiting_for
+    );
+    let face_up = apply_as_current(
+        &mut up,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Normal,
+        },
+    );
+    assert!(
+        face_up.is_err(),
+        "CR 101.2: the FACE-UP cast must be prohibited (proves the prohibition truly bites)"
+    );
+
+    // (b) DISCRIMINATING — the {3} FACE-DOWN cast is permitted (CR 708.4 + CR 601.3a):
+    // the blanked 2/2 has no name and mana value 0, so neither axis prohibits it.
+    let (mut down, morph, card_id) = prohibited_morph_fixture(axis, 5);
+    apply_as_current(
+        &mut down,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast accepted");
+    apply_as_current(
+        &mut down,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .expect("the {3} face-down cast must succeed despite the face-up prohibition");
+    let obj = &down.objects[&morph];
+    assert_eq!(
+        obj.zone,
+        Zone::Stack,
+        "the face-down spell must be on the stack"
+    );
+    assert!(
+        obj.face_down,
+        "CR 708.4: the spell is on the stack face down"
+    );
+    assert_eq!(obj.power, Some(2), "CR 708.2a: a face-down spell is a 2/2");
+    assert!(
+        obj.name.is_empty(),
+        "CR 708.2a: a face-down spell has no name"
+    );
+}
+
+/// Positive — NAME axis (dispatch): a `CantBeCast` + `HasChosenName` prohibition
+/// naming the morph blocks the face-up cast but not the {3} face-down cast.
+#[test]
+fn morph_name_prohibition_does_not_suppress_face_down_cast() {
+    assert_prohibited_morph_still_casts_face_down(ProhibitionAxis::ChosenName);
+}
+
+/// Positive — MANA-VALUE axis (dispatch): the same claim with a mana-value-
+/// conditional prohibition (`Cmc >= 5`), proving the class covers name AND mana
+/// value, not just `HasChosenName`.
+#[test]
+fn morph_mana_value_prohibition_does_not_suppress_face_down_cast() {
+    assert_prohibited_morph_still_casts_face_down(ProhibitionAxis::ManaValue);
+}
+
+/// Feasibility twin (CR 601.3a): the legal-actions / AI surface must also see the
+/// {3} face-down cast when the face-up cast is name-prohibited.
+///
+/// Revert direction (discriminating): with the feasibility block removed,
+/// `prepare_spell_cast` fails on the printed object and `casting_variant_choice_set`
+/// contains only `Normal` (never `FaceDown`), which is likewise prohibited — so
+/// `can_cast_object_now` returns false.
+#[test]
+fn morph_under_name_prohibition_is_castable_now() {
+    let (state, morph, _card_id) = prohibited_morph_fixture(ProhibitionAxis::ChosenName, 3);
+    assert!(
+        casting::can_cast_object_now(&state, PlayerId(0), morph),
+        "the {{3}} face-down cast must be surfaced as a legal action despite the face-up name prohibition"
+    );
+}
+
+/// Negative — keyword scope (conjunct 1 of the feasibility twin is load-bearing).
+/// A plain NON-morph creature named by the prohibition has no face-down escape, so
+/// it is NOT castable. Reach-guard: a differently-named creature with the same mana
+/// IS castable, proving the prohibition — not affordability — is the blocker.
+#[test]
+fn non_morph_under_name_prohibition_not_castable() {
+    let mut state = setup_game_at_main_phase();
+    add_cant_be_cast_source(
+        &mut state,
+        PlayerId(1),
+        CardId(0x2C57),
+        TargetFilter::HasChosenName,
+        Some("Secret Beast"),
+    );
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+    let make_plain = |state: &mut GameState, card_id: CardId, name: &str| -> ObjectId {
+        let id = create_object(state, card_id, PlayerId(0), name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Beast".to_string()],
+        };
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = ManaCost::generic(2);
+        id
+    };
+    let named = make_plain(&mut state, CardId(4310), "Secret Beast");
+    let free = make_plain(&mut state, CardId(4311), "Free Beast");
+    assert!(
+        !casting::can_cast_object_now(&state, PlayerId(0), named),
+        "a NON-morph spell named by the prohibition can't be cast — no {{3}} face-down escape (conjunct 1)"
+    );
+    assert!(
+        casting::can_cast_object_now(&state, PlayerId(0), free),
+        "reach-guard: an un-named creature with the same {{2}} mana IS castable — proves the prohibition (not affordability) blocks the named one"
+    );
+}
+
+/// Negative — affordability (conjunct 2 of the feasibility twin is load-bearing).
+/// The named morph with only {2} available cannot pay the {3} face-down cost, so
+/// the twin must not fire. Reach-guard: with {3} the same morph IS castable.
+#[test]
+fn morph_without_three_mana_not_castable_under_prohibition() {
+    let (two, morph_two, _) = prohibited_morph_fixture(ProhibitionAxis::ChosenName, 2);
+    assert!(
+        !casting::can_cast_object_now(&two, PlayerId(0), morph_two),
+        "only {{2}} available: the {{3}} face-down cast is unaffordable, so the twin must not fire (conjunct 2)"
+    );
+    let (three, morph_three, _) = prohibited_morph_fixture(ProhibitionAxis::ChosenName, 3);
+    assert!(
+        casting::can_cast_object_now(&three, PlayerId(0), morph_three),
+        "reach-guard: with {{3}} the same morph IS castable — proves affordability gates conjunct 2"
+    );
+}
+
+/// Hostile multi-authority (no over-fire / no stale binding). Two `CantBeCast` +
+/// `HasChosenName` sources — one naming the morph, one naming an unrelated card —
+/// must not suppress the face-down cast. Reach-guard: the matching authority
+/// genuinely prohibits the face-up cast.
+#[test]
+fn morph_casts_face_down_under_multiple_name_prohibitions() {
+    let build = || {
+        let mut state = setup_game_at_main_phase();
+        let morph = add_face_down_castable_to_hand(
+            &mut state,
+            PlayerId(0),
+            crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+            ManaCost::generic(5),
+        );
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+        add_cant_be_cast_source(
+            &mut state,
+            PlayerId(1),
+            CardId(0x2C57),
+            TargetFilter::HasChosenName,
+            Some("Secret Beast"),
+        );
+        add_cant_be_cast_source(
+            &mut state,
+            PlayerId(1),
+            CardId(0x2C58),
+            TargetFilter::HasChosenName,
+            Some("Unrelated Card"),
+        );
+        let card_id = state.objects[&morph].card_id;
+        (state, morph, card_id)
+    };
+
+    // Reach-guard: the matching authority genuinely prohibits the FACE-UP cast.
+    let (mut up, morph, card_id) = build();
+    apply_as_current(
+        &mut up,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("dispatch must still offer the face-down alt under two prohibitions");
+    let face_up = apply_as_current(
+        &mut up,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Normal,
+        },
+    );
+    assert!(
+        face_up.is_err(),
+        "CR 101.2: the matching authority must prohibit the face-up cast"
+    );
+
+    // Discriminating: the face-down cast succeeds, unaffected by either authority.
+    let (mut down, morph, card_id) = build();
+    apply_as_current(
+        &mut down,
+        GameAction::CastSpell {
+            object_id: morph,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast accepted");
+    apply_as_current(
+        &mut down,
+        GameAction::ChooseAlternativeCast {
+            choice: crate::types::actions::AlternativeCastDecision::Alternative,
+        },
+    )
+    .expect("face-down cast must succeed under multiple name prohibitions");
+    let obj = &down.objects[&morph];
+    assert!(
+        obj.face_down,
+        "CR 708.4: the spell is face down on the stack"
+    );
+    assert_eq!(obj.power, Some(2), "CR 708.2a: a face-down spell is a 2/2");
+    assert!(
+        obj.name.is_empty(),
+        "CR 708.2a: a face-down spell has no name"
+    );
 }

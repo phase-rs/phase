@@ -707,6 +707,7 @@ pub fn parse_alt_cost_keyword_name_to_kind(input: &str) -> OracleResult<'_, Keyw
         value(KeywordKind::Mutate, tag("mutate")),
         value(KeywordKind::Bestow, tag("bestow")),
         value(KeywordKind::Harmonize, tag("harmonize")),
+        value(KeywordKind::Madness, tag("madness")),
     ))
     .parse(input)
 }
@@ -1837,6 +1838,7 @@ mod tests {
             ("mutate ability", KeywordKind::Mutate),
             ("bestow ability", KeywordKind::Bestow),
             ("harmonize ability", KeywordKind::Harmonize),
+            ("madness", KeywordKind::Madness),
         ];
         for (input, expected) in cases {
             let (_, kind) = parse_alt_cost_keyword_name_to_kind(input).unwrap();

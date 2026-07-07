@@ -264,7 +264,7 @@ elif [ ! -s "$WARNING_PATTERNS_OUTPUT_TMP" ] || ! jq -e '.' "$WARNING_PATTERNS_O
   coverage_ok=0
 fi
 if [ "$coverage_ok" = 1 ]; then
-  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set}' \
+  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set, token_coverage}' \
         "$COVERAGE_OUTPUT_TMP" > "$COVERAGE_SUMMARY_TMP"; then
     echo "WARNING: coverage-summary derivation failed; leaving existing $COVERAGE_SUMMARY in place." >&2
   else

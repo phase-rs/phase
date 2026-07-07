@@ -61,6 +61,11 @@
     "showKeywords": "Mostra le parole chiave sulle carte sul campo di battaglia",
     "opponentHoverPreview": "Anteprima al passaggio sull'avversario",
     "showOpponentBoard": "Mostra il campo dell'avversario passando sull'HUD",
+    "multiplayerBoardLayout": "Layout del campo multigiocatore",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Avversario in focus",
+      "split": "Tavolo diviso"
+    },
     "cardPreviewDelay": "Ritardo al passaggio",
     "cardPreviewDelayInstant": "Istantaneo",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -179,7 +184,9 @@
     "importedWithPreferences_one": "Importato {{count}} mazzo e le preferenze.",
     "importedWithPreferences_other": "Importati {{count}} mazzi e le preferenze.",
     "skippedMalformed_one": "Saltata {{count}} voce malformata.",
-    "skippedMalformed_other": "Saltate {{count}} voci malformate."
+    "skippedMalformed_other": "Saltate {{count}} voci malformate.",
+    "telemetry": "Invia segnalazioni anonime di arresti anomali e utilizzo",
+    "telemetryDescription": "Aiuta a correggere gli arresti anomali e a dare priorità al supporto delle carte. Nessun account, nessun dato personale — solo conteggi di errori e riepiloghi di partita."
   },
   "resetAll": {
     "confirm": "Reimpostare tutte le preferenze ai valori predefiniti? Questo cancella ogni impostazione in questa finestra.",
