@@ -1188,3 +1188,111 @@ fn granted_equip_self_mana_value_cost_is_concretized_to_mana_value() {
         other => panic!("equip cost must be concrete Mana {{4}}, not a placeholder: {other:?}"),
     }
 }
+
+/// CR 702.6 + CR 702.6a: end-to-end proof that a runtime-granted Equip keyword
+/// (Bram, Bludgeon Brawl) is not merely *offered* but fully *functional* through
+/// the normal `ActivateAbility` path — announced, its mana cost paid from the
+/// pool, a legal "creature you control" targeted, and resolved so the Equipment
+/// becomes attached. The shape-only tests above assert the offered ability's AST
+/// (cost + `Effect::Attach`); this drives the whole pipeline, so a regression in
+/// runtime-index selection, payment, targeting, or Attach resolution fails HERE
+/// even though those still pass.
+#[test]
+fn granted_equip_attaches_through_full_activation_pipeline() {
+    use crate::game::scenario::GameScenario;
+    use crate::types::ability::{
+        AbilityTag, ContinuousModification, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::{ManaCost, ManaPipId, ManaType, ManaUnit};
+
+    let p0 = PlayerId(0);
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    // CR 702.6a: equip is a sorcery-speed activated ability — main phase, own
+    // turn, empty stack, priority to P0.
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // A creature P0 controls — the legal equip target.
+    let bear = scenario.add_creature(p0, "Bear", 2, 2).id();
+
+    // A noncreature Food artifact granted "Equipment with equip {1}" by a static
+    // on itself (Bram-shaped), mirroring the parser's `AddSubtype` + `AddKeyword`
+    // output.
+    let food = create_object(
+        &mut scenario.state,
+        CardId(1900),
+        p0,
+        "Test Food".to_string(),
+        Zone::Battlefield,
+    );
+    let equip_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    };
+    let def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Equipment".to_string(),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(equip_cost),
+            },
+        ]);
+    {
+        let obj = scenario.state.objects.get_mut(&food).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Food".to_string());
+        obj.static_definitions.push(def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+    crate::game::layers::evaluate_layers(&mut scenario.state);
+
+    // Fund the {1} equip cost — the driver does not model source auto-tap, so the
+    // pool must cover the cost or `PassPriority` (finalize payment) errors.
+    scenario.with_mana_pool(
+        p0,
+        vec![ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(9998),
+            pip_id: ManaPipId(0),
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        }],
+    );
+
+    // The granted equip is appended LAST in `activated_ability_definitions`;
+    // resolve its runtime index the same way the engine does.
+    let equip_index = crate::game::casting::activated_ability_definitions(&scenario.state, food)
+        .iter()
+        .position(|(_, ability)| ability.ability_tag == Some(AbilityTag::Equip))
+        .expect("granted equip must be offered as an activated ability");
+
+    let mut runner = scenario.build();
+    // Announce → pay {1} from the pool → target the creature → resolve.
+    let outcome = runner
+        .activate(food, equip_index)
+        .target_object(bear)
+        .resolve();
+
+    // CR 702.6a: equip attaches the Equipment to the chosen creature.
+    assert_eq!(
+        outcome.state().objects.get(&food).unwrap().attached_to,
+        Some(bear.into()),
+        "granted equip must attach the Equipment to the targeted creature through the \
+         normal ActivateAbility path"
+    );
+    assert!(
+        outcome
+            .state()
+            .objects
+            .get(&bear)
+            .unwrap()
+            .attachments
+            .contains(&food),
+        "the equipped creature must carry the Equipment"
+    );
+}

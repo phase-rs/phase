@@ -682,13 +682,13 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
     )
 }
 
-/// CR 205.1a + CR 301.5c + CR 702.6: "Each `<subject>` is an Equipment with equip
+/// CR 205.1a + CR 702.6: "Each `<subject>` is an Equipment with equip
 /// `{N}` and \"`<quoted ability>`\"" — the become-Equipment anthem (Bram,
 /// Baguette Brawler; Bludgeon Brawl). Each matching permanent gains the Equipment
-/// artifact subtype (CR 301.5c — replacing its other artifact subtypes, CR
-/// 205.1a), the Equip keyword with the printed cost (CR 702.6), and the quoted
-/// static ability (typically an "Equipped creature gets +N/+0" anthem, granted
-/// via the shared quoted-ability authority).
+/// artifact subtype (CR 205.1a — setting an artifact subtype replaces the
+/// object's other artifact subtypes), the Equip keyword with the printed cost
+/// (CR 702.6), and the quoted static ability (typically an "Equipped creature
+/// gets +N/+0" anthem, granted via the shared quoted-ability authority).
 pub(crate) fn parse_becomes_equipment_with_ability(
     tp: &TextPair<'_>,
     description: &str,
