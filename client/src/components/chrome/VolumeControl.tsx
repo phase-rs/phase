@@ -159,7 +159,7 @@ export function VolumeControl({ variant }: VolumeControlProps) {
   return (
     <div
       ref={containerRef}
-      className="flex flex-row-reverse min-h-9 items-center overflow-hidden rounded-[12px] border border-white/12 bg-black/18 backdrop-blur-sm transition-all duration-200"
+      className="flex flex-row-reverse min-h-9 items-center overflow-hidden rounded-[8px] border border-white/12 bg-slate-950/82 transition-all duration-200"
       style={{ width: expanded ? 180 : 36 }}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}

@@ -291,7 +291,7 @@ export function LobbyView({
               type="button"
               onClick={() => setServerPickerOpen(true)}
               title={serverAddress}
-              className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
+              className="flex min-w-0 max-w-full items-center gap-1.5 rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
             >
               {serverFlag && (
                 <ServerFlag
@@ -311,13 +311,13 @@ export function LobbyView({
               type="button"
               onClick={() => setServerPickerOpen(true)}
               title={t("lobbyView.pickServerTitle")}
-              className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
+              className="rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
             >
               {t("lobbyView.pickServer")}
             </button>
           )}
           {isServer && playerCount > 0 && (
-            <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
+            <span className="rounded-[7px] border border-emerald-300/20 bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-200">
               {t("lobbyView.online", { count: playerCount })}
             </span>
           )}
@@ -329,7 +329,7 @@ export function LobbyView({
           Desktop keeps the anchored dropdown. min-h-44px + text-base meet the
           44/48px touch-target rule and prevent iOS focus-zoom. */}
       {isServer && (
-        <div className="flex min-h-[44px] w-full items-center gap-2 self-stretch rounded-[16px] bg-black/18 px-3 py-1 ring-1 ring-white/10 sm:w-auto sm:self-start">
+        <div className="flex min-h-[44px] w-full items-center gap-2 self-stretch rounded-[10px] border border-white/10 bg-black/25 px-3 py-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm sm:w-auto sm:self-start">
           <span className="shrink-0 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
             {t("lobbyView.format")}
           </span>
@@ -351,15 +351,15 @@ export function LobbyView({
       )}
 
       {isServer && showRoomTypeFilter && (
-        <div className="flex rounded-[16px] bg-black/18 p-0.5 ring-1 ring-white/10">
+        <div className="flex rounded-[10px] border border-white/10 bg-black/25 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
           {ROOM_TYPE_FILTERS.map((opt) => (
             <button
               key={opt.value}
               onClick={() => setRoomTypeFilter(opt.value)}
-              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+              className={`rounded-[7px] px-3 py-1 text-xs font-medium transition-colors ${
                 roomTypeFilter === opt.value
-                  ? "bg-white/10 text-white"
-                  : "text-gray-400 hover:text-gray-200"
+                  ? "bg-white/12 text-white"
+                  : "text-gray-400 hover:bg-white/5 hover:text-gray-200"
               }`}
             >
               {t(opt.labelKey)}
@@ -372,7 +372,7 @@ export function LobbyView({
         <div className="w-full space-y-3">
           <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("lobbyView.openTables")}</div>
           {filteredGames.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 rounded-[18px] border border-dashed border-white/10 px-4 py-6 text-center">
+            <div className="flex flex-col items-center gap-3 rounded-[10px] border border-dashed border-white/10 bg-black/12 px-4 py-6 text-center backdrop-blur-sm">
               <p className="text-sm text-gray-400">
                 {formatFilter
                   ? t("lobbyView.noFormatGames", { format: formatFilter })
@@ -405,7 +405,7 @@ export function LobbyView({
       )}
 
       {isP2P && (
-        <div className="w-full rounded-[18px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-3 text-sm leading-6 text-cyan-100">
+        <div className="w-full rounded-[10px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-3 text-sm leading-6 text-cyan-100 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
           {t("lobbyView.p2pNotice")}
         </div>
       )}
@@ -422,7 +422,7 @@ export function LobbyView({
             onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
             placeholder={isP2P ? t("lobbyView.p2pCodePlaceholder") : t("lobbyView.serverCodePlaceholder")}
             maxLength={isP2P ? 5 : 50}
-            className="min-w-0 flex-1 rounded-[18px] bg-black/18 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
+            className="min-w-0 flex-1 rounded-[8px] border border-white/10 bg-black/25 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none backdrop-blur-sm focus:border-white/20"
           />
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
             <button
@@ -507,7 +507,7 @@ export function LobbyView({
             className="absolute inset-0 bg-black/60"
             onClick={() => setPasswordModal(null)}
           />
-          <div className="relative z-10 w-full max-w-xs rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
+          <div className="relative z-10 w-full max-w-xs rounded-[10px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
             <h3 className="mb-3 text-sm font-semibold text-white">
               {t("lobbyView.passwordRequired")}
             </h3>

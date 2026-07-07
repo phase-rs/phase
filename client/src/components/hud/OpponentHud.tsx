@@ -245,10 +245,6 @@ export function OpponentHud({
   const disconnectedPlayers = useMultiplayerStore((s) => s.disconnectedPlayers);
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
   const isOnline = connectionStatus !== "disconnected";
-  // Seat the game is currently waiting on (semantic actor). Drives the
-  // decision marker on opponent plates, distinct from the turn ring.
-  const { waitingSeatId } = useTurnStatus();
-
   const primaryOpponentId =
     liveOpponents[0] ?? allOpponents[0] ?? (playerId === 0 ? 1 : 0);
   const primaryOpponentAvatarUrl = useMultiplayerStore(
@@ -299,7 +295,6 @@ export function OpponentHud({
           underAttack={isOpponentUnderAttack}
           avatarUrl={opponentAvatarUrl}
           playerId={opponentId}
-          hasPendingDecision={waitingSeatId === opponentId}
           density={compact ? "compact" : "default"}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           cornerBadge={<NextUpBadge playerId={opponentId} compact={compact} />}
@@ -711,7 +706,7 @@ function OpponentTab({
     : isValidTarget
       ? "border-cyan-400/45 bg-cyan-950/30 ring-1 ring-cyan-300/35"
       : isTheirTurn
-        ? "border-rose-300/70 bg-rose-950/72 ring-1 ring-rose-300/45"
+        ? "border-rose-300/70 bg-rose-950/72 ring-1 ring-rose-300/55 shadow-[0_0_0_1px_rgba(253,164,175,0.16),0_0_24px_rgba(244,63,94,0.30)]"
         : ally
           ? isFocused
             ? "border-emerald-400/40 bg-emerald-950/40 ring-1 ring-emerald-300/30"
@@ -719,9 +714,6 @@ function OpponentTab({
           : isFocused
             ? "border-amber-400/40 bg-amber-950/38 ring-1 ring-amber-300/30"
             : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-slate-900/72";
-  const turnAccentClass = isTheirTurn
-    ? "after:pointer-events-none after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-[1px] after:bg-rose-300"
-    : "";
   const waitingReasonText = isWaitingOnThem
     ? t(reason?.key ?? "status.reason.thinking", reason?.params)
     : null;
@@ -844,7 +836,7 @@ function OpponentTab({
       // ~14rem (~227px at the default 16px root, verified in-browser). Cap at
       // 16rem gives headroom; the reveal is gated at 15rem so a tab too narrow
       // to fit the breakdown collapses to the HAND-only tier (tap to focus).
-      className={`@container relative flex min-w-0 items-center rounded-[8px] border transition-colors duration-150 ${splitOverview ? "gap-1 px-1 py-0" : "gap-1.5 px-1.5"} ${compact && !splitOverview ? "py-0.5" : !splitOverview ? "py-1" : ""} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : liveSizeClass} ${borderClass} ${turnAccentClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      className={`@container relative flex min-w-0 items-center rounded-[8px] border transition-[border-color,background-color,box-shadow] duration-150 ${splitOverview ? "gap-1 px-1 py-0" : "gap-1.5 px-1.5"} ${compact && !splitOverview ? "py-0.5" : !splitOverview ? "py-1" : ""} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : liveSizeClass} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isUnderAttack && (
         <>

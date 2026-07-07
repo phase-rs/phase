@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
@@ -29,10 +29,6 @@ interface HudPlateProps {
    *  by both `PlayerHud` and `OpponentHud`; absence means the plate never
    *  participates in debug highlighting. */
   playerId?: PlayerId;
-  /** Decision authority (orthogonal to `active`/turn): this seat is the one the
-   *  game is currently waiting on to make a choice. Decorative — narration lives
-   *  in `TurnStatusLine`. */
-  hasPendingDecision?: boolean;
   density?: "default" | "compact";
 }
 
@@ -44,12 +40,12 @@ const TONE_CLASSES: Record<HudTone, string> = {
   amber: "border-amber-400/28 bg-amber-950/72 text-amber-50 shadow-[0_1px_0_rgba(255,255,255,0.05)]",
 };
 
-const ACTIVE_RING_CLASSES: Record<HudTone, string> = {
-  neutral: "ring-1 ring-white/45 border-white/28",
-  emerald: "ring-1 ring-emerald-300/65 border-emerald-300/55",
-  rose: "ring-1 ring-rose-300/65 border-rose-300/55",
-  cyan: "ring-1 ring-cyan-300/65 border-cyan-300/55",
-  amber: "ring-1 ring-amber-300/65 border-amber-300/55",
+const ACTIVE_TURN_CLASSES: Record<HudTone, string> = {
+  neutral: "border-white/35 ring-1 ring-white/40 shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_0_24px_rgba(226,232,240,0.22)]",
+  emerald: "border-emerald-300/60 ring-1 ring-emerald-300/60 shadow-[0_0_0_1px_rgba(110,231,183,0.18),0_0_26px_rgba(16,185,129,0.34)]",
+  rose: "border-rose-300/62 ring-1 ring-rose-300/60 shadow-[0_0_0_1px_rgba(253,164,175,0.18),0_0_26px_rgba(244,63,94,0.34)]",
+  cyan: "border-cyan-300/62 ring-1 ring-cyan-300/60 shadow-[0_0_0_1px_rgba(103,232,249,0.18),0_0_26px_rgba(34,211,238,0.34)]",
+  amber: "border-amber-300/62 ring-1 ring-amber-300/60 shadow-[0_0_0_1px_rgba(252,211,77,0.18),0_0_26px_rgba(245,158,11,0.34)]",
 };
 
 export function HudPlate({
@@ -64,12 +60,11 @@ export function HudPlate({
   underAttack = false,
   avatarUrl,
   playerId,
-  hasPendingDecision = false,
   density = "default",
 }: HudPlateProps) {
   const { t } = useTranslation("game");
   const Component = onClick ? "button" : "div";
-  const activeRing = active ? ` ${ACTIVE_RING_CLASSES[tone]}` : "";
+  const activeChrome = active ? ` ${ACTIVE_TURN_CLASSES[tone]}` : "";
   const isDebugHighlighted = useUiStore(
     (s) => playerId != null && s.debugHighlightedPlayerId === playerId,
   );
@@ -91,7 +86,7 @@ export function HudPlate({
       type={onClick ? "button" : undefined}
       onClick={onClick}
       data-hud-plate=""
-      className={`group relative inline-flex max-w-full items-center border transition-colors duration-150 ${plateChrome} ${TONE_CLASSES[tone]}${activeRing} ${
+      className={`group relative inline-flex max-w-full items-center border transition-[border-color,background-color,box-shadow] duration-150 ${plateChrome} ${TONE_CLASSES[tone]}${activeChrome} ${
         onClick ? "cursor-pointer hover:border-white/30 hover:bg-slate-900/92" : ""
       }`}
     >
@@ -105,12 +100,6 @@ export function HudPlate({
         <div
           aria-hidden
           className="pointer-events-none absolute inset-0 z-30 rounded-[10px] outline-2 outline-fuchsia-300"
-        />
-      )}
-      {hasPendingDecision && (
-        <span
-          aria-hidden
-          className="pointer-events-none absolute left-1 top-1 z-30 h-1.5 w-5 rounded-[2px] bg-amber-300"
         />
       )}
       {cornerBadge ? (
@@ -131,7 +120,7 @@ export function HudPlate({
             <span
               aria-hidden
               className={`${compact ? "h-2 w-2" : "h-2.5 w-2.5"} shrink-0 rounded-full ring-1 ring-black/30`}
-              style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
+              style={{ backgroundColor: seatColor }}
             />
           )}
           <span
@@ -176,7 +165,7 @@ function HudAvatar({
       className={`relative shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.35)] ${compact ? "h-8 w-7" : "h-12 w-10 lg:h-14 lg:w-12"}`}
       style={seatColor ? {
         borderColor: `${seatColor}cc`,
-        boxShadow: `0 0 0 1px ${seatColor}55, 0 10px 24px rgba(0,0,0,0.35), 0 0 18px ${seatColor}33`,
+        boxShadow: `0 0 0 1px ${seatColor}55, 0 10px 24px rgba(0,0,0,0.35)`,
       } : undefined}
     >
       <img
