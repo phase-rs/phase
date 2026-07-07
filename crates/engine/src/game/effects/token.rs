@@ -2567,8 +2567,14 @@ fn wicked_role_spec() -> RoleSpec {
 ///
 /// All Role tokens share the `Role` subtype, so dispatch must be by display
 /// name — subtype alone cannot distinguish the seven variants.
+///
+/// CR 111.10: a Role token's printed name is "<Role> Role" (e.g. "Monster Role"),
+/// which is exactly what the parser/token creation assigns as the display name.
+/// Strip that trailing " Role" before matching so real tokens dispatch correctly;
+/// the bare role word ("Monster") is also accepted for internal/test callers.
 fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
-    match name {
+    let role = name.strip_suffix(" Role").unwrap_or(name);
+    match role {
         "Cursed" => Some(RoleSpec::statics_only(cursed_role_statics())),
         "Monster" => Some(RoleSpec::statics_only(monster_role_statics())),
         "Royal" => Some(RoleSpec::statics_only(royal_role_statics())),
@@ -4366,6 +4372,144 @@ mod tests {
         assert!(
             obj.trigger_definitions.is_empty(),
             "catalog injection must not double-grant predefined Royal Role statics"
+        );
+    }
+
+    /// CR 111.10k: A Role token created by a real card ("Create a Monster Role
+    /// token …") is named "Monster Role" — the parser's `known_role_token_identity`
+    /// produces the full "<Role> Role" name, which is the printed token name. The
+    /// predefined-ability dispatch MUST recognize that full name; matching only the
+    /// bare "Monster" left the token with no +1/+1-and-trample static. Regression
+    /// for Role tokens (Monstrous Rage, Royal Treatment, …) granting nothing.
+    #[test]
+    fn predefined_monster_role_full_name_grants_role_static() {
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Monstrous Rage".to_string(),
+            Zone::Battlefield,
+        );
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                // The name the parser actually produces for "a Monster Role token".
+                display_name: "Monster Role".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Role".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Monster Role".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let role_id = state.last_created_token_ids[0];
+        let obj = &state.objects[&role_id];
+        assert_eq!(
+            obj.static_definitions.len(),
+            1,
+            "Monster Role must carry its enchanted-creature +1/+1-and-trample static"
+        );
+    }
+
+    /// CR 111.3: A Role token is one face of a two-Role DFC ("Monster // Sorcerer"),
+    /// so its source card links to BOTH face presets — the single-preset fast path
+    /// in `find_exact_token_ref` is skipped and art resolves via body match. The
+    /// token is named "Monster Role" but the face preset is "Monster", so the name
+    /// comparison must reconcile the trailing " Role"; otherwise the token gets no
+    /// image ref and renders with no art (reported for Monstrous Rage). The match
+    /// must also select the correct face (Monster, not Sorcerer).
+    #[test]
+    fn dfc_monster_role_resolves_the_monster_face_art() {
+        use crate::types::card::PrintedCardRef;
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        // Monster face of the "Monster // Sorcerer" DFC (WOE), and the Sorcerer face.
+        const MONSTER_PRESET: &str = "246f948c-eea9-5f6a-8d19-f8c11c51de94";
+        const SORCERER_PRESET: &str = "dd6f5274-9bb4-5acc-9855-55815f497831";
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Monstrous Rage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.printed_ref = Some(PrintedCardRef {
+                oracle_id: "646a2371-54c0-4492-ac2f-20f109d6108c".to_string(),
+                face_name: "Monstrous Rage".to_string(),
+            });
+            obj.source_related_token_ids =
+                vec![MONSTER_PRESET.to_string(), SORCERER_PRESET.to_string()];
+        }
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Monster Role".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Role".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Monster Role".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let role_id = state.last_created_token_ids[0];
+        let image_ref = state.objects[&role_id]
+            .token_image_ref
+            .clone()
+            .expect("DFC Monster Role must resolve an image ref, not render artless");
+        assert_eq!(
+            image_ref.preset_id, MONSTER_PRESET,
+            "must resolve the Monster face preset, not the Sorcerer face"
         );
     }
 

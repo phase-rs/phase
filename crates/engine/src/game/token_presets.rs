@@ -375,12 +375,25 @@ fn find_token_ref_with_mode(
     first.token_image_ref.clone()
 }
 
+/// CR 111.10: The engine names a Role token "<Role> Role" (e.g. "Monster Role",
+/// the parser/token-creation convention), but catalog presets — generated from
+/// MTGJSON — name the same token by its bare role word ("Monster"). Reconcile the
+/// trailing " Role" so a "Monster Role" token body matches its "Monster" face
+/// preset. Without this a DFC Role token ("Monster // Sorcerer"), whose source
+/// card links to BOTH face presets and so skips the single-preset fast path,
+/// never resolves an image ref and renders with no art. Non-Role names have no
+/// " Role" suffix and are unaffected; the accompanying subtype/type comparison
+/// still prevents a Role body from matching a non-Role preset.
+fn role_normalized_display_name(name: &str) -> &str {
+    name.strip_suffix(" Role").unwrap_or(name)
+}
+
 fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
     token_body_identity_matches(a, b) && a.power == b.power && a.toughness == b.toughness
 }
 
 fn token_body_identity_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
-    a.display_name == b.display_name
+    role_normalized_display_name(&a.display_name) == role_normalized_display_name(&b.display_name)
         && sorted_debug(&a.core_types) == sorted_debug(&b.core_types)
         && sorted_strings(&a.subtypes) == sorted_strings(&b.subtypes)
         && sorted_debug(&a.supertypes) == sorted_debug(&b.supertypes)
