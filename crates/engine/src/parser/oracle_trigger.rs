@@ -1545,7 +1545,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     //      legitimately inherits the player's chosen target.
     if let Some(execute) = def.execute.as_deref_mut() {
         if mode_carries_event_source_object(&def.mode)
-            && (def.valid_target.is_none() || def.mode == TriggerMode::Unattach)
+            && !valid_target_blocks_event_source_lift(&def.mode, def.valid_target.as_ref())
             && !execute.optional_targeting
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
@@ -1583,6 +1583,16 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
             | TriggerMode::ChangesZone
             | TriggerMode::Unattach
     )
+}
+
+fn valid_target_blocks_event_source_lift(
+    mode: &TriggerMode,
+    valid_target: Option<&TargetFilter>,
+) -> bool {
+    match mode {
+        TriggerMode::Discarded | TriggerMode::DiscardedAll | TriggerMode::Unattach => false,
+        _ => valid_target.is_some(),
+    }
 }
 
 /// Top-level target rewrite: `ParentTarget` → `TriggeringSource` on the
@@ -14328,7 +14338,11 @@ fn try_parse_discard_trigger(
         }
 
         let (filter, rest) = parse_type_phrase(after_verb);
-        if !discard_filter_tail_is_complete(rest) {
+        if !discard_filter_tail_is_complete(rest)
+            && tag::<_, _, OracleError<'_>>("or ")
+                .parse(rest.trim_start())
+                .is_err()
+        {
             return None;
         }
         match filter {
@@ -14354,6 +14368,12 @@ fn try_parse_discard_trigger(
             }
             _ => false,
         }
+    }
+
+    fn is_discarded_self_reference(after_verb: &str) -> bool {
+        all_consuming(alt((tag::<_, _, OracleError<'_>>("this card"), tag("~"))))
+            .parse(after_verb.trim().trim_end_matches('.').trim())
+            .is_ok()
     }
 
     // CR 603.2c: Batched discard triggers — "one or more" fire once per batch.
@@ -14429,7 +14449,12 @@ fn try_parse_discard_trigger(
     def.mode = TriggerMode::Discarded;
 
     def.valid_target = discard_actor_filter(controller_ref);
-    def.valid_card = Some(discard_card_filter(after_verb)?);
+    if is_discarded_self_reference(after_verb) {
+        def.valid_card = Some(TargetFilter::SelfRef);
+        def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
+    } else {
+        def.valid_card = Some(discard_card_filter(after_verb)?);
+    }
 
     Some((TriggerMode::Discarded, def))
 }

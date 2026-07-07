@@ -13582,6 +13582,39 @@ fn discard_trigger_rejects_unconsumed_type_qualifier_tail() {
 }
 
 #[test]
+fn discard_trigger_accepts_or_tail_event_branch() {
+    let def = parse_trigger_line(
+        "Whenever an opponent discards a card or mills one or more cards, put a +1/+1 counter on each Advisor you control.",
+        "Lo and Li, Royal Advisors",
+    );
+    assert_eq!(def.mode, TriggerMode::Discarded);
+    assert!(matches!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter { ref type_filters, .. }))
+            if type_filters == &[TypeFilter::Card]
+    ));
+}
+
+#[test]
+fn discard_trigger_accepts_or_tail_card_filter_branch() {
+    let def = parse_trigger_line(
+        "Whenever you discard a Spirit card or a card with disturb, put a +1/+1 counter on this creature.",
+        "Shipwreck Sifters",
+    );
+    assert_eq!(def.mode, TriggerMode::Discarded);
+    let tf = match def.valid_card {
+        Some(TargetFilter::Typed(tf)) => tf,
+        other => panic!("expected typed valid_card, got {other:?}"),
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Subtype("Spirit".to_string())),
+        "expected Spirit subtype filter, got {:?}",
+        tf.type_filters
+    );
+}
+
+#[test]
 fn doctor_doom_full_card_discard_trigger_splits_actor_and_card_filter() {
     let parsed = parse_oracle_text(
         "Whenever you discard one or more land cards, each opponent loses 2 life.\nAt the beginning of combat on your turn, target Villain you control gains menace until end of turn. It connives.",

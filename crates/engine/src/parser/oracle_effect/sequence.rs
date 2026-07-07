@@ -2400,6 +2400,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     .or(value((), tag("cast ")))
     .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
+    // CR 701.34a + CR 608.2c: "draw a card and proliferate" is two
+    // independent instructions. `proliferate` is intransitive, so it has no
+    // trailing space; keep it in the bare-and splitter instead of letting the
+    // Draw parser swallow it as an ignored tail.
+    .or(value((), tag("proliferate")))
     // CR 701.20a (issue #516): "reveal " as an imperative clause starter so
     // chains like "choose land or nonland and reveal cards from the top of
     // your library ..." split at the bare " and " and each half reaches its

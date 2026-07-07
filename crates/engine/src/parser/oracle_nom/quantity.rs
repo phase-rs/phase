@@ -607,7 +607,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_greatest_commander_mana_value_ref,
             parse_commander_mana_value_ref,
         )),
-        parse_distinct_card_types_in_zone,
+        alt((
+            parse_distinct_card_types_in_zone,
+            parse_distinct_permanent_types_in_zone,
+        )),
         // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
         // precede the generic `among <objects>` arm so the chain-tracked-set,
         // cause-filtered count wins on the "card type among cards" prefix. Nested
@@ -1081,7 +1084,10 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
 fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_exiled_with_source,
-        parse_distinct_card_types_in_zone,
+        alt((
+            parse_distinct_card_types_in_zone,
+            parse_distinct_permanent_types_in_zone,
+        )),
         // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
         // precede the generic `among <objects>` arm (same ordering as
         // `parse_quantity_ref`). Nested with `parse_distinct_card_types_among_objects`
@@ -1709,6 +1715,44 @@ fn parse_distinct_card_types_in_zone(input: &str) -> OracleResult<'_, QuantityRe
         rest,
         QuantityRef::DistinctCardTypes {
             source: CardTypeSetSource::Zone { zone, scope },
+        },
+    ))
+}
+
+fn zone_ref_to_zone(zone: ZoneRef) -> Zone {
+    match zone {
+        ZoneRef::Graveyard => Zone::Graveyard,
+        ZoneRef::Exile => Zone::Exile,
+        ZoneRef::Library => Zone::Library,
+        ZoneRef::Hand => Zone::Hand,
+    }
+}
+
+fn scoped_zone_card_filter(zone: ZoneRef, scope: CountScope) -> TargetFilter {
+    let mut filter = TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::InZone {
+        zone: zone_ref_to_zone(zone),
+    }]);
+    filter.controller = match scope {
+        CountScope::Controller | CountScope::Owner => Some(ControllerRef::You),
+        CountScope::Opponents => Some(ControllerRef::Opponent),
+        CountScope::All => None,
+        CountScope::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
+        CountScope::SourceChosenPlayer => None,
+    };
+    TargetFilter::Typed(filter)
+}
+
+fn parse_distinct_permanent_types_in_zone(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("permanent type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among cards in ").parse(rest)?;
+    let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+    Ok((
+        rest,
+        // CR 110.4: permanent types are the six battlefield-capable card types.
+        QuantityRef::ObjectCountDistinct {
+            filter: scoped_zone_card_filter(zone, scope),
+            qualities: vec![SharedQuality::PermanentType],
         },
     ))
 }
@@ -7056,6 +7100,27 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_distinct_permanent_types_in_your_graveyard() {
+        let (rest, q) =
+            parse_quantity_ref("the number of permanent types among cards in your graveyard")
+                .unwrap();
+        let QuantityRef::ObjectCountDistinct {
+            filter: TargetFilter::Typed(filter),
+            qualities,
+        } = q
+        else {
+            panic!("expected permanent-type ObjectCountDistinct, got {q:?}");
+        };
+        assert_eq!(rest, "");
+        assert_eq!(qualities, vec![SharedQuality::PermanentType]);
+        assert_eq!(filter.type_filters, vec![TypeFilter::Card]);
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
     }
 
     #[test]
