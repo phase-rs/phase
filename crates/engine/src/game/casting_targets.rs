@@ -632,6 +632,12 @@ fn escalate_cost_for_selected_modes(
         return None;
     }
 
+    // CR 702.120a + CR 702.102b: Reads the spell's own Escalate keyword. Left on the
+    // marker-default (non-fuse-aware) `effective_spell_keywords` deliberately: no
+    // real split card carries Escalate, and the only fuse-sensitive input is a
+    // `CastWithKeyword` `affected` filter keyed on the combined mana value / colors
+    // — a class that does not arise for Escalate. If a fused split spell were ever
+    // granted Escalate by a value-keyed static, this would need the `_for` variant.
     let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
         .into_iter()
         .find_map(|keyword| match keyword {

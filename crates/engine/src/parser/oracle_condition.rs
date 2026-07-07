@@ -10,6 +10,7 @@ use nom::Parser;
 
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::target as nom_target;
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::{
     Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, PlayerScope,
@@ -462,6 +463,29 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     if let Some(count) = parse_numeric_threshold(text, "you control ", " or more snow permanents") {
         return Some(ParsedCondition::YouControlSnowPermanentCountAtLeast { count });
     }
+    // CR 205.4a: A counted "you control N or more <supertype> <type>s" restriction
+    // (two or more basic lands, two or more legendary creatures) must decompose the
+    // supertype into a `HasSupertype` object-count the same way the singular arm
+    // does — otherwise the bare-subtype catch-all below dumps "basic land" /
+    // "legendary creature" into a non-existent subtype and the restriction can never
+    // be satisfied. Runs before `parse_you_control_subtype_count`; the
+    // `parse_supertype_prefix` gate inside the helper keeps ordinary subtype counts
+    // ("two or more vampires") on the subtype path.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control ").parse(text) {
+        if let Ok((type_text, count_text)) = terminated(
+            take_until::<_, _, OracleError<'_>>(" or more "),
+            tag(" or more "),
+        )
+        .parse(rest)
+        {
+            if let Some(count) = parse_count_word(count_text) {
+                let singular = type_text.trim().trim_end_matches('.').trim_end_matches('s');
+                if let Some(cond) = parse_you_control_supertype_count(singular, count) {
+                    return Some(cond);
+                }
+            }
+        }
+    }
     // The generic bare-subtype catch-all must run AFTER the specific "creatures with
     // different powers" / "lands with the same name" / "snow permanents" suffix arms
     // above. Otherwise it greedily consumes those qualifier phrases via its bare
@@ -558,6 +582,19 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     ))
     .parse(text)
     {
+        // CR 205.4a: A supertype adjective ("snow", "basic", "legendary", "world")
+        // in "you control a <supertype> <type>" must decompose into a
+        // `HasSupertype` filter property plus the core type / subtype — it must NOT
+        // be dumped whole into a stringly-typed `subtype`. No permanent has the
+        // subtype "snow land" or "snow mountain", so the bare-subtype parse below
+        // makes the restriction permanently unsatisfiable (Blizzard could never be
+        // cast; Goblin Ski Patrol's ability could never activate). Reuse
+        // `parse_type_phrase` — the same combinator that decomposes "basic land
+        // card" into `Land` + `HasSupertype Basic` — and count matching permanents
+        // you control via the generic `ObjectCount >= 1` presence check.
+        if let Some(cond) = parse_you_control_supertype_count(rest, 1) {
+            return Some(cond);
+        }
         if let Some(core_type) = parse_core_type_word(rest) {
             return Some(ParsedCondition::YouControlCoreTypeCountAtLeast {
                 core_type,
@@ -1232,6 +1269,37 @@ fn parse_you_control_subtype_count(text: &str) -> Option<(usize, String)> {
     Some((minimum, subtype))
 }
 
+/// CR 205.4a + CR 205.4g: Decompose a `<supertype> <type>` phrase (snow land,
+/// basic land, legendary creature, …) into a `HasSupertype` object-count
+/// presence condition — count the matching permanents you control and compare
+/// `>= count`. Shared by the singular "you control a snow land" arm and the
+/// plural "you control N or more basic lands" arm so a supertype adjective never
+/// falls through to the stringly-typed subtype dump (which yields a non-existent
+/// subtype like "basic land", leaving the restriction permanently unsatisfiable).
+/// Gated on `parse_supertype_prefix` so genuine bare-subtype counts
+/// ("two or more vampires") are untouched and still reach the subtype path.
+fn parse_you_control_supertype_count(type_phrase: &str, count: usize) -> Option<ParsedCondition> {
+    nom_target::parse_supertype_prefix(type_phrase).ok()?;
+    let (filter, remainder) = parse_type_phrase(type_phrase);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(typed) = filter else {
+        return None;
+    };
+    Some(ParsedCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(typed.controller(ControllerRef::You)),
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+    })
+}
+
 /// CR 601.3d + CR 608.2c: Parse `"it targets a <type_phrase>"` (or `"it targets <type_phrase>"`)
 /// into a `ParsedCondition::SpellTargetsFilter` whose filter is derived from
 /// `parse_type_phrase`. The pronoun `it` refers to the spell being cast — this
@@ -1449,6 +1517,108 @@ mod tests {
             ),
             other => panic!("expected QuantityComparison(ObjectCount >= 3), got {other:?}"),
         }
+    }
+
+    /// CR 205.4a + CR 205.4g: A supertype adjective in a "you control a
+    /// <supertype> <type>" restriction (Blizzard — "Cast this spell only if you
+    /// control a snow land"; Goblin Ski Patrol — "only if you control a snow
+    /// Mountain") must decompose into a `HasSupertype` filter property plus the
+    /// core type / subtype and count via `ObjectCount >= 1`. It must NOT dump
+    /// "snow land" / "snow mountain" into a stringly-typed
+    /// `YouControlSubtypeCountAtLeast` — no permanent has such a subtype, so that
+    /// parse leaves the restriction permanently unsatisfiable.
+    #[test]
+    fn you_control_supertype_permanent_decomposes_to_filter() {
+        use crate::types::card_type::Supertype;
+
+        fn assert_supertype_filter(
+            text: &str,
+            expect_type: TypeFilter,
+            expect_supertype: Supertype,
+            expect_count: i32,
+        ) {
+            match parse_restriction_condition(text) {
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value },
+                }) => {
+                    assert_eq!(value, expect_count, "{text}: count must be {expect_count}");
+                    match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(
+                                tf.controller,
+                                Some(ControllerRef::You),
+                                "{text}: must be scoped to permanents you control"
+                            );
+                            assert!(
+                                tf.properties.iter().any(|p| matches!(
+                                    p,
+                                    FilterProp::HasSupertype { value } if *value == expect_supertype
+                                )),
+                                "{text}: must carry HasSupertype({expect_supertype:?}), got {:?}",
+                                tf.properties
+                            );
+                            assert!(
+                                tf.type_filters.contains(&expect_type),
+                                "{text}: type_filters {:?} must contain {expect_type:?}",
+                                tf.type_filters
+                            );
+                        }
+                        other => panic!("{text}: expected a Typed filter, got {other:?}"),
+                    }
+                }
+                other => {
+                    panic!("{text}: expected QuantityComparison(ObjectCount >= N), got {other:?}")
+                }
+            }
+        }
+
+        // Singular "you control a <supertype> <type>" (count 1):
+        // Blizzard — supertype Snow + core type Land.
+        assert_supertype_filter(
+            "you control a snow land",
+            TypeFilter::Land,
+            Supertype::Snow,
+            1,
+        );
+        // Goblin Ski Patrol — supertype Snow + subtype Mountain (basic land type).
+        assert_supertype_filter(
+            "you control a snow mountain",
+            TypeFilter::Subtype("Mountain".to_string()),
+            Supertype::Snow,
+            1,
+        );
+
+        // Plural/count "you control N or more <supertype> <type>s" (Matt's sibling
+        // gap): must decompose the same way with the parsed count, NOT dump
+        // "basic land" / "legendary creature" into a stringly subtype.
+        assert_supertype_filter(
+            "you control two or more basic lands",
+            TypeFilter::Land,
+            Supertype::Basic,
+            2,
+        );
+        assert_supertype_filter(
+            "you control two or more legendary creatures",
+            TypeFilter::Creature,
+            Supertype::Legendary,
+            2,
+        );
+
+        // Regression guard: an ordinary bare subtype count keeps the subtype path
+        // (no supertype prefix → must NOT become an ObjectCount comparison).
+        assert_eq!(
+            parse_restriction_condition("you control two or more vampires"),
+            Some(ParsedCondition::YouControlSubtypeCountAtLeast {
+                subtype: "vampire".to_string(),
+                count: 2,
+            }),
+            "bare subtype count must stay on the subtype path"
+        );
     }
 
     #[test]

@@ -568,6 +568,7 @@ mod sliver_static_grants;
 mod specialize_runtime;
 mod spellstutter_sprite_counter_with_x;
 mod spikeshell_harrier_speed_superlative;
+mod split_offstack_mana_value;
 mod springheart_nantuko_bestow_landfall;
 mod springheart_realdb_repro;
 mod squirrel_mob_dynamic_pump;

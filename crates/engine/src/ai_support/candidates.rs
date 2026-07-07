@@ -92,10 +92,12 @@ fn collect_evidence_candidate_combos(
         if combo.is_empty() || combos.len() >= MAX_COMBOS {
             return;
         }
+        // CR 202.3d + CR 701.59a: a split card in the graveyard is off the stack, so
+        // collect-evidence exile totals must use its combined mana value.
         let total: u32 = combo
             .iter()
             .filter_map(|id| state.objects.get(id))
-            .map(|obj| obj.mana_cost.mana_value())
+            .map(|obj| obj.effective_mana_value())
             .sum();
         if total < minimum_mana_value {
             return;
@@ -113,7 +115,7 @@ fn collect_evidence_candidate_combos(
             state
                 .objects
                 .get(&id)
-                .map(|obj| (id, obj.mana_cost.mana_value()))
+                .map(|obj| (id, obj.effective_mana_value()))
         })
         .collect();
     valued_cards.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0 .0.cmp(&a.0 .0)));
@@ -4860,6 +4862,44 @@ mod tests {
             casting_options: Vec::new(),
             layout_kind: Some(LayoutKind::Prepare),
         }
+    }
+
+    /// CR 202.3d + CR 701.59a: collect-evidence candidate generation values a
+    /// graveyard split card by its COMBINED mana value. Assault // Battery is
+    /// {R} (front, MV 1) + {3}{G} (MV 4) → combined MV 5. An evidence threshold
+    /// of 5 must be satisfiable by this single card; a threshold of 6 must not.
+    ///
+    /// Revert-failing discriminator: reading the front-only MV (1) omits the card
+    /// at threshold 5, so the `contains(&assault)` assertion fails on revert.
+    #[test]
+    fn collect_evidence_candidates_use_combined_split_mana_value() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let assault = sc.add_real_card(P0, "Assault", Zone::Graveyard, db);
+        let state = sc.state;
+
+        // Sanity: combined MV off the stack is 5 (front-only would be 1).
+        assert_eq!(
+            state.objects.get(&assault).unwrap().effective_mana_value(),
+            5,
+            "Assault // Battery in the graveyard reports combined MV 5"
+        );
+
+        let at_five = collect_evidence_candidate_combos(&state, &[assault], 5);
+        assert!(
+            at_five.iter().any(|combo| combo.contains(&assault)),
+            "combined MV 5 must satisfy collect-evidence threshold 5; the front-only \
+             MV (1) would wrongly omit Assault // Battery"
+        );
+
+        let at_six = collect_evidence_candidate_combos(&state, &[assault], 6);
+        assert!(
+            at_six.is_empty(),
+            "combined MV 5 cannot satisfy a collect-evidence threshold of 6"
+        );
     }
 
     #[test]

@@ -1130,7 +1130,10 @@ pub(super) fn handle_resolution_choice(
                 let mv = state
                     .objects
                     .get(&chosen)
-                    .map(|obj| obj.mana_cost.mana_value())
+                    // CR 202.3d + CR 709.4b: the chosen card is off the stack, so
+                    // a split card's MV budget is its combined halves — must match
+                    // the candidate-eligibility check in free_cast_from_zones.
+                    .map(|obj| obj.effective_mana_value())
                     .unwrap_or(0);
                 if mv > budget {
                     return Err(EngineError::InvalidAction(

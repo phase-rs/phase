@@ -92,8 +92,43 @@ export function formatCounterType(type: string): string {
   return type;
 }
 
-export function formatCounterTooltip(type: string, count: number): string {
+type CounterTooltipTranslator = (
+  key: string,
+  options?: { count?: number; label?: string; description?: string },
+) => string;
+
+const COUNTER_DESCRIPTION_KEYS: Record<string, string> = {
+  P1P1: "counterTooltip.descriptions.p1p1",
+  M1M1: "counterTooltip.descriptions.m1m1",
+  loyalty: "counterTooltip.descriptions.loyalty",
+  lore: "counterTooltip.descriptions.lore",
+  stun: "counterTooltip.descriptions.stun",
+};
+
+export function formatCounterDescription(
+  type: string,
+  translate: CounterTooltipTranslator,
+): string {
   const label = formatCounterType(type);
+  const key = COUNTER_DESCRIPTION_KEYS[type];
+  return key
+    ? translate(key)
+    : translate("counterTooltip.descriptions.generic", { label });
+}
+
+export function formatCounterTooltip(
+  type: string,
+  count: number,
+  translate?: CounterTooltipTranslator,
+): string {
+  const label = formatCounterType(type);
+  if (translate) {
+    return translate("counterTooltip.summary", {
+      count,
+      label,
+      description: formatCounterDescription(type, translate),
+    });
+  }
   return `${label} counter${count !== 1 ? "s" : ""}: ${count}`;
 }
 

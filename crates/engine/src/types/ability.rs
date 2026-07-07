@@ -15076,9 +15076,17 @@ pub enum CastingRestriction {
     DeclareBlockersStep,
     BeforeAttackersDeclared,
     BeforeBlockersDeclared,
+    /// CR 509.1 + CR 510.1 + CR 511.1: "only during combat after blockers are
+    /// declared" — the window that opens once the declare-blockers turn-based
+    /// action has placed blockers and stays open through combat damage and end
+    /// of combat. The exact complement of `BeforeBlockersDeclared` within the
+    /// combat phase (CR 506.1); enforced in `restrictions.rs`.
+    AfterBlockersDeclared,
     BeforeCombatDamage,
     AfterCombat,
-    RequiresCondition { condition: Option<ParsedCondition> },
+    RequiresCondition {
+        condition: Option<ParsedCondition>,
+    },
 }
 
 /// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.

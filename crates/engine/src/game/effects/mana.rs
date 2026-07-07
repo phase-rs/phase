@@ -784,8 +784,10 @@ pub(crate) fn exiled_color_options(
         if exiled.zone != crate::types::zones::Zone::Exile {
             continue;
         }
-        for color in &exiled.color {
-            let mana_type = mana_color_to_type(color);
+        // CR 202.3d + CR 709.4b: a linked exiled card is off the stack, so a split
+        // card exposes the combined colors of both halves, not just its front half.
+        for color in exiled.effective_colors() {
+            let mana_type = mana_color_to_type(&color);
             if !options.contains(&mana_type) {
                 options.push(mana_type);
             }
@@ -854,6 +856,38 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 202.3d + CR 709.4b: "add mana of any of the exiled card's colors"
+    /// (`ChoiceAmongExiledColors` → `exiled_color_options`) reads a linked exiled
+    /// split card's COMBINED colors. Assault // Battery is {R} (front, Red) +
+    /// {3}{G} (Green) → colors {Red, Green} off the stack.
+    ///
+    /// Revert-failing discriminator: reading the front-only `exiled.color` (Red)
+    /// omits Green from the options, so the `contains(Green)` assertion fails.
+    #[test]
+    fn exiled_color_options_use_combined_split_colors() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let source = sc.add_real_card(P0, "Gray Ogre", Zone::Battlefield, db);
+        let exiled = sc.add_real_card(P0, "Assault", Zone::Exile, db);
+        let mut state = sc.state;
+        state.exile_links.push(ExileLink {
+            exiled_id: exiled,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let options = exiled_color_options(&state, LinkedExileScope::ThisObject, source);
+        assert!(
+            options.contains(&ManaType::Red) && options.contains(&ManaType::Green),
+            "a linked exiled Assault // Battery must expose BOTH Red and Green (its \
+             combined split colors); the front-only read would omit Green — got {options:?}"
+        );
     }
 
     #[test]

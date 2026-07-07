@@ -3219,6 +3219,13 @@ fn parse_for_each_clause_ref_with_they_controller(
         // unconsumed remainder (Armorcraft Judge, High Sentinels of Arashin,
         // Inspiring Call).
         parse_for_each_controlled_type_with_counter,
+        // CR 109.4 + CR 702: "[other] <type> you control with <keyword>" — a
+        // controller-scoped count gated on a keyword-presence predicate. Must
+        // precede `parse_for_each_controlled_type`, whose bare " you control"
+        // match would otherwise strand the trailing " with <keyword>" clause as
+        // an unconsumed remainder, dropping the quantity (Skycat Sovereign, Aven
+        // Gagglemaster, Aerial Assault, Alert Heedbonder, Overgrown Battlement).
+        parse_for_each_controlled_type_with_keyword,
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -4310,6 +4317,58 @@ fn parse_for_each_controlled_type_with_counter(input: &str) -> OracleResult<'_, 
     ))
 }
 
+/// CR 109.4 + CR 702: Parse "[other] <type> you [already] control with
+/// <keyword>" in a "for each" clause -> a controller-scoped
+/// (`ControllerRef::You`) population count of the source controller's
+/// permanents of the given type that have the named keyword ability (CR 702),
+/// with an optional "other"/"another" exclusion of the source object.
+///
+/// The controller-scoped ("you control") sibling of
+/// `parse_for_each_battlefield_type_with_keyword` (the any-controller "on the
+/// battlefield with <keyword>" form): both compose `parse_type_filter_word`
+/// with `parse_keyword_name` + `FilterProp::WithKeyword` over the whole
+/// evergreen keyword table, but this arm binds the count to the source's
+/// controller (CR 109.4 — only battlefield/stack objects have a controller).
+/// The controller phrase mirrors `parse_for_each_controlled_type_with_counter`
+/// (the counter-predicate cousin), tolerating the "already" adverb.
+///
+/// Must precede the bare `parse_for_each_controlled_type` arm: that arm matches
+/// "<type> you control" and strands " with <keyword>" as an unconsumed
+/// remainder, which fails the "for each" full-consumption requirement and
+/// silently drops the whole quantity (and its dependent P/T pump, life-gain, or
+/// mana amount). Backs the class: Skycat Sovereign ("for each other creature
+/// you control with flying"), Aven Gagglemaster, Aerial Assault, Alert
+/// Heedbonder, and Overgrown Battlement.
+fn parse_for_each_controlled_type_with_keyword(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, has_other) =
+        opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
+    // Mirror the bare `parse_for_each_controlled_type` controller phrase,
+    // tolerating the "already" adverb ("<type> you already control with …").
+    let (rest, _) = tag(" you").parse(rest)?;
+    let (rest, _) = opt(tag(" already")).parse(rest)?;
+    let (rest, _) = tag(" control with ").parse(rest)?;
+    let (rest, keyword) =
+        map_res(parse_keyword_name, |s: &str| s.parse::<Keyword>()).parse(rest)?;
+
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    properties.push(FilterProp::WithKeyword { value: keyword });
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: Some(ControllerRef::You),
+                properties,
+            }),
+        },
+    ))
+}
+
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
     // CR 109.4: Only objects on the stack or on the battlefield have a
     // controller, so a "you control" count is over battlefield permanents
@@ -4841,6 +4900,60 @@ mod tests {
                     filter: TargetFilter::Typed(tf),
                 } => {
                     assert_eq!(tf.controller, None, "{clause:?}: counts every controller");
+                    assert_eq!(
+                        tf.properties.contains(&FilterProp::Another),
+                        other,
+                        "{clause:?}: Another presence must match the other/another prefix"
+                    );
+                    assert!(
+                        tf.properties
+                            .contains(&FilterProp::WithKeyword { value: kw }),
+                        "{clause:?}: must gate on the named keyword"
+                    );
+                }
+                other => panic!("{clause:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 109.4 + CR 702: controller-scoped ("you control") sibling of
+    /// `parse_for_each_battlefield_type_with_keyword_global_count`. Backs the
+    /// class dropped before this arm existed (issue #5018): Skycat Sovereign
+    /// ("for each other creature you control with flying"), Aven Gagglemaster /
+    /// Aerial Assault (flying life-gain), Alert Heedbonder (vigilance), and
+    /// Overgrown Battlement (defender mana). The controller must be `Some(You)`
+    /// — the discriminator from the any-controller battlefield form.
+    #[test]
+    fn parse_for_each_controlled_type_with_keyword_scoped_count() {
+        for (clause, other, kw) in [
+            (
+                "other creature you control with flying",
+                true,
+                Keyword::Flying,
+            ),
+            ("creature you control with flying", false, Keyword::Flying),
+            (
+                "creature you control with vigilance",
+                false,
+                Keyword::Vigilance,
+            ),
+            (
+                "another creature you already control with defender",
+                true,
+                Keyword::Defender,
+            ),
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+            assert_eq!(rest, "", "{clause:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(
+                        tf.controller,
+                        Some(ControllerRef::You),
+                        "{clause:?}: 'you control' binds the count to the source controller"
+                    );
                     assert_eq!(
                         tf.properties.contains(&FilterProp::Another),
                         other,

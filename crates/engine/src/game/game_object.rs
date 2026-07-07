@@ -612,6 +612,17 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_x_paid: Option<u32>,
 
+    /// CR 702.102b + CR 709.4d: `true` when this stack object is a *fused* split
+    /// spell (both halves cast via Fuse), so its characteristics are the combined
+    /// characteristics of both halves *while on the stack* — unlike a non-fused
+    /// split spell, whose on-stack characteristics are those of the chosen half
+    /// alone (CR 202.3d). Set at fuse finalize; only meaningful on the stack (off
+    /// the stack a split card combines regardless, per CR 709.4). Read by
+    /// [`GameObject::effective_mana_value`]/[`effective_colors`] so mana-value and
+    /// color reads of a fused spell see both halves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fused_split_spell: bool,
+
     /// CR 702.33d + CR 702.33f: Kicker payments declared while casting the
     /// spell that produced this permanent, in payment order. Mirrors
     /// `SpellContext.kickers_paid`; copied at cast resolution from the
@@ -1181,6 +1192,150 @@ impl GameObject {
         self.is_commander || self.is_signature_spell()
     }
 
+    /// CR 202.3d + CR 709.4/709.4b/709.4d: A split card's mana value and colors
+    /// are the COMBINED value of both halves off the stack, AND for a *fused*
+    /// split spell on the stack (CR 702.102b — both halves were cast). A *non-fused*
+    /// split spell on the stack uses only the chosen half. When this returns
+    /// `Some(bf)`, `bf` is the *other* half's back-face data (its `mana_cost`/
+    /// `color` describe the half NOT stored in `self`), and the caller should
+    /// combine it with `self`.
+    ///
+    /// CR 709.5 / CR 709.5c: A Room permanent ON THE BATTLEFIELD is characterized
+    /// by its unlocked-half static abilities (the "left/right half unlocked"
+    /// designations are battlefield-only, CR 709.5c), NOT this naive combine, so a
+    /// Room on the battlefield is gated out here and falls through to the
+    /// single-face path. A Room card OFF the battlefield still combines per
+    /// CR 709.4. `room_unlocks` is populated on any Room card regardless of zone
+    /// (see `apply_card_face_to_object`), so the gate keys on the actual zone —
+    /// a Room card in hand/graveyard/exile has `zone != Battlefield` and combines.
+    fn split_half_to_combine(&self) -> Option<&BackFaceData> {
+        let bf = self.back_face.as_ref()?;
+        if bf.layout_kind != Some(LayoutKind::Split) {
+            return None;
+        }
+        // CR 709.5c: a Room on the battlefield is characterized by its unlocked
+        // halves, not a naive combine.
+        let is_battlefield_room = self.zone == Zone::Battlefield && self.room_unlocks.is_some();
+        if is_battlefield_room {
+            return None;
+        }
+        // CR 202.3d + CR 709.4d: combine off the stack, or on the stack when this
+        // is a fused split spell. A non-fused split spell on the stack keeps the
+        // chosen half only.
+        let combine = self.zone != Zone::Stack || self.fused_split_spell;
+        combine.then_some(bf)
+    }
+
+    /// CR 202.3d + CR 709.4b: This object's mana value accounting for the split
+    /// card rule. Off the stack, a split card's mana value is the combined mana
+    /// value of both halves; in every other case it is this object's own cost
+    /// (including announced X while on the stack, per CR 202.3e). Every off-stack
+    /// mana-value read for a split-capable object must route through here rather
+    /// than reading `self.mana_cost.mana_value()` directly.
+    pub fn effective_mana_value(&self) -> u32 {
+        match self.split_half_to_combine() {
+            // CR 202.3e: X = 0 off the stack, so `mana_value()` (X treated as 0)
+            // on each half is the correct combined off-stack mana value. A fused
+            // split spell on the stack also reaches this arm; no printed Fuse card
+            // has {X} in either half, so summing X-as-0 mana values is exact there.
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self
+                .mana_cost
+                .mana_value_with_x(self.zone, self.cost_x_paid),
+        }
+    }
+
+    /// CR 202.3d + CR 709.4/709.4b: This object's colors accounting for the split
+    /// card rule. Off the stack, a split card's colors are determined from the
+    /// combined mana cost of both halves; otherwise they are this object's own
+    /// colors. The union is de-duplicated in canonical WUBRG order
+    /// (`ManaColor::ALL`) so the result is deterministic and order-stable.
+    pub fn effective_colors(&self) -> Vec<ManaColor> {
+        match self.split_half_to_combine() {
+            Some(bf) => ManaColor::ALL
+                .into_iter()
+                .filter(|c| self.color.contains(c) || bf.color.contains(c))
+                .collect(),
+            None => self.color.clone(),
+        }
+    }
+
+    /// The other Split half to combine when this object is being cast as a FUSED
+    /// split spell (CR 702.102b). `None` for non-fused casts and non-split objects,
+    /// so callers combine both halves ONLY for a fused spell. Distinct from
+    /// `split_half_to_combine`, which also fires for ANY split card off the stack
+    /// (the object-characteristic rule, CR 709.4). `fused` is the caller's
+    /// determination — either the persisted `fused_split_spell` marker
+    /// (already-finalized casts) OR a pre-payment `CastingVariant::Fuse` override,
+    /// which is not yet reflected in the marker while enumerating / preparing on an
+    /// immutable `&GameState`. The single-face guard (`layout_kind == Split`) still
+    /// applies, so a non-split object returns `None` even when `fused == true`.
+    fn fused_split_half_for(&self, fused: bool) -> Option<&BackFaceData> {
+        if !fused {
+            return None;
+        }
+        self.back_face
+            .as_ref()
+            .filter(|bf| bf.layout_kind == Some(LayoutKind::Split))
+    }
+
+    /// CR 202.3d + CR 709.4d + CR 702.102b + CR 202.3e: The mana value of the SPELL
+    /// this object represents while being cast / on the stack. For a FUSED split
+    /// spell (both halves cast) this is the COMBINED mana value of both halves; for
+    /// every other object it is the object's own cost, honoring announced X on the
+    /// stack. Distinct from [`effective_mana_value`](Self::effective_mana_value),
+    /// which ALSO combines a split card merely SITTING off the stack: mid-cast the
+    /// spell is still in its origin zone yet must be characterized as its single
+    /// (chosen) half unless it was fused, so restricted-mana payment metadata and
+    /// spell-cast history must key on the fuse marker, not the zone. The
+    /// `fused_split_spell` marker is set BEFORE mana payment so both consumers see
+    /// the combined value.
+    pub fn spell_mana_value(&self) -> u32 {
+        self.spell_mana_value_for(self.fused_split_spell)
+    }
+
+    /// Variant-aware sibling of [`spell_mana_value`](Self::spell_mana_value).
+    /// `fused` lets a pre-payment caller (option enumeration / cast preparation on
+    /// an immutable `&GameState`, where the `fused_split_spell` marker is not yet
+    /// set) request the COMBINED mana value a fused split spell would present to
+    /// spell filters (CR 202.3d + CR 702.102b + CR 709.4d). The public
+    /// [`spell_mana_value`](Self::spell_mana_value) delegates with the persisted
+    /// marker so its existing callers stay byte-identical.
+    pub fn spell_mana_value_for(&self, fused: bool) -> u32 {
+        match self.fused_split_half_for(fused) {
+            // Fuse cards carry no {X} in either half, so summing X-as-0 mana values
+            // is exact (CR 202.3e is moot here).
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self
+                .mana_cost
+                .mana_value_with_x(self.zone, self.cost_x_paid),
+        }
+    }
+
+    /// CR 202.3d + CR 709.4d + CR 702.102b: The colors of the SPELL this object
+    /// represents while being cast / on the stack — the COMBINED colors of both
+    /// halves for a fused split spell, otherwise the object's own colors. See
+    /// [`spell_mana_value`](Self::spell_mana_value) for why this keys on the
+    /// `fused_split_spell` marker rather than the zone gate used by
+    /// `effective_colors`.
+    pub fn spell_colors(&self) -> Vec<ManaColor> {
+        self.spell_colors_for(self.fused_split_spell)
+    }
+
+    /// Variant-aware sibling of [`spell_colors`](Self::spell_colors). `fused`
+    /// requests the COMBINED colors (CR 202.3d + CR 702.102b) a fused split spell
+    /// would present pre-payment, before the `fused_split_spell` marker is set.
+    /// The public [`spell_colors`](Self::spell_colors) delegates with the marker.
+    pub fn spell_colors_for(&self, fused: bool) -> Vec<ManaColor> {
+        match self.fused_split_half_for(fused) {
+            Some(bf) => ManaColor::ALL
+                .into_iter()
+                .filter(|c| self.color.contains(c) || bf.color.contains(c))
+                .collect(),
+            None => self.color.clone(),
+        }
+    }
+
     /// CR 603.10 + CR 400.7: Snapshot this object's public characteristics
     /// for a zone-change event. The record captures state *at the moment of
     /// the move* so zone-change trigger filters and past-tense conditions
@@ -1208,11 +1363,13 @@ impl GameObject {
             // current 2).
             base_power: self.base_power,
             base_toughness: self.base_toughness,
-            colors: self.color.clone(),
-            // CR 202.3e: While on the stack, X equals the announced value, not 0.
-            mana_value: self
-                .mana_cost
-                .mana_value_with_x(self.zone, self.cost_x_paid),
+            // CR 709.4b: Off the stack, a split card's colors are the combined
+            // colors of both halves (`effective_colors` no-ops for single-face).
+            colors: self.effective_colors(),
+            // CR 202.3d + CR 202.3e: On the stack, X equals the announced value
+            // and a split spell's mana value is the chosen half; off the stack a
+            // split card's mana value is the combined value of both halves.
+            mana_value: self.effective_mana_value(),
             controller: self.controller,
             owner: self.owner,
             from_zone: from,
@@ -1366,6 +1523,7 @@ impl GameObject {
             entered_via_ability_source: None,
             cast_timing_permission: None,
             cost_x_paid: None,
+            fused_split_spell: false,
             kickers_paid: Vec::new(),
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
@@ -1442,14 +1600,18 @@ impl GameObject {
             // `power`/`toughness` capture the post-layer-7 current values.
             base_power: self.base_power,
             base_toughness: self.base_toughness,
-            mana_value: self.mana_cost.mana_value(),
+            // CR 202.3d + CR 709.4b: combined mana value / colors for a split card
+            // off the stack (no-op for single-face, on-stack, and battlefield
+            // Rooms, which gate out) so look-back queries read the CR-correct
+            // characteristics — mirrors `snapshot_for_zone_change`.
+            mana_value: self.effective_mana_value(),
             controller: self.controller,
             owner: self.owner,
             card_types: self.card_types.core_types.clone(),
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
-            colors: self.color.clone(),
+            colors: self.effective_colors(),
             chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
             // CR 110.5: Capture live tap status. This snapshot is taken while the
@@ -2161,5 +2323,272 @@ mod tests {
             Zone::Hand,
         );
         assert_eq!(obj.final_chapter_number(), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 202.3d + CR 709.4/709.4b split-card off-stack mana value & colors.
+    //
+    // Assault // Battery (fixture): Assault {R} = MV 1 (Red), Battery {3}{G} =
+    // MV 4 (Green). Off the stack the combined characteristics are MV 5 and
+    // colors {Red, Green}. Each test drives `add_real_card` (which populates
+    // `back_face` via `populate_back_face_if_dfc`) so it exercises the real
+    // parsed card, then reads the fix's helpers / production seams. Every
+    // assertion FAILS on the pre-fix front-only read.
+    // ---------------------------------------------------------------------
+
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::test_support::shared_card_db;
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
+
+    /// (a) A split card in library/graveyard/hand reports the COMBINED mana value
+    /// of both halves (5), not the front half alone (1). Reverting the fix makes
+    /// `effective_mana_value()` return 1 and every assertion fails.
+    #[test]
+    fn split_card_effective_mana_value_is_combined_off_stack() {
+        let db = shared_card_db();
+        for zone in [Zone::Library, Zone::Graveyard, Zone::Hand, Zone::Exile] {
+            let mut sc = GameScenario::new();
+            let id = sc.add_real_card(P0, "Assault", zone, db);
+            let obj = sc.state.objects.get(&id).unwrap();
+            assert_eq!(
+                obj.back_face.as_ref().map(|b| b.name.as_str()),
+                Some("Battery"),
+                "back_face must hydrate the other split half off the stack in {zone:?}"
+            );
+            assert_eq!(
+                obj.effective_mana_value(),
+                5,
+                "Assault // Battery combined MV must be 5 in {zone:?} (front-only = 1)"
+            );
+        }
+    }
+
+    /// (b) A split card off the stack has the COMBINED colors of both halves.
+    /// Assault // Battery is {R} + {3}{G} → {Red, Green}. Front-only reports only
+    /// {Red}, so the Green assertion fails on revert.
+    #[test]
+    fn split_card_effective_colors_are_combined_off_stack() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        let id = sc.add_real_card(P0, "Assault", Zone::Hand, db);
+        let colors = sc.state.objects.get(&id).unwrap().effective_colors();
+        assert!(
+            colors.contains(&ManaColor::Red) && colors.contains(&ManaColor::Green),
+            "combined colors must include both Red and Green, got {colors:?}"
+        );
+        assert_eq!(
+            colors.len(),
+            2,
+            "exactly the two half colors, WUBRG-ordered"
+        );
+        // Canonical WUBRG order (ManaColor::ALL): Red precedes Green.
+        assert_eq!(colors, vec![ManaColor::Red, ManaColor::Green]);
+    }
+
+    /// (c) A production `FilterProp::Cmc { GE, 5 }` MATCHES a split card off the
+    /// stack (combined MV 5) and a `HasColor { Green }` filter matches its
+    /// combined colors; a plain {2}{R} MV-3 single-face card does NOT match
+    /// either. Reverting the fix drops the Cmc/color match on the split card.
+    #[test]
+    fn cmc_and_color_filters_see_combined_split_characteristics() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        let split = sc.add_real_card(P0, "Assault", Zone::Graveyard, db);
+        let ogre = sc.add_real_card(P0, "Gray Ogre", Zone::Graveyard, db);
+        let state = sc.state;
+
+        let cmc_ge_5 = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 5 },
+            }],
+            ..TypedFilter::card()
+        });
+        let has_green = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+            ..TypedFilter::card()
+        });
+
+        let ctx = crate::game::filter::FilterContext::from_source(&state, split);
+        assert!(
+            crate::game::filter::matches_target_filter(&state, split, &cmc_ge_5, &ctx),
+            "split card off the stack must match Cmc >= 5 (combined MV)"
+        );
+        assert!(
+            crate::game::filter::matches_target_filter(&state, split, &has_green, &ctx),
+            "split card off the stack must match HasColor(Green) (combined colors)"
+        );
+        // Negative: a plain {2}{R} MV-3 Red card matches neither.
+        assert!(
+            !crate::game::filter::matches_target_filter(&state, ogre, &cmc_ge_5, &ctx),
+            "a plain {{2}}{{R}} MV-3 card must NOT match Cmc >= 5"
+        );
+        assert!(
+            !crate::game::filter::matches_target_filter(&state, ogre, &has_green, &ctx),
+            "a mono-red card must NOT match HasColor(Green)"
+        );
+    }
+
+    /// (d) The zone-change LKI snapshot (`snapshot_for_zone_change`) captures the
+    /// COMBINED mana value for a dying split card, so an MV-gated look-back
+    /// trigger ("a card with MV 5 leaves") reads 5, not 1. A plain MV-3
+    /// single-face card snapshots 3. Reverting the fix snapshots 1.
+    #[test]
+    fn zone_change_snapshot_records_combined_split_mana_value() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        let split = sc.add_real_card(P0, "Assault", Zone::Battlefield, db);
+        let ogre = sc.add_real_card(P0, "Gray Ogre", Zone::Battlefield, db);
+        let state = &sc.state;
+
+        let split_record = state.objects.get(&split).unwrap().snapshot_for_zone_change(
+            split,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        assert_eq!(
+            split_record.mana_value, 5,
+            "dying split card's zone-change record must snapshot combined MV 5"
+        );
+
+        let ogre_record = state.objects.get(&ogre).unwrap().snapshot_for_zone_change(
+            ogre,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        assert_eq!(
+            ogre_record.mana_value, 3,
+            "a plain {{2}}{{R}} single-face card snapshots MV 3, unaffected by the fix"
+        );
+    }
+
+    /// (g) A non-split {2}{R} card reports MV 3 in every zone — the fix must not
+    /// perturb single-face cards (no `back_face`, so the gate returns None).
+    #[test]
+    fn single_face_card_mana_value_unchanged_in_all_zones() {
+        let db = shared_card_db();
+        for zone in [
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Library,
+            Zone::Battlefield,
+        ] {
+            let mut sc = GameScenario::new();
+            let id = sc.add_real_card(P0, "Gray Ogre", zone, db);
+            let obj = sc.state.objects.get(&id).unwrap();
+            assert_eq!(
+                obj.effective_mana_value(),
+                3,
+                "Gray Ogre {{2}}{{R}} must report MV 3 in {zone:?}"
+            );
+            assert_eq!(
+                obj.effective_colors(),
+                vec![ManaColor::Red],
+                "Gray Ogre is mono-red in {zone:?}"
+            );
+        }
+    }
+
+    /// OR-gate anchor for the pre-payment fuse projection (PR #5093). The
+    /// `spell_mana_value_for(fused)` / `spell_colors_for(fused)` helpers let a
+    /// pre-payment caller (option enumeration / cast preparation on an immutable
+    /// `&GameState`, before the `fused_split_spell` marker is set) request the
+    /// COMBINED characteristics a fused split spell would present to spell filters
+    /// (CR 202.3d + CR 702.102b). `fused = false` reports the front half; `true`
+    /// reports both halves combined — WITHOUT ever touching the marker. Reverting
+    /// the `_for` split (making the projection key only on the marker) makes the
+    /// `true` case still report the front half and fails these assertions.
+    #[test]
+    fn spell_mana_value_and_colors_for_fused_hint_combine_without_marker() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        // Breaking // Entering: Breaking {U}{B} (MV 2, {U,B}) front + Entering
+        // {4}{B}{R} (MV 6, {B,R}) back Split half. Combined MV 8, colors {U,B,R}.
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        let obj = sc.state.objects.get(&breaking).unwrap();
+
+        // Marker is NOT set — the object is a raw hand card mid-enumeration.
+        assert!(
+            !obj.fused_split_spell,
+            "fixture must exercise the marker-independent `_for` path"
+        );
+
+        // fused = false: front half only (MV 2, no red).
+        assert_eq!(
+            obj.spell_mana_value_for(false),
+            2,
+            "spell_mana_value_for(false) reports the front half MV (2)"
+        );
+        assert!(
+            !obj.spell_colors_for(false).contains(&ManaColor::Red),
+            "spell_colors_for(false) is the front half (no red)"
+        );
+
+        // fused = true: combined halves (MV 8, includes red) — no marker set.
+        assert_eq!(
+            obj.spell_mana_value_for(true),
+            8,
+            "spell_mana_value_for(true) reports the COMBINED MV (8) with no marker set"
+        );
+        assert!(
+            obj.spell_colors_for(true).contains(&ManaColor::Red),
+            "spell_colors_for(true) includes Entering's red with no marker set"
+        );
+
+        // The public marker-keyed accessors still report the front half (marker unset).
+        assert_eq!(
+            obj.spell_mana_value(),
+            2,
+            "public spell_mana_value() stays marker-keyed (front half while marker unset)"
+        );
+    }
+
+    /// (h) The Room gate (CR 709.5 / CR 709.5c): a Room card ON the battlefield is
+    /// characterized by its unlocked-half static abilities, so it is NOT
+    /// over-combined — `effective_mana_value` returns the single (front) half. The
+    /// SAME Room card in hand combines both halves per CR 709.4. This proves the
+    /// zone-aware battlefield-Room gate. Bottomless Pool // Locker Room:
+    /// {U} + {4}{U} → combined MV 6, front-only MV 1.
+    ///
+    /// Note: `room_unlocks` is populated on any Room card regardless of zone (by
+    /// `apply_card_face_to_object`), so the gate must key on the actual zone —
+    /// `room_unlocks.is_some()` alone would wrongly exclude off-battlefield Rooms.
+    #[test]
+    fn room_permanent_on_battlefield_is_not_over_combined() {
+        let db = shared_card_db();
+
+        // On the battlefield: gated out → single (front) half MV 1.
+        let mut sc_bf = GameScenario::new();
+        let bf_id = sc_bf.add_real_card(P0, "Bottomless Pool", Zone::Battlefield, db);
+        let bf_obj = sc_bf.state.objects.get(&bf_id).unwrap();
+        assert_eq!(
+            bf_obj.zone,
+            Zone::Battlefield,
+            "the Room entered the battlefield"
+        );
+        assert!(
+            bf_obj.room_unlocks.is_some(),
+            "a Room on the battlefield carries room_unlocks (CR 709.5c)"
+        );
+        assert_eq!(
+            bf_obj.effective_mana_value(),
+            1,
+            "a battlefield Room is gated out of the naive combine (front half MV 1)"
+        );
+
+        // In hand: off the battlefield → combines to MV 6 (CR 709.4), even though
+        // `room_unlocks` is populated at card creation.
+        let mut sc_hand = GameScenario::new();
+        let hand_id = sc_hand.add_real_card(P0, "Bottomless Pool", Zone::Hand, db);
+        let hand_obj = sc_hand.state.objects.get(&hand_id).unwrap();
+        assert_eq!(hand_obj.zone, Zone::Hand, "the Room card is in hand");
+        assert_eq!(
+            hand_obj.effective_mana_value(),
+            6,
+            "a Room card in hand combines both halves (CR 709.4b): {{U}} + {{4}}{{U}} = 6"
+        );
     }
 }

@@ -1452,9 +1452,7 @@ pub(crate) fn aggregate_property_over(
             ObjectProperty::Power => obj.power,
             ObjectProperty::Toughness => obj.toughness,
             // CR 202.3e: include X when on the stack (cost_x_paid).
-            ObjectProperty::ManaValue => Some(u32_to_i32_saturating(
-                obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-            )),
+            ObjectProperty::ManaValue => Some(u32_to_i32_saturating(obj.effective_mana_value())),
             // CR 107.4a + CR 107.4e + CR 202.1: colored mana symbols of `color`;
             // hybrid symbols contribute to each of their colors.
             ObjectProperty::ManaSymbolCount(color) => Some(u32_to_i32_saturating(
@@ -1885,9 +1883,7 @@ fn resolve_ref(
         QuantityRef::SelfManaValue => state
             .objects
             .get(&source_id)
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .or_else(|| {
                 state
                     .lki_cache
@@ -2586,11 +2582,7 @@ fn resolve_ref(
             // Return mana value of first matching commander (any one if multiple exist)
             ids.first()
                 .and_then(|&id| state.objects.get(&id))
-                .map(|obj| {
-                    u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )
-                })
+                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .unwrap_or(0)
         }
         // CR 106.1 + CR 109.1: Count distinct colors (W/U/B/R/G) among permanents
@@ -4211,9 +4203,7 @@ fn resolve_object_mana_value(
         ObjectScope::Source => state
             .objects
             .get(&ctx.source)
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .or_else(|| {
                 state
                     .lki_cache
@@ -4227,14 +4217,10 @@ fn resolve_object_mana_value(
                 TargetRef::Object(id) => state.objects.get(id),
                 _ => None,
             })
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
             let Some(object_id) =
@@ -4245,11 +4231,7 @@ fn resolve_object_mana_value(
             state
                 .objects
                 .get(&object_id)
-                .map(|obj| {
-                    u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )
-                })
+                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .or_else(|| {
                     state
                         .lki_cache
@@ -4269,11 +4251,7 @@ fn resolve_object_mana_value(
             state
                 .objects
                 .get(&object_id)
-                .map(|obj| {
-                    u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )
-                })
+                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .or_else(|| {
                     state
                         .lki_cache
@@ -4308,7 +4286,10 @@ fn resolve_object_mana_value(
                     state
                         .objects
                         .get(&id)
-                        .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                        // CR 202.3d + CR 709.4b: combined MV for a split card off
+                        // the stack; CR 202.3e: chosen X for an on-stack source
+                        // (parity with the sibling Anaphoric event-source arm).
+                        .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                         .or_else(|| {
                             state
                                 .lki_cache
@@ -4364,11 +4345,7 @@ fn resolve_object_mana_value(
                     state
                         .objects
                         .get(&id)
-                        .map(|obj| {
-                            u32_to_i32_saturating(
-                                obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                            )
-                        })
+                        .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                         .or_else(|| {
                             state
                                 .lki_cache

@@ -16,6 +16,7 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { ReportCardButton, type CardReportContext } from "./ReportCardButton.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
   getKeywordDisplayText,
@@ -874,7 +875,9 @@ function CardInfoPanel({
 }) {
   const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
-  const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
+  const counters = Object.entries(obj.counters).flatMap(([type, count]) =>
+    type === "loyalty" || count == null ? [] : [[type, count] as const],
+  );
   const keywords = sortKeywords(obj.keywords);
   const colorsChanged =
     obj.color.length !== obj.base_color.length ||
@@ -1007,9 +1010,11 @@ function CardInfoPanel({
       {counters.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-3 text-gray-400">
           {counters.map(([type, count]) => (
-            <span key={type}>
-              {formatCounterType(type)}: {count}
-            </span>
+            <CounterTooltip key={type} type={type} count={count}>
+              <span>
+                {formatCounterType(type)}: {count}
+              </span>
+            </CounterTooltip>
           ))}
         </div>
       )}

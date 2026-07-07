@@ -729,8 +729,10 @@ pub(crate) fn apply_counter_addition(
         keywords: obj.keywords.clone(),
         power: obj.power,
         toughness: obj.toughness,
-        colors: obj.color.clone(),
-        mana_value: obj.mana_cost.mana_value(),
+        // CR 709.4b + CR 202.3d: combined colors / mana value for a split card off
+        // the stack (no-op for single-face and battlefield Rooms, which gate out).
+        colors: obj.effective_colors(),
+        mana_value: obj.effective_mana_value(),
         controller: obj.controller,
         owner: obj.owner,
         counters: obj

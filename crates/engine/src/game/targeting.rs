@@ -1921,8 +1921,12 @@ fn hexproof_filter_matches(
         Some(o) => o,
         None => return false,
     };
+    // CR 709.4b: A split source has its chosen-half colors on the stack (the
+    // usual hexproof-source case) and its combined colors off the stack; no-op
+    // for single-face and on-stack sources.
+    let source_colors = source_obj.effective_colors();
     match filter {
-        HexproofFilter::Color(color) => source_obj.color.contains(color),
+        HexproofFilter::Color(color) => source_colors.contains(color),
         HexproofFilter::CardType(type_name) => {
             crate::game::keywords::source_matches_card_type(source_obj, type_name)
         }
@@ -1939,7 +1943,7 @@ fn hexproof_filter_matches(
             .objects
             .get(&source_id)
             .and_then(|src| src.chosen_color())
-            .is_some_and(|color| source_obj.color.contains(&color)),
+            .is_some_and(|color| source_colors.contains(&color)),
     }
 }
 

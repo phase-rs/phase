@@ -520,24 +520,24 @@ fn restriction_scope_matches_player(
     }
 }
 
-/// CR 601.2a: Build the spell-record projection used by prohibition filters.
-fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> SpellCastRecord {
-    SpellCastRecord {
-        name: spell_obj.name.clone(),
-        core_types: spell_obj.card_types.core_types.clone(),
-        supertypes: spell_obj.card_types.supertypes.clone(),
-        subtypes: spell_obj.card_types.subtypes.clone(),
-        keywords: spell_obj.keywords.clone(),
-        colors: spell_obj.color.clone(),
-        // CR 202.3e: While on the stack, X equals the announced value, not 0.
-        mana_value: spell_obj
-            .mana_cost
-            .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
-        has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
-        from_zone: spell_obj.zone,
-        cast_variant: crate::types::game_state::CastingVariant::Normal,
-        was_kicked: !spell_obj.kickers_paid.is_empty(),
-    }
+/// CR 601.2a + CR 202.3d: Build the spell-record projection used by prohibition
+/// filters. Routes through the shared `restrictions::spell_cast_record_for`
+/// authority so a fused split spell is projected with the COMBINED mana value /
+/// colors of both halves (CR 702.102b). `fused` requests that combined projection
+/// for a pre-payment fused split spell whose `fused_split_spell` marker is not yet
+/// set (the prohibition seam passes the `variant_override == Some(Fuse)` hint).
+/// `CastingVariant::Normal` is the historical placeholder for these live per-spell
+/// filters (they do not consult the variant).
+fn spell_record_for_restrictions_for(
+    spell_obj: &super::game_object::GameObject,
+    fused: bool,
+) -> SpellCastRecord {
+    super::restrictions::spell_cast_record_for(
+        spell_obj,
+        spell_obj.zone,
+        crate::types::game_state::CastingVariant::Normal,
+        fused,
+    )
 }
 
 fn is_blocked_by_cast_only_from_zones(
@@ -607,6 +607,19 @@ fn is_blocked_by_cant_cast_spells(
     caster: PlayerId,
     spell_obj: Option<&super::game_object::GameObject>,
 ) -> bool {
+    is_blocked_by_cant_cast_spells_for(state, caster, spell_obj, false)
+}
+
+/// Fuse-aware sibling of [`is_blocked_by_cant_cast_spells`]. `fused` projects a
+/// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
+/// so `CastSpells { spell_filter }` prohibitions keyed on mana value / colors see
+/// the fused spell. The non-`_for` entry delegates with `fused = false`.
+fn is_blocked_by_cant_cast_spells_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: Option<&super::game_object::GameObject>,
+    fused: bool,
+) -> bool {
     // CR 702.50b: a player who controls a resolved Epic spell can't cast spells
     // for the rest of the game. Activated/triggered abilities and spell copies
     // are unaffected — neither routes through this cast-legality gate.
@@ -614,7 +627,7 @@ fn is_blocked_by_cant_cast_spells(
         return true;
     }
 
-    let spell_record = spell_obj.map(spell_record_for_restrictions);
+    let spell_record = spell_obj.map(|obj| spell_record_for_restrictions_for(obj, fused));
 
     state.restrictions.iter().any(|restriction| {
         let GameRestriction::ProhibitActivity {
@@ -1313,10 +1326,17 @@ fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Optio
     None
 }
 
-fn granted_spell_keywords(
+/// Collect the keywords granted to `object_id` by `CastWithKeyword` statics
+/// (CR 604.1). `fused` projects a pre-payment fused split spell with its COMBINED
+/// characteristics (CR 702.102b) so `CastWithKeyword` `affected` filters keyed on
+/// mana value / colors see the fused spell; the payment-time / on-stack callers
+/// pass `false` and rely on the `fused_split_spell` marker OR-gate inside
+/// `spell_cast_record_for`.
+fn granted_spell_keywords_for(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
+    fused: bool,
 ) -> Vec<Keyword> {
     let Some(spell_obj) = state.objects.get(&object_id) else {
         return Vec::new();
@@ -1340,7 +1360,7 @@ fn granted_spell_keywords(
         };
 
         let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state(
+            super::filter::spell_object_matches_filter_from_state_for(
                 state,
                 spell_obj,
                 origin_zone,
@@ -1348,6 +1368,7 @@ fn granted_spell_keywords(
                 filter,
                 source_obj.id,
                 &state.all_creature_types,
+                fused,
             )
         });
         if !matches {
@@ -1359,10 +1380,18 @@ fn granted_spell_keywords(
 
     // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
     // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
-    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords, false);
+    transient_granted_spell_keywords_for(
+        state,
+        caster,
+        spell_obj,
+        origin_zone,
+        &mut keywords,
+        false,
+        fused,
+    );
 
     // CR 601.2f: One-shot "the next spell …" keyword/flash grants (Insist, Quicken, Wand).
-    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, false);
+    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, false, fused);
 
     keywords
 }
@@ -1371,6 +1400,17 @@ fn granted_spell_keyword_instances(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
+) -> Vec<Keyword> {
+    granted_spell_keyword_instances_for(state, caster, object_id, false)
+}
+
+/// Fuse-aware sibling of [`granted_spell_keyword_instances`]. See
+/// [`granted_spell_keywords_for`] for the `fused` projection rationale.
+fn granted_spell_keyword_instances_for(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
 ) -> Vec<Keyword> {
     let Some(spell_obj) = state.objects.get(&object_id) else {
         return Vec::new();
@@ -1388,7 +1428,7 @@ fn granted_spell_keyword_instances(
         };
 
         let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state(
+            super::filter::spell_object_matches_filter_from_state_for(
                 state,
                 spell_obj,
                 origin_zone,
@@ -1396,6 +1436,7 @@ fn granted_spell_keyword_instances(
                 filter,
                 source_obj.id,
                 &state.all_creature_types,
+                fused,
             )
         });
         if matches {
@@ -1403,8 +1444,16 @@ fn granted_spell_keyword_instances(
         }
     }
 
-    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords, true);
-    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, true);
+    transient_granted_spell_keywords_for(
+        state,
+        caster,
+        spell_obj,
+        origin_zone,
+        &mut keywords,
+        true,
+        fused,
+    );
+    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, true, fused);
 
     keywords
 }
@@ -1416,14 +1465,18 @@ fn granted_spell_keyword_instances(
 /// permanent leaving play and expires on its own duration (CR 611.2a). This scan is
 /// the player-scoped counterpart to the `game_active_statics` loop in
 /// `granted_spell_keywords`; it mirrors the condition gating of the sibling player
-/// query `transient_grants_static_mode_to_player` (static_abilities.rs).
-fn transient_granted_spell_keywords(
+/// query `transient_grants_static_mode_to_player` (static_abilities.rs). `fused`
+/// projects a pre-payment fused split spell with its COMBINED characteristics
+/// (CR 702.102b); see [`granted_spell_keywords_for`] for the rationale.
+#[allow(clippy::too_many_arguments)]
+fn transient_granted_spell_keywords_for(
     state: &GameState,
     caster: PlayerId,
     spell_obj: &crate::game::game_object::GameObject,
     origin_zone: Zone,
     keywords: &mut Vec<Keyword>,
     preserve_instances: bool,
+    fused: bool,
 ) {
     for tce in &state.transient_continuous_effects {
         let TargetFilter::SpecificPlayer { id } = tce.affected else {
@@ -1471,7 +1524,7 @@ fn transient_granted_spell_keywords(
                 filter
             });
             let matches = affected.as_ref().is_none_or(|filter| {
-                super::filter::spell_object_matches_filter_from_state(
+                super::filter::spell_object_matches_filter_from_state_for(
                     state,
                     spell_obj,
                     origin_zone,
@@ -1479,6 +1532,7 @@ fn transient_granted_spell_keywords(
                     filter,
                     tce.source_id,
                     &state.all_creature_types,
+                    fused,
                 )
             });
             if matches {
@@ -1511,6 +1565,19 @@ pub(super) fn granted_spell_alternative_cost(
     caster: PlayerId,
     object_id: ObjectId,
 ) -> Option<GrantedSpellAlternativeCost> {
+    granted_spell_alternative_cost_for(state, caster, object_id, false)
+}
+
+/// Fuse-aware sibling of [`granted_spell_alternative_cost`]. `fused` projects a
+/// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
+/// so `CastWithAlternativeCost` `affected` filters keyed on mana value / colors
+/// see the fused spell. The non-`_for` entry delegates with `fused = false`.
+pub(super) fn granted_spell_alternative_cost_for(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
+) -> Option<GrantedSpellAlternativeCost> {
     let spell_obj = state.objects.get(&object_id)?;
     let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
 
@@ -1525,7 +1592,7 @@ pub(super) fn granted_spell_alternative_cost(
         };
 
         let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state(
+            super::filter::spell_object_matches_filter_from_state_for(
                 state,
                 spell_obj,
                 origin_zone,
@@ -1533,6 +1600,7 @@ pub(super) fn granted_spell_alternative_cost(
                 filter,
                 source_obj.id,
                 &state.all_creature_types,
+                fused,
             )
         });
         if matches {
@@ -1551,6 +1619,22 @@ pub(crate) fn effective_spell_keywords(
     caster: PlayerId,
     object_id: ObjectId,
 ) -> Vec<Keyword> {
+    effective_spell_keywords_for(state, caster, object_id, false)
+}
+
+/// Fuse-aware sibling of [`effective_spell_keywords`]. `fused` projects a
+/// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
+/// so `CastWithKeyword`-granted keywords keyed on mana value / colors are granted
+/// to the fused spell. The non-`_for` entry delegates with `fused = false` so its
+/// ~40 non-pre-payment callers stay byte-identical. Only the granted-keyword scan
+/// is fused-projection-sensitive; the printed keywords (`obj.keywords`) and the
+/// keyword-presence-based flashback grant are unaffected by the fuse projection.
+pub(crate) fn effective_spell_keywords_for(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
+) -> Vec<Keyword> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
@@ -1560,7 +1644,7 @@ pub(crate) fn effective_spell_keywords(
     // in `obj.keywords`; granted spell keywords are currently merged by kind here.
     // A future granted-multi-instance keyword must collect those instances before
     // this upsert path if its rules require separate triggers.
-    for keyword in granted_spell_keywords(state, caster, object_id) {
+    for keyword in granted_spell_keywords_for(state, caster, object_id, fused) {
         upsert_keyword_by_kind(&mut keywords, keyword);
     }
 
@@ -1626,8 +1710,13 @@ pub(super) fn build_spell_meta(
         subtypes: obj.card_types.subtypes.clone(),
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
         cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
-        mana_value: Some(obj.mana_cost.mana_value()),
-        color_count: Some(obj.color.len() as u32),
+        // CR 202.3d + CR 702.102b: a FUSED split spell's mana value / color count
+        // are the COMBINED values of both halves; a non-fused split cast and every
+        // single-face spell use the object's own (chosen-half) cost. `spell_*` key
+        // on the pre-payment fuse marker rather than the zone, so mid-cast (object
+        // still in its origin zone) a non-fused split spell is not over-combined.
+        mana_value: Some(obj.spell_mana_value()),
+        color_count: Some(obj.spell_colors().len() as u32),
         // CR 107.3 + CR 202.3e: structural "has {X}" property of the printed cost,
         // detected from shards (mana value alone can't reveal it — X contributes 0
         // off the stack).
@@ -1673,8 +1762,23 @@ pub(crate) fn effective_spell_keyword_kinds(
     caster: PlayerId,
     object_id: ObjectId,
 ) -> Vec<KeywordKind> {
+    effective_spell_keyword_kinds_for(state, caster, object_id, false)
+}
+
+/// Fuse-aware sibling of [`effective_spell_keyword_kinds`]. `fused` projects the
+/// COMBINED characteristics of a pre-payment fused split spell (CR 702.102b) so a
+/// value-keyed `CastWithKeyword` grant (e.g. Flash keyed on mana value / colors —
+/// CR 702.8a) is seen for the fused spell rather than only the front half. The
+/// non-`_for` entry delegates with `fused = false` so its non-pre-payment callers
+/// stay byte-identical.
+pub(crate) fn effective_spell_keyword_kinds_for(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
+) -> Vec<KeywordKind> {
     let mut kinds = Vec::new();
-    for keyword in effective_spell_keywords(state, caster, object_id) {
+    for keyword in effective_spell_keywords_for(state, caster, object_id, fused) {
         let kind = keyword.kind();
         if !kinds.contains(&kind) {
             kinds.push(kind);
@@ -1781,7 +1885,14 @@ pub(super) fn cast_permission_constraint_allows_cast(
             comparator,
             value: QuantityExpr::Fixed { value },
         }) if resulting_mv.is_none() => {
-            comparator.evaluate(obj.mana_cost.mana_value() as i32, *value)
+            // CR 202.3d + CR 709.4b: The object being tested is off the stack (in
+            // exile/graveyard for the impulse-draw exile-cast path), so a split
+            // card's mana value is the COMBINED value of both halves.
+            // `effective_mana_value()` gates on `zone != Zone::Stack`, so it
+            // combines here and falls back to the chosen-half value for any
+            // on-stack caller — correct in both cases. A single-face object's
+            // `effective_mana_value()` is identical to `mana_cost.mana_value()`.
+            comparator.evaluate(obj.effective_mana_value() as i32, *value)
         }
         Some(CastPermissionConstraint::ManaValue { comparator, value }) => {
             let Some(resulting_mv) = resulting_mv else {
@@ -3559,16 +3670,21 @@ fn unlimited_hand_cast_free_applies(
             .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
 }
 
-/// CR 601.2f: Whether `spell_id` matches a pending next-spell modifier's optional filter.
+/// CR 601.2f: Whether `spell_id` matches a pending next-spell modifier's optional
+/// filter. `fused` projects a pre-payment fused split spell with its COMBINED
+/// characteristics (CR 702.102b) so a filter keyed on mana value / colors ("the
+/// next spell with mana value 5 or greater you cast has flash") matches the fused
+/// spell. Post-cast consumers pass `false` and rely on the marker OR-gate.
 fn spell_matches_pending_next_spell_filter(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
     entry: &crate::types::game_state::PendingNextSpellModifier,
+    fused: bool,
 ) -> bool {
     let filter_source_id = entry.source_id.unwrap_or(spell_id);
     entry.spell_filter.as_ref().is_none_or(|filter| {
-        spell_matches_cost_filter(state, caster, spell_id, filter, filter_source_id)
+        spell_matches_cost_filter_for(state, caster, spell_id, filter, filter_source_id, fused)
     })
 }
 
@@ -3581,24 +3697,30 @@ fn pending_next_spell_modifier_index(
 ) -> Option<usize> {
     state.pending_next_spell_modifiers.iter().position(|entry| {
         entry.player == caster
-            && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry)
+            // CR 702.102b: index lookup runs at consume time (marker set) — the
+            // OR-gate covers fusion, so `false` here is byte-identical.
+            && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry, false)
             && predicate(&entry.modifier)
     })
 }
 
-/// CR 601.2f: Apply keyword/flash grants from matching pending next-spell modifiers.
+/// CR 601.2f: Apply keyword/flash grants from matching pending next-spell
+/// modifiers. `fused` projects a pre-payment fused split spell with its COMBINED
+/// characteristics (CR 702.102b) so a filtered next-spell grant matches the fused
+/// spell before its `fused_split_spell` marker is set.
 fn apply_pending_next_spell_keyword_grants(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
     keywords: &mut Vec<Keyword>,
     preserve_instances: bool,
+    fused: bool,
 ) {
     for entry in &state.pending_next_spell_modifiers {
         if entry.player != caster {
             continue;
         }
-        if !spell_matches_pending_next_spell_filter(state, caster, spell_id, entry) {
+        if !spell_matches_pending_next_spell_filter(state, caster, spell_id, entry, fused) {
             continue;
         }
         match &entry.modifier {
@@ -3621,7 +3743,9 @@ pub(super) fn apply_pending_next_spell_stack_grants(
 ) {
     let stamp_cant_be_countered = state.pending_next_spell_modifiers.iter().any(|entry| {
         entry.player == caster
-            && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry)
+            // CR 702.102b: stack-grant stamping runs post-finalization (marker set)
+            // — the OR-gate covers fusion, so `false` here is byte-identical.
+            && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry, false)
             && matches!(entry.modifier, NextSpellModifier::CantBeCountered)
     });
     if stamp_cant_be_countered {
@@ -3650,7 +3774,9 @@ pub(super) fn consume_pending_next_spell_modifiers(
         .enumerate()
         .filter_map(|(idx, entry)| {
             (entry.player == caster
-                && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry))
+                // CR 702.102b: consumption runs post-finalization (marker set) —
+                // the OR-gate covers fusion, so `false` here is byte-identical.
+                && spell_matches_pending_next_spell_filter(state, caster, spell_id, entry, false))
             .then_some(idx)
         })
         .collect();
@@ -3790,6 +3916,20 @@ fn casting_variant_candidates(
         return Vec::new();
     };
     let mut candidates = Vec::new();
+
+    // CR 601.2b + CR 702.102b: NON-Fuse alternative-cost candidate discovery
+    // (Dash/Evoke/Overload/Freerunning/Prowl/Surge/Emerge/Blitz/Spectacle below)
+    // reads the FRONT-HALF projection via plain `effective_spell_keywords`, NOT the
+    // fused combined projection. A non-Fuse alternative cast executes as its own
+    // cast method (a split spell can't combine Fuse with another alternative cost —
+    // CR 601.2b), and its preparation/cost reader uses the front half, so its
+    // candidate gate must match the front half too. The COMBINED projection is
+    // routed ONLY through the actual `CastingVariant::Fuse` prepare/check path
+    // (`is_fuse_variant`). Admitting a Dash/Evoke option from combined
+    // characteristics would surface an option the later non-fused preparation can't
+    // honor (the granted keyword no longer matches the front half), wrongly falling
+    // back to the printed cost. The Fuse candidate itself is gated intrinsically by
+    // `has_fuse_candidate` (printed Fuse keyword + Split back face) below.
 
     if obj.zone == Zone::Graveyard {
         if super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
@@ -4053,6 +4193,17 @@ fn prepare_spell_cast_with_variant_override_inner(
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    // CR 702.102b + CR 202.3d: Pre-payment fused discriminator. Invariant: a fused
+    // split cast is reachable at this seam ONLY through an explicit
+    // `variant_override == Some(CastingVariant::Fuse)`. Fuse is constructed in
+    // exactly one place (`casting_variant_candidates`, pushed for a fuse-capable
+    // split card) and prepared with `Some(Fuse)`; it is never inferred by the
+    // alternative-cost closure below (which resolves `casting_variant` at ~4374,
+    // after the prohibition block). The `fused_split_spell` marker is not set until
+    // finalization (payment time), so pre-payment prohibition / keyword-grant /
+    // cost seams must derive fusion from this override. If a future change ever
+    // infers Fuse elsewhere, this discriminator must be revisited.
+    let is_fuse_variant = variant_override == Some(CastingVariant::Fuse);
     // CR 715.3d + CR 701.17d: Cards carrying an object-tagged play/cast
     // permission. Exile sources cover AdventureCreature / ExileWithAltCost /
     // impulse `PlayFromExile`; the graveyard branch covers a milled card whose
@@ -4165,7 +4316,9 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
     // E.g., Silence: "Your opponents can't cast spells this turn."
-    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player, Some(obj)) {
+    if mode == CastingMode::Actual
+        && is_blocked_by_cant_cast_spells_for(state, player, Some(obj), is_fuse_variant)
+    {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents you from casting spells this turn".to_string(),
         ));
@@ -4173,7 +4326,9 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
     // E.g., Steel Golem: "You can't cast creature spells."
-    if mode == CastingMode::Actual && is_blocked_by_cant_be_cast(state, player, obj) {
+    if mode == CastingMode::Actual
+        && is_blocked_by_cant_be_cast_for(state, player, obj, is_fuse_variant)
+    {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents you from casting this spell".to_string(),
         ));
@@ -4206,7 +4361,9 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
     // E.g., Rule of Law, High Noon, Deafening Silence.
-    if mode == CastingMode::Actual && is_blocked_by_per_turn_cast_limit(state, player, obj) {
+    if mode == CastingMode::Actual
+        && is_blocked_by_per_turn_cast_limit_for(state, player, obj, is_fuse_variant)
+    {
         return Err(EngineError::ActionNotAllowed(
             "A static ability limits the number of spells you can cast this turn".to_string(),
         ));
@@ -4312,7 +4469,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // the *effective* spell keywords so a Dash cost granted by a static
     // (CR 604.1) is honored, not just printed Dash.
     let dash_cost = if obj.zone == Zone::Hand {
-        effective_spell_keywords(state, player, object_id)
+        effective_spell_keywords_for(state, player, object_id, is_fuse_variant)
             .iter()
             .find_map(|k| match k {
                 crate::types::keywords::Keyword::Dash(cost) => Some(cost.clone()),
@@ -4328,7 +4485,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // (CR 604.1) is honored; CR 702.152b makes Blitz single-instance, so the
     // dedup-by-kind collector is correct.
     let blitz_cost = if obj.zone == Zone::Hand {
-        effective_spell_keywords(state, player, object_id)
+        effective_spell_keywords_for(state, player, object_id, is_fuse_variant)
             .iter()
             .find_map(|k| match k {
                 crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
@@ -4344,7 +4501,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // *effective* spell keywords so a Spectacle cost granted by a static
     // (CR 604.1) is honored, not just printed Spectacle.
     let spectacle_cost = if obj.zone == Zone::Hand {
-        effective_spell_keywords(state, player, object_id)
+        effective_spell_keywords_for(state, player, object_id, is_fuse_variant)
             .iter()
             .find_map(|k| match k {
                 crate::types::keywords::Keyword::Spectacle(cost) => Some(cost.clone()),
@@ -4529,6 +4686,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // CR 702.96a + CR 604.1: read the overload cost from effective keywords so a
     // granted Overload (CastWithKeyword) substitutes its cost, mirroring the
     // Evoke/Emerge effective-keyword cost reads below.
+    // CR 702.102b: GUARDED — arm requires `casting_variant == Overload`, which Fuse
+    // never equals, so a fused split cast never reaches this read.
     let overload_cost = if casting_variant == CastingVariant::Overload {
         effective_spell_keywords(state, player, object_id)
             .iter()
@@ -4569,6 +4728,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // payload. Non-mana evoke (Solitude et al.) has no mana sub-cost — the
     // mana component substitutes to `ManaCost::zero()` and the residual
     // non-mana cost is paid via the additional-cost path (CR 601.2h).
+    // CR 702.102b: GUARDED — arm requires `casting_variant == Evoke`; Fuse never
+    // equals it, so this read is unreachable for a fused split cast.
     let (evoke_cost, evoke_non_mana_cost) = if casting_variant == CastingVariant::Evoke {
         // CR 702.74a + CR 601.2f-h + CR 604.1: read evoke cost from effective
         // keywords so granted evoke (CastWithKeyword) substitutes its cost, not
@@ -4590,6 +4751,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // mana cost from the spell's effective `Keyword::Emerge(cost)`. The required
     // sacrifice and mana-value reduction are paid later as a cost component
     // (CR 702.119c, CR 601.2h).
+    // CR 702.102b: GUARDED — arm requires `casting_variant == Emerge`; Fuse never
+    // equals it, so this read is unreachable for a fused split cast.
     let emerge_cost = if casting_variant == CastingVariant::Emerge {
         effective_spell_keywords(state, player, object_id)
             .iter()
@@ -4614,6 +4777,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // `handle_bestow_cost_choice` because it requires a `&mut GameState` handle
     // and needs to outlive `prepare_spell_cast_with_variant_override` (which
     // holds an immutable borrow).
+    // CR 702.102b: GUARDED — arm requires `casting_variant == Bestow`; Fuse never
+    // equals it, so this read is unreachable for a fused split cast.
     let (bestow_cost, bestow_non_mana_cost) = if casting_variant == CastingVariant::Bestow {
         let split = effective_spell_keywords(state, player, object_id)
             .iter()
@@ -4793,6 +4958,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // consulted at candidate enumeration). Only honored when the caller
     // explicitly opted into the Freerunning variant via the
     // `CastingVariantChoice` prompt.
+    // CR 702.102b: GUARDED — arm requires `casting_variant == Freerunning`; Fuse
+    // never equals it, so this read is unreachable for a fused split cast.
     let freerunning_cost = if casting_variant == CastingVariant::Freerunning {
         effective_spell_keywords(state, player, object_id)
             .iter()
@@ -4806,6 +4973,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // CR 702.76a: When the caller opted into Prowl, substitute the prowl mana cost
     // from the `Keyword::Prowl(cost)` payload (printed or granted). Mirrors the
     // Freerunning/Overload cost-selection pattern.
+    // CR 702.102b: GUARDED — arm requires `casting_variant == Prowl`; Fuse never
+    // equals it, so this read is unreachable for a fused split cast.
     let prowl_cost = if casting_variant == CastingVariant::Prowl {
         effective_spell_keywords(state, player, object_id)
             .iter()
@@ -4819,6 +4988,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // CR 702.117a: When the caller opted into Surge, substitute the surge mana
     // cost from the `Keyword::Surge(cost)` payload (printed or granted). Mirrors
     // the Freerunning/Prowl cost-selection pattern.
+    // CR 702.102b: GUARDED — arm requires `casting_variant == Surge`; Fuse never
+    // equals it, so this read is unreachable for a fused split cast.
     let surge_cost = if casting_variant == CastingVariant::Surge {
         effective_spell_keywords(state, player, object_id)
             .iter()
@@ -4952,9 +5123,14 @@ fn prepare_spell_cast_with_variant_override_inner(
     // OR from a battlefield `StaticMode::ExileCastPermission` static granting
     // "you may cast them as though they had flash" (Azula, Cunning Usurper) for
     // the cards in its exile pool.
-    let has_granted_flash = effective_spell_keyword_kinds(state, player, object_id)
-        .contains(&KeywordKind::Flash)
-        || exile_static_permission_grants_flash(state, player, object_id);
+    // CR 702.102b: THREADED. Flash can be granted by a value-keyed
+    // `CastWithKeyword{Flash}` static, and this read gates timing legality
+    // pre-payment; project the fused split spell's COMBINED characteristics so a
+    // value-keyed flash grant is not dropped on the front half.
+    let has_granted_flash =
+        effective_spell_keyword_kinds_for(state, player, object_id, is_fuse_variant)
+            .contains(&KeywordKind::Flash)
+            || exile_static_permission_grants_flash(state, player, object_id);
     let cast_outside_sorcery_timing = !restrictions::is_sorcery_speed_window(state, player);
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
@@ -5207,15 +5383,24 @@ fn apply_non_floor_cost_modifiers(
     let mut collected =
         collect_self_spell_cost_modifiers(state, player, object_id, None, false, casting_variant);
     collected.extend(collect_battlefield_cost_modifiers(
-        state, player, object_id, None, false,
+        state,
+        player,
+        object_id,
+        None,
+        false,
+        casting_variant,
     ));
     apply_cost_modifications_in_order(mana_cost, &collected);
+    // CR 702.102b: derive the pre-payment fused hint from the casting variant so a
+    // filtered reduction / granted keyword keyed on the combined mana value /
+    // colors matches a fused split spell before its marker is set.
+    let fused = casting_variant == Some(CastingVariant::Fuse);
     // CR 702.41a: Affinity — reduce cost by {1} per matching permanent controlled.
-    apply_affinity_reduction(state, player, object_id, mana_cost);
+    apply_affinity_reduction(state, player, object_id, mana_cost, fused);
     // CR 702.125a: Undaunted — reduce cost by {1} per living opponent you have.
-    apply_undaunted_reduction(state, player, object_id, mana_cost);
+    apply_undaunted_reduction(state, player, object_id, mana_cost, fused);
     // CR 601.2f: One-shot pending cost reductions ("the next spell costs {N} less").
-    apply_pending_spell_cost_reductions(state, player, object_id, mana_cost);
+    apply_pending_spell_cost_reductions(state, player, object_id, mana_cost, fused);
 }
 
 /// CR 601.2f: Apply every cost modifier to `mana_cost` in CR-correct order:
@@ -5239,7 +5424,11 @@ pub(super) fn apply_all_cost_modifiers(
     // cost" step of CR 601.2f). Defer the floor for `{X}` costs to
     // `apply_post_x_cost_modifiers`, run from the ChooseX handler once X is concrete.
     if !casting_costs::cost_has_x(mana_cost) {
-        apply_cost_floor(state, player, object_id, mana_cost);
+        // CR 702.102b: derive the pre-payment fused hint so a filtered floor keyed
+        // on the combined mana value / colors matches a fused split spell before
+        // its marker is set.
+        let fused = casting_variant == Some(CastingVariant::Fuse);
+        apply_cost_floor_for(state, player, object_id, mana_cost, fused);
     }
 }
 
@@ -5278,6 +5467,11 @@ pub(super) fn apply_target_dependent_cost_modifiers(
         object_id,
         Some(ability),
         true,
+        // CR 702.102b: this target-dependent pass runs after finalization sets the
+        // `fused_split_spell` marker, so the marker (OR-gated inside
+        // `spell_cast_record_for`) already yields the combined projection — no
+        // pre-payment variant hint is needed or available here.
+        None,
     ));
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
@@ -5476,6 +5670,13 @@ pub(super) fn apply_cost_modifiers_to_base(
             }
         }
     }
+    // CR 601.2f + CR 702.102b: This recompute path is exercised only after an
+    // *additional* cost (Bargain) is declared (`recompute_pending_cast_cost`).
+    // Fuse and Bargain never co-occur — no printed split card carries Bargain — so
+    // this path is Fuse-unreachable and `None` (front-half) is exact. Were a fused
+    // recompute ever to reach here, the `fused_split_spell` marker would already be
+    // set by finalization and `spell_cast_record_for`'s OR-gate would still yield
+    // the combined projection, so this is not a silent front-half leak either way.
     apply_all_cost_modifiers(state, player, object_id, &mut mana_cost, None);
     Some(mana_cost)
 }
@@ -5582,6 +5783,11 @@ fn collect_self_spell_cost_modifiers(
         return Vec::new();
     };
 
+    // CR 202.3d + CR 702.102b: a pre-payment `CastingVariant::Fuse` cast presents
+    // the COMBINED characteristics of both halves to a self-spell `ModifyCost`
+    // static's `spell_filter`. The `fused_split_spell` marker is not yet set here.
+    let fused = casting_variant == Some(CastingVariant::Fuse);
+
     let mut collected = Vec::new();
 
     // CR 113.6 + CR 604.1: A static ability only functions in zones listed by
@@ -5631,11 +5837,11 @@ fn collect_self_spell_cost_modifiers(
 
         if let Some(ref filter) = spell_filter {
             let matches = if let Some(ability) = selected_ability {
-                spell_matches_cost_filter_with_selected_targets(
-                    state, caster, spell_id, filter, spell_id, ability,
+                spell_matches_cost_filter_with_selected_targets_for(
+                    state, caster, spell_id, filter, spell_id, ability, fused,
                 )
             } else {
-                spell_matches_cost_filter(state, caster, spell_id, filter, spell_id)
+                spell_matches_cost_filter_for(state, caster, spell_id, filter, spell_id, fused)
             };
             if !matches {
                 continue;
@@ -5761,6 +5967,25 @@ fn spell_matches_cost_filter_with_selected_targets(
     source_id: ObjectId,
     ability: &ResolvedAbility,
 ) -> bool {
+    spell_matches_cost_filter_with_selected_targets_for(
+        state, caster, spell_id, filter, source_id, ability, false,
+    )
+}
+
+/// Fuse-aware sibling of [`spell_matches_cost_filter_with_selected_targets`]. See
+/// [`spell_matches_cost_filter_for`] for the `fused` projection rationale. Only
+/// the spell-characteristic sub-filter (`base`) is fuse-projected; the
+/// target-referencing props resolve against the chosen targets, not the spell.
+#[allow(clippy::too_many_arguments)]
+fn spell_matches_cost_filter_with_selected_targets_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    fused: bool,
+) -> bool {
     let Some(source_controller) = state.objects.get(&source_id).map(|obj| obj.controller) else {
         return false;
     };
@@ -5784,7 +6009,7 @@ fn spell_matches_cost_filter_with_selected_targets(
                 controller: tf.controller.clone(),
                 properties: non_target_props,
             });
-            if !spell_matches_cost_filter(state, caster, spell_id, &base, source_id) {
+            if !spell_matches_cost_filter_for(state, caster, spell_id, &base, source_id, fused) {
                 return false;
             }
 
@@ -5813,19 +6038,21 @@ fn spell_matches_cost_filter_with_selected_targets(
             })
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
-            spell_matches_cost_filter_with_selected_targets(
-                state, caster, spell_id, inner, source_id, ability,
+            spell_matches_cost_filter_with_selected_targets_for(
+                state, caster, spell_id, inner, source_id, ability, fused,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|inner| {
-            spell_matches_cost_filter_with_selected_targets(
-                state, caster, spell_id, inner, source_id, ability,
+            spell_matches_cost_filter_with_selected_targets_for(
+                state, caster, spell_id, inner, source_id, ability, fused,
             )
         }),
-        TargetFilter::Not { filter: inner } => !spell_matches_cost_filter_with_selected_targets(
-            state, caster, spell_id, inner, source_id, ability,
-        ),
-        _ => spell_matches_cost_filter(state, caster, spell_id, filter, source_id),
+        TargetFilter::Not { filter: inner } => {
+            !spell_matches_cost_filter_with_selected_targets_for(
+                state, caster, spell_id, inner, source_id, ability, fused,
+            )
+        }
+        _ => spell_matches_cost_filter_for(state, caster, spell_id, filter, source_id, fused),
     }
 }
 
@@ -5852,7 +6079,7 @@ fn apply_battlefield_cost_modifiers(
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
-    let collected = collect_battlefield_cost_modifiers(state, caster, spell_id, None, false);
+    let collected = collect_battlefield_cost_modifiers(state, caster, spell_id, None, false, None);
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
@@ -5865,7 +6092,7 @@ pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
     mana_cost: &mut ManaCost,
 ) {
     let collected =
-        collect_battlefield_cost_modifiers(state, caster, spell_id, Some(ability), true);
+        collect_battlefield_cost_modifiers(state, caster, spell_id, Some(ability), true, None);
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
@@ -5909,8 +6136,14 @@ fn collect_battlefield_cost_modifiers(
     spell_id: ObjectId,
     selected_ability: Option<&ResolvedAbility>,
     target_sensitive_only: bool,
+    casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
     use crate::types::ability::ControllerRef;
+
+    // CR 202.3d + CR 702.102b: a pre-payment `CastingVariant::Fuse` cast presents
+    // the COMBINED characteristics of both halves to a `ModifyCost` static's
+    // `spell_filter`. The `fused_split_spell` marker is not yet set at this seam.
+    let fused = casting_variant == Some(CastingVariant::Fuse);
 
     // CR 702.26b + CR 114.4 + CR 113.6b: Functioning gate (phased-out /
     // command-zone with Eminence-style opt-in) owned by
@@ -6014,11 +6247,11 @@ fn collect_battlefield_cost_modifiers(
             // CR 601.2f: Check spell type filter — does the spell match?
             if let Some(ref filter) = spell_filter {
                 let matches = if let Some(ability) = selected_ability {
-                    spell_matches_cost_filter_with_selected_targets(
-                        state, caster, spell_id, filter, bf_id, ability,
+                    spell_matches_cost_filter_with_selected_targets_for(
+                        state, caster, spell_id, filter, bf_id, ability, fused,
                     )
                 } else {
-                    spell_matches_cost_filter(state, caster, spell_id, filter, bf_id)
+                    spell_matches_cost_filter_for(state, caster, spell_id, filter, bf_id, fused)
                 };
                 if !matches {
                     continue;
@@ -6166,7 +6399,22 @@ pub(super) fn apply_cost_floor(
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
-    apply_cost_floor_inner(state, caster, spell_id, None, false, mana_cost);
+    apply_cost_floor_inner(state, caster, spell_id, None, false, mana_cost, false);
+}
+
+/// Fuse-aware sibling of [`apply_cost_floor`]. `fused` projects a pre-payment
+/// fused split spell with its COMBINED characteristics (CR 702.102b) so a
+/// `ModifyCost { Minimum }` floor's `spell_filter` keyed on mana value / colors
+/// matches the fused spell. Payment-time callers use [`apply_cost_floor`] and rely
+/// on the `fused_split_spell` marker OR-gate.
+fn apply_cost_floor_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    mana_cost: &mut ManaCost,
+    fused: bool,
+) {
+    apply_cost_floor_inner(state, caster, spell_id, None, false, mana_cost, fused);
 }
 
 pub(super) fn apply_cost_floor_with_selected_targets(
@@ -6176,9 +6424,21 @@ pub(super) fn apply_cost_floor_with_selected_targets(
     ability: &ResolvedAbility,
     mana_cost: &mut ManaCost,
 ) {
-    apply_cost_floor_inner(state, caster, spell_id, Some(ability), true, mana_cost);
+    // CR 702.102b: this target-dependent floor pass runs post-finalization (marker
+    // set), so the marker OR-gate inside `spell_cast_record_for` already yields the
+    // combined projection; no pre-payment fused hint is needed here.
+    apply_cost_floor_inner(
+        state,
+        caster,
+        spell_id,
+        Some(ability),
+        true,
+        mana_cost,
+        false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_cost_floor_inner(
     state: &GameState,
     caster: PlayerId,
@@ -6186,6 +6446,7 @@ fn apply_cost_floor_inner(
     selected_ability: Option<&ResolvedAbility>,
     target_sensitive_only: bool,
     mana_cost: &mut ManaCost,
+    fused: bool,
 ) {
     // CR 604.1: O(1) presence gate — no ModifyCost static means no cost floor to apply.
     if !static_kind_present(state, StaticModeKind::ModifyCost) {
@@ -6249,11 +6510,11 @@ fn apply_cost_floor_inner(
         // CR 601.2f: Spell-type filter narrows which spells are floored.
         if let Some(ref filter) = spell_filter {
             let matches = if let Some(ability) = selected_ability {
-                spell_matches_cost_filter_with_selected_targets(
-                    state, caster, spell_id, filter, bf_id, ability,
+                spell_matches_cost_filter_with_selected_targets_for(
+                    state, caster, spell_id, filter, bf_id, ability, fused,
                 )
             } else {
-                spell_matches_cost_filter(state, caster, spell_id, filter, bf_id)
+                spell_matches_cost_filter_for(state, caster, spell_id, filter, bf_id, fused)
             };
             if !matches {
                 continue;
@@ -6297,6 +6558,21 @@ fn spell_matches_cost_filter(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> bool {
+    spell_matches_cost_filter_for(state, caster, spell_id, filter, source_id, false)
+}
+
+/// Fuse-aware sibling of [`spell_matches_cost_filter`]. `fused` projects a
+/// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
+/// so a `ModifyCost` static's `spell_filter` keyed on mana value / colors sees
+/// the fused spell. The non-`_for` entry delegates with `fused = false`.
+fn spell_matches_cost_filter_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    fused: bool,
+) -> bool {
     let Some(spell_obj) = state.objects.get(&spell_id) else {
         return false;
     };
@@ -6305,7 +6581,7 @@ fn spell_matches_cost_filter(
     }
 
     match filter {
-        TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_from_state(
+        TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_from_state_for(
             state,
             spell_obj,
             spell_obj.zone,
@@ -6313,28 +6589,29 @@ fn spell_matches_cost_filter(
             filter,
             source_id,
             &state.all_creature_types,
+            fused,
         ),
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| spell_matches_cost_filter(state, caster, spell_id, inner, source_id)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| spell_matches_cost_filter(state, caster, spell_id, inner, source_id)),
+        TargetFilter::Or { filters } => filters.iter().any(|inner| {
+            spell_matches_cost_filter_for(state, caster, spell_id, inner, source_id, fused)
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|inner| {
+            spell_matches_cost_filter_for(state, caster, spell_id, inner, source_id, fused)
+        }),
         TargetFilter::Not { filter: inner } => {
-            !spell_matches_cost_filter(state, caster, spell_id, inner, source_id)
+            !spell_matches_cost_filter_for(state, caster, spell_id, inner, source_id, fused)
         }
         // CR 201.2: "spells with the chosen name" (Disruptor Flute).
         TargetFilter::HasChosenName => {
             let Some(source_obj) = state.objects.get(&source_id) else {
                 return false;
             };
-            cant_cast_filter_matches(state, spell_obj, filter, source_obj, caster)
+            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused)
         }
         TargetFilter::Named { .. } => {
             let Some(source_obj) = state.objects.get(&source_id) else {
                 return false;
             };
-            cant_cast_filter_matches(state, spell_obj, filter, source_obj, caster)
+            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused)
         }
         // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
         // Fail-closed: unrecognized filter shapes do not universally reduce costs.
@@ -6420,16 +6697,22 @@ fn apply_cost_mod_to_mana(
 /// permanents on the battlefield controlled by the caster and reduces the
 /// spell's generic mana cost by that count (floor at 0).
 /// CR 702.41b: Multiple Affinity instances each apply separately.
+///
+/// CR 702.102b: `fused` projects a pre-payment fused split spell with its COMBINED
+/// characteristics so a `CastWithKeyword`-granted Affinity keyed on the combined
+/// mana value / colors is granted to the fused spell before its marker is set.
+/// Payment-time / non-fused callers pass `false` and rely on the marker.
 fn apply_affinity_reduction(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
+    fused: bool,
 ) {
     if !state.objects.contains_key(&spell_id) {
         return;
     }
-    for kw in effective_spell_keywords(state, caster, spell_id) {
+    for kw in effective_spell_keywords_for(state, caster, spell_id, fused) {
         if let Keyword::Affinity(ref type_filter) = kw {
             let filter = TargetFilter::Typed(type_filter.clone());
             let ctx = super::filter::FilterContext::from_source(state, spell_id);
@@ -6456,16 +6739,22 @@ fn apply_affinity_reduction(
 /// returns only living opponents, so its length is exactly the CR count. Reduces
 /// the spell's generic mana cost by that count (floor at 0; colored pips are
 /// never reduced — `apply_cost_mod_to_mana` handles both).
+///
+/// CR 702.102b: `fused` projects a pre-payment fused split spell with its COMBINED
+/// characteristics so a `CastWithKeyword`-granted Undaunted keyed on the combined
+/// mana value / colors is granted to the fused spell before its marker is set.
+/// Payment-time / non-fused callers pass `false` and rely on the marker.
 fn apply_undaunted_reduction(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
+    fused: bool,
 ) {
     if !state.objects.contains_key(&spell_id) {
         return;
     }
-    let instances = effective_spell_keywords(state, caster, spell_id)
+    let instances = effective_spell_keywords_for(state, caster, spell_id, fused)
         .iter()
         .filter(|kw| matches!(kw, Keyword::Undaunted))
         .count() as u32;
@@ -6482,11 +6771,17 @@ fn apply_undaunted_reduction(
 
 /// CR 601.2f: Apply one-shot pending cost reductions (read-only during cost calculation).
 /// The matching entry is consumed later in `consume_pending_spell_cost_reduction`.
+///
+/// CR 702.102b: `fused` projects a pre-payment fused split spell with its COMBINED
+/// characteristics so a filtered reduction ("the next spell with mana value 5 or
+/// greater you cast costs {1} less") keyed on mana value / colors matches the fused
+/// spell. Payment-time callers pass `false` and rely on the marker OR-gate.
 fn apply_pending_spell_cost_reductions(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
+    fused: bool,
 ) {
     for r in &state.pending_spell_cost_reductions {
         if r.player != caster {
@@ -6494,7 +6789,9 @@ fn apply_pending_spell_cost_reductions(
         }
         let matches = match &r.spell_filter {
             None => true,
-            Some(filter) => spell_matches_cost_filter(state, caster, spell_id, filter, spell_id),
+            Some(filter) => {
+                spell_matches_cost_filter_for(state, caster, spell_id, filter, spell_id, fused)
+            }
         };
         if matches {
             apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), r.amount, false);
@@ -9029,6 +9326,14 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
+    // CR 702.102b: CORRECTNESS-NEUTRAL for the following alternative-cast-choice
+    // enumeration block (Evoke/Emerge/Dash/Blitz/Prowl/Bestow). These reads offer
+    // a keyword's alternative cost as a DISTINCT casting variant, mutually
+    // exclusive with Fuse (a fused split cast is prepared with
+    // `variant_override == Some(Fuse)` and never routes through these keyword-cost
+    // prompts). Evoke/Emerge/Dash/Blitz/Bestow are creature/Aura keywords never
+    // carried by an instant/sorcery split card; so front-vs-combined projection
+    // never changes which option is offered here.
     // CR 702.74a + CR 118.9: Evoke — when a hand card has Keyword::Evoke and
     // both costs are affordable, present a choice. Auto-skip when only one
     // cost is viable. Unlike Warp, Evoke is opt-in via variant_override (the
@@ -11217,11 +11522,15 @@ fn can_cast_prepared_now_with_probe(
     // analogue of the finalize-time target_dependent_flash_permission_satisfied
     // SATISFACTION gate. Also covers the Adventure recursion re-entry, since
     // every CastSpell path flows through can_cast_object_now.
+    // CR 702.102b: fuse-project the real-flash short-circuit for a fused split
+    // candidate (marker not set during candidate generation) so a value-keyed
+    // granted Flash is not dropped on the front half.
     if prepared.cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
         && !restrictions::target_dependent_flash_permission_feasible(
             state,
             player,
             prepared.object_id,
+            prepared.casting_variant == CastingVariant::Fuse,
         )
     {
         return false;
@@ -11570,10 +11879,25 @@ pub(super) fn spell_tap_payment_mode(
     player: PlayerId,
     source_id: ObjectId,
 ) -> Option<ConvokeMode> {
+    spell_tap_payment_mode_for(state, player, source_id, false)
+}
+
+/// CR 702.102b: Fuse-aware sibling of [`spell_tap_payment_mode`]. `fused` projects
+/// a pre-payment fused split spell with its COMBINED characteristics so a
+/// `CastWithKeyword`-granted Convoke / Improvise / Delve keyed on the combined
+/// mana value / colors is granted to the fused spell before its marker is set. The
+/// non-`_for` entry delegates with `fused = false` so payment-time / post-marker
+/// callers rely on the marker.
+pub(super) fn spell_tap_payment_mode_for(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    fused: bool,
+) -> Option<ConvokeMode> {
     if !state.objects.contains_key(&source_id) {
         return None;
     }
-    let effective_keywords = effective_spell_keywords(state, player, source_id);
+    let effective_keywords = effective_spell_keywords_for(state, player, source_id, fused);
     if effective_keywords
         .iter()
         .any(|k| matches!(k, Keyword::Convoke))
@@ -15664,10 +15988,27 @@ pub(super) fn is_blocked_by_cant_activate_during(
 /// the given player from casting the given spell.
 /// Handles scope-based checks (opponents, all players, controller, enchanted creature's
 /// controller) and filter-based checks (type, mana value, chosen name, chosen card type).
+///
+/// Non-fuse-aware entry retained for existing tests; production calls
+/// `is_blocked_by_cant_be_cast_for` with the pre-payment fused hint.
+#[cfg(test)]
 fn is_blocked_by_cant_be_cast(
     state: &GameState,
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
+) -> bool {
+    is_blocked_by_cant_be_cast_for(state, caster, spell_obj, false)
+}
+
+/// Fuse-aware sibling of [`is_blocked_by_cant_be_cast`]. `fused` projects a
+/// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
+/// so `CantBeCast` `affected` filters keyed on mana value / colors see the fused
+/// spell. The non-`_for` entry delegates with `fused = false`.
+fn is_blocked_by_cant_be_cast_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &super::game_object::GameObject,
+    fused: bool,
 ) -> bool {
     // CR 604.1: O(1) presence gate — no CantBeCast static means no restriction.
     if !static_kind_present(state, StaticModeKind::CantBeCast) {
@@ -15688,7 +16029,7 @@ fn is_blocked_by_cant_be_cast(
 
         // CR 604.1: Check spell filter if present.
         if let Some(ref affected) = def.affected {
-            if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj, caster) {
+            if !cant_cast_filter_matches_for(state, spell_obj, affected, bf_obj, caster, fused) {
                 continue;
             }
         }
@@ -15724,12 +16065,16 @@ fn is_blocked_by_cant_be_cast(
 /// chosen attributes from context, so a prohibition can combine a chosen
 /// attribute with any card-type, controller, or zone axis without a bespoke
 /// per-property matcher here.
-fn cant_cast_filter_matches(
+/// `fused` requests the COMBINED-characteristics projection (CR 702.102b) for a
+/// pre-payment fused split spell; payment-time callers pass `false` and rely on
+/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`.
+fn cant_cast_filter_matches_for(
     state: &GameState,
     spell_obj: &super::game_object::GameObject,
     filter: &TargetFilter,
     source_obj: &super::game_object::GameObject,
     caster: PlayerId,
+    fused: bool,
 ) -> bool {
     use crate::types::ability::ChosenAttribute;
 
@@ -15746,7 +16091,7 @@ fn cant_cast_filter_matches(
         }
         // Everything else — including IsChosenColor / IsChosenCardType properties —
         // flows through the shared source-aware typed-filter conjunction.
-        _ => super::filter::spell_object_matches_filter_from_state(
+        _ => super::filter::spell_object_matches_filter_from_state_for(
             state,
             spell_obj,
             spell_obj.zone,
@@ -15754,6 +16099,7 @@ fn cant_cast_filter_matches(
             filter,
             source_obj.id,
             &state.all_creature_types,
+            fused,
         ),
     }
 }
@@ -15762,10 +16108,29 @@ fn cant_cast_filter_matches(
 /// the given player from casting the given spell this turn.
 /// E.g., Rule of Law: "Each player can't cast more than one spell each turn."
 /// E.g., Deafening Silence: "Each player can't cast more than one noncreature spell each turn."
+///
+/// Non-fuse-aware entry retained for existing tests; production calls
+/// `is_blocked_by_per_turn_cast_limit_for` with the pre-payment fused hint.
+#[cfg(test)]
 fn is_blocked_by_per_turn_cast_limit(
     state: &GameState,
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
+) -> bool {
+    is_blocked_by_per_turn_cast_limit_for(state, caster, spell_obj, false)
+}
+
+/// Fuse-aware sibling of [`is_blocked_by_per_turn_cast_limit`]. `fused` projects
+/// the spell being cast with its COMBINED characteristics (CR 702.102b) so a
+/// fused split spell is matched against the limit's `spell_filter` (e.g. a
+/// mana-value threshold) as the fused spell. Only the current spell's projection
+/// is fused — the counted history records are already projected at record time.
+/// The non-`_for` entry delegates with `fused = false`.
+fn is_blocked_by_per_turn_cast_limit_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &super::game_object::GameObject,
+    fused: bool,
 ) -> bool {
     // CR 604.1: O(1) presence gate — no PerTurnCastLimit static means no limit.
     if !static_kind_present(state, StaticModeKind::PerTurnCastLimit) {
@@ -15793,19 +16158,16 @@ fn is_blocked_by_per_turn_cast_limit(
             // E.g., Deafening Silence only limits noncreature spells — creature spells
             // are unaffected regardless of how many noncreature spells were cast.
             if let Some(filter) = spell_filter {
-                let current_record = SpellCastRecord {
-                    name: spell_obj.name.clone(),
-                    core_types: spell_obj.card_types.core_types.clone(),
-                    supertypes: spell_obj.card_types.supertypes.clone(),
-                    subtypes: spell_obj.card_types.subtypes.clone(),
-                    keywords: spell_obj.keywords.clone(),
-                    colors: spell_obj.color.clone(),
-                    mana_value: spell_obj.mana_cost.mana_value(),
-                    has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
-                    from_zone: spell_obj.zone,
-                    cast_variant: crate::types::game_state::CastingVariant::Normal,
-                    was_kicked: !spell_obj.kickers_paid.is_empty(),
-                };
+                // CR 202.3d + CR 702.102b: project the spell being cast through the
+                // shared cast-record authority so a fused split spell's mana value /
+                // colors reflect both halves for the per-turn cast-limit filter.
+                // Pre-payment (marker not yet set) the caller supplies `fused`.
+                let current_record = super::restrictions::spell_cast_record_for(
+                    spell_obj,
+                    spell_obj.zone,
+                    crate::types::game_state::CastingVariant::Normal,
+                    fused,
+                );
                 if !super::filter::spell_record_matches_filter(
                     &current_record,
                     filter,

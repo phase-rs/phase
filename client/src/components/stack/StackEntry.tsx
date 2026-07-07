@@ -10,7 +10,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
@@ -77,10 +77,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
+  const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
+  const sourceTokenImageRef =
+    sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
 
-  const { src, isLoading } = useCardImage(imageLookup.name, {
+  const { src, isLoading } = useCardImage(sourceObj ? imageLookup.name : sourceName, {
     size: "normal",
     faceIndex: imageLookup.faceIndex,
+    isToken: sourceIsToken,
+    tokenFilters: sourceObj?.display_source === "Token" ? tokenFiltersForObject(sourceObj) : undefined,
+    tokenImageRef: sourceTokenImageRef,
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
   });

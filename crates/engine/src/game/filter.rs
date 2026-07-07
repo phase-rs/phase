@@ -2528,7 +2528,32 @@ pub fn spell_object_matches_filter_from(
     source_controller: PlayerId,
     all_creature_types: &[String],
 ) -> bool {
-    let record = spell_cast_record_from_object(spell_obj);
+    spell_object_matches_filter_from_for(
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_controller,
+        all_creature_types,
+        false,
+    )
+}
+
+/// Fuse-aware sibling of [`spell_object_matches_filter_from`]. `fused` requests
+/// the COMBINED characteristics projection (CR 702.102b) for a pre-payment fused
+/// split spell whose `fused_split_spell` marker is not yet set. The non-`_for`
+/// entry delegates with `fused = false` so existing callers stay byte-identical.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_for(
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    all_creature_types: &[String],
+    fused: bool,
+) -> bool {
+    let record = spell_cast_record_from_object_for(spell_obj, fused);
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -2552,10 +2577,37 @@ pub fn spell_object_matches_filter_from_state(
     source_id: ObjectId,
     all_creature_types: &[String],
 ) -> bool {
+    spell_object_matches_filter_from_state_for(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        false,
+    )
+}
+
+/// Fuse-aware sibling of [`spell_object_matches_filter_from_state`]. `fused`
+/// requests the COMBINED characteristics projection (CR 702.102b) for a
+/// pre-payment fused split spell. The non-`_for` entry delegates with
+/// `fused = false` so existing callers stay byte-identical.
+#[allow(clippy::too_many_arguments)]
+pub fn spell_object_matches_filter_from_state_for(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    fused: bool,
+) -> bool {
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
-    let record = spell_cast_record_from_object(spell_obj);
+    let record = spell_cast_record_from_object_for(spell_obj, fused);
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -2582,24 +2634,30 @@ pub fn spell_object_matches_filter_from_state(
     )
 }
 
+/// CR 202.3d + CR 702.102b: Project the spell being cast into the record used by
+/// live cost-modifier / cast-prohibition filters, via the shared
+/// `restrictions::spell_cast_record` authority so a fused split spell carries the
+/// COMBINED mana value / colors of both halves. `CastingVariant::Normal` is the
+/// historical placeholder for these live per-spell filters.
+///
+/// Non-fuse-aware entry retained for existing tests; production reaches the
+/// projection through `spell_cast_record_from_object_for` with the fused hint.
+#[cfg(test)]
 fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
-    SpellCastRecord {
-        name: spell_obj.name.clone(),
-        core_types: spell_obj.card_types.core_types.clone(),
-        supertypes: spell_obj.card_types.supertypes.clone(),
-        subtypes: spell_obj.card_types.subtypes.clone(),
-        keywords: spell_obj.keywords.clone(),
-        colors: spell_obj.color.clone(),
-        // CR 202.3e: While on the stack, X equals the announced value, not 0.
-        mana_value: spell_obj
-            .mana_cost
-            .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
-        has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
-        from_zone: spell_obj.zone,
-        // CR 702.33d: Kicker-paid state for "first kicked spell" cost reducers.
-        was_kicked: !spell_obj.kickers_paid.is_empty(),
-        cast_variant: crate::types::game_state::CastingVariant::Normal,
-    }
+    spell_cast_record_from_object_for(spell_obj, false)
+}
+
+/// Fuse-aware sibling of [`spell_cast_record_from_object`]. `fused` selects the
+/// COMBINED-characteristics projection (CR 702.102b) for a pre-payment fused
+/// split spell whose `fused_split_spell` marker is not yet set; the non-`_for`
+/// entry delegates with `fused = false`.
+fn spell_cast_record_from_object_for(spell_obj: &GameObject, fused: bool) -> SpellCastRecord {
+    crate::game::restrictions::spell_cast_record_for(
+        spell_obj,
+        spell_obj.zone,
+        crate::types::game_state::CastingVariant::Normal,
+        fused,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -3493,11 +3551,16 @@ fn matches_filter_prop(
         // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
         // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
         FilterProp::Cmc { comparator, value } => {
-            let cmc = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32;
+            // CR 202.3d + CR 709.4b: a split card off the stack matches on its
+            // combined mana value; on the stack it matches the chosen half (X
+            // included per CR 202.3e). `effective_mana_value` no-ops single-face.
+            let cmc = obj.effective_mana_value() as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
         FilterProp::ManaValueParity { parity } => {
-            let mana_value = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid);
+            // CR 202.3d + CR 709.4b: combined mana value off the stack (a split
+            // card's parity is that of both halves), chosen half on the stack.
+            let mana_value = obj.effective_mana_value();
             mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
         }
         // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
@@ -3825,7 +3888,9 @@ fn matches_filter_prop(
                     .is_some_and(|set| set.contains(&object_id))
             })
         }
-        FilterProp::HasColor { color } => obj.color.contains(color),
+        // CR 202.2 + CR 709.4b: A split card off the stack has the combined
+        // colors of both halves; `effective_colors` no-ops for single-face cards.
+        FilterProp::HasColor { color } => obj.effective_colors().contains(color),
         // CR 208 + CR 208.4b: Power/toughness metric comparison against a
         // dynamic threshold. `scope = Base` reads `base_power`/`base_toughness`
         // (the value after layer 7b, ignoring counters/modifiers per
@@ -3857,12 +3922,14 @@ fn matches_filter_prop(
                 .unwrap_or(0);
             obj.power.unwrap_or(0) > source_power
         }
+        // CR 709.4b: A split card off the stack counts its combined colors.
         FilterProp::ColorCount { comparator, count } => {
-            comparator.evaluate(obj.color.len() as i32, i32::from(*count))
+            comparator.evaluate(obj.effective_colors().len() as i32, i32::from(*count))
         }
         FilterProp::HasSupertype { value } => obj.card_types.supertypes.contains(value),
-        // CR 205.4b: Object does NOT have this color.
-        FilterProp::NotColor { color } => !obj.color.contains(color),
+        // CR 202.2 + CR 709.4b: Object does NOT have this color (combined colors
+        // off the stack for a split card).
+        FilterProp::NotColor { color } => !obj.effective_colors().contains(color),
         // CR 205.4a: Object does NOT have this supertype.
         FilterProp::NotSupertype { value } => !obj.card_types.supertypes.contains(value),
         // CR 205.3e + CR 205.3m + CR 702.73a: A chosen creature type matches
@@ -3905,7 +3972,8 @@ fn matches_filter_prop(
                 crate::types::ability::ChosenAttribute::Color(c) => Some(c),
                 _ => None,
             })
-            .is_some_and(|chosen| obj.color.contains(chosen)),
+            // CR 709.4b: combined colors off the stack for a split card.
+            .is_some_and(|chosen| obj.effective_colors().contains(chosen)),
         // CR 205 + CR 205.2a: Match objects whose core type includes the
         // source's chosen card type. Used for "spells of the chosen type"
         // (Archon of Valor's Reach) and "all cards of the chosen type revealed
@@ -4749,16 +4817,21 @@ fn object_shared_quality_values(
     quality: &SharedQuality,
     all_creature_types: &[String],
 ) -> HashSet<String> {
+    // CR 202.3d + CR 709.4b: A split card off the stack shares its combined mana
+    // value and combined colors; both no-op for single-face cards. Bound to a
+    // local because `SharedQualitySource.colors` borrows a slice.
+    let effective_colors = obj.effective_colors();
     shared_quality_values(
         SharedQualitySource {
             name: &obj.name,
             power: obj.power,
             toughness: obj.toughness,
-            // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
-            mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+            // CR 202.3d + CR 202.3e: combined MV off the stack, chosen half (with
+            // announced X) on the stack.
+            mana_value: obj.effective_mana_value(),
             core_types: &obj.card_types.core_types,
             subtypes: &obj.card_types.subtypes,
-            colors: &obj.color,
+            colors: &effective_colors,
             keywords: &obj.keywords,
         },
         quality,
@@ -5831,6 +5904,78 @@ mod tests {
             PlayerId(0),
             &[]
         ));
+    }
+
+    /// CR 202.3d + CR 702.102b + CR 709.4d: A FUSED split spell is projected into
+    /// the live cost-modifier / cast-prohibition filter record
+    /// (`spell_cast_record_from_object`) with the COMBINED mana value and colors of
+    /// both halves, so `Cmc` / `HasColor` spell filters evaluate the fused spell,
+    /// not just its front half.
+    ///
+    /// Breaking // Entering fused: Breaking {U}{B} (front) + Entering {4}{B}{R}
+    /// (back). Combined MV 8, colors {U, B, R}; front-only would be MV 2, {U, B}.
+    ///
+    /// Discriminating: a `Cmc >= 5` filter and a `HasColor { Red }` filter BOTH
+    /// match the fused record but NEITHER matches the non-fused (front-half) record.
+    /// Reverting the record projection to raw `mana_cost`/`color` flips both fused
+    /// assertions.
+    #[test]
+    fn fused_split_spell_projected_with_combined_characteristics_for_spell_filters() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+
+        let cmc_ge_5 =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 5 },
+            }]));
+        let has_red =
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }]),
+            );
+
+        // Non-fused: front half only — MV 2, colors {U, B}. Neither filter matches.
+        let unfused = spell_cast_record_from_object(sc.state.objects.get(&breaking).unwrap());
+        assert_eq!(
+            unfused.mana_value, 2,
+            "a non-fused split cast is projected with the front-half mana value (2)"
+        );
+        assert!(
+            !unfused.colors.contains(&ManaColor::Red),
+            "the front half Breaking {{U}}{{B}} carries no red"
+        );
+        assert!(!spell_record_matches_filter(&unfused, &cmc_ge_5, P0, &[]));
+        assert!(!spell_record_matches_filter(&unfused, &has_red, P0, &[]));
+
+        // Fused: both halves combined — MV 8, colors {U, B, R}. Both filters match.
+        sc.state
+            .objects
+            .get_mut(&breaking)
+            .unwrap()
+            .fused_split_spell = true;
+        let fused = spell_cast_record_from_object(sc.state.objects.get(&breaking).unwrap());
+        assert_eq!(
+            fused.mana_value, 8,
+            "a fused split spell is projected with the COMBINED mana value (8), not the front half (2)"
+        );
+        assert!(
+            fused.colors.contains(&ManaColor::Red),
+            "the fused spell's combined colors include Entering's red"
+        );
+        assert!(
+            spell_record_matches_filter(&fused, &cmc_ge_5, P0, &[]),
+            "a `Cmc >= 5` spell filter must match the fused spell (combined MV 8), not just the front half (2)"
+        );
+        assert!(
+            spell_record_matches_filter(&fused, &has_red, P0, &[]),
+            "a `HasColor {{ Red }}` spell filter must match the fused spell's combined colors"
+        );
     }
 
     /// CR 107.3 + CR 202.1: `FilterProp::HasXInManaCost` reads

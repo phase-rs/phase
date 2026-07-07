@@ -5957,10 +5957,13 @@ fn validate_target_constraints(
                 let sum: i32 = targets
                     .iter()
                     .filter_map(|t| match t {
+                        // CR 202.3d + CR 709.4b: object targets may be off the
+                        // stack (cards in a graveyard), where a split card's mana
+                        // value is its combined halves; chosen X on the stack.
                         TargetRef::Object(id) => state
                             .objects
                             .get(id)
-                            .map(|o| o.mana_cost.mana_value_with_x(o.zone, o.cost_x_paid) as i32),
+                            .map(|o| o.effective_mana_value() as i32),
                         TargetRef::Player(_) => None,
                     })
                     .sum();
