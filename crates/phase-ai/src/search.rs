@@ -1702,7 +1702,11 @@ pub fn score_candidates_with_session(
         let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
-    finalize_mean(acc, counts, k as usize)
+    let mut out = finalize_mean(acc, counts, k as usize);
+    if config.execution_mode.is_measurement() {
+        out.sort_by_cached_key(|(action, _)| action_order_key(action));
+    }
+    out
 }
 
 /// Core scoring for a single (possibly determinized) state. Byte-identical to

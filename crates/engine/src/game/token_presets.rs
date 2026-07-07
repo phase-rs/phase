@@ -290,6 +290,19 @@ fn find_token_ref_with_mode(
         .unwrap_or(&[]);
     let source_oracle =
         source.and_then(|obj| obj.printed_ref.as_ref().map(|r| r.oracle_id.as_str()));
+    let name_only_offspring_copy = source.is_some_and(|obj| {
+        obj.keywords
+            .iter()
+            .chain(obj.base_keywords.iter())
+            .any(|keyword| matches!(keyword, crate::types::keywords::Keyword::Offspring(_)))
+    });
+    if matches!(mode, TokenRefMatchMode::CardLinkedCopy)
+        && related_ids.is_empty()
+        && source_oracle.is_none()
+        && !name_only_offspring_copy
+    {
+        return None;
+    }
     let source_face = source.and_then(|obj| obj.printed_ref.as_ref().map(|r| r.face_name.as_str()));
     let source_name = source
         .map(|obj| obj.name.as_str())
@@ -458,7 +471,8 @@ mod tests {
     use crate::types::card::PrintedCardRef;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
-    use crate::types::mana::ManaColor;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -466,6 +480,8 @@ mod tests {
     const SOURCE_DEFINED_OOZE_PRESET_ID: &str = "1545ee29-d9c1-57ff-acae-431cfd6d60cf";
     const ROT_LIKE_ORACLE_ID: &str = "8f47c236-46b6-47cb-9ea9-7adfef8fd8ce";
     const SLIME_MOLDING_ORACLE_ID: &str = "e01c8122-9159-4f28-ac6c-338bd889650e";
+    const FANATIC_OF_RHONAS_PRESET_ID: &str = "001dd45c-851b-5eb3-9a53-fc9fb2c0e322";
+    const IRIDESCENT_VINELASHER_PRESET_ID: &str = "c39bbf40-9bf9-5400-8be3-0fb961f0a643";
 
     fn green_ooze_body(power: Option<i32>, toughness: Option<i32>) -> TokenCharacteristics {
         TokenCharacteristics {
@@ -476,6 +492,36 @@ mod tests {
             subtypes: vec!["Ooze".to_string()],
             supertypes: Vec::new(),
             colors: vec![ManaColor::Green],
+            keywords: Vec::new(),
+        }
+    }
+
+    fn fanatic_of_rhonas_body() -> TokenCharacteristics {
+        TokenCharacteristics {
+            display_name: "Fanatic of Rhonas".to_string(),
+            power: Some(4),
+            toughness: Some(4),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![
+                "Zombie".to_string(),
+                "Snake".to_string(),
+                "Druid".to_string(),
+            ],
+            supertypes: Vec::new(),
+            colors: vec![ManaColor::Black],
+            keywords: Vec::new(),
+        }
+    }
+
+    fn iridescent_vinelasher_offspring_body() -> TokenCharacteristics {
+        TokenCharacteristics {
+            display_name: "Iridescent Vinelasher".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Lizard".to_string(), "Assassin".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![ManaColor::Black],
             keywords: Vec::new(),
         }
     }
@@ -599,5 +645,53 @@ mod tests {
             &[SOURCE_DEFINED_OOZE_PRESET_ID],
         );
         assert!(find_card_linked_copy_token_ref(&copy_state, copy_source, &body).is_none());
+    }
+
+    #[test]
+    fn card_linked_copy_does_not_use_name_only_source_fallback() {
+        let body = fanatic_of_rhonas_body();
+        let (state, source) = state_with_source("Fanatic of Rhonas", None, &[]);
+
+        assert!(find_card_linked_copy_token_ref(&state, source, &body).is_none());
+    }
+
+    #[test]
+    fn offspring_card_linked_copy_keeps_name_only_source_fallback() {
+        let body = iridescent_vinelasher_offspring_body();
+        let (mut state, source) = state_with_source("Iridescent Vinelasher", None, &[]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .keywords
+            .push(Keyword::Offspring(ManaCost::generic(2)));
+
+        let image = find_card_linked_copy_token_ref(&state, source, &body)
+            .expect("offspring copy token may use name-only source context");
+
+        assert_eq!(image.preset_id, IRIDESCENT_VINELASHER_PRESET_ID);
+    }
+
+    #[test]
+    fn card_linked_copy_matches_related_token_body_without_printed_ref() {
+        let body = fanatic_of_rhonas_body();
+        let (state, source) =
+            state_with_source("Fanatic of Rhonas", None, &[FANATIC_OF_RHONAS_PRESET_ID]);
+
+        let image = find_card_linked_copy_token_ref(&state, source, &body)
+            .expect("related Fanatic copy token body should match linked preset");
+
+        assert_eq!(image.preset_id, FANATIC_OF_RHONAS_PRESET_ID);
+    }
+
+    #[test]
+    fn exact_create_token_keeps_name_only_source_fallback() {
+        let body = fanatic_of_rhonas_body();
+        let (state, source) = state_with_source("Fanatic of Rhonas", None, &[]);
+
+        let image = find_exact_token_ref(&state, source, &body)
+            .expect("exact create-token lookup may use name-only source context");
+
+        assert_eq!(image.preset_id, FANATIC_OF_RHONAS_PRESET_ID);
     }
 }
