@@ -1055,6 +1055,12 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_enchanted_becomes_type_with_ability(&tp, &text) {
         return Some(def);
     }
+    // CR 205.1a + CR 702.6: "Each <subject> is an Equipment with equip {N} and
+    // "<ability>"" — the become-Equipment anthem (Bram, Bludgeon Brawl). Grants
+    // the Equipment subtype + Equip keyword + the quoted static ability.
+    if let Some(def) = parse_becomes_equipment_with_ability(&tp, &text) {
+        return Some(def);
+    }
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.

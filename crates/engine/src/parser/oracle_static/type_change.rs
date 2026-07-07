@@ -682,6 +682,58 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
     )
 }
 
+/// CR 205.1a + CR 301.5c + CR 702.6: "Each `<subject>` is an Equipment with equip
+/// `{N}` and \"`<quoted ability>`\"" — the become-Equipment anthem (Bram,
+/// Baguette Brawler; Bludgeon Brawl). Each matching permanent gains the Equipment
+/// artifact subtype (CR 301.5c — replacing its other artifact subtypes, CR
+/// 205.1a), the Equip keyword with the printed cost (CR 702.6), and the quoted
+/// static ability (typically an "Equipped creature gets +N/+0" anthem, granted
+/// via the shared quoted-ability authority).
+pub(crate) fn parse_becomes_equipment_with_ability(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, rest_tp) = tp.split_around(" is an equipment with equip ")?;
+    let affected = super::shared::parse_continuous_subject_filter(subject_tp.original)?;
+
+    // rest: `{N} and "<quoted ability>"[.]` — the equip cost precedes ` and "`.
+    let (cost_tp, ability_tp) = rest_tp.split_around(" and \"")?;
+    let (cost_rest, equip_cost) = nom_primitives::parse_mana_cost(cost_tp.lower.trim()).ok()?;
+    if !cost_rest.trim().is_empty() {
+        return None;
+    }
+
+    // Re-add the opening quote the split consumed and delegate to the shared
+    // quoted-ability authority (original case preserves any {symbols}).
+    let quoted = format!("\"{}", ability_tp.original.trim());
+    let grant_modifications = parse_quoted_ability_modifications(&quoted);
+    if grant_modifications.is_empty() {
+        return None;
+    }
+
+    // CR 205.1a: Equipment is an artifact subtype; setting it replaces the
+    // object's existing artifact subtypes (Bram's Food → Equipment), so wipe the
+    // artifact subtype set before granting Equipment.
+    let mut modifications = Vec::new();
+    if let Some(set) = core_type_subtype_set(CoreType::Artifact) {
+        modifications.push(ContinuousModification::RemoveAllSubtypes { set });
+    }
+    modifications.push(ContinuousModification::AddSubtype {
+        subtype: "Equipment".to_string(),
+    });
+    modifications.push(ContinuousModification::AddKeyword {
+        keyword: Keyword::Equip(equip_cost),
+    });
+    modifications.extend(grant_modifications);
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
 /// CR 205.3: the subtype set correlated with a core card type. Used to wipe an
 /// object's existing subtypes of that set before a set-replacement `AddSubtype`
 /// (CR 205.1a). Returns `None` for core types that have no subtype set of
