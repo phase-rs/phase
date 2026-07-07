@@ -1379,15 +1379,23 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // Isle's "it's a land" makes it a LAND (Creature removed → "Legendary Land —
     // Kraken"), not a land creature. Collapse the additive `AddType` list into one
     // replacing `SetCardTypes`, mirroring the aura type-change path
-    // (`parse_type_change_static`'s `needs_set_card_types`). The additive animations
-    // (Gideon Blackblade, manlands) are excluded because they carry a P/T, keywords,
-    // or an explicit retention clause — so `modifications` is not all `AddType`, or
-    // the body names a retention clause.
+    // (`parse_type_change_static`'s `needs_set_card_types`).
+    //
+    // CR 205.1b — artifact-creature / creature-animation retention exception: a
+    // static that animates a permanent INTO a creature ("~ is an artifact
+    // creature", Grond / Midnight Mangler / Phoenix Fleet Airship; "During turns
+    // other than yours, ~ is an artifact creature") GAINS the creature type while
+    // retaining its other card types — it must stay additive (`AddType`). So the
+    // replacement is restricted to type-sets that do NOT add Creature; only a
+    // non-creature type-set like "it's a land" (CR 205.1a / CR 305.7) replaces.
+    // The additive animations (Gideon Blackblade, manlands) are also excluded
+    // because they carry a P/T, keywords, or an explicit retention clause — so
+    // `modifications` is not all `AddType`, or the body names a retention clause.
     let body_lower = body_text.to_lowercase();
     let pure_core_type_replacement = !modifications.is_empty()
-        && modifications
-            .iter()
-            .all(|m| matches!(m, ContinuousModification::AddType { .. }))
+        && modifications.iter().all(|m| {
+            matches!(m, ContinuousModification::AddType { core_type } if *core_type != CoreType::Creature)
+        })
         && !nom_primitives::scan_contains(&body_lower, "in addition")
         && !nom_primitives::scan_contains(&body_lower, "still");
     let modifications = if pure_core_type_replacement {

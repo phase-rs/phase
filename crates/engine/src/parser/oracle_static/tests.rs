@@ -14773,6 +14773,42 @@ fn arixmethes_conditional_is_a_land_replaces_card_types() {
     );
 }
 
+// CR 205.1b (issue #5213): animating a permanent INTO a creature ("~ is an
+// artifact creature") is the retention exception — it GAINS the creature type
+// while keeping its other card types, so it must stay ADDITIVE (AddType), NOT
+// collapse to a replacing SetCardTypes like the Arixmethes "it's a land" path.
+// Guards the parse-diff class (Grond, the Gatebreaker; Midnight Mangler; Phoenix
+// Fleet Airship) whose printed forms carry a leading "during …" timing prefix.
+#[test]
+fn is_an_artifact_creature_stays_additive() {
+    for text in [
+        "During your turn, ~ is an artifact creature.",
+        "During turns other than yours, ~ is an artifact creature.",
+    ] {
+        let def = parse_static_line(text).unwrap_or_else(|| panic!("{text:?} should parse"));
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddType {
+                    core_type: crate::types::card_type::CoreType::Artifact,
+                })
+                && def
+                    .modifications
+                    .contains(&ContinuousModification::AddType {
+                        core_type: crate::types::card_type::CoreType::Creature,
+                    }),
+            "{text:?}: artifact-creature animation must stay additive (AddType): {:?}",
+            def.modifications
+        );
+        assert!(
+            !def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+            "{text:?}: must NOT replace card types (CR 205.1b retention): {:?}",
+            def.modifications
+        );
+    }
+}
+
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land
 // with "{T}: Add {C}" and loses all other card types and abilities." Must become
 // a colorless land (SetCardTypes + SetColor), lose its own abilities
