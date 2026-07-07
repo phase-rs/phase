@@ -160,25 +160,25 @@ Skip this section entirely on the Non-developer track — CI runs everything `--
 
 ## 3. Pick your work
 
-Most runs start with the human pointing their LLM at the repo and expecting *you* to find the highest-value work — no card named. This section is the menu that makes that self-directed. Work the priority ladder **top-down**: drop to a lower tier only when the tiers above it yield nothing you can complete cleanly. Every tier resolves to one card's change and flows through the same pipeline from §4 onward — only *how you find the target* and *what "done" looks like* differ between them.
+Most runs start with the human pointing their LLM at the repo and expecting *you* to find the highest-value work — no card named. This section is the menu that makes that self-directed. The three tiers below (§3.1 → §3.3) are listed in **priority order**: work them top-down, dropping to a lower tier only when the ones above yield nothing you can complete cleanly. Every tier resolves to one card's change and flows through the same pipeline from §4 onward — only *how you find the target* and *what "done" looks like* differ between them.
 
 **Override — the human named something.** If the human named a specific card, issue, or task, do that verbatim and skip the ladder. Normalize card-name casing for `client/public/card-data.json` lookups (typically lowercase). Otherwise, self-select down the ladder below.
 
 Record your target card name up front — it appears in the branch name, commit message, and PR title regardless of which tier you picked from.
 
-### Priority 1 — Fix a misparse
+### 3.1 Fix a misparse
 
 `docs/parser-misparse-backlog.md` is the canonical worklist and the first place to look. It catalogs cards the coverage system marks `supported: true` — no `Unimplemented` effects, so they *look* finished — but whose parsed AST is semantically **wrong**: a dropped intervening-if condition, a `for each` count collapsed to a fixed number, an anaphor bound to the wrong referent. These are the highest-harm gaps in the engine because they ship silently-wrong game behavior that nothing flags at runtime.
 
-The backlog is already root-caused and ranked — about 30 root causes, each listing the parser module that most likely owns the fix and the full set of cards it breaks. The top five root causes account for roughly half of all misparses, so fixing one root cause's parser gap is the single highest-ROI change available: one combinator fix corrects the entire class.
+The backlog is clustered and ranked — about 30 **root-cause categories**, each naming the parser module that most likely owns the fix and the full list of cards that share that failure *shape*. Read these as categories, not one identical bug: the headline counts (753, 606, …) aggregate many sub-patterns, so a single combinator arm typically clears a *sub-cluster*, not the whole count. That is still the best ROI available — one fix unlocks a batch — but size your claim to what you actually change, and confirm it by regenerating card data and re-checking (that re-check is also your list-hygiene step below).
 
-- **How to pick:** open the backlog, start at the top of the ranked table, and take a card under a high-ranked root cause whose fix hint points at a parser module you can extend (typically adding an `alt()` arm or delegating to an existing combinator — consult the `oracle-parser` skill). Fix for the *class* the root cause names, never the single card.
+- **How to pick:** don't all start at row 1 — every contributor converging on the top category guarantees duplicate PRs. Pick a category from the ranked table **at random** (bias toward higher-ranked ones for ROI, but spread out), then pick a card from its list, preferring a category whose fix hint points at a parser module you can extend (typically an `alt()` arm or delegating to an existing combinator — consult the `oracle-parser` skill). **Before starting, run the §3.4 in-flight check for both the card and the category's mechanic** — someone may already have the class on a branch. Fix for the *class* the category names, never the single card.
 - **How to know it's done:** the card is already `supported: true`, so `cargo coverage` won't move — the load-bearing signal is `cargo semantic-audit` reporting **zero findings** for the card after you regenerate card data, plus the card no longer parsing to the wrong shape.
 - **List hygiene — required, in the same PR:** remove every card your change actually fixes from its root-cause list in `docs/parser-misparse-backlog.md`. A root-cause fix usually clears several cards at once — regenerate card data and re-check them to see which moved. If a root cause's card list becomes empty, delete that whole `### N.` section and update the ranked table plus the counts at the top of the file. The backlog is a live worklist for the next contributor; a fix that leaves stale entries misdirects the next run, so this cleanup is part of the deliverable, not optional.
 
 When you invoke `$engine-implementer` in §4, frame the task as *correcting the parser so `<NAME>` and its root-cause class parse to the right shape* — a targeted fix at the root-cause seam, not a greenfield add.
 
-### Priority 2 — Resolve an open GitHub issue
+### 3.2 Resolve an open GitHub issue
 
 If the backlog has nothing you can land cleanly, take an open issue. Issues are human-curated, user-facing priorities — work a maintainer or player has already flagged as mattering — so they outrank the open-ended coverage tail.
 
@@ -187,14 +187,14 @@ gh issue list --repo phase-rs/phase --state open --limit 50 \
   --json number,title,labels,assignees
 ```
 
-Pick an issue that (a) is unassigned, (b) has no open linked PR already resolving it, and (c) names a card or a concrete parser/engine behavior you can implement end-to-end. Skip open-ended design discussions and anything gated on deferred infrastructure. Run the §3.1 in-flight check before you start so you don't duplicate work already on someone's branch. If the issue names a card, that card is your target; put `Closes #<number>` in the PR body so the issue auto-closes on merge.
+Pick an issue that (a) is unassigned, (b) has no open linked PR already resolving it, and (c) names a card or a concrete parser/engine behavior you can implement end-to-end. Skip open-ended design discussions and anything gated on deferred infrastructure. Run the §3.4 in-flight check before you start so you don't duplicate work already on someone's branch. If the issue names a card, that card is your target; put `Closes #<number>` in the PR body so the issue auto-closes on merge.
 
-### Priority 3 — Fill a coverage gap
+### 3.3 Fill a coverage gap
 
 The open-ended long tail: cards with no support yet (`supported: false`). Always available, lowest coordination cost, and a clean greenfield add — the fallback when the two tiers above are exhausted. Fetch the coverage data from the published R2 endpoint (no local `cargo coverage` needed):
 
 ```bash
-curl -s https://data.phase-rs.dev/staging/coverage-data.json -o coverage-data.json   # ~60 MB — download, then jq
+curl -sL https://data.phase-rs.dev/staging/coverage-data.json -o coverage-data.json   # ~60 MB — download, then jq
 ```
 
 The payload is a **single object**, not a bare card list — do not iterate its top level. Two fields drive card selection:
@@ -206,11 +206,11 @@ The payload is a **single object**, not a bare card list — do not iterate its 
          | sort_by(.gap_count)[] | "\(.gap_count)  \(.card_name)"' coverage-data.json | head
   ```
 
-- **`.top_gaps`** — the ROI ranking, and the best place to start. Each entry is a missing parser handler with `single_gap_cards` (how many cards become supported if you implement *just* that one handler), per-format unlock counts, and `oracle_patterns[].example_cards`. Pick a high-`single_gap_cards` handler, implement it **for the class**, then take one of its `example_cards` as your concrete target card. `.gap_bundles` pairs handlers by how many cards fixing them *together* unlocks. This is the coverage-tier analogue of the misparse backlog's ranked root causes — one handler fix flips a whole cluster.
+- **`.top_gaps`** — the ROI ranking, and the best place to start. Each entry is a missing parser handler with `single_gap_cards` (how many cards become supported if you implement *just* that one handler), per-format unlock counts, and `oracle_patterns[].example_cards`. Pick a high-`single_gap_cards` handler, implement it **for the class**, then take one of its `example_cards` as your concrete target card. `.gap_bundles` pairs handlers by how many cards fixing them *together* unlocks. This is the coverage-tier analogue of the misparse categories — and the same caveat applies: `single_gap_cards` is the *ceiling* for fully implementing the handler (which spans many sub-patterns), so one combinator arm clears a slice, not the whole number. Let `cargo coverage` tell you which cards actually flipped.
 
 Skip any card whose remaining gap is deferred infrastructure — oracle text referencing Rooms, Enchant Player, or Suspend Aggression (a judgment call from the Oracle text; there is no structured flag for it — see `memory/` notes in the repo if available, otherwise ignore). `cargo parser-gaps` and the `parser-velocity` skill compute the same `top_gaps` ranking locally. Here the "done" signal is `cargo coverage` flipping the card to `supported: true, gap_count: 0`.
 
-### 3.1. Confirm the work isn't already in flight
+### 3.4 Confirm the work isn't already in flight
 
 Before implementing, confirm no open PR already covers the selected card **or its core mechanic**. Duplicate PRs for the same issue waste reviewer and CI effort and one will lose the merge-queue race (recurring: two PRs adding the same crew/saddle contribution static, two adding the same prevention-recipient scope). Scan by card name *and* by mechanic — the keyword you would add may already be in flight under a different card:
 
@@ -289,8 +289,8 @@ else
 fi
 
 # One-shot audit binaries (always direct — not Tilt resources):
-cargo coverage                                # coverage/near-miss track: confirm the card is now supported: true, gap_count: 0
-cargo semantic-audit                          # misparse track: confirm the card surfaces zero findings (and remove it from parser-misparse-backlog.md)
+cargo coverage                                # every track: card is supported: true, gap_count: 0 — and no other card regressed
+cargo semantic-audit                          # every track: zero new findings for the card (a §3.1 fix also removes it from parser-misparse-backlog.md)
 ```
 
 **Non-developer track** — skip this step entirely. GitHub Actions runs the same checks on the PR.
@@ -317,14 +317,14 @@ git push -u origin HEAD
 gh pr create --title "<title>" --body "<body>"   # no --label arg; upstream auto-labeler handles it
 ```
 
-**PR title:** `Add <Card Name>` for a coverage-gap add (the default case), including runs that grew in scope — a clean `Add` may legitimately ship new infrastructure as a building block, and size alone is not a signal of incompleteness. For a **Priority-1 misparse fix** or a **Priority-2 issue**, use `Fix <Card Name>` instead of `Add` (and for an issue, add `Closes #<number>` to the body). Use `Partial: <Card Name>` only if Step 5 logged validation failures or Step 6 logged CI failures the run could not resolve.
+**PR title:** `Add <Card Name>` for a coverage-gap add (the default case), including runs that grew in scope — a clean `Add` may legitimately ship new infrastructure as a building block, and size alone is not a signal of incompleteness. For a **misparse fix (§3.1)** or an **issue (§3.2)**, use `Fix <Card Name>` instead of `Add` (and for an issue, add `Closes #<number>` to the body). Use `Partial: <Card Name>` only if Step 5 logged validation failures or Step 6 logged CI failures the run could not resolve.
 
 **PR body template:**
 
 ```markdown
 ## Summary
 Adds engine support for **<Card Name>**.
-<!-- Priority-1 misparse fix: "Fixes the <root cause> misparse for <Card Name>" and note the backlog entries removed. Priority-2 issue: add "Closes #<number>". -->
+<!-- Misparse fix (§3.1): "Fixes the <root cause> misparse for <Card Name>" and note the backlog entries removed. Issue (§3.2): add "Closes #<number>". -->
 
 ## Files changed
 <brief bulleted list — paths only, no prose>
@@ -460,7 +460,7 @@ Steps:
    or fresh context when available and hand it only the diff + CLAUDE.md.
 6. Skip local verification (I don't have a Rust toolchain).
 7. git push to my fork and open a PR with title "Add <Card Name>" (use
-   "Fix <Card Name>" for a Priority-1 misparse fix or a Priority-2 issue, and
+   "Fix <Card Name>" for a misparse fix (§3.1) or an issue (§3.2), and
    add "Closes #<number>" to the body for an issue; "Partial: <Card Name>"
    only if validation or CI failures were unresolved).
    Body must follow the template in docs/AI-CONTRIBUTOR.md. Do NOT pass
