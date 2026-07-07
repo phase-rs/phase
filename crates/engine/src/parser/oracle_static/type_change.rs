@@ -696,19 +696,46 @@ pub(crate) fn parse_becomes_equipment_with_ability(
     let (subject_tp, rest_tp) = tp.split_around(" is an equipment with equip ")?;
     let affected = super::shared::parse_continuous_subject_filter(subject_tp.original)?;
 
-    // rest: `{N} and "<quoted ability>"[.]` — the equip cost precedes ` and "`.
+    // rest: `{cost} and "<quoted ability>"[, where X is <…> mana value][.]`. The
+    // equip cost precedes ` and "`; the quoted ability is bounded by its closing
+    // quote, and any trailing `, where X is …` binding follows it.
     let (cost_tp, ability_tp) = rest_tp.split_around(" and \"")?;
-    let (cost_rest, equip_cost) = nom_primitives::parse_mana_cost(cost_tp.lower.trim()).ok()?;
-    if !cost_rest.trim().is_empty() {
-        return None;
-    }
+    let (quoted_body_tp, tail_tp) = ability_tp.split_around("\"")?;
+    let tail_lower = tail_tp.lower.trim().trim_start_matches([',', '.']).trim();
 
-    // Re-add the opening quote the split consumed and delegate to the shared
-    // quoted-ability authority (original case preserves any {symbols}).
-    let quoted = format!("\"{}", ability_tp.original.trim());
-    let grant_modifications = parse_quoted_ability_modifications(&quoted);
+    // CR 202.3: Bludgeon Brawl binds X to "that artifact's mana value" — the
+    // Equipment's own mana value — used for BOTH the equip cost ({X}) and the
+    // granted anthem ("gets +X/+0"). Match only the unambiguous "artifact's mana
+    // value" (the source): a bare "its" could refer to the equipped creature.
+    let dynamic_self_mana_value = nom_primitives::scan_contains(tail_lower, "where x is ")
+        && nom_primitives::scan_contains(tail_lower, "artifact's mana value");
+
+    // Equip cost: a bare `{X}` bound to the source's mana value lowers to
+    // `ManaCost::SelfManaValue` (concretized at activation like a graveyard-grant
+    // "encore {X}, where X is its mana value"); otherwise a fixed mana cost.
+    let cost_text = cost_tp.lower.trim();
+    let equip_cost = if cost_text == "{x}" && dynamic_self_mana_value {
+        ManaCost::SelfManaValue
+    } else {
+        let (cost_rest, cost) = nom_primitives::parse_mana_cost(cost_text).ok()?;
+        if !cost_rest.trim().is_empty() {
+            return None;
+        }
+        cost
+    };
+
+    // Re-wrap the quoted body and delegate to the shared quoted-ability authority
+    // (original case preserves any {symbols}).
+    let quoted = format!("\"{}\"", quoted_body_tp.original.trim());
+    let mut grant_modifications = parse_quoted_ability_modifications(&quoted);
     if grant_modifications.is_empty() {
         return None;
+    }
+    // CR 202.3: the standalone anthem parser reads "gets +X/+0" as the cost-X
+    // paid; for a CONTINUOUS grant bound to the Equipment's mana value, rebind
+    // that reference to `SelfManaValue` so it reads the source's mana value.
+    if dynamic_self_mana_value {
+        rebind_cost_x_to_self_mana_value(&mut grant_modifications);
     }
 
     // CR 205.1a: Equipment is an artifact subtype; setting it replaces the
@@ -732,6 +759,36 @@ pub(crate) fn parse_becomes_equipment_with_ability(
             .modifications(modifications)
             .description(description.to_string()),
     )
+}
+
+/// CR 202.3: Rebind a granted anthem's `CostXPaid` power/toughness reference to
+/// the source object's mana value (`SelfManaValue`). Used when a become-Equipment
+/// grant binds X to "that artifact's mana value" (Bludgeon Brawl): the standalone
+/// anthem parser reads the bare "gets +X/+0" as the cost-X paid, but for a
+/// continuous grant X is a fixed characteristic of the granting Equipment.
+/// Recurses into the granted `StaticDefinition` carried by `GrantStaticAbility`.
+fn rebind_cost_x_to_self_mana_value(modifications: &mut [ContinuousModification]) {
+    for modification in modifications.iter_mut() {
+        match modification {
+            ContinuousModification::GrantStaticAbility { definition } => {
+                rebind_cost_x_to_self_mana_value(&mut definition.modifications);
+            }
+            ContinuousModification::AddDynamicPower { value }
+            | ContinuousModification::AddDynamicToughness { value } => {
+                if matches!(
+                    value,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ) {
+                    *value = QuantityExpr::Ref {
+                        qty: QuantityRef::SelfManaValue,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// CR 205.3: the subtype set correlated with a core card type. Used to wipe an
