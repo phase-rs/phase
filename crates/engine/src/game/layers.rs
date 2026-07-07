@@ -5583,6 +5583,49 @@ mod tests {
             .contains(&CoreType::Creature));
     }
 
+    /// CR 205.1a (issue #5213): Arixmethes, Slumbering Isle — a `SetCardTypes([Land])`
+    /// replacement on a Legendary Creature Kraken removes the Creature card type
+    /// AND the correlated Kraken creature subtype, leaving a Legendary Land — never
+    /// the impossible "Creature Land" the additive `AddType` produced.
+    #[test]
+    fn set_card_types_land_strips_creature_and_creature_subtype() {
+        use crate::types::card_type::Supertype;
+
+        let mut state = setup();
+        let arixmethes = make_creature(&mut state, "Arixmethes", 12, 12, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&arixmethes).unwrap();
+            obj.card_types.subtypes.push("Kraken".to_string());
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.base_card_types = obj.card_types.clone();
+            let def = StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetCardTypes {
+                    core_types: vec![CoreType::Land],
+                }]);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&arixmethes).unwrap();
+        assert_eq!(
+            obj.card_types.core_types,
+            vec![CoreType::Land],
+            "must be only a Land (Creature removed)"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Kraken"),
+            "correlated Kraken creature subtype must be removed: {:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            obj.card_types.supertypes.contains(&Supertype::Legendary),
+            "Legendary supertype must be retained"
+        );
+    }
+
     /// Places a battlefield commander object with the given owner/controller.
     fn make_commander(state: &mut GameState, owner: PlayerId, controller: PlayerId) -> ObjectId {
         let id = make_creature(state, "Test Commander", 3, 3, owner);
