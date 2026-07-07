@@ -5,8 +5,7 @@
 
 use engine::types::phase::Phase;
 
-use super::rules::run_combat;
-use super::{GameScenario, P0};
+use super::rules::{run_combat, GameScenario, P0};
 
 const ORACLE: &str = "Whenever a creature you control attacks alone, investigate.";
 

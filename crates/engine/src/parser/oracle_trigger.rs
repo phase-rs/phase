@@ -8529,6 +8529,7 @@ fn try_parse_event(
             def.valid_target = Some(TargetFilter::Controller);
         }
         if attacks_alone {
+            // CR 506.5: attacks alone — zero same-controller co-attackers.
             def.condition = Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::MinCoAttackers {
                     minimum: 1,
