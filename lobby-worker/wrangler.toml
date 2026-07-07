@@ -69,10 +69,11 @@ invocation_logs = false
 TURN_KEY_ID = "97c7984d6c155084f9d0fdf8090e02f8"
 # Credential lifetime in seconds (Cloudflare max 48h). 24h covers any session.
 TURN_TTL_SECONDS = "86400"
-# Origin allowlist for the /turn-credentials fetch. "*" is fine during rollout
-# (TURN creds are short-lived; worst case is quota use). Tighten for prod, e.g.
-# "https://phase-rs.dev,http://localhost:5173".
-ALLOWED_ORIGINS = "*"
+# Max TURN credential mints per client IP per hour (abuse guard).
+TURN_RATE_LIMIT_PER_HOUR = "30"
+# Origin allowlist for the /turn-credentials fetch. Missing Origin is still
+# allowed (Tauri/desktop). Browsers with a present but disallowed Origin get 403.
+ALLOWED_ORIGINS = "https://phase-rs.dev,https://preview.phase-rs.dev,http://localhost:5173,http://127.0.0.1:5173"
 
 # The TURN API token is a SECRET — never put it here. Set it with:
 #   npx wrangler secret put TURN_KEY_API_TOKEN

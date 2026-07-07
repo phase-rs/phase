@@ -6,6 +6,17 @@
 // API with the secret token and forwards the resulting ICE servers.
 // Docs: https://developers.cloudflare.com/realtime/turn/generate-credentials/
 
+import {
+  createRateLimiter,
+  parseTurnRateLimitPerHour,
+} from "./turn-rate-limit";
+
+const TURN_RATE_WINDOW_MS = 60 * 60 * 1000;
+const turnRateLimiter = createRateLimiter({
+  maxRequests: 30,
+  windowMs: TURN_RATE_WINDOW_MS,
+});
+
 export interface TurnEnv {
   /** Cloudflare Realtime TURN key ID (var, not secret). */
   TURN_KEY_ID?: string;
@@ -15,6 +26,8 @@ export interface TurnEnv {
   TURN_TTL_SECONDS?: string;
   /** Comma-separated origin allowlist, or "*" (default) to allow any. */
   ALLOWED_ORIGINS?: string;
+  /** Max credential mints per client IP per hour (default 30, max 120). */
+  TURN_RATE_LIMIT_PER_HOUR?: string;
 }
 
 function corsHeaders(request: Request, env: TurnEnv): Record<string, string> {
@@ -55,6 +68,56 @@ function clientContext(request: Request): {
   return { colo, country, asn, customIdentifier: `${country}-AS${asn}` };
 }
 
+function clientIp(request: Request): string {
+  return (
+    request.headers.get("CF-Connecting-IP") ??
+    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ??
+    "unknown"
+  );
+}
+
+/**
+ * When `ALLOWED_ORIGINS` is tightened, reject browser requests whose `Origin`
+ * header is present but not on the allowlist. Missing `Origin` is allowed so
+ * Tauri/desktop fetches (no Origin) keep working.
+ */
+function rejectDisallowedOrigin(
+  request: Request,
+  env: TurnEnv,
+  cors: Record<string, string>,
+): Response | null {
+  const allow = (env.ALLOWED_ORIGINS ?? "*").trim();
+  if (allow === "*") return null;
+  const origin = request.headers.get("Origin");
+  if (!origin) return null;
+  const list = allow.split(",").map((s) => s.trim()).filter(Boolean);
+  if (list.includes(origin)) return null;
+  return Response.json(
+    { error: "Origin not allowed" },
+    { status: 403, headers: cors },
+  );
+}
+
+function rejectRateLimited(
+  request: Request,
+  env: TurnEnv,
+  cors: Record<string, string>,
+): Response | null {
+  const maxRequests = parseTurnRateLimitPerHour(env.TURN_RATE_LIMIT_PER_HOUR);
+  const result = turnRateLimiter.check(clientIp(request), Date.now(), maxRequests);
+  if (result.allowed) return null;
+  return Response.json(
+    { error: "TURN credential rate limit exceeded" },
+    {
+      status: 429,
+      headers: {
+        ...cors,
+        "Retry-After": String(result.retryAfterSeconds),
+      },
+    },
+  );
+}
+
 export async function handleTurnCredentials(
   request: Request,
   env: TurnEnv,
@@ -64,6 +127,12 @@ export async function handleTurnCredentials(
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: cors });
   }
+
+  const originBlock = rejectDisallowedOrigin(request, env, cors);
+  if (originBlock) return originBlock;
+
+  const rateBlock = rejectRateLimited(request, env, cors);
+  if (rateBlock) return rateBlock;
 
   if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN) {
     // Not configured yet — the client falls back to STUN-only (direct/STUN
