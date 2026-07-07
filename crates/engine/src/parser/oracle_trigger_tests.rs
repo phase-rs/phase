@@ -1777,7 +1777,16 @@ fn trigger_first_combat_phase_followup_condition() {
             "Whenever a Samurai or Warrior you control attacks alone, untap it. If it's the first combat phase of the turn, there is an additional combat phase after this phase.",
             "A-Raiyuu, Storm's Edge",
         );
-    assert!(def.condition.is_none());
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
+        }),
+        "attacks alone gates the main trigger; first-combat-phase is on the follow-up"
+    );
     let followup = def
         .execute
         .as_ref()
