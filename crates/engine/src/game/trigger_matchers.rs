@@ -4944,6 +4944,102 @@ mod tests {
     }
 
     #[test]
+    fn discarded_all_valid_target_and_valid_card_are_independent() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Doctor Doom, King of Latveria".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Discarded Land".to_string(),
+            Zone::Graveyard,
+        );
+        let p1_land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Discarded Land".to_string(),
+            Zone::Graveyard,
+        );
+        let p0_nonland = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Discarded Creature".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [p0_land, p1_land] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+        state
+            .objects
+            .get_mut(&p0_nonland)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger =
+            make_trigger(TriggerMode::DiscardedAll).valid_target(TargetFilter::Controller);
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)));
+
+        assert!(match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id: p0_land,
+                source_id: None,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(1),
+                object_id: p1_land,
+                source_id: None,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id: p0_nonland,
+                source_id: None,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+
+        let broad = make_trigger(TriggerMode::DiscardedAll).valid_target(TargetFilter::Controller);
+        assert!(match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id: p0_nonland,
+                source_id: None,
+            },
+            &broad,
+            source,
+            &state,
+        ));
+    }
+
+    #[test]
     fn cycled_or_discarded_valid_target_controller_rejects_opponent_event() {
         let mut state = setup();
         let source = create_object(

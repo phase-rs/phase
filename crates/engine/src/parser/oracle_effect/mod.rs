@@ -16998,6 +16998,27 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
     }
 }
 
+/// CR 608.2c: A subjectless reveal continuation that explicitly says
+/// "their library" inherits the prior non-caster player anchor. Do not apply
+/// this to "your library": `RevealTop { Controller }` cannot otherwise
+/// distinguish an explicit caster possessive from an implicit default.
+fn apply_their_library_reveal_anchor(effect: &mut Effect, anchor: &TargetFilter, text_lower: &str) {
+    if !scan_contains_phrase(text_lower, "their library")
+        || !target_filter_can_target_player(anchor)
+    {
+        return;
+    }
+    let Effect::RevealTop { player, .. } = effect else {
+        return;
+    };
+    if matches!(
+        *player,
+        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ParentTargetController
+    ) {
+        *player = anchor.clone();
+    }
+}
+
 /// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
 /// variant a typed object filter should adopt to match "permanents that player
 /// controls". `TriggeringPlayer` is event-contextual and must not create a
@@ -25703,6 +25724,8 @@ pub(crate) fn parse_effect_chain_ir(
             anchor_subject = None;
         }
         if let Some(ref anchor) = anchor_subject {
+            let text_lower_for_anchor = text.to_lowercase();
+            apply_their_library_reveal_anchor(&mut clause.effect, anchor, &text_lower_for_anchor);
             apply_anchor_subject(&mut clause.effect, anchor);
         }
 
@@ -28133,7 +28156,7 @@ fn issue_2403_sin_spira_tracked_set_copy_after_random_exile() {
 #[test]
 fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
     let def = parse_effect_chain(
-        "The owner of target permanent shuffles it into their library, then reveals the top card of that library. If it's a permanent card, they put it onto the battlefield.",
+        "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
         AbilityKind::Spell,
     );
     let Effect::ChangeZone {
@@ -28158,6 +28181,25 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
         panic!("expected RevealTop of owner's library, got {reveal:?}");
     };
     assert_eq!(*player, TargetFilter::ParentTargetOwner);
+}
+
+#[test]
+fn owner_anchor_does_not_rewrite_explicit_your_library_reveal() {
+    let def = parse_effect_chain(
+        "The owner of target permanent shuffles it into their library, then reveals the top card of your library.",
+        AbilityKind::Spell,
+    );
+    let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
+    let reveal = shuffle
+        .sub_ability
+        .as_ref()
+        .expect("reveal sub")
+        .effect
+        .as_ref();
+    let Effect::RevealTop { player, count: 1 } = reveal else {
+        panic!("expected RevealTop of your library, got {reveal:?}");
+    };
+    assert_eq!(*player, TargetFilter::Controller);
 }
 
 #[test]

@@ -1133,6 +1133,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
             parse_number_of_sacrificed_this_turn,
+            parse_number_of_descended_this_turn,
         )),
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
@@ -3978,6 +3979,23 @@ fn parse_number_of_sacrificed_this_turn(input: &str) -> OracleResult<'_, Quantit
         QuantityRef::SacrificedThisTurn {
             player: PlayerScope::Controller,
             filter,
+        },
+    ))
+}
+
+fn parse_number_of_descended_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("times you descended this turn").parse(input)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: None,
+            to: Some(Zone::Graveyard),
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::NonToken,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+            ])),
         },
     ))
 }
@@ -7949,6 +7967,26 @@ mod tests {
                 assert_eq!(tf.controller, None, "{phrase:?} must not scope controller");
             }
         }
+    }
+
+    #[test]
+    fn parse_number_of_times_you_descended_this_turn() {
+        let (rest, q) = parse_quantity_ref("the number of times you descended this turn").unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::ZoneChangeCountThisTurn { from, to, filter } = q else {
+            panic!("expected ZoneChangeCountThisTurn, got {q:?}");
+        };
+        assert_eq!(from, None);
+        assert_eq!(to, Some(Zone::Graveyard));
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed permanent filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert_eq!(tf.controller, None);
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+        assert!(tf.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::You,
+        }));
     }
 
     #[test]

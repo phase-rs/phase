@@ -7343,17 +7343,21 @@ fn resolve_chain_body(
             }
 
             // CR 608.2c + CR 400.7j: When the parent effect wrote the
-            // last-revealed set (a look/reveal/dig) but carries no targets of its
-            // own, the gated sub references that revealed object both in its
+            // last-revealed set (a look/reveal/dig), the gated sub may reference
+            // that revealed object both in its
             // condition ("if it has three or more colored mana symbols in its
             // mana cost") and in its effect ("add three mana in any combination
-            // of its colors") — Omnath, Locus of All. CR 400.7j: an effect can
+            // of its colors") — Omnath, Locus of All. It can also carry an
+            // unrelated original target while the condition binds to the reveal
+            // result (Chaos Warp). CR 400.7j: an effect can
             // find an object it moved to a public zone, so the deep add-mana sub
-            // still finds the revealed card after it is put into hand. Inject the
-            // revealed ids as the parent's targets so BOTH the condition
-            // evaluation and the performed-true sub-resolution (which inherits
-            // the parent's targets via the early continuation/sibling paths) bind
-            // to the revealed object.
+            // still finds the revealed card after it is put into hand. When the
+            // parent has no targets, inject the revealed ids as the parent's
+            // targets so BOTH the condition evaluation and the performed-true
+            // sub-resolution bind to the revealed object. When the parent already
+            // has original targets, use the revealed ids only for this condition
+            // check so later target inheritance remains anchored to the original
+            // target.
             let injected_parent;
             let ability: &ResolvedAbility = if effect_writes_last_revealed_ids(&ability.effect)
                 && !state.last_revealed_ids.is_empty()
@@ -7367,7 +7371,22 @@ fn resolve_chain_body(
                 ability
             };
 
-            let condition_met = evaluate_condition(condition, state, ability);
+            let condition_injected_parent;
+            let condition_ability: &ResolvedAbility =
+                if effect_writes_last_revealed_ids(&ability.effect)
+                    && !state.last_revealed_ids.is_empty()
+                    && !ability.targets.is_empty()
+                    && condition_depends_on_result_object(condition)
+                {
+                    let mut clone = ability.clone();
+                    clone.targets = inject_last_revealed_targets(state, ability, sub.as_ref());
+                    condition_injected_parent = clone;
+                    &condition_injected_parent
+                } else {
+                    ability
+                };
+
+            let condition_met = evaluate_condition(condition, state, condition_ability);
             if !condition_met {
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {

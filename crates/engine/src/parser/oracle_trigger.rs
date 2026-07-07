@@ -14306,23 +14306,79 @@ fn try_parse_discard_trigger(
     .parse(lower)
     .ok()?;
 
+    fn discard_actor_filter(controller_ref: Option<ControllerRef>) -> Option<TargetFilter> {
+        match controller_ref {
+            Some(ControllerRef::You) => Some(TargetFilter::Controller),
+            Some(ControllerRef::Opponent) => Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            _ => None,
+        }
+    }
+
+    fn discard_card_filter(after_verb: &str) -> Option<TargetFilter> {
+        fn discard_filter_tail_is_complete(rest: &str) -> bool {
+            let rest = rest.trim().trim_end_matches('.').trim();
+            if rest.is_empty() {
+                return true;
+            }
+            all_consuming(alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))))
+                .parse(rest)
+                .is_ok()
+        }
+
+        let (filter, rest) = parse_type_phrase(after_verb);
+        if !discard_filter_tail_is_complete(rest) {
+            return None;
+        }
+        match filter {
+            TargetFilter::Typed(tf)
+                if tf
+                    .type_filters
+                    .iter()
+                    .any(|t| !matches!(t, TypeFilter::Card | TypeFilter::Any))
+                    || !tf.properties.is_empty() =>
+            {
+                Some(TargetFilter::Typed(tf))
+            }
+            _ => Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Card))),
+        }
+    }
+
+    fn is_plain_card_filter(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(tf) => {
+                tf.controller.is_none()
+                    && tf.type_filters.as_slice() == [TypeFilter::Card]
+                    && tf.properties.is_empty()
+            }
+            _ => false,
+        }
+    }
+
     // CR 603.2c: Batched discard triggers — "one or more" fire once per batch.
-    if tag::<_, _, OracleError<'_>>("you discard one or more")
-        .parse(event)
-        .is_ok()
+    if let Ok((after_verb, _)) =
+        tag::<_, _, OracleError<'_>>("you discard one or more ").parse(event)
     {
         let mut def = make_base();
         def.mode = TriggerMode::DiscardedAll;
         def.valid_target = Some(TargetFilter::Controller);
+        let card_filter = discard_card_filter(after_verb)?;
+        if !is_plain_card_filter(&card_filter) {
+            def.valid_card = Some(card_filter);
+        }
         def.batched = true;
         return Some((TriggerMode::DiscardedAll, def));
     }
-    if tag::<_, _, OracleError<'_>>("one or more players discard one or more")
-        .parse(event)
-        .is_ok()
+    if let Ok((after_verb, _)) =
+        tag::<_, _, OracleError<'_>>("one or more players discard one or more ").parse(event)
     {
         let mut def = make_base();
         def.mode = TriggerMode::DiscardedAll;
+        let card_filter = discard_card_filter(after_verb)?;
+        if !is_plain_card_filter(&card_filter) {
+            def.valid_card = Some(card_filter);
+        }
         def.batched = true;
         return Some((TriggerMode::DiscardedAll, def));
     }
@@ -14372,38 +14428,8 @@ fn try_parse_discard_trigger(
     let mut def = make_base();
     def.mode = TriggerMode::Discarded;
 
-    // CR 701.9a + CR 603.2c: parse the type qualifier on the discarded card
-    // ("a land card", "a creature card", "a nonland card") so the trigger only
-    // fires when the matching card type is discarded. Reuses `parse_type_phrase`
-    // (the same building block `parse_discard_card_filter` uses for cost-form
-    // discards in `oracle_effect/imperative.rs`). The actor-derived
-    // `controller_ref` is preserved on the resulting filter.
-    let parsed_typed = {
-        let (filter, _rest) = parse_type_phrase(after_verb);
-        match filter {
-            TargetFilter::Typed(tf) => Some(tf),
-            _ => None,
-        }
-    };
-    let type_filter = match parsed_typed {
-        Some(tf)
-            if tf
-                .type_filters
-                .iter()
-                .any(|t| !matches!(t, TypeFilter::Card | TypeFilter::Any))
-                || !tf.properties.is_empty() =>
-        {
-            match controller_ref {
-                Some(cr) => tf.controller(cr),
-                None => tf,
-            }
-        }
-        _ => match controller_ref {
-            Some(cr) => TypedFilter::new(TypeFilter::Card).controller(cr),
-            None => TypedFilter::new(TypeFilter::Card),
-        },
-    };
-    def.valid_card = Some(TargetFilter::Typed(type_filter));
+    def.valid_target = discard_actor_filter(controller_ref);
+    def.valid_card = Some(discard_card_filter(after_verb)?);
 
     Some((TriggerMode::Discarded, def))
 }

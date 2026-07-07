@@ -8483,6 +8483,42 @@ fn effect_proliferate_x_times_applies_where_x_repeat_for() {
 }
 
 #[test]
+fn draw_and_proliferate_chain_keeps_both_effects() {
+    let def = parse_effect_chain("you may draw a card and proliferate", AbilityKind::Spell);
+    assert!(def.optional, "leading may should mark the draw optional");
+    assert!(matches!(*def.effect, Effect::Draw { .. }));
+    let sub = def.sub_ability.expect("proliferate sub-ability");
+    assert!(matches!(*sub.effect, Effect::Proliferate));
+}
+
+#[test]
+fn tidus_combat_damage_trigger_draws_then_proliferates() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "At the beginning of combat on your turn, you may move a counter from target creature you control onto a second target creature you control.\nCheer — Whenever one or more creatures you control with counters on them deal combat damage to a player, you may draw a card and proliferate. Do this only once each turn.",
+        "Tidus, Yuna's Guardian",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Warrior".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            matches!(
+                trigger.execute.as_ref().map(|execute| &*execute.effect),
+                Some(Effect::Draw { .. })
+            )
+        })
+        .expect("Tidus Cheer trigger should parse as Draw");
+    let execute = trigger.execute.as_ref().expect("trigger has execute");
+    let sub = execute
+        .sub_ability
+        .as_ref()
+        .expect("Draw should chain to Proliferate");
+    assert!(matches!(*sub.effect, Effect::Proliferate));
+}
+
+#[test]
 fn expand_the_sphere_difference_repeat_threads_onto_proliferate_sub() {
     // CR 609.3: "If you put fewer than two lands onto the battlefield this
     // way, proliferate a number of times equal to the difference." — the
