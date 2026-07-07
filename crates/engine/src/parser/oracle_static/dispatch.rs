@@ -1061,6 +1061,13 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_becomes_equipment_with_ability(&tp, &text) {
         return Some(def);
     }
+    // CR 205.1a + CR 613.1d + CR 613.4b: Lignify-class — "Enchanted <subject> is a
+    // <creature subtype> with base power and toughness N/N …" names only a
+    // creature subtype before the base-P/T seam. Must precede parse_enchanted_is_type,
+    // which requires at least one granted core card type (issue #5300).
+    if let Some(def) = parse_enchanted_is_creature_subtype_with_base_pt(&tp, &text) {
+        return Some(def);
+    }
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.

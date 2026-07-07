@@ -547,11 +547,104 @@ pub(crate) fn try_parse_self_is_also_subtypes(
     )
 }
 
-/// CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a/an [type] [with base P/T N/N]
-/// [in addition to its other types]"
+/// CR 205.1a + CR 613.1d (Layer 4) + CR 613.4b (Layer 7b) + CR 613.1f (Layer 6):
+/// Lignify-class — "Enchanted <subject> is a <creature subtype> with base power
+/// and toughness N/N [and loses all abilities]." The grammar names only a
+/// creature subtype (Treefolk, Wall, …) before the base-P/T seam — no explicit
+/// "creature" core-type word — so [`parse_enchanted_is_type`] declines with an
+/// empty `granted_core_types` list. Emits `SetCardTypes { Creature }` (CR 205.1a
+/// replacement), `RemoveAllSubtypes { Creature }` + `AddSubtype` (subtype set
+/// replacement), base P/T (CR 613.4b), and optional `RemoveAllAbilities` (CR
+/// 613.1f) from either the leading "loses all abilities and is a" prefix or the
+/// trailing "and loses all abilities" clause. No new variant, no new runtime.
 ///
-/// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
-/// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
+/// Dispatched AFTER [`parse_enchanted_becomes_type_with_ability`] and BEFORE
+/// [`parse_enchanted_is_type`], which owns multi-core-type phrases ("Insect
+/// artifact creature", "blue Frog creature", …). Closes #5300.
+pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    use crate::types::card_type::{CoreType, SubtypeSet};
+
+    let (before_pt, after_pt) = tp.split_around(" with base power and toughness ")?;
+
+    let before_rest = nom_tag_tp(&before_pt, "enchanted ")?;
+    let (r, perm_tf) = nom_target::parse_type_filter_word(before_rest.lower).ok()?;
+
+    let mut modifications = Vec::new();
+    type VE<'a> = OracleError<'a>;
+
+    let is_rest = if let Ok((r, _)) = alt((
+        tag::<_, _, VE>("loses all abilities and is a "),
+        tag::<_, _, VE>("loses all abilities and is an "),
+    ))
+    .parse(r.trim_start())
+    {
+        modifications.push(ContinuousModification::RemoveAllAbilities);
+        r
+    } else if let Ok((r, _)) =
+        alt((tag::<_, _, VE>("is a "), tag::<_, _, VE>("is an "))).parse(r.trim_start())
+    {
+        r
+    } else {
+        return None;
+    };
+
+    let is_rest = is_rest.trim_end_matches('.');
+
+    // Parse one or more creature subtypes; decline if a core-type word appears.
+    let mut r = is_rest.trim();
+    let mut subtypes: Vec<String> = Vec::new();
+    while let Some((canonical, consumed)) = parse_subtype(r) {
+        if core_type_from_additive_word(&canonical.to_lowercase()).is_some() {
+            return None;
+        }
+        subtypes.push(canonical);
+        r = r[consumed..].trim_start();
+    }
+    if subtypes.is_empty() || !r.trim().is_empty() {
+        return None;
+    }
+
+    let after_pt_trimmed = after_pt.original.trim().trim_end_matches('.');
+    let (p, t) = parse_pt_mod(after_pt_trimmed)?;
+    let pt_part_lower = after_pt.lower.trim();
+    let slash_pos = pt_part_lower.find('/')?;
+    let after_slash = &pt_part_lower[slash_pos + 1..];
+    let t_end = after_slash
+        .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
+        .unwrap_or(after_slash.len());
+    let remainder = after_slash[t_end..].trim();
+    let clause_mods = if remainder.is_empty() {
+        Vec::new()
+    } else {
+        parse_continuous_modifications(remainder)
+    };
+
+    modifications.push(ContinuousModification::SetCardTypes {
+        core_types: vec![CoreType::Creature],
+    });
+    modifications.push(ContinuousModification::SetPower { value: p });
+    modifications.push(ContinuousModification::SetToughness { value: t });
+    modifications.push(ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    });
+    modifications.extend(clause_mods);
+    for subtype in subtypes {
+        modifications.push(ContinuousModification::AddSubtype { subtype });
+    }
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
 /// CR 205.1a + CR 613.1d (Layer 4) + CR 613.1f (Layer 6): Imprisoned-in-the-Moon
 /// class — an Aura that turns the enchanted permanent into a colorless permanent
 /// of a single card type (optionally with subtype[s]) carrying a granted ability
@@ -825,6 +918,11 @@ fn core_type_subtype_set(
     }
 }
 
+/// CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a/an [type] [with base P/T N/N]
+/// [in addition to its other types]"
+///
+/// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
+/// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
 pub(crate) fn parse_enchanted_is_type(
     tp: &TextPair,
     description: &str,
