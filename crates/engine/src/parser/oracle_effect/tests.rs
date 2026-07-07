@@ -11331,6 +11331,280 @@ fn protection_from_color_of_your_choice_injects_color_choice() {
     )));
 }
 
+/// Issue #4913 + CR 608.2d + CR 702.16a: "gains protection from colorless or
+/// from the color of your choice" is a choose-ONE at resolution, not a single
+/// merged grant. Giver of Runes (activated, targeted, left = "colorless"):
+/// head is `TargetOnly`; its sub is a `ChooseOneOf` with two branches — branch
+/// A grants `Protection(Quality("colorless"))`, branch B is a `Choose(Color)`
+/// wrapping `Protection(ChosenColor)`. Previously this mis-parsed to a single
+/// `Protection(CardType("colorless or from the color of your choice"))`.
+#[test]
+fn giver_of_runes_protection_or_color_is_choose_one() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{T}: Another target creature you control gains protection from colorless or from the color of your choice until end of turn.",
+        "Giver of Runes",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = &parsed.abilities[0];
+
+    // Targeted subject → TargetOnly head, NOT a single merged grant.
+    assert!(
+        matches!(&*def.effect, Effect::TargetOnly { .. }),
+        "expected TargetOnly head, got {:?}",
+        def.effect
+    );
+
+    let sub = def.sub_ability.as_ref().expect("ChooseOneOf sub_ability");
+    let Effect::ChooseOneOf { branches, .. } = &*sub.effect else {
+        panic!("expected ChooseOneOf sub, got {:?}", sub.effect);
+    };
+    assert_eq!(
+        branches.len(),
+        2,
+        "expected exactly two protection branches"
+    );
+
+    // Branch A: protection from colorless (Quality) — NOT wrapped in a color Choose.
+    let branch_a = &branches[0];
+    assert!(
+        !matches!(&*branch_a.effect, Effect::Choose { .. }),
+        "colorless branch must NOT be wrapped in a color Choose (no double-prompt)"
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = &*branch_a.effect
+    else {
+        panic!("expected GenericEffect branch A, got {:?}", branch_a.effect);
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::Quality("colorless".to_string())),
+        }
+    )));
+
+    // Branch B: Choose(Color) wrapping the chosen-color protection grant.
+    let branch_b = &branches[1];
+    assert!(
+        matches!(
+            &*branch_b.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { .. },
+                ..
+            }
+        ),
+        "expected Choose(Color) branch B, got {:?}",
+        branch_b.effect
+    );
+    let grant = branch_b.sub_ability.as_ref().expect("chosen-color grant");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!("expected grant GenericEffect, got {:?}", grant.effect);
+    };
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }
+    )));
+}
+
+/// Issue #4913 + CR 608.2d + CR 702.16a: Apostle's Blessing (spell, targeted,
+/// left = "artifacts"). Same choose-one shape as Giver of Runes, but branch A
+/// grants `Protection(CardType("artifacts"))`.
+#[test]
+fn apostles_blessing_protection_artifacts_or_color_is_choose_one() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    let def = parse_effect_chain(
+        "Target artifact or creature you control gains protection from artifacts or from the color of your choice until end of turn.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(&*def.effect, Effect::TargetOnly { .. }),
+        "expected TargetOnly head, got {:?}",
+        def.effect
+    );
+    let sub = def.sub_ability.as_ref().expect("ChooseOneOf sub_ability");
+    let Effect::ChooseOneOf { branches, .. } = &*sub.effect else {
+        panic!("expected ChooseOneOf sub, got {:?}", sub.effect);
+    };
+    assert_eq!(branches.len(), 2);
+
+    // Branch A: protection from artifacts (CardType) — not wrapped in a Choose.
+    let branch_a = &branches[0];
+    assert!(!matches!(&*branch_a.effect, Effect::Choose { .. }));
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*branch_a.effect
+    else {
+        panic!("expected GenericEffect branch A, got {:?}", branch_a.effect);
+    };
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::CardType("artifacts".to_string())),
+        }
+    )));
+
+    // Branch B: Choose(Color) wrapping the chosen-color grant.
+    let branch_b = &branches[1];
+    assert!(matches!(
+        &*branch_b.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    ));
+    let grant = branch_b.sub_ability.as_ref().expect("chosen-color grant");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!("expected grant GenericEffect, got {:?}", grant.effect);
+    };
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }
+    )));
+}
+
+/// Issue #4913 + CR 608.2d + CR 702.16a: Jeweled Spirit (self-referential
+/// subject, no target). The choose-one lives at the TOP level (`ChooseOneOf`
+/// directly, no `TargetOnly` parent) and the branches affect `SelfRef`.
+#[test]
+fn jeweled_spirit_self_ref_protection_or_color_is_top_level_choose_one() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Sacrifice two lands: This creature gains protection from artifacts or from the color of your choice until end of turn.",
+        "Jeweled Spirit",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = &parsed.abilities[0];
+
+    // Self-ref → the choice is the top-level effect, no TargetOnly wrapper.
+    let Effect::ChooseOneOf { branches, .. } = &*def.effect else {
+        panic!("expected top-level ChooseOneOf, got {:?}", def.effect);
+    };
+    assert_eq!(branches.len(), 2);
+
+    // Branch A affects SelfRef and grants protection from artifacts.
+    let branch_a = &branches[0];
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*branch_a.effect
+    else {
+        panic!("expected GenericEffect branch A, got {:?}", branch_a.effect);
+    };
+    assert!(static_abilities
+        .iter()
+        .all(|s| s.affected == Some(TargetFilter::SelfRef)));
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::CardType("artifacts".to_string())),
+        }
+    )));
+
+    // Branch B: chosen-color grant under a color Choose, still SelfRef.
+    let branch_b = &branches[1];
+    assert!(matches!(
+        &*branch_b.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    ));
+    let grant = branch_b.sub_ability.as_ref().expect("chosen-color grant");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!("expected grant GenericEffect, got {:?}", grant.effect);
+    };
+    assert!(static_abilities
+        .iter()
+        .all(|s| s.affected == Some(TargetFilter::SelfRef)));
+    assert!(static_abilities.iter().any(|s| s.modifications.contains(
+        &ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }
+    )));
+}
+
+/// Issue #4913 regression guard + CR 702.16: "protection from X and from Y"
+/// (AND, not "or from") is untouched by the choose-one path — it still grants
+/// BOTH protections, and neither is wrapped in a color Choose (no spurious
+/// double-prompt introduced by CHANGE B's ChooseOneOf recursion).
+#[test]
+fn protection_from_two_colors_and_path_grants_both_no_color_choice() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+    use crate::types::mana::ManaColor;
+    let def = parse_effect_chain(
+        "Target creature gains protection from black and from red until end of turn.",
+        AbilityKind::Spell,
+    );
+
+    // Collect every Protection AddKeyword across the whole tree, and assert no
+    // color Choose was injected anywhere.
+    let mut protections: Vec<ProtectionTarget> = Vec::new();
+    let mut saw_color_choice = false;
+    fn walk(
+        def: &AbilityDefinition,
+        protections: &mut Vec<ProtectionTarget>,
+        saw_color_choice: &mut bool,
+    ) {
+        if matches!(
+            &*def.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { .. },
+                ..
+            }
+        ) {
+            *saw_color_choice = true;
+        }
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        {
+            for s in static_abilities {
+                for m in &s.modifications {
+                    if let ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(pt),
+                    } = m
+                    {
+                        protections.push(pt.clone());
+                    }
+                }
+            }
+        }
+        if let Some(sub) = def.sub_ability.as_ref() {
+            walk(sub, protections, saw_color_choice);
+        }
+    }
+    walk(&def, &mut protections, &mut saw_color_choice);
+
+    assert_eq!(
+        protections,
+        vec![
+            ProtectionTarget::Color(ManaColor::Black),
+            ProtectionTarget::Color(ManaColor::Red),
+        ],
+        "AND path must grant BOTH protections"
+    );
+    assert!(
+        !saw_color_choice,
+        "the 'and from' AND path must NOT inject a color Choose"
+    );
+}
+
 /// CR 611.2a + CR 514.2: "gains <keyword> until end of turn and <non-pump
 /// conjunct>" must keep the `until end of turn` duration on the keyword
 /// grant. Homarid Warrior: "This creature gains shroud until end of turn

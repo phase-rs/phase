@@ -21845,6 +21845,19 @@ fn inject_chosen_color_choice_grant(def: &mut AbilityDefinition, parent_is_color
         return;
     }
 
+    // CR 608.2d + CR 702.16: a chosen-color grant can be nested inside a modal
+    // (`ChooseOneOf`) branch — e.g. "gains protection from colorless or from the
+    // color of your choice" lowers to a ChooseOneOf whose ChosenColor branch must
+    // get its own `Choose(Color)` wrapper. Each branch must be visited: the
+    // ChosenColor branch matches the wrap condition, while the colorless/artifacts
+    // branch does not and is left untouched (no double-wrap). Visited alongside —
+    // not instead of — the sub_ability recursion below.
+    if let Effect::ChooseOneOf { branches, .. } = &mut *def.effect {
+        for branch in branches.iter_mut() {
+            inject_chosen_color_choice_grant(branch, false);
+        }
+    }
+
     let child_under_color_choice = matches!(
         &*def.effect,
         Effect::Choose {
