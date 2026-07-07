@@ -119,7 +119,20 @@ fn runtime_granted_equip_abilities(
                 unconsumed_printed.remove(index);
                 return None;
             }
-            crate::database::synthesis::equip_ability_for_keyword(keyword)
+            crate::database::synthesis::equip_ability_for_keyword(keyword).map(|mut ability| {
+                // CR 202.3 + CR 118.9: Bludgeon Brawl grants `equip {X}` where X
+                // is the artifact's mana value, so the keyword carries the
+                // `ManaCost::SelfManaValue` placeholder. Concretize it to the
+                // source's actual mana value HERE — otherwise the payment path
+                // treats `SelfManaValue` as `{0}` and the equip is effectively
+                // free.
+                if let Some(cost) = ability.cost.take() {
+                    ability.cost = Some(super::keywords::resolve_self_mana_in_ability_cost(
+                        state, source_id, &cost,
+                    ));
+                }
+                ability
+            })
         })
         .collect()
 }

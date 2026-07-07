@@ -1129,3 +1129,62 @@ fn identical_printed_and_granted_equip_both_offered() {
         "printed + identical granted Equip must both be offered"
     );
 }
+
+/// CR 202.3 + CR 118.9: Bludgeon Brawl grants `equip {X}` where X is the
+/// artifact's mana value, carried as the `ManaCost::SelfManaValue` placeholder.
+/// The offered equip ability must present the CONCRETE mana value as its cost —
+/// otherwise the payment path treats `SelfManaValue` as `{0}` and equip is free.
+#[test]
+fn granted_equip_self_mana_value_cost_is_concretized_to_mana_value() {
+    use crate::types::ability::{
+        AbilityCost, AbilityTag, ContinuousModification, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+
+    let mut state = setup_main_phase();
+    // An Equipment with mana value 4, granted equip {X}=its mana value.
+    let gear = create_object(
+        &mut state,
+        CardId(1800),
+        PlayerId(0),
+        "MV Gear".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        };
+    }
+    let def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Equip(ManaCost::SelfManaValue),
+        }]);
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.static_definitions.push(def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // The offered equip cost is the concrete mana value (4), not the placeholder.
+    let abilities = crate::game::casting::activated_ability_definitions(&state, gear);
+    let equip = abilities
+        .iter()
+        .find(|(_, ability)| ability.ability_tag == Some(AbilityTag::Equip))
+        .expect("granted equip must be offered");
+    match &equip.1.cost {
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, shards },
+        }) => {
+            assert_eq!(*generic, 4, "equip {{X}} must concretize to mana value 4");
+            assert!(shards.is_empty(), "no colored pips expected");
+        }
+        other => panic!("equip cost must be concrete Mana {{4}}, not a placeholder: {other:?}"),
+    }
+}
