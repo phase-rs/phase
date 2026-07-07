@@ -5173,6 +5173,8 @@ pub fn find_applicable_replacements(
                     // CR 615.3: Check combat scope, target filters, and source filters.
                     // CR 614.1a: Damage source filter — matches the damage *source* object
                     // against the filter (e.g., "sources of the chosen color").
+                    let source_controller =
+                        repl_def.source_controller.unwrap_or(state.active_player);
                     if let Some(ref sf) = repl_def.damage_source_filter {
                         if let ProposedEvent::Damage { source_id, .. } = event {
                             // CR 109.4 + CR 614.1a: The pending replacement lives under
@@ -5219,6 +5221,18 @@ pub fn find_applicable_replacements(
                         && is_prevention_disabled(state, event)
                     {
                         continue;
+                    }
+                    if let Some(ref cond) = repl_def.condition {
+                        if !evaluate_replacement_condition(
+                            cond,
+                            source_controller,
+                            ObjectId(0),
+                            state,
+                            event.affected_object_id(),
+                            event,
+                        ) {
+                            continue;
+                        }
                     }
                 } else {
                     // CR 614.1a + CR 614.1d: Non-damage floating replacements run
@@ -15763,6 +15777,52 @@ mod tests {
                 index: 0
             }],
             "damage prevention shield must remain a candidate despite a non-matching valid_card recipient filter"
+        );
+    }
+
+    #[test]
+    fn global_store_damage_path_respects_unless_your_turn_condition() {
+        // REGRESSION: global prevention shields with an `unless your turn` gate
+        // should not match during the source controller's own turn.
+        let registry = build_replacement_registry();
+        let mut state = GameState::new_two_player(42);
+        let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::Next(2))
+            .condition(ReplacementCondition::UnlessYourTurn);
+        shield.source_controller = Some(PlayerId(0));
+        state.pending_damage_replacements.push(shield);
+
+        let your_turn_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &your_turn_damage, &registry).is_empty(),
+            "global shields gated by UnlessYourTurn must be suppressed on source player's turn"
+        );
+
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        let opp_turn_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &opp_turn_damage, &registry),
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "UnlessYourTurn shield should match on opponent's turn"
         );
     }
 }

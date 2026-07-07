@@ -1889,6 +1889,122 @@ pub(crate) fn parse_land_animation(tp: &TextPair<'_>, text: &str) -> Option<Stat
     )
 }
 
+/// CR 611.3 + CR 613.1 + CR 613.4b + CR 205.1b: "All `<X>` and all `<Y>` are
+/// `<predicate>`" — a compound-subject continuous animation/type-change where a
+/// single predicate applies uniformly to every object matching either subject.
+///
+/// Life and Limb is the canonical member: "All Forests and all Saprolings are
+/// 1/1 green Saproling creatures and Forest lands in addition to their other
+/// types." Neither single-subject parser is complete for this predicate — the
+/// animation path drops the trailing additive "and `<type>` lands", and the
+/// creature-subtype path drops the base P/T — so the compound line is dispatched
+/// here. The subjects distribute into an `Or` filter (CR 611.3: the same
+/// continuous effect applies to every object in the affected set), and the
+/// compound predicate is parsed once into a uniform modification set that both
+/// subjects share.
+///
+/// The predicate reuses the two tested predicate parsers: `parse_animation_spec`
+/// supplies the base P/T (CR 613.4b, layer 7b), the set color (CR 105.2, layer
+/// 5) and the leading type/subtype grants; `parse_additive_type_clause_modifications`
+/// supplies the additive type/subtype nouns the animation parser stops short of
+/// at the internal " and " (CR 205.1b, layer 4). Only additive `AddType` /
+/// `AddSubtype` grants are merged in — the animation spec's set color takes
+/// precedence over the additive parser's additive color.
+pub(crate) fn parse_compound_all_subjects_type_change(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    // Require a genuine "all <X> and all <Y>" conjunction so single-subject
+    // "all <X> are ..." lines fall through to their dedicated dispatchers.
+    let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
+
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+    let predicate_lower = predicate.to_lowercase();
+    // Claim only creature-animation predicates; a bare additive type line
+    // ("All Forests and all Saprolings are Plains") is owned elsewhere.
+    if !nom_primitives::scan_contains(&predicate_lower, "creature") {
+        return None;
+    }
+    // CR 205.1b: this handler applies strictly ADDITIVE type/subtype semantics
+    // (`AddType` / `AddSubtype`), so it must only claim predicates that carry the
+    // "in addition to {their|its} other types" marker. A compound predicate
+    // without it ("All X and all Y are Zombies") is a type REPLACEMENT (CR 205.1a
+    // `SetCardTypes`) that must fall through to a replacement-semantics handler
+    // rather than be silently reinterpreted as additive.
+    if !nom_primitives::scan_contains(&predicate_lower, "in addition to their other")
+        && !nom_primitives::scan_contains(&predicate_lower, "in addition to its other")
+    {
+        return None;
+    }
+    let spec = super::oracle_effect::animation::parse_animation_spec(
+        predicate,
+        &mut ParseContext::default(),
+    )?;
+    let mut modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if modifications.is_empty() {
+        return None;
+    }
+    // Merge the additive type/subtype grants past the animation parser's
+    // internal " and " stop (the "and <type> lands in addition to their other
+    // types" tail). The animation spec already set base P/T and color.
+    if let Some(additive) = parse_additive_type_clause_modifications(&format!("~ are {predicate}"))
+    {
+        for modification in additive {
+            let is_type_grant = matches!(
+                modification,
+                ContinuousModification::AddType { .. } | ContinuousModification::AddSubtype { .. }
+            );
+            if is_type_grant && !modifications.contains(&modification) {
+                modifications.push(modification);
+            }
+        }
+    }
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
+
+/// Parse "all `<X>` and all `<Y>`[ and all `<Z>`…]" into an `Or` of per-subject
+/// filters. Peels conjuncts on the " and all " seam (so every conjunct after the
+/// first is an `all `-quantified subject) and parses each through the shared
+/// subject parser. Requires 2+ conjuncts, all of which resolve to a filter;
+/// returns None otherwise so single-subject lines fall through to their
+/// dedicated dispatchers. The mandatory second `all ` quantifier is what
+/// distinguishes this compound animation subject from an incidental " and "
+/// inside a lone subject phrase.
+fn parse_compound_all_subjects_filter(subject: &str) -> Option<TargetFilter> {
+    let lower = subject.to_lowercase();
+    let mut filters: Vec<TargetFilter> = Vec::new();
+    let mut remaining: &str = lower.as_str();
+    // Each " and all " seam ends one conjunct and drops the next conjunct's
+    // `all ` quantifier; the shared parser strips a leading `all ` itself, so the
+    // leading conjunct's own quantifier is harmless.
+    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
+        filters.push(parse_compound_subject_conjunct(conjunct.trim())?);
+        remaining = rest;
+    }
+    filters.push(parse_compound_subject_conjunct(remaining.trim())?);
+    if filters.len() < 2 {
+        return None;
+    }
+    Some(TargetFilter::Or { filters })
+}
+
+/// Resolve one conjunct of a compound animation subject to a filter. A basic
+/// land-type conjunct ("Forests") must resolve to a `Land` + subtype filter
+/// (CR 305.6), so try the land-type-change subject parser first; the shared
+/// subject parser (which defaults a bare subtype to a *creature* subtype)
+/// handles the creature-subtype conjuncts ("Saprolings").
+fn parse_compound_subject_conjunct(conjunct: &str) -> Option<TargetFilter> {
+    parse_land_type_change_subject(conjunct)
+        .or_else(|| super::shared::parse_continuous_subject_filter(conjunct))
+}
+
 /// Parse the subject of a land type-change line into a TargetFilter.
 pub(crate) fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
     match subject.to_lowercase().as_str() {

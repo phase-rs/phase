@@ -179,6 +179,7 @@ pub(crate) fn put_face_up_exile_into(
         library_placement: None,
         // CR 614.12: search-from-outside carries no moved-object type gate.
         enters_modified_if: None,
+        enter_attached_to: None,
     };
     Ok(change_zone::process_one_zone_move(
         state, &ctx, object_id, events,

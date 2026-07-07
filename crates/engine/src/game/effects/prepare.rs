@@ -595,6 +595,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut events,
         );
 
