@@ -757,6 +757,41 @@ pub(crate) fn parse_mana_ability_exemption_suffix(input: &str) -> OracleResult<'
     .parse(input)
 }
 
+/// CR 602.5: The bare `can't be activated` predicate, tolerant of both the ASCII
+/// (`'`) and typographic (U+2019) apostrophe. Companion of
+/// `parse_mana_ability_exemption_suffix` — the single authority every activation
+/// prohibition predicate routes through, since there is no global apostrophe
+/// normalization in the parser pipeline.
+pub(crate) fn parse_cant_be_activated_predicate(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("can't be activated"), tag("can\u{2019}t be activated"))),
+    )
+    .parse(input)
+}
+
+/// CR 602.5: The `activated abilities can't be activated` predicate phrase,
+/// dual-apostrophe. Composes the fixed `"activated abilities "` lead with the
+/// shared `parse_cant_be_activated_predicate`.
+pub(crate) fn parse_activated_abilities_cant_be_activated(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("activated abilities "),
+            parse_cant_be_activated_predicate,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 602.5: True if `text` contains the `activated abilities can't be activated`
+/// predicate with either apostrophe glyph — the scan form used by the
+/// self-reference and compound-Aura activation-prohibition gates.
+pub(crate) fn contains_activated_abilities_cant_be_activated(text: &str) -> bool {
+    nom_primitives::scan_contains(text, "activated abilities can't be activated")
+        || nom_primitives::scan_contains(text, "activated abilities can\u{2019}t be activated")
+}
+
 /// CR 602.5: Parses the activation-prohibition tail of compound static text.
 fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
     value(
@@ -764,10 +799,7 @@ fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
         (
             tag(", and "),
             opt(alt((tag("its "), tag("their ")))),
-            alt((
-                tag("activated abilities can't be activated"),
-                tag("activated abilities can\u{2019}t be activated"),
-            )),
+            parse_activated_abilities_cant_be_activated,
             opt(parse_mana_ability_exemption_suffix),
             opt(tag(".")),
         ),
@@ -1302,7 +1334,7 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
 
     // CR 508.1c / CR 509.1b / CR 702.122c + CR 602.5: compound attack,
     // block, crew, and activation prohibitions produce parallel static definitions.
-    if nom_primitives::scan_contains(&lower, "activated abilities can't be activated")
+    if contains_activated_abilities_cant_be_activated(&lower)
         && (attached_activation_compound_modes.is_some()
             || nom_primitives::scan_contains(&lower, "can't attack")
             || nom_primitives::scan_contains(&lower, "can't block"))

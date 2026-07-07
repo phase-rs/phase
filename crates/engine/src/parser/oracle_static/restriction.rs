@@ -300,7 +300,13 @@ pub(crate) fn parse_activation_exemption_suffix(
 
 pub(crate) fn parse_cant_be_activated_exemption_in_text(lower: &str) -> ActivationExemption {
     nom_primitives::scan_preceded(lower, |i| {
-        preceded(tag("can't be activated"), parse_activation_exemption_suffix).parse(i)
+        // CR 605.1a: dual-apostrophe predicate + dual-apostrophe exemption suffix,
+        // so a U+2019 self-reference / attached line still records the carve-out.
+        preceded(
+            super::shared::parse_cant_be_activated_predicate,
+            parse_activation_exemption_suffix,
+        )
+        .parse(i)
     })
     .and_then(|(_, exemption, tail)| {
         let trimmed_tail = tail.trim_end_matches('.').trim();

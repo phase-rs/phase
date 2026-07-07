@@ -19532,6 +19532,38 @@ fn cant_be_activated_self_ref_mana_exemption_suffix() {
 }
 
 #[test]
+fn cant_be_activated_self_ref_typographic_apostrophe_keeps_mana_exemption() {
+    // CR 605.1a (issue #4999 follow-up): the self-reference activation-prohibition
+    // branch must accept the U+2019 apostrophe in BOTH the predicate ("can't be
+    // activated") and the exemption suffix ("unless they're mana abilities"). Before
+    // routing the predicate through the shared dual-apostrophe combinator, a U+2019
+    // printing failed the `activated abilities can't be activated` scan (dropping the
+    // whole static) or recorded `ActivationExemption::None` (wrongly blocking mana
+    // abilities). Revert-failing: restore the straight-only predicate scan/tag and
+    // this parses to `None` or drops the exemption.
+    let def = parse_static_line(
+        "Its activated abilities can\u{2019}t be activated unless they\u{2019}re mana abilities.",
+    )
+    .expect("U+2019 self-reference CantBeActivated with mana exemption should parse");
+    match def.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+        } => {
+            assert_eq!(who, ProhibitionScope::AllPlayers);
+            assert_eq!(source_filter, TargetFilter::SelfRef);
+            assert_eq!(
+                exemption,
+                ActivationExemption::ManaAbilities,
+                "U+2019 predicate + suffix must still carve out mana abilities"
+            );
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+}
+
+#[test]
 fn cant_be_activated_compound_aura_mana_exemption_suffix() {
     let defs = parse_static_line_multi(
         "Enchanted permanent can't attack or block, and its activated abilities can't be activated unless they're mana abilities.",

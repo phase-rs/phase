@@ -2173,7 +2173,7 @@ pub(crate) fn parse_static_line_inner(
     // being activated. The self-reference case: `who = AllPlayers, source_filter = SelfRef`.
     // Global filter-scoped variants (Clarion/Karn) are handled by parse_filter_scoped_cant_be_activated
     // which runs earlier via the "activated abilities of " prefix dispatch.
-    if nom_primitives::scan_contains(tp.lower, "activated abilities can't be activated") {
+    if super::shared::contains_activated_abilities_cant_be_activated(tp.lower) {
         let exemption = parse_cant_be_activated_exemption_in_text(tp.lower);
         let mut def = StaticDefinition::new(StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
