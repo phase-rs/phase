@@ -2218,20 +2218,20 @@ pub(crate) fn parse_compound_all_subjects_type_replacement(
 
 /// CR 611.3 + CR 305.7 + CR 205.1b: "All `<X>` and all `<Y>` are `<land-type
 /// predicate>`" — a compound-subject land type-change where one predicate applies
-/// uniformly to every object matching either basic-land-subject conjunct.
+/// uniformly to every object matching either land subject conjunct.
 ///
 /// Sibling of the compound animation handlers: `parse_land_type_change` only
-/// resolves single-subject land filters, so a line like "All Mountains and all
-/// Forests are Plains" would otherwise strict-fail. Subjects distribute into an
-/// `Or` filter via [`parse_compound_all_subjects_filter`]; the predicate is
-/// parsed once through [`parse_land_type_change_modifications`]. The `"creature"`
-/// guard keeps animation compounds on the animation dispatch path.
+/// resolves single-subject land filters. Subjects distribute into an `Or` filter
+/// via [`parse_compound_all_subjects_land_filter`] (land-only conjuncts — mixed
+/// land/creature compounds like Life and Limb stay on the animation path). The
+/// predicate is parsed once through [`parse_land_type_change_modifications`]. The
+/// `"creature"` guard keeps animation compounds on the animation dispatch path.
 pub(crate) fn parse_compound_all_subjects_land_type_change(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
     let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
-    let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
+    let affected = parse_compound_all_subjects_land_filter(subject_tp.original)?;
 
     let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
     let predicate_lower = predicate.to_lowercase();
@@ -2282,6 +2282,26 @@ fn parse_compound_all_subjects_filter(subject: &str) -> Option<TargetFilter> {
 fn parse_compound_subject_conjunct(conjunct: &str) -> Option<TargetFilter> {
     parse_land_type_change_subject(conjunct)
         .or_else(|| super::shared::parse_continuous_subject_filter(conjunct))
+}
+
+/// Parse "all `<X>` and all `<Y>`[ and all `<Z>`…]" into an `Or` of land-only
+/// per-subject filters. Each conjunct must resolve through
+/// [`parse_land_type_change_subject`] — mixed land/creature compounds (Life and
+/// Limb's "Forests and Saprolings") return `None` so animation handlers keep
+/// ownership.
+fn parse_compound_all_subjects_land_filter(subject: &str) -> Option<TargetFilter> {
+    let lower = subject.to_lowercase();
+    let mut filters: Vec<TargetFilter> = Vec::new();
+    let mut remaining: &str = lower.as_str();
+    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
+        filters.push(parse_land_type_change_subject(conjunct.trim())?);
+        remaining = rest;
+    }
+    filters.push(parse_land_type_change_subject(remaining.trim())?);
+    if filters.len() < 2 {
+        return None;
+    }
+    Some(TargetFilter::Or { filters })
 }
 
 /// Parse the subject of a land type-change line into a TargetFilter.

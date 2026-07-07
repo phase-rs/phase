@@ -3506,6 +3506,151 @@ fn compound_subject_animation_replacement_predicate() {
     );
 }
 
+// CR 611.3 + CR 305.7: compound-subject land type-change class — sibling of the
+// compound animation handlers (#5219 / #5293). A single land-type predicate
+// applies uniformly to every object in the `Or` distributed subject set.
+#[test]
+fn compound_subject_land_type_change_replacement_predicate() {
+    let line = "All Mountains and all Forests are Plains.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "one compound static: {defs:?}");
+    let def = &defs[0];
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be Or of both land subjects: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Mountain")))),
+        "Mountain conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
+        "Forest conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetBasicLandType {
+            land_type: BasicLandType::Plains,
+        }]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_additive_predicate() {
+    let line = "All Islands and all Swamps are Mountains in addition to their other land types.";
+    let def = parse_static_line(line).expect("additive compound land type-change");
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 2);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Mountain".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_multi_type_predicate() {
+    let line = "All Mountains and all Forests are Mountain, Forest, and Plains.";
+    let def = parse_static_line(line).expect("multi-type compound land type-change");
+    assert!(matches!(
+        def.modifications.as_slice(),
+        [
+            ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Mountain
+            },
+            ContinuousModification::AddSubtype { subtype },
+            ContinuousModification::AddSubtype { subtype: subtype2 },
+        ] if subtype == "Forest" && subtype2 == "Plains"
+    ));
+}
+
+#[test]
+fn compound_subject_land_type_change_triple_subject() {
+    let line = "All Mountains and all Forests and all Islands are Swamps.";
+    let def = parse_static_line(line).expect("triple-subject compound land type-change");
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 3, "three conjuncts: {filters:?}");
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetBasicLandType {
+            land_type: BasicLandType::Swamp,
+        }]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_every_basic_land_type() {
+    let line =
+        "All Mountains and all Forests are every basic land type in addition to their other types.";
+    let def = parse_static_line(line).expect("all-basic-types compound land type-change");
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddAllBasicLandTypes]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_declines_mixed_land_creature_subjects() {
+    // Life and Limb's mixed land/creature subject must stay with animation handlers.
+    assert!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are Plains in addition to their other land types."
+        )
+        .is_empty(),
+        "mixed land/creature compound must not be land-type-claimed"
+    );
+    assert_eq!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are 1/1 green Saproling creatures and \
+             Forest lands in addition to their other types."
+        )
+        .len(),
+        1,
+        "Life and Limb must still route to compound animation"
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_single_subject_falls_through() {
+    // Single-subject lines remain owned by parse_land_type_change.
+    let def = parse_static_line("All Mountains are Plains.").unwrap();
+    assert!(
+        matches!(
+            def.affected,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters.contains(&TypeFilter::Land)
+        ),
+        "single land subject: {:?}",
+        def.affected
+    );
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::Or { .. })),
+        "single subject must not be Or-compound: {:?}",
+        def.affected
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetBasicLandType {
+            land_type: BasicLandType::Plains,
+        }]
+    );
+}
+
 #[test]
 fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     let def = parse_static_line(
@@ -14074,70 +14219,6 @@ fn all_mountains_are_plains_conversion() {
         }
         _ => panic!("Expected Typed land filter with Mountain subtype"),
     }
-}
-
-// CR 611.3 + CR 305.7: compound-subject land type-change — same structural class
-// as Life and Limb's compound animation handler, but the predicate is a basic
-// land type grant/replacement rather than creature animation.
-#[test]
-fn compound_subject_land_type_change_replacement_predicate() {
-    let line = "All Mountains and all Forests are Plains.";
-    let defs = parse_static_line_multi(line);
-    assert_eq!(defs.len(), 1, "one compound static: {defs:?}");
-    let def = &defs[0];
-
-    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
-        panic!("affected must be Or of both subjects: {:?}", def.affected);
-    };
-    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
-    assert!(
-        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
-            if tf.type_filters.contains(&TypeFilter::Land)
-                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Mountain")))),
-        "Mountain conjunct must be a LAND subtype: {:?}",
-        def.affected
-    );
-    assert!(
-        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
-            if tf.type_filters.contains(&TypeFilter::Land)
-                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
-        "Forest conjunct must be a LAND subtype: {:?}",
-        def.affected
-    );
-    assert!(matches!(
-        def.modifications.as_slice(),
-        [ContinuousModification::SetBasicLandType { land_type }]
-        if *land_type == BasicLandType::Plains
-    ));
-
-    // Single-subject sibling still routes through parse_land_type_change.
-    assert!(parse_static_line("All Mountains are Plains.").is_some());
-
-    // Animation compounds stay on the animation handler, not land type-change.
-    assert_eq!(
-        parse_static_line_multi(
-            "All Forests and all Saprolings are 1/1 green Saproling creatures and \
-             Forest lands in addition to their other types."
-        )
-        .len(),
-        1,
-        "animation compound must not be land-type-claimed"
-    );
-}
-
-#[test]
-fn compound_subject_land_type_change_additive_predicate() {
-    let def = parse_static_line(
-        "All Mountains and all Islands are Swamps in addition to their other land types.",
-    )
-    .unwrap();
-    assert!(matches!(def.affected, Some(TargetFilter::Or { .. })));
-    assert_eq!(
-        def.modifications,
-        vec![ContinuousModification::AddSubtype {
-            subtype: "Swamp".to_string(),
-        }]
-    );
 }
 
 #[test]
