@@ -1369,47 +1369,12 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         return None;
     }
 
-    // CR 205.1a: Type-setting effects replace card types.
-    // CR 613.1d: Layer 4 (Type-changing effects).
-    // A pure "it's a <core type(s)>" static —
-    // whose body is nothing but card types (no retained P/T, keywords, color, or
-    // subtype change) and carries no "in addition to its other types" / "that's
-    // still a <type>" retention clause — is a type-SETTING effect that REPLACES the
-    // permanent's card types, not an additive animation. Arixmethes, Slumbering
-    // Isle's "it's a land" makes it a LAND (Creature removed → "Legendary Land —
-    // Kraken"), not a land creature. Collapse the additive `AddType` list into one
-    // replacing `SetCardTypes`, mirroring the aura type-change path
-    // (`parse_type_change_static`'s `needs_set_card_types`).
-    //
-    // CR 205.1b — artifact-creature / creature-animation retention exception: a
-    // static that animates a permanent INTO a creature ("~ is an artifact
-    // creature", Grond / Midnight Mangler / Phoenix Fleet Airship; "During turns
-    // other than yours, ~ is an artifact creature") GAINS the creature type while
-    // retaining its other card types — it must stay additive (`AddType`). So the
-    // replacement is restricted to type-sets that do NOT add Creature; only a
-    // non-creature type-set like "it's a land" (CR 205.1a) replaces.
-    // The additive animations (Gideon Blackblade, manlands) are also excluded
-    // because they carry a P/T, keywords, or an explicit retention clause — so
-    // `modifications` is not all `AddType`, or the body names a retention clause.
-    let body_lower = body_text.to_lowercase();
-    let pure_core_type_replacement = !modifications.is_empty()
-        && modifications.iter().all(|m| {
-            matches!(m, ContinuousModification::AddType { core_type } if *core_type != CoreType::Creature)
-        })
-        && !nom_primitives::scan_contains(&body_lower, "in addition")
-        && !nom_primitives::scan_contains(&body_lower, "still");
-    let modifications = if pure_core_type_replacement {
-        let core_types = modifications
-            .iter()
-            .filter_map(|m| match m {
-                ContinuousModification::AddType { core_type } => Some(*core_type),
-                _ => None,
-            })
-            .collect();
-        vec![ContinuousModification::SetCardTypes { core_types }]
-    } else {
-        modifications
-    };
+    // CR 205.1a: an effect that sets an object's card type replaces its existing
+    // card types unless it retains them (CR 205.1b). A pure non-creature
+    // card-type change with no retention marker therefore REPLACES — Arixmethes,
+    // Slumbering Isle's "it's a land. (It's not a creature.)" must stop the
+    // Kraken from being a creature, not leave it a "Creature Land" (issue #5213).
+    let modifications = maybe_replace_card_types(modifications, body.lower);
 
     // STEP D — attach the condition(s). The leading "during your turn, " timing
     // peel (STEP A.0) and the trailing " as long as <cond>" peel (STEP A) are
@@ -1443,6 +1408,48 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         def = def.condition(condition);
     }
     Some(def)
+}
+
+/// CR 205.1a / CR 205.1b: Decide whether a self type-change is a REPLACEMENT or
+/// an additive grant. A set of `AddType` modifications is replaced by a single
+/// `SetCardTypes` (which removes the object's prior card types, CR 205.1a) only
+/// when ALL of these hold:
+///   - every modification is an `AddType` (a pure card-type change — no P/T,
+///     subtype, keyword, color, or supertype, which would signal an animation
+///     that retains its card type),
+///   - none of the added types is `Creature` (creature forms retain via CR
+///     205.1b's "artifact creature" rule and P/T-bearing animations),
+///   - the body carries no CR 205.1b retention marker ("in addition to" /
+///     "still a[n]").
+///
+/// Otherwise the additive modifications are returned unchanged. This makes
+/// Arixmethes' "it's a land" strip the Creature type while leaving creature
+/// animations (Gideon Blackblade, Midnight Mangler, Circle of the Moon Druid)
+/// on their additive path.
+fn maybe_replace_card_types(
+    modifications: Vec<ContinuousModification>,
+    body_lower: &str,
+) -> Vec<ContinuousModification> {
+    if nom_primitives::scan_contains(body_lower, "in addition to")
+        || nom_primitives::scan_contains(body_lower, "still a")
+    {
+        return modifications;
+    }
+    let mut core_types = Vec::new();
+    for modification in &modifications {
+        match modification {
+            ContinuousModification::AddType { core_type } if *core_type != CoreType::Creature => {
+                core_types.push(*core_type);
+            }
+            // Anything else (P/T, subtype, keyword, an added Creature type, …)
+            // keeps the additive form.
+            _ => return modifications,
+        }
+    }
+    if core_types.is_empty() {
+        return modifications;
+    }
+    vec![ContinuousModification::SetCardTypes { core_types }]
 }
 
 /// CR 205.2 + CR 613.1d + CR 613.4b + CR 611.3a: "Each noncreature <T> [you control]
