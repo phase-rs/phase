@@ -142,6 +142,7 @@ import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from ".
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import {
   getCastableZoneViewerTarget,
+  getBoardChoiceView,
   getOpponentIds,
   getSeatCount,
   getWaitingForObjectChoiceIds,
@@ -839,6 +840,10 @@ function GamePageContent({
   // Card-report picker is valid in a live, participating game (never spectate).
   const canReportCard = gameState != null && !isSpectatorMode;
   const canActForWaitingState = useCanActForWaitingState();
+  const boardChoiceLayerActive = useMemo(() => {
+    const choice = getBoardChoiceView(waitingFor, objects);
+    return canActForWaitingState && choice?.player === playerId;
+  }, [canActForWaitingState, objects, playerId, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
@@ -1269,7 +1274,7 @@ function GamePageContent({
 
       {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand */}
       <div
-        className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
+        className={`relative ${boardChoiceLayerActive && !isReconnecting ? "z-[45]" : "z-10"} grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
           gridTemplateRows,
