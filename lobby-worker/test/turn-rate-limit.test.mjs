@@ -23,6 +23,15 @@ test("createRateLimiter allows up to maxRequests per window", () => {
   assert.equal(blocked.retryAfterSeconds, 58);
 });
 
+test("createRateLimiter prunes expired buckets and caps map growth", () => {
+  const limiter = createRateLimiter({ maxRequests: 2, windowMs: 60_000 });
+  for (let i = 0; i < 10_050; i++) {
+    limiter.check(`key-${i}`, 0);
+  }
+  // After window elapses, stale keys are pruned before inserting a new one.
+  assert.deepEqual(limiter.check("fresh-key", 61_000), { allowed: true });
+});
+
 test("createRateLimiter resets after the window elapses", () => {
   const limiter = createRateLimiter({ maxRequests: 1, windowMs: 1_000 });
   const key = "client";

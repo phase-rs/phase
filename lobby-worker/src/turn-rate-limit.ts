@@ -8,6 +8,19 @@ interface Bucket {
   resetAt: number;
 }
 
+const MAX_BUCKETS = 10_000;
+
+function pruneBuckets(buckets: Map<string, Bucket>, now: number): void {
+  for (const [key, entry] of buckets) {
+    if (now >= entry.resetAt) buckets.delete(key);
+  }
+  if (buckets.size <= MAX_BUCKETS) return;
+  const victims = [...buckets.entries()]
+    .sort((a, b) => a[1].resetAt - b[1].resetAt)
+    .slice(0, buckets.size - MAX_BUCKETS);
+  for (const [key] of victims) buckets.delete(key);
+}
+
 /** In-memory per-key sliding window limiter (per isolate). */
 export function createRateLimiter(config: RateLimitConfig) {
   const buckets = new Map<string, Bucket>();
@@ -18,6 +31,7 @@ export function createRateLimiter(config: RateLimitConfig) {
       now = Date.now(),
       maxRequests = config.maxRequests,
     ): { allowed: true } | { allowed: false; retryAfterSeconds: number } {
+      pruneBuckets(buckets, now);
       const entry = buckets.get(key);
       if (!entry || now >= entry.resetAt) {
         buckets.set(key, { count: 1, resetAt: now + config.windowMs });
