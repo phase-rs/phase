@@ -57,6 +57,132 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
     }
 }
 
+fn create_tap_mana_source(state: &mut GameState, name: &str, produced: ManaProduction) -> ObjectId {
+    let source = create_object(
+        state,
+        CardId(9_010),
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&source).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    Arc::make_mut(&mut obj.abilities).push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap),
+    );
+    source
+}
+
+#[test]
+fn fixed_alternative_chosen_color_auto_tap_replays_selected_fixed_color() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_generic_creature_in_hand(&mut state, 9_011, PlayerId(0), "Blue Spell", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 1,
+    };
+
+    let thriving = create_tap_mana_source(
+        &mut state,
+        "Thriving Isle",
+        ManaProduction::ChosenColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            contribution: ManaContribution::Base,
+            fixed_alternative: Some(ManaColor::Blue),
+        },
+    );
+    state
+        .objects
+        .get_mut(&thriving)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Black));
+    create_tap_mana_source(
+        &mut state,
+        "Mountain",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        },
+    );
+
+    assert!(
+        can_feasibly_pay_mana_cost_with_probe(
+            &state,
+            PlayerId(0),
+            Some(spell),
+            &state.objects[&spell].mana_cost,
+            None,
+        ),
+        "auto-tap must replay Thriving Isle's selected fixed blue row, not its saved chosen black"
+    );
+}
+
+#[test]
+fn pure_chosen_color_without_choice_does_not_auto_pay_from_preview_colors() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_generic_creature_in_hand(&mut state, 9_012, PlayerId(0), "Green Spell", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 0,
+    };
+
+    let source = create_tap_mana_source(
+        &mut state,
+        "Unchosen Color Source",
+        ManaProduction::ChosenColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            contribution: ManaContribution::Base,
+            fixed_alternative: None,
+        },
+    );
+    let options =
+        crate::game::mana_sources::activatable_land_mana_options(&state, source, PlayerId(0));
+    assert!(
+        options
+            .iter()
+            .any(|option| option.mana_type == ManaType::Green),
+        "preview should expose possible colors before a color is chosen"
+    );
+    assert!(
+        !can_feasibly_pay_mana_cost_with_probe(
+            &state,
+            PlayerId(0),
+            Some(spell),
+            &state.objects[&spell].mana_cost,
+            None,
+        ),
+        "CR 106.5: undefined chosen-color production must not pay from preview colors"
+    );
+
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Green));
+    assert!(
+        can_feasibly_pay_mana_cost_with_probe(
+            &state,
+            PlayerId(0),
+            Some(spell),
+            &state.objects[&spell].mana_cost,
+            None,
+        ),
+        "once a color is chosen, the same source can pay that chosen color"
+    );
+}
+
 fn install_optional_discard_replacement(state: &mut GameState) -> ObjectId {
     let replacement_source = create_object(
         state,
@@ -417,6 +543,487 @@ fn build_spell_meta_for_foretold_card_is_not_face_down() {
     assert!(
         !meta.is_face_down,
         "a foretold (face-up) cast must NOT be reported as a face-down CR 708.4 cast"
+    );
+}
+
+// CR 202.3d + CR 702.102b + CR 709.4d: The restricted-mana metadata built during
+// mana payment (`build_spell_meta` → `SpellMeta`) must characterize a FUSED split
+// spell by the COMBINED mana value / color count of both halves, so restricted
+// mana such as "spend only to cast a spell with mana value N" / "... color count
+// N" gates the fused cast on both halves — while a non-fused split cast still
+// reports only the chosen half. The `fused_split_spell` marker is set BEFORE
+// payment, and `spell_mana_value`/`spell_colors` key on it (not the zone), so a
+// non-fused split spell mid-cast (object still in its origin zone) is NOT
+// over-combined.
+//
+// Discriminating revert: reading `obj.mana_cost.mana_value()` / `obj.color.len()`
+// (the pre-fix path) reports the front half (MV 2, 2 colors) even for the fused
+// cast, so the fused assertions fail.
+#[test]
+fn build_spell_meta_fused_split_spell_uses_combined_mana_value_and_colors() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    // Breaking // Entering (Fuse): Breaking {U}{B} (MV 2, colors U/B) is the front
+    // half; Entering {4}{B}{R} (MV 6, colors B/R) is the back Split half. Combined
+    // MV 8, colors {U, B, R}.
+    let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+
+    // Non-fused (marker unset): the metadata reports the chosen/front half only.
+    let meta_unfused =
+        build_spell_meta(&scenario.state, P0, breaking).expect("split card builds a spell meta");
+    assert_eq!(
+        meta_unfused.mana_value,
+        Some(2),
+        "a non-fused split cast reports the front half's mana value (2)"
+    );
+    assert_eq!(
+        meta_unfused.color_count,
+        Some(2),
+        "a non-fused split cast reports the front half's color count (2)"
+    );
+
+    // Fused (marker set before payment): the metadata reports both halves combined.
+    scenario
+        .state
+        .objects
+        .get_mut(&breaking)
+        .unwrap()
+        .fused_split_spell = true;
+    let meta_fused =
+        build_spell_meta(&scenario.state, P0, breaking).expect("split card builds a spell meta");
+    assert_eq!(
+        meta_fused.mana_value,
+        Some(8),
+        "a fused split spell's restricted-mana metadata must use the COMBINED mana value (8), \
+         not the front half (2)"
+    );
+    assert_eq!(
+        meta_fused.color_count,
+        Some(3),
+        "a fused split spell's restricted-mana metadata must use the COMBINED color count (3: \
+         U, B, R), not the front half (2)"
+    );
+}
+
+// --------------------------------------------------------------------------
+// PR #5093 — pre-payment fused split spells must present the COMBINED mana
+// value / colors to spell filters that run BEFORE the `fused_split_spell`
+// marker is set (option enumeration on an immutable `&GameState`). These three
+// tests drive the private `casting_variant_choice_set` directly and inspect the
+// offered options WITHOUT setting the marker — the whole point of the fix is
+// that the enumeration path can no longer rely on the marker. Each asserts an
+// option that flips when the projection is reverted to the front half.
+//
+// Breaking // Entering (Fuse): Breaking {U}{B} (front, MV 2, {U,B}) + Entering
+// {4}{B}{R} (back Split half, MV 6, {B,R}). Combined MV 8, colors {U,B,R}.
+// --------------------------------------------------------------------------
+
+/// Add a battlefield permanent controlled by `controller` carrying a single
+/// static `def`, then return its id. Used to install a pre-payment spell filter
+/// (PerTurnCastLimit / CastWithKeyword) for the fuse-enumeration tests.
+fn add_static_permanent(
+    scenario: &mut crate::game::scenario::GameScenario,
+    controller: PlayerId,
+    def: StaticDefinition,
+) -> ObjectId {
+    let card_id = CardId(scenario.state.next_object_id);
+    let id = create_object(
+        &mut scenario.state,
+        card_id,
+        controller,
+        "Static Source".to_string(),
+        Zone::Battlefield,
+    );
+    scenario
+        .state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .static_definitions
+        .push(def);
+    id
+}
+
+/// Give `player` a large heterogeneous mana pool so both the front-half Normal
+/// cast ({U}{B}) and the fused cast ({4}{U}{B}{B}{R}) are affordable — the
+/// enumeration path drops an option that `can_cast_prepared_now` deems
+/// unaffordable, so affordability must never be the reason a variant is absent.
+fn fill_mana_for_fused_cast(scenario: &mut crate::game::scenario::GameScenario, player: PlayerId) {
+    for (color, n) in [
+        (ManaType::Blue, 2),
+        (ManaType::Black, 3),
+        (ManaType::Red, 2),
+        (ManaType::Colorless, 6),
+    ] {
+        add_mana(&mut scenario.state, player, color, n);
+    }
+}
+
+fn cmc_ge(value: i32) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+        comparator: Comparator::GE,
+        value: QuantityExpr::Fixed { value },
+    }]))
+}
+
+fn cmc_le(value: i32) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+        comparator: Comparator::LE,
+        value: QuantityExpr::Fixed { value },
+    }]))
+}
+
+fn fuse_option_offered(set: &CastingVariantChoiceSet) -> bool {
+    set.options
+        .iter()
+        .any(|o| o.variant == CastingVariant::Fuse)
+}
+
+fn normal_option_offered(set: &CastingVariantChoiceSet) -> bool {
+    set.options
+        .iter()
+        .any(|o| o.variant == CastingVariant::Normal)
+}
+
+/// Test 1 (prohibition / per-turn-limit path). A `PerTurnCastLimit { max: 0,
+/// spell_filter: Cmc >= 5 }` prohibits casting any spell with mana value >= 5.
+/// A fused Breaking // Entering (combined MV 8) must be BLOCKED — so Fuse is
+/// absent from the offered options — while the Normal front-half cast (MV 2)
+/// stays legal. Hostile control (Cmc >= 9) proves the compared value is exactly
+/// 8, not merely "some large number": the fused cast IS offered under >= 9.
+/// Reverting the projection makes the enumeration see MV 2 for the fused cast,
+/// so Fuse would be offered under Cmc >= 5 and the positive assertion fails.
+#[test]
+fn fused_split_spell_blocked_by_combined_mana_value_per_turn_limit_enumeration() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+
+    // Cmc >= 5: combined MV 8 matches → fused cast blocked.
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+    fill_mana_for_fused_cast(&mut sc, P0);
+    add_static_permanent(
+        &mut sc,
+        P0,
+        StaticDefinition::new(StaticMode::PerTurnCastLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 0,
+            spell_filter: Some(cmc_ge(5)),
+        }),
+    );
+    // Sanity: marker must NOT be set — this exercises the pre-payment path.
+    assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+
+    let set = casting_variant_choice_set(&sc.state, P0, breaking);
+    assert!(
+        !fuse_option_offered(&set),
+        "a fused Breaking // Entering (combined MV 8) must be BLOCKED by a \
+         PerTurnCastLimit(Cmc >= 5); reverting the combined projection would wrongly \
+         offer Fuse (front half MV 2 < 5). Offered: {:?}",
+        set.options.iter().map(|o| o.variant).collect::<Vec<_>>()
+    );
+    assert!(
+        normal_option_offered(&set),
+        "the Normal front-half cast (MV 2 < 5) must still be offered — the fix must \
+         not over-combine the non-fused variant. Offered: {:?}",
+        set.options.iter().map(|o| o.variant).collect::<Vec<_>>()
+    );
+
+    // Cmc >= 9: combined MV 8 does NOT match → fused cast offered (hostile;
+    // proves the compared value is exactly 8, not just "large").
+    let mut sc9 = GameScenario::new();
+    sc9.at_phase(Phase::PreCombatMain);
+    let breaking9 = sc9.add_real_card(P0, "Breaking", Zone::Hand, db);
+    fill_mana_for_fused_cast(&mut sc9, P0);
+    add_static_permanent(
+        &mut sc9,
+        P0,
+        StaticDefinition::new(StaticMode::PerTurnCastLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 0,
+            spell_filter: Some(cmc_ge(9)),
+        }),
+    );
+    let set9 = casting_variant_choice_set(&sc9.state, P0, breaking9);
+    assert!(
+        fuse_option_offered(&set9),
+        "under Cmc >= 9 the fused cast (combined MV 8 < 9) is NOT blocked and must be \
+         offered — this proves the compared value is exactly 8. Offered: {:?}",
+        set9.options.iter().map(|o| o.variant).collect::<Vec<_>>()
+    );
+}
+
+/// Test 2 (NON-Fuse alternative-cost candidate discovery uses the FRONT-HALF
+/// projection, end-to-end via `casting_variant_choice_set`). CR 601.2b: a split
+/// spell can't combine Fuse with another alternative cost, so a granted-Dash cast
+/// executes as its own front-half cast method. Its candidate gate must therefore
+/// match the FRONT half, not the fused combined value — otherwise an option is
+/// admitted that the later non-fused preparation can't honor (the grant no longer
+/// matches), wrongly falling back to the printed cost.
+/// - `CastWithKeyword { Dash, affected: Cmc >= 5 }` matches ONLY the combined MV
+///   (8), not the front half (2) → Dash must NOT be offered.
+/// - `CastWithKeyword { Dash, affected: Cmc <= 2 }` matches the front half (2) but
+///   not the combined MV (8) → Dash MUST still be offered.
+///
+/// Reverting the candidate gates to the combined projection flips both assertions.
+#[test]
+fn non_fuse_alt_cost_candidate_uses_front_half_not_combined() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let dash_kw = Keyword::Dash(ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    });
+
+    let dash_offered = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        fill_mana_for_fused_cast(&mut sc, P0);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: dash_kw.clone(),
+            })
+            .affected(filter),
+        );
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+        casting_variant_choice_set(&sc.state, P0, breaking)
+            .options
+            .iter()
+            .any(|o| o.variant == CastingVariant::Dash)
+    };
+
+    assert!(
+        !dash_offered(cmc_ge(5)),
+        "a combined-only `CastWithKeyword {{ Dash, Cmc >= 5 }}` grant (matches combined MV 8, \
+         NOT front MV 2) must NOT surface a separate non-Fuse Dash option — a Dash cast is \
+         front-half and the grant would not cover it at preparation time"
+    );
+    assert!(
+        dash_offered(cmc_le(2)),
+        "a front-half `CastWithKeyword {{ Dash, Cmc <= 2 }}` grant (matches front MV 2, not \
+         combined MV 8) must still surface the non-Fuse Dash option"
+    );
+}
+
+/// Test 2b (pre-payment cost-keyword read: Assist). CR 702.132a + CR 702.102b.
+/// A value-keyed `CastWithKeyword { Assist, affected: Cmc >= 5 }` static grants
+/// Assist only to spells of combined MV >= 5. Driving the FUSED cast of Breaking //
+/// Entering (combined MV 8, cost {4}{U}{B}{B}{R} — has a generic component) through
+/// the real production entry `handle_casting_variant_choice` must reach
+/// `WaitingFor::AssistChoosePlayer` because `assist_offer_params` now fuse-projects
+/// the effective-keyword read. Reverting that threading reads the front half (MV 2
+/// < 5), drops the Assist grant, and the cast auto-finalizes with NO assist offer —
+/// so the positive assertion flips. The `Cmc >= 9` control (combined MV 8 < 9)
+/// proves the compared value is exactly 8, not merely "large": no assist offer.
+#[test]
+fn fused_split_spell_assist_offer_uses_combined_projection() {
+    use super::super::engine::apply_as_current;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let assist_kw = Keyword::Assist;
+
+    // Returns true iff casting Breaking FUSED reaches the assist player-choice.
+    let assist_offered_on_fuse = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        let card_id = sc.state.objects[&breaking].card_id;
+        fill_mana_for_fused_cast(&mut sc, P0);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: assist_kw.clone(),
+            })
+            .affected(filter),
+        );
+        // Marker must NOT be set — this exercises the pre-payment path.
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+
+        let set = casting_variant_choice_set(&sc.state, P0, breaking);
+        let options: Vec<CastingVariantChoiceOption> = set.options.clone();
+        let fuse_index = options
+            .iter()
+            .position(|o| o.variant == CastingVariant::Fuse)
+            .expect("Fuse must be an offered variant for Breaking // Entering");
+
+        let mut events = Vec::new();
+        let waiting = handle_casting_variant_choice(
+            &mut sc.state,
+            P0,
+            breaking,
+            card_id,
+            &options,
+            fuse_index,
+            &mut events,
+        )
+        .expect("casting the fused variant should not error");
+        // Breaking // Entering's front half (Breaking) targets a player to mill.
+        // The fused cast pauses for target selection FIRST; submitting the target
+        // advances the real cast pipeline through `enter_payment_step`, where the
+        // (also-threaded) assist offer for a fused cast surfaces.
+        let waiting = match waiting {
+            WaitingFor::AssistChoosePlayer { .. } => waiting,
+            WaitingFor::TargetSelection { .. } => {
+                // Publish the returned WaitingFor onto the state machine so the
+                // `SelectTargets` action drives the real `apply()` pipeline.
+                sc.state.waiting_for = waiting;
+                apply_as_current(
+                    &mut sc.state,
+                    GameAction::SelectTargets {
+                        targets: vec![crate::types::ability::TargetRef::Player(P1)],
+                    },
+                )
+                .expect("selecting the mill target should advance the cast")
+                .waiting_for
+            }
+            other => panic!("unexpected WaitingFor after choosing Fuse: {other:?}"),
+        };
+        matches!(
+            waiting,
+            WaitingFor::AssistChoosePlayer {
+                player,
+                ref candidates,
+                ..
+            } if player == P0 && candidates.contains(&P1)
+        )
+    };
+
+    assert!(
+        assist_offered_on_fuse(cmc_ge(5)),
+        "a `CastWithKeyword {{ Assist }}` gated on Cmc >= 5 must grant Assist to the \
+         fused Breaking // Entering (combined MV 8), so the fused cast reaches \
+         AssistChoosePlayer. Reverting the combined projection reads the front half \
+         (MV 2 < 5), drops the grant, and the cast auto-finalizes with no assist offer."
+    );
+    assert!(
+        !assist_offered_on_fuse(cmc_ge(9)),
+        "gated on Cmc >= 9 the fused cast (combined MV 8 < 9) must NOT receive Assist — \
+         proving the grant compares the exact combined MV (8), not just a large number."
+    );
+}
+
+/// Test 2c (pre-payment timing-keyword read: Flash). CR 702.8a + CR 702.102b.
+/// A value-keyed `CastWithKeyword { Flash, affected: Cmc >= 5 }` grants Flash only
+/// to spells of combined MV >= 5. On the OPPONENT's end step (outside P0's
+/// sorcery-speed window), the Fuse variant of Breaking // Entering (combined MV 8)
+/// is castable — hence offered by `casting_variant_choice_set` (whose
+/// `can_cast_prepared_now` gate runs the flash-feasibility timing check) — ONLY
+/// because the `has_granted_flash` / flash-feasibility reads now fuse-project the
+/// combined MV. Reverting that projection reads the front half (MV 2 < 5), the
+/// grant is dropped, sorcery-speed timing rejects the fused cast, and Fuse is not
+/// offered. The `Cmc >= 9` control (combined MV 8 < 9) proves the compared value is
+/// exactly 8: no Flash, so Fuse is not offered on the opponent's turn.
+#[test]
+fn fused_split_spell_granted_flash_timing_uses_combined_projection() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+
+    let fuse_offered_on_opponent_turn = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        // CR 307.1 / CR 608.3: place P0 outside its sorcery-speed window — the
+        // opponent (P1) is the active player during their end step, P0 has
+        // priority. A sorcery-speed fused cast is illegal here UNLESS the spell
+        // has (granted) Flash.
+        sc.state.phase = Phase::End;
+        sc.state.active_player = P1;
+        sc.state.priority_player = P0;
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        fill_mana_for_fused_cast(&mut sc, P0);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash,
+            })
+            .affected(filter),
+        );
+        // Marker must NOT be set — this exercises the pre-payment path.
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+
+        fuse_option_offered(&casting_variant_choice_set(&sc.state, P0, breaking))
+    };
+
+    assert!(
+        fuse_offered_on_opponent_turn(cmc_ge(5)),
+        "a `CastWithKeyword {{ Flash }}` gated on Cmc >= 5 must grant Flash to the fused \
+         Breaking // Entering (combined MV 8), so the fused cast is legal at instant \
+         speed on the opponent's turn and Fuse is offered. Reverting the combined \
+         projection reads the front half (MV 2 < 5), drops Flash, and sorcery-speed \
+         timing rejects the fused cast."
+    );
+    assert!(
+        !fuse_offered_on_opponent_turn(cmc_ge(9)),
+        "gated on Cmc >= 9 the fused cast (combined MV 8 < 9) does NOT receive Flash, so \
+         a sorcery-speed fused cast on the opponent's turn is illegal and Fuse is not \
+         offered — proving the grant compares the exact combined MV (8)."
+    );
+}
+
+/// Test 3 (candidate-enumeration path in `casting_variant_candidates`). The Dash
+/// Test 3 (direct-enumeration counterpart to `non_fuse_alt_cost_candidate_uses_
+/// front_half_not_combined`). Inspects `casting_variant_candidates` directly (BEFORE
+/// `can_cast_prepared_now` filtering) so it isolates the enumeration projection from
+/// downstream affordability/legality. The non-Fuse Dash candidate must be gated on
+/// the FRONT-HALF projection even for a fuse-capable Breaking // Entering:
+/// - `CastWithKeyword { Dash, affected: Cmc >= 5 }` (combined MV 8 only) → Dash
+///   candidate ABSENT (front MV 2 < 5).
+/// - `CastWithKeyword { Dash, affected: Cmc <= 2 }` (front MV 2) → Dash candidate
+///   PRESENT.
+///
+/// Reverting the candidate-enumeration gates to the combined projection flips both.
+#[test]
+fn non_fuse_alt_cost_candidate_enumeration_uses_front_half() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let dash_kw = Keyword::Dash(ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    });
+
+    let dash_candidate_present = |filter: TargetFilter| -> bool {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        add_static_permanent(
+            &mut sc,
+            P0,
+            StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: dash_kw.clone(),
+            })
+            .affected(filter),
+        );
+        assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
+        casting_variant_candidates(&sc.state, P0, breaking).contains(&CastingVariant::Dash)
+    };
+
+    assert!(
+        !dash_candidate_present(cmc_ge(5)),
+        "a combined-only `CastWithKeyword {{ Dash, Cmc >= 5 }}` grant (front MV 2 < 5) must \
+         NOT enumerate a non-Fuse Dash candidate — enumeration reads the front half, since a \
+         Dash cast executes front-half"
+    );
+    assert!(
+        dash_candidate_present(cmc_le(2)),
+        "a front-half `CastWithKeyword {{ Dash, Cmc <= 2 }}` grant (front MV 2) must still \
+         enumerate the Dash candidate"
     );
 }
 
@@ -12707,6 +13314,107 @@ fn granted_self_cost_encore_surfaces_graveyard_ability_at_card_mana_cost() {
     );
 }
 
+/// CR 702.97a: Varolz-class grant, but *filter-scoped* rather than
+/// `SpecificObject` — the shape a real continuous static ability actually
+/// uses ("Each creature card in your graveyard has scavenge"), which no
+/// existing test exercised through to activation. Two graveyard creatures
+/// with different mana costs must each surface their OWN scavenge cost from
+/// the SAME granting effect, proving the off-zone grant pipeline resolves
+/// `SelfManaCost` per-recipient rather than once for the whole filter.
+#[test]
+fn filter_scoped_scavenge_grant_resolves_per_object_cost_for_every_match() {
+    let mut state = setup_game_at_main_phase();
+
+    let grantor = create_object(
+        &mut state,
+        CardId(9600),
+        PlayerId(0),
+        "Varolz, the Scar-Striped".to_string(),
+        Zone::Battlefield,
+    );
+    let cheap_cost = ManaCost::Cost {
+        generic: 1,
+        shards: vec![],
+    };
+    let expensive_cost = ManaCost::Cost {
+        generic: 3,
+        shards: vec![ManaCostShard::Green],
+    };
+    let cheap_creature = create_object(
+        &mut state,
+        CardId(9601),
+        PlayerId(0),
+        "Cheap Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let expensive_creature = create_object(
+        &mut state,
+        CardId(9602),
+        PlayerId(0),
+        "Expensive Graveyard Creature".to_string(),
+        Zone::Graveyard,
+    );
+    for (id, cost) in [
+        (cheap_creature, cheap_cost.clone()),
+        (expensive_creature, expensive_cost.clone()),
+    ] {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = cost;
+    }
+
+    state.add_transient_continuous_effect(
+        grantor,
+        PlayerId(0),
+        crate::types::ability::Duration::UntilEndOfTurn,
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+        ),
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Scavenge(ManaCost::SelfManaCost),
+        }],
+        None,
+    );
+
+    for (id, expected_cost) in [
+        (cheap_creature, cheap_cost),
+        (expensive_creature, expensive_cost),
+    ] {
+        let abilities = activated_ability_definitions(&state, id);
+        // CR 702.97a: identify the scavenge ability by its distinctive
+        // Composite{Mana, Exile(SelfRef, Graveyard)} cost shape (there is no
+        // dedicated `Effect::Scavenge` marker — it lowers to `Effect::PutCounter`,
+        // shared with every other +1/+1-counter effect).
+        let (_, scavenge) = abilities
+            .iter()
+            .find(|(_, a)| {
+                a.activation_zone == Some(Zone::Graveyard)
+                    && matches!(
+                        &a.cost,
+                        Some(AbilityCost::Composite { costs })
+                            if costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. }))
+                    )
+            })
+            .unwrap_or_else(|| {
+                panic!("{id:?}: filter-scoped grant must surface scavenge, got {abilities:?}")
+            });
+        let Some(AbilityCost::Composite { costs }) = &scavenge.cost else {
+            unreachable!("filtered above");
+        };
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Mana { cost } if *cost == expected_cost)),
+            "{id:?}: scavenge mana sub-cost must equal THIS card's own mana cost, got {costs:?}"
+        );
+    }
+}
+
 /// CR 702.74a + CR 604.1: End-to-end composition of the two evoke work items.
 /// Ashling grants evoke {4} to an Elemental permanent spell in hand; casting
 /// it for the granted evoke cost (only {4} available, printed {6} unaffordable)
@@ -24678,6 +25386,14 @@ fn add_harmonize_draw_spell_to_graveyard(
     spell
 }
 
+fn grant_cant_tap(state: &mut GameState, id: ObjectId) {
+    let def = StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.static_definitions.push(def.clone());
+    Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    crate::game::layers::evaluate_layers(state);
+}
+
 /// CR 702.180a (issue #1550): Winternight Stories — Harmonize {4}{U}. With
 /// only 4 mana but a 4-power creature to tap (reducing the {4} generic to
 /// {0}), the spell must be legally castable from the graveyard. Before the
@@ -24715,6 +25431,104 @@ fn harmonize_card_castable_when_creature_tap_covers_generic() {
         can_cast_object_now(&state, PlayerId(0), spell),
         "Harmonize {{4}}{{U}} must be castable with 4 mana + a 4-power creature to tap"
     );
+}
+
+#[test]
+fn harmonize_card_not_castable_when_only_reduction_creature_cant_tap() {
+    let mut state = setup_game_at_main_phase();
+
+    let spell = add_harmonize_draw_spell_to_graveyard(
+        &mut state,
+        PlayerId(0),
+        CardId(77_020),
+        "Winternight Stories",
+    );
+
+    let creature = create_object(
+        &mut state,
+        CardId(77_021),
+        PlayerId(0),
+        "Power Four".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(4);
+        obj.toughness = Some(4);
+    }
+    grant_cant_tap(&mut state, creature);
+
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 4);
+
+    assert!(
+        !can_cast_object_now(&state, PlayerId(0), spell),
+        "Harmonize reduction must not count a creature that can't become tapped"
+    );
+}
+
+#[test]
+fn harmonize_tap_choice_excludes_cant_tap_creature() {
+    let mut state = setup_game_at_main_phase();
+
+    let spell = add_harmonize_draw_spell_to_graveyard(
+        &mut state,
+        PlayerId(0),
+        CardId(77_030),
+        "Winternight Stories",
+    );
+
+    let restricted = create_object(
+        &mut state,
+        CardId(77_031),
+        PlayerId(0),
+        "Restricted Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&restricted).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(4);
+        obj.toughness = Some(4);
+    }
+    grant_cant_tap(&mut state, restricted);
+
+    let eligible = create_object(
+        &mut state,
+        CardId(77_032),
+        PlayerId(0),
+        "Eligible Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&eligible).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 5);
+
+    let card_id = state.objects.get(&spell).unwrap().card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+
+    match result.waiting_for {
+        WaitingFor::HarmonizeTapChoice {
+            eligible_creatures, ..
+        } => {
+            assert!(eligible_creatures.contains(&eligible));
+            assert!(!eligible_creatures.contains(&restricted));
+        }
+        other => panic!("Expected HarmonizeTapChoice, got {other:?}"),
+    }
 }
 
 /// CR 702.180a + CR 601.2h: A creature tapped for Harmonize's cost

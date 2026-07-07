@@ -451,6 +451,37 @@ fn runtime_granted_lki_keyword_triggers(
     partition_lki_trigger_definitions(source_obj, record).1
 }
 
+fn lki_source_object_from_zone_change_record(
+    object_id: ObjectId,
+    record: &crate::types::game_state::ZoneChangeRecord,
+) -> Option<GameObject> {
+    if record.name.is_empty() && record.trigger_definitions.is_empty() {
+        return None;
+    }
+    let mut obj = GameObject::new(
+        object_id,
+        crate::types::identifiers::CardId(0),
+        record.owner,
+        record.name.clone(),
+        record.from_zone.unwrap_or(Zone::Battlefield),
+    );
+    obj.controller = record.controller;
+    obj.card_types.core_types = record.core_types.clone();
+    obj.card_types.subtypes = record.subtypes.clone();
+    obj.card_types.supertypes = record.supertypes.clone();
+    obj.keywords = record.keywords.clone();
+    obj.trigger_definitions = record.trigger_definitions.clone().into();
+    obj.power = record.power;
+    obj.toughness = record.toughness;
+    obj.base_power = record.base_power;
+    obj.base_toughness = record.base_toughness;
+    obj.color = record.colors.clone();
+    obj.is_token = record.is_token;
+    obj.attached_to = record.attached_to;
+    obj.is_suspected = record.is_suspected;
+    Some(obj)
+}
+
 fn partition_lki_trigger_definitions(
     source_obj: &GameObject,
     record: &crate::types::game_state::ZoneChangeRecord,
@@ -1920,15 +1951,14 @@ fn collect_pending_triggers(
             ..
         } = event
         {
-            // Only scan if the object wasn't already found by the battlefield scan
-            // (it won't be — it has already moved out — but guard against double-fire).
-            if state
+            let lki_source_obj = state
                 .objects
                 .get(moved_id)
-                .is_some_and(|o| o.zone != Zone::Battlefield)
-            {
+                .filter(|obj| obj.zone != Zone::Battlefield)
+                .cloned()
+                .or_else(|| lki_source_object_from_zone_change_record(*moved_id, record));
+            if let Some(mut obj) = lki_source_obj {
                 let matched_triggers = {
-                    let mut obj = state.objects[moved_id].clone();
                     obj.trigger_definitions =
                         partition_lki_trigger_definitions(&obj, record).0.into();
                     collect_matching_triggers(
@@ -2254,6 +2284,11 @@ fn collect_pending_triggers(
             ..
         } = event
         {
+            // CR 702.102b: NOT-PRE-PAYMENT — this reacts to `GameEvent::SpellCast`,
+            // emitted after payment, so the `fused_split_spell` marker is already
+            // set and the non-fuse-aware collector's marker OR-gate yields the
+            // combined projection. Representative of every `SpellCast`-reactive
+            // `effective_spell_keywords` read in this module.
             let storm_instances =
                 super::casting::effective_spell_keywords(state, *caster, *cast_obj_id)
                     .iter()
@@ -4247,6 +4282,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
         .objects
         .get(&source_id)
         .map(|o| o.name.clone())
+        .or_else(|| state.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
         .unwrap_or_default();
     let entry = StackEntry {
         id: entry_id,
@@ -6373,7 +6409,7 @@ pub(crate) fn check_trigger_condition(
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
         // evaluates the triggering damage source as it was when the damage was
         // dealt. Reuse the same DamageRecord snapshot matcher as
-        // PlayerFilter::OpponentDealtCombatDamage so later type changes or zone
+        // PlayerFilter::OpponentDealtDamage so later type changes or zone
         // moves do not change what "that damage was dealt by" refers to.
         TriggerCondition::EventDamageSourceMatchesFilter { filter } => trigger_event
             .and_then(|event| match event {
@@ -6531,9 +6567,9 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::OpponentLostLife
             | PlayerFilter::OpponentGainedLife
             | PlayerFilter::HasLostTheGame
-            // CR 120.1 + CR 510.1: a set-valued combat-damaged-this-turn
-            // predicate has no single-player "whose turn" semantic.
-            | PlayerFilter::OpponentDealtCombatDamage { .. }
+            // CR 120.1 + CR 510.1: a set-valued damaged-this-turn predicate has
+            // no single-player "whose turn" semantic.
+            | PlayerFilter::OpponentDealtDamage { .. }
             // CR 508.6: a set-valued attacked-this-turn predicate has no
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttacked { .. }
@@ -7301,6 +7337,14 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
 
         // Card-type counting embeds a `TargetFilter` through its source enum.
         QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+
+        // Subtype counting embeds a `TargetFilter` through its source enum too.
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
             CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
@@ -11087,6 +11131,7 @@ pub mod tests {
             dead,
             crate::types::game_state::LKISnapshot {
                 name: "Countered Dead".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -17448,6 +17493,7 @@ pub mod tests {
             None,  // face_down_profile
             false, // track_exiled_by_source
             None,  // library_placement
+            None,  // enter_attached_to
             &mut events,
         );
 

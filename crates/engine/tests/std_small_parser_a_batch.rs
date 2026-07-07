@@ -287,6 +287,26 @@ fn royal_treatment_creates_role_token_attached_to_target() {
         Some(target),
         "the Royal Role token must enter attached to the targeted creature (CR 303.7)"
     );
+
+    // CR 111.10m: the Role must actually BUFF the enchanted creature, not merely
+    // attach. Pre-fix the predefined dispatch matched only the bare "Royal", so a
+    // token named "Royal Role" carried no static and the 2/2 target stayed 2/2
+    // with no ward — the reported "Roles do nothing" bug. After layers apply the
+    // Role's enchanted-creature static, the 2/2 target must be a 3/3 with ward.
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    let buffed = &runner.state().objects[&target];
+    assert_eq!(
+        (buffed.power, buffed.toughness),
+        (Some(3), Some(3)),
+        "Royal Role must grant the enchanted creature +1/+1 (2/2 -> 3/3)"
+    );
+    assert!(
+        buffed
+            .keywords
+            .iter()
+            .any(|k| matches!(k, engine::types::keywords::Keyword::Ward(_))),
+        "Royal Role must grant the enchanted creature ward"
+    );
 }
 
 // ===========================================================================

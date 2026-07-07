@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, LibraryPosition, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, GuessOutcome, LibraryPosition,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -124,6 +124,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
+            | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
@@ -1129,7 +1130,10 @@ pub(super) fn handle_resolution_choice(
                 let mv = state
                     .objects
                     .get(&chosen)
-                    .map(|obj| obj.mana_cost.mana_value())
+                    // CR 202.3d + CR 709.4b: the chosen card is off the stack, so
+                    // a split card's MV budget is its combined halves — must match
+                    // the candidate-eligibility check in free_cast_from_zones.
+                    .map(|obj| obj.effective_mana_value())
                     .unwrap_or(0);
                 if mv > budget {
                     return Err(EngineError::InvalidAction(
@@ -2195,7 +2199,13 @@ pub(super) fn handle_resolution_choice(
                     .exiled_from_hand_this_resolution
                     .saturating_add(hand_exiles);
             }
-            if let Some(cont) = state.pending_continuation.as_mut() {
+            if let Some(mut cont) = state.pending_continuation.take() {
+                cont.search_attach_host =
+                    effects::change_zone::resolve_search_continuation_attach_host(
+                        state,
+                        &cont.chain,
+                    );
+                state.search_continuation_attach_host = cont.search_attach_host;
                 let mut continuation_targets: Vec<_> =
                     chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 701.23a + CR 701.24a: When the searcher is not the caster
@@ -2209,6 +2219,7 @@ pub(super) fn handle_resolution_choice(
                 }
                 cont.chain.targets = continuation_targets.clone();
                 propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
+                state.pending_continuation = Some(cont);
             }
             effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -3155,6 +3166,7 @@ pub(super) fn handle_resolution_choice(
                             // across the `EffectZoneChoice` round-trip against each
                             // chosen object (Summoner's Grimoire).
                             enters_modified_if: enters_modified_if.clone(),
+                            enter_attached_to: None,
                         };
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
@@ -3194,6 +3206,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -3231,6 +3244,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3435,6 +3449,7 @@ pub(super) fn handle_resolution_choice(
                         // CR 614.12: cost-payment exile carries no enter-modifier
                         // gate; thread the (None) round-trip value for consistency.
                         enters_modified_if: enters_modified_if.clone(),
+                        enter_attached_to: None,
                     };
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
@@ -3473,6 +3488,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3507,6 +3523,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3695,6 +3712,7 @@ pub(super) fn handle_resolution_choice(
                 options,
                 choice_type,
                 source_id,
+                persist_player,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -3722,7 +3740,13 @@ pub(super) fn handle_resolution_choice(
             // protection, Sewer Nemesis CDA, …), recompute layers for the
             // layer-affecting choice kinds, and record `last_named_choice`.
             // Single authority shared with the random `Effect::Choose` resolver.
-            effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
+            effects::choose::bind_named_choice(
+                state,
+                &choice_type,
+                &choice,
+                source_id,
+                persist_player,
+            );
             if choice_type.is_card_predicate_guess() {
                 events.push(GameEvent::CardPredicateGuessMade {
                     player_id: player,
@@ -3818,6 +3842,81 @@ pub(super) fn handle_resolution_choice(
             } else {
                 effects::drain_pending_continuation(state, events);
             }
+            state.last_named_choice = None;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 608.2d + CR 608.2e: an opponent / the defending player answered the
+        // guess. Compute correctness against the UNFILTERED state, record the
+        // guessed value for downstream reads, stamp the outcome onto the stashed
+        // branch chain, then drain it synchronously under the source controller.
+        (
+            WaitingFor::OpponentGuess {
+                player: guesser,
+                options,
+                choice_type,
+                source_id,
+                proposition_truth,
+            },
+            GameAction::ChooseOption { choice },
+        ) => {
+            // (a) Validate the guess is a legal option.
+            if !options.contains(&choice) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Invalid guess '{}', must be one of: {:?}",
+                    choice, options
+                )));
+            }
+
+            // (b) Correctness, resolved against the unfiltered GameState.
+            let outcome = if effects::opponent_guess::guess_is_correct(
+                state,
+                source_id,
+                &options,
+                &choice,
+                proposition_truth,
+            ) {
+                GuessOutcome::Correct
+            } else {
+                GuessOutcome::Incorrect
+            };
+
+            // (c) Record the guessed value WITHOUT persisting it to the source.
+            // "they lose life equal to the number they guessed" reads the
+            // guesser's value via `QuantityRef::Variable` -> `last_named_choice`;
+            // `source_id: None` sets `last_named_choice` without pushing a
+            // `ChosenAttribute::Number` (bind_named_choice gates the push on
+            // source_id.is_some()), keeping the source's committed-number history
+            // (which drives BOTH the DistinctFromSourceHistory exclusion AND the
+            // last-committed read) guesser-free. Only meaningful for a committed
+            // number guess; propositions carry no downstream guessed-value read.
+            if proposition_truth.is_none() {
+                effects::choose::bind_named_choice(state, &choice_type, &choice, None, None);
+            }
+
+            // (d) Stamp the outcome across the stashed continuation chain so each
+            // branch head re-evaluates `Guessed { outcome }` against it on drain.
+            // Also expose the guesser as a front player target so a "they lose
+            // life ..." `ParentTarget` anaphor in a branch resolves to them
+            // (CR 608.2d — the guesser is the player the branch acts on).
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.set_guess_outcome_recursive(Some(outcome));
+                cont.chain.push_front_player_target_recursive(guesser);
+            }
+
+            // (e) Priority to the source CONTROLLER (the player resolving this
+            // ability), not the guesser — the guesser only answered a sub-prompt;
+            // the resolution continues under the controller (e.g. Seventh
+            // Doctor's "you may cast it" CastOffer is to the controller). This
+            // also clears the OpponentGuess wait so the drain's guard passes.
+            let controller = state
+                .objects
+                .get(&source_id)
+                .map(|o| o.controller)
+                .unwrap_or(state.active_player);
+            set_priority(state, controller);
+            effects::drain_pending_continuation(state, events);
+            // Cleared ONLY after the synchronous drain (mirrors NamedChoice), so
+            // the wrong/right branch's "number they guessed" read sees it.
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -4813,6 +4912,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut events = Vec::new();
 
@@ -4863,6 +4963,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut events = Vec::new();
 

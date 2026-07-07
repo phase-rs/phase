@@ -5044,6 +5044,12 @@ pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
     // CR 702.154a-c: the enlisted creature must be another untapped creature you
     // control, must not be a creature you chose to attack with, and must either
     // have haste or have been controlled continuously since turn began.
+    //
+    // The "can't become tapped" exclusion (CR 701.26a) is not expressible as a
+    // static `TargetFilter` prop, so the offer layer (`enlist_eligible_targets`
+    // in `engine_combat.rs`) applies it via the single `object_cant_tap`
+    // authority after evaluating this filter — mirroring the convoke/crew
+    // auto-tap gate. The commit taps through `tap_permanent_for_cost`.
     TargetFilter::And {
         filters: vec![
             TargetFilter::Typed(
@@ -8828,6 +8834,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
             choice_type: ChoiceType::NumberRange {
                 min: 1,
                 max: final_chapter.min(u8::MAX as u32) as u8,
+                distinctness: crate::types::ability::NumberDistinctness::Repeatable,
             },
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10531,6 +10538,7 @@ mod cycling_synthesis_tests {
                 scryfall_id: Some("fractured-sanity-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -10599,6 +10607,7 @@ mod cycling_synthesis_tests {
                 scryfall_id: Some("storm-queen-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&storm, None);
@@ -10650,6 +10659,7 @@ mod cycling_synthesis_tests {
                 scryfall_id: Some("flying-men-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&men, None);
@@ -11253,6 +11263,7 @@ mod evoke_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -13655,6 +13666,7 @@ mod provoke_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -14731,6 +14743,7 @@ mod increment_synthesis_tests {
                 scryfall_id: Some("increment-dedupe-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         }
     }
 
@@ -21247,6 +21260,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -21310,6 +21324,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         }
     }
 
@@ -21429,6 +21444,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         }
     }
 
@@ -21560,6 +21576,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -22569,7 +22586,7 @@ mod devour_synthesis_tests {
             .expect("read-ahead ETB replacement");
         let execute = etb.execute.as_deref().expect("execute body");
         let Effect::Choose {
-            choice_type: ChoiceType::NumberRange { min, max },
+            choice_type: ChoiceType::NumberRange { min, max, .. },
             persist,
             ..
         } = &*execute.effect

@@ -4418,7 +4418,7 @@ fn try_extract_zone_change_object_filter_condition(
 /// ("Whenever your opponents are dealt combat damage, if any of that damage
 /// was dealt by a Warrior, ..."). The source phrase reuses the same
 /// `parse_target` + " or " + `merge_or_filters` chain as the
-/// `OpponentDealtCombatDamage { source }` PlayerFilter so a `~ or a Dragon`
+/// `OpponentDealtDamage { source }` PlayerFilter so a `~ or a Dragon`
 /// style disjunction composes uniformly.
 fn try_extract_event_damage_source_condition(
     lower: &str,
@@ -4454,7 +4454,7 @@ fn try_extract_event_damage_source_condition(
 /// CR 120.1 + CR 608.2i: Fold a "X or Y or ..." damage-source phrase into a
 /// single `TargetFilter` via `parse_target` + `merge_or_filters`. Mirrors
 /// `parse_source_chain_phrase` in `oracle_quantity.rs` (the
-/// `OpponentDealtCombatDamage { source }` builder) so source-restriction
+/// `OpponentDealtDamage { source }` builder) so source-restriction
 /// parsing stays consistent across the quantity and trigger-condition layers.
 fn parse_event_damage_source_chain(phrase: &str) -> TargetFilter {
     let (first, rest) = super::oracle_target::parse_target(phrase.trim());
@@ -11578,7 +11578,15 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     {
         def.valid_target = Some(TargetFilter::SourceChosenPlayer);
     }
-    if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
+    // CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
+    // names one unique step — the starting player's first upkeep — so the trigger
+    // fires exactly once. Modeled as OncePerGame: the source (a plane/scheme or
+    // other permanent present at game start) fires the first time its upkeep
+    // trigger is checked and never again. Checked before the "each turn" arm
+    // because "of the game" and "each turn" are mutually exclusive phrasings.
+    if scan_contains(phase_text, "first upkeep of the game") {
+        def.constraint = Some(TriggerConstraint::OncePerGame);
+    } else if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
         def.constraint = Some(TriggerConstraint::MaxTimesPerTurn { max: 1 });
     }
     // "each player's upkeep" / "each upkeep" / "the end step" → no constraint (fires every turn)
@@ -15115,6 +15123,180 @@ mod modal_spell_cast_trigger_tests {
         assert!(
             !valid_card_props(trigger.valid_card.as_ref()).contains(&FilterProp::Modal),
             "a plain 'you cast a spell' trigger must not gain FilterProp::Modal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ood_sphere_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        ContinuousModification, Duration, Effect, PlayerScope, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::{StaticMode, StaticModeKind};
+    use crate::types::TriggerMode;
+
+    const OOD_SPHERE_ORACLE: &str = "Song of the Ood \u{2014} Noncreature spells have convoke. (A player's creatures can help cast those spells. Each creature they tap while casting a noncreature spell pays for {1} or one mana of that creature's color.)\nRed-Eye \u{2014} Whenever chaos ensues, for each opponent, goad up to one target creature that opponent controls. Until your next turn, those creatures can't become tapped unless they're being declared as attackers.";
+
+    fn parse_ood_sphere() -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(
+            OOD_SPHERE_ORACLE,
+            "Ood Sphere",
+            &[],
+            &["Plane".into()],
+            &["Horsehead Nebula".into()],
+        )
+    }
+
+    fn effect_is_unimplemented(effect: &Effect) -> bool {
+        matches!(effect, Effect::Unimplemented { .. })
+    }
+
+    fn flatten_chain(def: &crate::types::ability::AbilityDefinition) -> Vec<&Effect> {
+        let mut out = Vec::new();
+        let mut node = Some(def);
+        while let Some(d) = node {
+            out.push(&*d.effect);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// Defect 1: the "Noncreature spells have convoke." static must be a functional
+    /// casting-keyword grant, not the runtime-inert anthem AddKeyword.
+    #[test]
+    fn song_of_the_ood_static_grants_cast_with_keyword_convoke() {
+        let parsed = parse_ood_sphere();
+        let statics = &parsed.statics;
+        assert_eq!(statics.len(), 1, "exactly one static: {statics:?}");
+        assert_eq!(
+            statics[0].mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Convoke
+            },
+            "must be CastWithKeyword, not anthem AddKeyword: {:?}",
+            statics[0]
+        );
+    }
+
+    /// Defect 2: the Red-Eye trigger's second sentence must lower to a real
+    /// "can't become tapped" continuous grant, NOT `Effect::Unimplemented`.
+    #[test]
+    fn red_eye_cant_become_tapped_sub_ability_grants_cant_tap_static() {
+        let parsed = parse_ood_sphere();
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::ChaosEnsues))
+            .expect("ChaosEnsues trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+
+        // Head effect is Goad.
+        assert!(
+            matches!(*execute.effect, Effect::Goad { .. }),
+            "head effect must be Goad, got {:?}",
+            execute.effect
+        );
+
+        // The sub-ability lowers the second sentence.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Red-Eye must carry a can't-become-tapped sub-ability");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*sub.effect
+        else {
+            panic!(
+                "sub-ability effect must be GenericEffect, got {:?}",
+                sub.effect
+            );
+        };
+        assert_eq!(
+            *target,
+            Some(TargetFilter::ParentTarget),
+            "GenericEffect must apply to the goaded creatures (ParentTarget)"
+        );
+        assert_eq!(
+            *duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            }),
+            "restriction lasts until the controller's next turn"
+        );
+        let inner: &StaticDefinition = static_abilities
+            .iter()
+            .find_map(|sd| {
+                sd.modifications.iter().find_map(|m| match m {
+                    ContinuousModification::GrantStaticAbility { definition } => {
+                        Some(&**definition)
+                    }
+                    _ => None,
+                })
+            })
+            .expect("GenericEffect must grant a static ability");
+        assert_eq!(
+            inner.mode,
+            StaticMode::CantTap,
+            "granted static must be CantTap, got {:?}",
+            inner.mode
+        );
+        assert_eq!(inner.mode.kind(), StaticModeKind::CantTap);
+    }
+
+    /// Full-card gate: zero `Unimplemented` across every ability, trigger, and
+    /// the trigger's sub-ability chain.
+    #[test]
+    fn ood_sphere_has_no_unimplemented() {
+        let parsed = parse_ood_sphere();
+        for ability in &parsed.abilities {
+            for effect in flatten_chain(ability) {
+                assert!(
+                    !effect_is_unimplemented(effect),
+                    "ability effect is Unimplemented: {effect:?}"
+                );
+            }
+        }
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_ref() {
+                for effect in flatten_chain(execute) {
+                    assert!(
+                        !effect_is_unimplemented(effect),
+                        "trigger effect is Unimplemented: {effect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Negative: only the declared-as-attackers exemption is captured. A
+    /// different "unless" rider must fall through to the strict-failure fallback.
+    #[test]
+    fn other_unless_rider_falls_through_to_unimplemented() {
+        // Reuse the parser via a synthetic trigger whose second sentence carries a
+        // non-attacker rider — it must remain Unimplemented (fail closed).
+        let parsed = parse_oracle_text(
+            "Whenever chaos ensues, goad up to one target creature. Until your next turn, those creatures can't become tapped unless you pay {2}.",
+            "Test Plane",
+            &[],
+            &["Plane".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::ChaosEnsues))
+            .expect("ChaosEnsues trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let has_unimplemented = flatten_chain(execute)
+            .iter()
+            .any(|e| effect_is_unimplemented(e));
+        assert!(
+            has_unimplemented,
+            "a non-attacker 'unless' rider must fail closed to Unimplemented, not be silently dropped"
         );
     }
 }

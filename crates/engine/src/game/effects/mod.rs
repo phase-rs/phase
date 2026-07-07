@@ -12,7 +12,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
@@ -147,6 +147,7 @@ pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
+pub mod opponent_guess;
 pub mod overload;
 pub mod pair_with;
 pub mod paradigm;
@@ -175,6 +176,7 @@ pub mod reveal_from_hand;
 pub mod reveal_hand;
 pub mod reveal_top;
 pub mod reveal_until;
+pub mod reverse_turn_order;
 pub mod ring;
 pub mod ripple;
 pub mod roll_die;
@@ -204,6 +206,7 @@ pub mod turn_face_up;
 mod spellbook_tests;
 pub mod surveil;
 pub mod suspect;
+pub mod swap_chosen_labels;
 pub mod switch_pt;
 pub mod tap_untap;
 pub mod time_travel;
@@ -351,12 +354,13 @@ pub(crate) fn matches_player_scope(
                     // intervening-if); it has no live effect-recipient meaning, so
                     // no player ever matches it as an effect target.
                     PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
-                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
-                    // who was dealt combat damage this turn, optionally
-                    // restricted to a matching source.
-                    PlayerFilter::OpponentDealtCombatDamage { source } => {
-                        crate::game::quantity::opponent_dealt_combat_damage_matches(
-                            state, p.id, controller, source, source_id,
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
+                    // CR 120.2a/120.2b: Each opponent who was dealt damage of the
+                    // given kind this turn, optionally restricted to a matching
+                    // source.
+                    PlayerFilter::OpponentDealtDamage { kind, source } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
+                            state, p.id, controller, *kind, source, source_id,
                         )
                     }
                     // CR 508.6: opponent the subject attacked within scope.
@@ -684,9 +688,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // re-pausing on a further per-target replacement choice.
     if !waits_for_resolution_choice(&state.waiting_for) {
         if let Some(cont) = state.pending_continuation.take() {
-            let PendingContinuation { chain, parent_kind } = cont;
+            let PendingContinuation {
+                chain,
+                parent_kind,
+                search_attach_host,
+            } = cont;
+            state.search_continuation_attach_host = search_attach_host;
             let source_id = chain.source_id;
             let _ = resolve_ability_chain(state, &chain, events, 1);
+            state.search_continuation_attach_host = None;
             if let Some(kind) = parent_kind {
                 events.push(GameEvent::EffectResolved { kind, source_id });
             }
@@ -850,6 +860,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             face_down_profile,
             library_placement,
             enters_modified_if,
+            enter_attached_to,
             effect_kind,
         } = pending;
         // CR 608.2c: the object that paused this iteration on a replacement CHOICE
@@ -914,6 +925,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // resume ctx so a resumed member is still gated on its type
                 // (Summoner's Grimoire), matching the synchronous move path.
                 enters_modified_if: enters_modified_if.clone(),
+                enter_attached_to,
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             match crate::game::effects::change_zone::process_one_zone_move(
@@ -966,6 +978,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 614.12: preserve the moved-object type gate
                             // across a further pause.
                             enters_modified_if: ctx.enters_modified_if.clone(),
+                            enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         });
                     paused = true;
@@ -996,6 +1009,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 614.12: preserve the moved-object type gate
                             // across a further pause.
                             enters_modified_if: ctx.enters_modified_if.clone(),
+                            enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         });
                     // CR 608.2c: a further member paused mid-move on a replacement
@@ -1190,11 +1204,16 @@ pub(crate) fn append_to_pending_continuation(
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
     if let Some(existing) = state.pending_continuation.take() {
-        let PendingContinuation { chain, parent_kind } = existing;
+        let PendingContinuation {
+            chain,
+            parent_kind,
+            search_attach_host,
+        } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.pending_continuation = Some(PendingContinuation {
             chain: Box::new(head),
             parent_kind,
+            search_attach_host,
         });
     } else {
         state.pending_continuation = Some(PendingContinuation::new(Box::new(head)));
@@ -1451,6 +1470,7 @@ fn revealed_object_context_from_events(
 fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapshot {
     LKISnapshot {
         name: record.name.clone(),
+        token_image_ref: None,
         power: record.power,
         toughness: record.toughness,
         // CR 208.4b + CR 613.4b: Carry the layer-7b base values from the
@@ -1892,6 +1912,12 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::NamedChoice { .. }
+            // CR 608.2d + CR 608.2e: an opponent's guess is a deferred outcome —
+            // the answer arrives via a `WaitingFor` round-trip, so the
+            // `Guessed`-gated branch chain must auto-stash here and re-evaluate on
+            // drain once the outcome is stamped (the same deferred pattern as
+            // `NamedChoice` / Scry "If you do, Y").
+            | WaitingFor::OpponentGuess { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::MultiTargetSelection { .. }
             | WaitingFor::ReplacementChoice { .. }
@@ -2378,7 +2404,12 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. }
             | AbilityCondition::EffectOutcome {
-                signal: EffectOutcomeSignal::CurrentScopeSucceeded,
+                signal:
+                    EffectOutcomeSignal::CurrentScopeSucceeded
+                    // CR 608.2d: a `Guessed` gate is a positive guess-outcome
+                    // branch, not an optional-decline alternative — declining an
+                    // optional effect never selects it.
+                    | EffectOutcomeSignal::Guessed { .. },
             },
         ) => false,
     }
@@ -3166,6 +3197,8 @@ pub fn resolve_effect(
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
+        Effect::OpponentGuess { .. } => opponent_guess::resolve(state, ability, events),
+        Effect::SwapChosenLabels { .. } => swap_chosen_labels::resolve(state, ability, events),
         Effect::ChooseCounterKind { .. } => choose_counter_kind::resolve(state, ability, events),
         Effect::PutChosenCounter { .. } => put_chosen_counter::resolve(state, ability, events),
         Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
@@ -3334,6 +3367,7 @@ pub fn resolve_effect(
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
         Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
+        Effect::ReverseTurnOrder => reverse_turn_order::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
             attractions::resolve(state, ability, events)
         }
@@ -3471,7 +3505,16 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         Effect::ChangeSpeed { amount, .. } => quantity_hits_tracked(amount),
         Effect::PutCounter { count, .. } => quantity_hits_tracked(count),
         Effect::PutCounterAll { count, .. } => quantity_hits_tracked(count),
-        Effect::Token { count, .. } => quantity_hits_tracked(count),
+        Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } => {
+            quantity_hits_tracked(count)
+                || pt_value_references_tracked_set(power)
+                || pt_value_references_tracked_set(toughness)
+        }
         _ => false,
     };
     if has_quantity_hit {
@@ -3550,6 +3593,13 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     false
 }
 
+fn pt_value_references_tracked_set(value: &PtValue) -> bool {
+    match value {
+        PtValue::Fixed(_) | PtValue::Variable(_) => false,
+        PtValue::Quantity(expr) => quantity_expr_references_tracked_set(expr),
+    }
+}
+
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
@@ -3561,6 +3611,10 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
                     | QuantityRef::TrackedSetAggregate { .. }
                     | QuantityRef::DistinctCardTypes {
                         source: CardTypeSetSource::TrackedSet { .. }
+                    }
+                    | QuantityRef::DistinctSubtypes {
+                        source: CardTypeSetSource::TrackedSet { .. },
+                        ..
                     }
             )
         }
@@ -3651,11 +3705,12 @@ fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bo
 ///     name a "<verb>ed this way" set; they carry no cause and are consumed only
 ///     by `caused_by: None` (selection-set) downstream references.
 fn affected_objects_with_causes(
+    state: &GameState,
+    ability: &ResolvedAbility,
     effect: &Effect,
     events: &[GameEvent],
-    fallback_targets: &[TargetRef],
 ) -> Vec<(ObjectId, Option<ThisWayCause>)> {
-    let ids = affected_objects_from_events(effect, events, fallback_targets);
+    let ids = affected_objects_from_events(state, ability, effect, events);
     // CR 608.2c: the cause is a property of the EFFECT being resolved, not of any
     // individual member's event — so every member of this publish shares one
     // cause. `None` for producers that do not name a "this way" verb (reveals,
@@ -3692,6 +3747,10 @@ fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
         // CR 611.2c: mass-bounce destination defaults to Hand.
         Effect::BounceAll { destination, .. } => cause_for_zone(destination.unwrap_or(Zone::Hand)),
         Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => Some(ThisWayCause::Exiled),
+        // CR 608.2c: a coercion (mass MustAttack) names no "<verb>ed this way" set —
+        // "those creatures" is a bare frozen population, so its members carry no
+        // cause and are matched only by the punisher's `caused_by: None`.
+        Effect::GenericEffect { .. } => None,
         // Reveals, taps, counter producers, the RevealUntil kept card, and any
         // other producer do not name a "<verb>ed this way" set — leave them
         // unstamped (matched only by `caused_by: None`).
@@ -3700,11 +3759,60 @@ fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
 }
 
 fn affected_objects_from_events(
+    state: &GameState,
+    ability: &ResolvedAbility,
     effect: &Effect,
     events: &[GameEvent],
-    fallback_targets: &[TargetRef],
 ) -> Vec<ObjectId> {
+    let fallback_targets = ability.targets.as_slice();
     match effect {
+        // CR 508.1a + CR 608.2c + CR 603.7c: A mass "attack this turn if able"
+        // coercion (Maddening Imp's `{T}` `GenericEffect{MustAttack}`) moves no
+        // objects and emits NO object-affecting event, so — unlike every other arm
+        // here — its affected population is FILTER-driven: re-enumerate the
+        // battlefield by the governing filter at resolution time. The publish site
+        // runs on the identical post-resolution board state, so this yields exactly
+        // the resolution-time population that "those creatures" freezes. Mirrors
+        // the broadcast-static binding in `effect.rs` (`Some(filter)` arm).
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => {
+            // Select the first coercion static (matching `is_mass_coerce_static`).
+            let Some(static_def) = static_abilities.iter().find(|sd| {
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustAttack
+                        | crate::types::statics::StaticMode::MustAttackPlayer { .. }
+                )
+            }) else {
+                return Vec::new();
+            };
+            let Some(governing) = effect::generic_effect_application_filter(
+                target.as_ref(),
+                static_def.affected.as_ref(),
+            ) else {
+                return Vec::new();
+            };
+            // CR 608.2c: an inherited-reference affected filter (ParentTarget /
+            // CostPaidObject / TriggeringSource) names a specific object, not a
+            // broadcast population — it must NOT be enumerated. Mirrors the
+            // early-return in `effect.rs`.
+            if effect::generic_effect_affected_uses_inherited_targets(governing) {
+                return Vec::new();
+            }
+            let filter = resolved_object_filter(ability, governing);
+            let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
+            // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+            let ctx = filter::FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .filter(|obj_id| filter::matches_target_filter(state, **obj_id, &filter, &ctx))
+                .copied()
+                .collect()
+        }
         Effect::GainControl { .. } => fallback_targets
             .iter()
             .filter_map(|target| match target {
@@ -6009,9 +6117,10 @@ fn resolve_chain_body(
         let affected_with_causes =
             if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile {
                 affected_objects_with_causes(
+                    state,
+                    &scoped_template,
                     &scoped_template.effect,
                     scoped_events,
-                    &scoped_template.targets,
                 )
             } else {
                 Vec::new()
@@ -6856,11 +6965,8 @@ fn resolve_chain_body(
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
     if next_sub_needs_tracked_set(ability) {
-        let affected_with_causes = affected_objects_with_causes(
-            &ability.effect,
-            &events[events_before..],
-            &ability.targets,
-        );
+        let affected_with_causes =
+            affected_objects_with_causes(state, ability, &ability.effect, &events[events_before..]);
         publish_tracked_set_with_causes(state, affected_with_causes);
     }
 
@@ -7910,6 +8016,14 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::CurrentScopeSucceeded,
         } => !state.cost_payment_failed_flag,
+        // CR 608.2d: "if they guessed right/wrong" reads the just-resolved
+        // `Effect::OpponentGuess` outcome (a choice made by a player during
+        // resolution, processed in written order per CR 608.2c). CR 609.3: when
+        // no guess happened (impossible commit / empty hand) `guess_outcome` is
+        // `None`, so BOTH polarities are false and NEITHER rider fires.
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::Guessed { outcome },
+        } => ability.context.guess_outcome == Some(*outcome),
         AbilityCondition::EventOutcomeWon => state
             .current_trigger_event
             .as_ref()
@@ -8545,7 +8659,7 @@ fn scoped_player_matches_filter(
         // game/triggers.rs:3703-3723).
         PlayerFilter::DefendingPlayer
         | PlayerFilter::HasLostTheGame
-        | PlayerFilter::OpponentDealtCombatDamage { .. }
+        | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::HighestSpeed
@@ -9271,6 +9385,7 @@ mod tests {
             source,
             LKISnapshot {
                 name: "Choice Source".to_string(),
+                token_image_ref: None,
                 power: None,
                 toughness: None,
                 base_power: None,
@@ -9484,6 +9599,43 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    #[test]
+    fn token_power_toughness_tracked_set_marks_ability_as_referencing_tracked_set() {
+        let tracked_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::Power,
+                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            },
+        });
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Zombie".to_string(),
+                power: tracked_pt.clone(),
+                toughness: tracked_pt,
+                types: vec!["Creature".to_string(), "Zombie".to_string()],
+                colors: vec![ManaColor::Blue],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "token P/T TrackedSetAggregate must publish the chain tracked set"
         );
     }
 
@@ -11503,6 +11655,7 @@ mod tests {
             sacrificed,
             crate::types::game_state::LKISnapshot {
                 name: "Sacrificed".to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -12908,9 +13061,13 @@ mod tests {
             player: TargetFilter::Controller,
             count: 2,
         };
+        // The RevealTop arm is event-driven; `state`/`ability` are ignored (only
+        // the GenericEffect arm reads them). Pass a minimal ability with no targets
+        // — the previous `&[]` fallback_targets.
+        let ability = ResolvedAbility::new(effect.clone(), vec![], ObjectId(0), PlayerId(0));
 
         assert_eq!(
-            affected_objects_from_events(&effect, &events, &[]),
+            affected_objects_from_events(&state, &ability, &effect, &events),
             vec![top, second]
         );
     }
@@ -12958,9 +13115,13 @@ mod tests {
             kept_optional_to: None,
             enters_under: None,
         };
+        // The RevealUntil arm is event-driven; `state`/`ability` are ignored (only
+        // the GenericEffect arm reads them). Minimal state + empty-target ability.
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(effect.clone(), vec![], ObjectId(0), PlayerId(0));
 
         assert_eq!(
-            affected_objects_from_events(&effect, &events, &[]),
+            affected_objects_from_events(&state, &ability, &effect, &events),
             vec![hit]
         );
     }

@@ -17,7 +17,7 @@ use super::ability::{
     TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
-use super::card::CardFace;
+use super::card::{CardFace, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
@@ -26,7 +26,7 @@ use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
-use super::phase::{Phase, PhaseStop};
+use super::phase::{Phase, PhaseStop, TurnDirection};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
 use super::replacements::ReplacementEvent;
@@ -196,6 +196,11 @@ pub struct CombatPhaseSkipState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LKISnapshot {
     pub name: String,
+    /// Display-only token catalog ref as it last existed in the public zone.
+    /// Preserved so stack entries from dead token sources can render the exact
+    /// token image without falling back to name-based lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     /// CR 208.4b + CR 613.4b: Base power as it last existed in the public zone
@@ -985,6 +990,9 @@ pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_kind: Option<EffectKind>,
+    /// CR 303.4f: Attach host captured before SearchChoice overwrites parent targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_attach_host: Option<AttachTarget>,
 }
 
 impl PendingContinuation {
@@ -995,6 +1003,7 @@ impl PendingContinuation {
         Self {
             chain,
             parent_kind: None,
+            search_attach_host: None,
         }
     }
 
@@ -1006,6 +1015,7 @@ impl PendingContinuation {
         Self {
             chain,
             parent_kind: Some(parent_kind),
+            search_attach_host: None,
         }
     }
 }
@@ -1196,6 +1206,9 @@ pub struct PendingChangeZoneIteration {
     /// carry-through pattern on this same struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_modified_if: Option<crate::types::ability::TargetFilter>,
+    /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enter_attached_to: Option<AttachTarget>,
     pub effect_kind: crate::types::ability::EffectKind,
 }
 
@@ -2851,6 +2864,13 @@ pub enum AlternativeCastKeyword {
     /// — the spell resolves normally; the prowl provenance is recorded so "if
     /// its prowl cost was paid" intervening-ifs (Latchkey Faerie) can read it.
     Prowl,
+    /// CR 702.37c (Morph) / CR 702.168b (Disguise): Cast the card face down as a
+    /// 2/2 face-down creature spell for a fixed {3} (CR 601.2b alternative cost)
+    /// rather than its mana cost. Offered from hand for any card with Morph,
+    /// Megamorph, or Disguise; the resulting spell is blanked before it is put on
+    /// the stack (CR 708.4) and resolves to a face-down permanent. Maps to
+    /// `CastingVariant::FaceDown`.
+    FaceDown,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -3759,6 +3779,37 @@ pub enum WaitingFor {
         /// their value there; transient prompts use this as source context.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
+        /// CR 607.2d / CR 607.2m (by analogy): when set, this choice's answer is a
+        /// PER-PLAYER persistent anchor label — the answer binds
+        /// `ChosenAttribute::Label` onto `state.players[persist_player]`
+        /// (`chosen_attributes`) instead of onto `source_id`'s object. Set during
+        /// a `player_scope: All` fan-out of a persisting `Effect::Choose` to the
+        /// fanned per-player value (`ability.scoped_player`). `None` preserves the
+        /// object-scoped binding used by Khans Sieges and every other named choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persist_player: Option<PlayerId>,
+    },
+    /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
+    /// the defending player) guesses a committed value or proposition during
+    /// resolution of an `Effect::OpponentGuess`. `player` is the guesser;
+    /// `source_id` lets the answer handler derive the controller and read the
+    /// committed `ChosenAttribute::Number`. This wait is a member of
+    /// `waits_for_resolution_choice` — the branch chain is auto-stashed onto
+    /// `pending_continuation` and re-evaluated on drain once the outcome is known
+    /// (the deferred "If you do" / `NamedChoice` resolution pattern).
+    OpponentGuess {
+        player: PlayerId,
+        options: Vec<String>,
+        choice_type: ChoiceType,
+        source_id: ObjectId,
+        /// CR 608.2d: For a `GuessSubject::Proposition`, the proposition's truth
+        /// resolved at the moment the guess was raised (when the resolving
+        /// ability's targets are still in scope). The answer handler compares the
+        /// guesser's chosen label against this to decide correctness. `None` for
+        /// `GuessSubject::CommittedChoice`, whose correctness is read from the
+        /// source's last committed `ChosenAttribute::Number` at answer time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposition_truth: Option<bool>,
     },
     /// Alchemy "draft a card from [card]'s spellbook": `player` chooses one card
     /// name from `options` (the source card's spellbook list); the chosen card is
@@ -4929,6 +4980,7 @@ impl WaitingFor {
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
             WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
@@ -5069,6 +5121,7 @@ impl WaitingFor {
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
             | WaitingFor::NamedChoice { player, .. }
+            | WaitingFor::OpponentGuess { player, .. }
             | WaitingFor::SpellbookDraft { player, .. }
             | WaitingFor::DamageSourceChoice { player, .. }
             | WaitingFor::ModeChoice { player, .. }
@@ -5803,6 +5856,24 @@ pub enum CastingVariant {
     /// the caster has cast another spell this turn. Resolution is normal (no
     /// exile/restore), so it appears only in `uses_alternative_cost`.
     Surge,
+    /// CR 708.4 + CR 702.37c (Morph) / CR 702.168b (Disguise): Cast a card face
+    /// down as a 2/2 face-down creature spell by paying a fixed {3} (an
+    /// alternative cost, CR 601.2b) rather than its mana cost. Morph, Megamorph,
+    /// and Disguise all cast identically this way — the only differences (ward {2}
+    /// for Disguise per CR 702.168a; the turn-face-up cost) are read downstream
+    /// from the hidden real card's keyword, so this variant is parameterless.
+    ///
+    /// Runtime: `casting::continue_cast_face_down` blanks the object to its
+    /// face-down 2/2 (stashing the real card in `back_face`) BEFORE it is put on
+    /// the stack (CR 708.4), so the whole downstream face-down machinery is
+    /// inherited: `visibility` redacts the stack spell to opponents, the object
+    /// resolves onto the battlefield still face down (CR 702.37c), and
+    /// `GameAction::TurnFaceUp` (CR 702.37e) flips it. The face-down spell is an
+    /// alternative cast (appears in `uses_alternative_cost`); it neither exiles
+    /// on resolution nor restores a front face (the object simply stays face down),
+    /// but CR 708.9 reveal-on-leave-stack is handled by the shared
+    /// `apply_zone_exit_cleanup`, so it needs no `restores_front_face_after_stack_exit`.
+    FaceDown,
 }
 
 impl CastingVariant {
@@ -5859,6 +5930,10 @@ impl CastingVariant {
             | CastingVariant::Prowl
             // CR 702.117a: Surge substitutes the surge cost for the printed cost.
             | CastingVariant::Surge
+            // CR 601.2b + CR 702.37c / CR 702.168b: casting face down pays a fixed
+            // {3} rather than the printed mana cost — an alternative cost, so only
+            // one alternative casting method may apply (CR 118.9a).
+            | CastingVariant::FaceDown
             | CastingVariant::Freerunning => true,
             CastingVariant::Normal
             | CastingVariant::Adventure
@@ -6687,6 +6762,22 @@ pub struct GameState {
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
+    /// CR 500.8 + CR 501.1: LIFO stack of anchor phases for inserted beginning
+    /// phases (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus)
+    /// currently in progress. When such a phase's draw step ends, the turn
+    /// resumes at the anchor's natural successor (or runs the next queued
+    /// beginning phase for the same anchor) rather than at the draw step's
+    /// default successor. Empty outside inserted beginning phases.
+    /// `#[serde(default)]` so saved games load unchanged.
+    #[serde(default)]
+    pub extra_phase_resume: Vec<Phase>,
+
+    /// CR 103.1: The current turn-order direction. Durable — persists across
+    /// turns until an effect reverses it again. Default `Normal` is the game's
+    /// clockwise turn order (CR 103.1). `#[serde(default)]` for save compat.
+    #[serde(default)]
+    pub turn_direction: TurnDirection,
+
     /// CR 508.1c + CR 506.1: When the current combat phase was scheduled with an
     /// attacker restriction (Last Night Together / Bumi), only creatures matching
     /// this filter may be declared as attackers. Set on entering that
@@ -7237,6 +7328,10 @@ pub struct GameState {
     // fires at the tail of its resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_continuation: Option<PendingContinuation>,
+
+    /// CR 303.4f: Attach host captured before SearchChoice replaces parent targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_continuation_attach_host: Option<AttachTarget>,
 
     /// CR 609.3 + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
     /// because the inner effect entered an interactive `WaitingFor` state.
@@ -8476,6 +8571,8 @@ impl GameState {
             ],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
+            extra_phase_resume: Vec::new(),
+            turn_direction: TurnDirection::Normal,
             current_combat_attacker_restriction: None,
             current_combat_attacker_restriction_source: None,
             seat_order,
@@ -8561,6 +8658,7 @@ impl GameState {
             revealed_cards: HashSet::new(),
             public_revealed_cards: HashSet::new(),
             pending_continuation: None,
+            search_continuation_attach_host: None,
             pending_repeat_iteration: None,
             pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
@@ -9117,6 +9215,8 @@ impl PartialEq for GameState {
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
+            && self.extra_phase_resume == other.extra_phase_resume
+            && self.turn_direction == other.turn_direction
             && self.current_combat_attacker_restriction
                 == other.current_combat_attacker_restriction
             && self.current_combat_attacker_restriction_source
@@ -10608,6 +10708,7 @@ mod tests {
             library_placement: None,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             enters_modified_if: None,
+            enter_attached_to: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

@@ -6,7 +6,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, rest, value};
 use nom::Parser;
 
-use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
@@ -585,6 +585,8 @@ fn parse_token_description_with_context(
             );
         }
     }
+    bind_bare_token_x_pt_to_cost_x(&mut power);
+    bind_bare_token_x_pt_to_cost_x(&mut toughness);
 
     if let Some(count_expression) = extract_token_count_expression(suffix) {
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
@@ -669,7 +671,16 @@ fn parse_token_description_with_context(
 
     let is_creature = types.iter().any(|token_type| token_type == "Creature");
     if is_creature && (power.is_none() || toughness.is_none()) {
-        return None;
+        if let Some(TokenPtFollowup::PowerToughness {
+            power: followup_power,
+            toughness: followup_toughness,
+        }) = &ctx.token_pt_followup
+        {
+            power = Some(followup_power.clone());
+            toughness = Some(followup_toughness.clone());
+        } else {
+            return None;
+        }
     }
 
     // Extract quoted static abilities: `and "This token can't block."` / `"~ can't block."`
@@ -689,6 +700,19 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
     })
+}
+
+fn bind_bare_token_x_pt_to_cost_x(value: &mut Option<PtValue>) {
+    // CR 107.3a + CR 107.3i + CR 111.3: a bare X in token P/T shares the
+    // spell or ability's chosen X unless an explicit "where X is" clause
+    // already rebound it above.
+    if matches!(value, Some(PtValue::Variable(alias)) if alias == "X") {
+        *value = Some(PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }));
+    }
 }
 
 fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
@@ -1423,6 +1447,200 @@ mod tests {
         );
         assert_eq!(colors, vec![ManaColor::Green]);
         assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+    }
+
+    #[test]
+    fn bare_x_x_token_pt_lowers_to_cost_x_quantity_shape() {
+        let txt = "Create an X/X green Ooze creature token.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            types,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "bare X power must bind to cost X"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "bare X toughness must bind to cost X"
+        );
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Ooze"),
+            "types must include Creature and Ooze, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn variable_count_and_bare_x_x_token_pt_share_cost_x_shape() {
+        let txt = "Create X X/X green Ooze creature tokens.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            types,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(count, expected_x.clone(), "token count must bind to cost X");
+        let expected_pt = PtValue::Quantity(expected_x);
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "bare X power must bind to cost X"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "bare X toughness must bind to cost X"
+        );
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Ooze"),
+            "types must include Creature and Ooze, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn where_x_token_pt_keeps_explicit_greatest_power_quantity_shape() {
+        let txt = "Create an X/X green Ooze creature token, where X is the greatest power among creatures you control.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power, toughness, ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected = crate::parser::oracle_quantity::parse_cda_quantity(
+            "the greatest power among creatures you control",
+        )
+        .expect("greatest-power quantity must parse");
+        let expected_pt = PtValue::Quantity(expected);
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "where-X power must keep the explicit greatest-power quantity"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "where-X toughness must keep the explicit greatest-power quantity"
+        );
+    }
+
+    #[test]
+    fn where_x_token_pt_covers_known_ooze_source_expressions() {
+        let cases = [
+            (
+                "Create an X/X green Ooze creature token, where X is that spell's mana value.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is the number of +1/+1 counters removed this way.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is the sacrificed creature's power.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is this card's power.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            ),
+        ];
+
+        for (txt, expected) in cases {
+            let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("expected Token effect for {txt:?}"));
+            let Effect::Token {
+                power, toughness, ..
+            } = effect
+            else {
+                panic!("expected Effect::Token, got {effect:?}");
+            };
+            let expected_pt = PtValue::Quantity(expected);
+            assert_eq!(
+                power,
+                expected_pt.clone(),
+                "where-X power must bind for {txt:?}"
+            );
+            assert_eq!(
+                toughness, expected_pt,
+                "where-X toughness must bind for {txt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_x_token_pt_covers_cards_exiled_this_way_aggregate() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty, TrackedAnaphorSource};
+
+        let txt = "Create an X/X blue Zombie creature token, where X is the total power of the cards exiled this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Stitcher Geralf token effect");
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: TrackedAnaphorSource::ChainSet,
+            },
+        });
+        assert_eq!(name, "Zombie");
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Zombie"),
+            "types must include Creature and Zombie, got {types:?}"
+        );
+        assert_eq!(colors, vec![ManaColor::Blue]);
+        assert_eq!(power, expected_pt.clone());
+        assert_eq!(toughness, expected_pt);
     }
 
     #[test]
@@ -2611,6 +2829,68 @@ mod tests {
         assert_eq!(power, PtValue::Fixed(2));
         assert_eq!(toughness, PtValue::Fixed(2));
         assert_eq!(colors, vec![ManaColor::White]);
+    }
+
+    #[test]
+    fn source_defined_named_creature_token_lookup_does_not_invent_fixed_pt() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create a 7/7 Ooze token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Slime Molding".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("source-defined named Ooze token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(name, "Ooze");
+        assert!(types.contains(&"Creature".to_string()));
+        assert!(types.contains(&"Ooze".to_string()));
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(power, PtValue::Fixed(7));
+        assert_eq!(toughness, PtValue::Fixed(7));
+    }
+
+    #[test]
+    fn fixed_source_scoped_named_creature_token_still_fills_omitted_pt() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create an Ooze token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Rot Like the Scum You Are".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("fixed source-scoped Ooze token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(name, "Ooze");
+        assert!(types.contains(&"Creature".to_string()));
+        assert!(types.contains(&"Ooze".to_string()));
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(power, PtValue::Fixed(2));
+        assert_eq!(toughness, PtValue::Fixed(2));
     }
 
     /// CR 111.1 + CR 111.4 + CR 208.1: ordinary subtype display names are not

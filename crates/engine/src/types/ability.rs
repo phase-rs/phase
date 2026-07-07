@@ -296,6 +296,20 @@ pub enum OpponentMayScope {
     AnyPlayer,
 }
 
+/// CR 609.3 + CR 608.2d: whether a "choose a number" domain must exclude numbers
+/// already committed on this source ("...that hasn't been chosen"), or repeats
+/// are legal. Parse-detected; static; serialized only when non-default so the
+/// existing `NumberRange` card-data stays byte-stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NumberDistinctness {
+    /// The default for the entire existing `NumberRange` pool — repeats allowed.
+    #[default]
+    Repeatable,
+    /// Each commit must differ from every prior `ChosenAttribute::Number` on the
+    /// source (The Toymaker's Trap "a number ... that hasn't been chosen").
+    DistinctFromSourceHistory,
+}
+
 /// What kind of named choice the player must make at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
@@ -329,6 +343,9 @@ pub enum ChoiceType {
     NumberRange {
         min: u8,
         max: u8,
+        /// CR 609.3: distinctness requirement, parse-detected from "that hasn't
+        /// been chosen". Default `Repeatable` for every existing card.
+        distinctness: NumberDistinctness,
     },
     /// "Choose left or right", "choose fame or fortune" — options come from the parser.
     Labeled {
@@ -564,11 +581,25 @@ impl Serialize for ChoiceType {
                 }
             }
             Self::CardName => serializer.serialize_unit_variant("ChoiceType", 5, "CardName"),
-            Self::NumberRange { min, max } => {
-                let mut variant =
-                    serializer.serialize_struct_variant("ChoiceType", 6, "NumberRange", 2)?;
+            Self::NumberRange {
+                min,
+                max,
+                distinctness,
+            } => {
+                // Emit `distinctness` only when non-default so existing
+                // `{min,max}` card-data stays byte-stable.
+                let field_count = 2 + (*distinctness != NumberDistinctness::Repeatable) as usize;
+                let mut variant = serializer.serialize_struct_variant(
+                    "ChoiceType",
+                    6,
+                    "NumberRange",
+                    field_count,
+                )?;
                 variant.serialize_field("min", min)?;
                 variant.serialize_field("max", max)?;
+                if *distinctness != NumberDistinctness::Repeatable {
+                    variant.serialize_field("distinctness", distinctness)?;
+                }
                 variant.end()
             }
             Self::Labeled { options } => {
@@ -668,6 +699,8 @@ impl<'de> Deserialize<'de> for ChoiceType {
             NumberRange {
                 min: u8,
                 max: u8,
+                #[serde(default)]
+                distinctness: NumberDistinctness,
             },
             Labeled {
                 options: Vec<String>,
@@ -734,7 +767,15 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
-                ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
+                ChoiceTypeData::NumberRange {
+                    min,
+                    max,
+                    distinctness,
+                } => Ok(Self::NumberRange {
+                    min,
+                    max,
+                    distinctness,
+                }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
                 ChoiceTypeData::CardPredicate { options } => Ok(Self::CardPredicate { options }),
                 ChoiceTypeData::CardPredicateGuess { options } => {
@@ -1090,7 +1131,11 @@ impl ChosenAttribute {
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
             Self::CardName(_) => ChoiceType::CardName,
-            Self::Number(_) => ChoiceType::NumberRange { min: 0, max: 20 },
+            Self::Number(_) => ChoiceType::NumberRange {
+                min: 0,
+                max: 20,
+                distinctness: NumberDistinctness::Repeatable,
+            },
             // Player covers both Player and Opponent choice types
             Self::Player(_) => ChoiceType::Player,
             Self::TwoColors(_) => ChoiceType::TwoColors,
@@ -2007,22 +2052,14 @@ pub enum ManaSpendRestriction {
     /// The runtime gate reads `SpellMeta.is_face_down`, sourced from the cast's
     /// face-down intent (`build_spell_meta`) rather than `obj.face_down`, so it
     /// correctly REJECTS exile-concealment casts (foretell/hideaway) whose
-    /// `obj.face_down = true` but which are cast face up (CR 702.143c). It is also
-    /// fail-closed: no production path casts a face-down spell *through spell
-    /// payment* in this engine — CR 708.4 face-down play
-    /// (`GameAction::PlayFaceDown` → `game::morph::play_face_down`) enters the
-    /// battlefield via the zone pipeline and charges no mana (the `{3}` face-down
-    /// cast cost, CR 702.37c, is not yet implemented), so `SpellMeta.is_face_down`
-    /// is never `true` at a payment site and the gate never over-permits. The
-    /// variant exists so the restriction stays representable as a typed value even
-    /// though this leaf is dead today: the parser still recognizes the shape, but a
-    /// card whose spend restriction includes this leaf is left unabsorbed at the
-    /// `Effect::Mana` seam and intentionally surfaces an `Effect::Unimplemented`
-    /// gap (honest coverage red) via
-    /// `ManaSpendRestriction::is_coverage_supported`.
-    /// Once a real face-down CAST routes its
-    /// `{3}` cost through `PaymentContext::Spell` the gate becomes live with no
-    /// type change. See
+    /// `obj.face_down = true` but which are cast face up (CR 702.143c). This leaf
+    /// is now production-live: CR 708.4 morph/megamorph/disguise face-down spell
+    /// casting (`AlternativeCastKeyword::FaceDown` → `continue_cast_face_down`)
+    /// routes the `{3}` face-down cost (CR 702.37c) through `PaymentContext::Spell`
+    /// with `SpellMeta.is_face_down = true`, so the gate is satisfiable and a card
+    /// whose spend restriction includes this leaf is absorbed at the `Effect::Mana`
+    /// seam and coverage-supported via `ManaSpendRestriction::is_coverage_supported`.
+    /// See
     /// [`ManaRestriction::OnlyForFaceDownSpell`](super::mana::ManaRestriction::OnlyForFaceDownSpell).
     FaceDownSpell,
     /// CR 106.6 + CR 116.2b + CR 702.37e: "Spend this mana only to turn
@@ -2052,12 +2089,12 @@ impl ManaSpendRestriction {
     /// the parser seam (see `parser::oracle_effect::sequence`), so the surrounding
     /// `Effect::Mana` line keeps a residual `Effect::Unimplemented` — honest
     /// coverage **red** — rather than marking a card supported while one branch it
-    /// names is not production-live. (Dead example today: `FaceDownSpell` — no
-    /// production path casts a spell *through spell payment* face down, so
-    /// `SpellMeta.is_face_down` is never `true` at a payment site. The
-    /// turn-face-up leaf is live via the paid `GameAction::TurnFaceUp` special
-    /// action, but an `Any([FaceDownSpell, TurnPermanentFaceUp])` still remains
-    /// coverage-red until face-down spell casting exists.)
+    /// names is not production-live. As of CR 708.4 face-down spell casting,
+    /// every named leaf is production-live: `FaceDownSpell` was the last dead
+    /// leaf, now satisfiable at a `PaymentContext::Spell` site, so the only
+    /// coverage-red result left is a structurally-empty `Any([])` (no branch to
+    /// support). An `Any([FaceDownSpell, TurnPermanentFaceUp])` (Tin Street
+    /// Gossip) is therefore coverage-supported.
     ///
     /// Any `grants` paired with an unsupported restriction drop with it. This is
     /// intentional: no real card pairs a mana-spell grant with a restriction that
@@ -2071,10 +2108,11 @@ impl ManaSpendRestriction {
         match self {
             // LIVE — production coverage exists via `SpellMeta.has_x_in_cost`.
             ManaSpendRestriction::XCostOnly => true,
-            // CR 708.4: gate is `meta.is_face_down`, which `build_spell_meta` never
-            // sets `true` at a payment site (no production path casts a spell face
-            // down *through spell payment*), so coverage must remain red.
-            ManaSpendRestriction::FaceDownSpell => false,
+            // CR 708.4: gate is `meta.is_face_down`, which `build_spell_meta` now
+            // sets `true` at a `PaymentContext::Spell` site for a morph/megamorph/
+            // disguise face-down cast (`AlternativeCastKeyword::FaceDown` →
+            // `continue_cast_face_down`, CR 702.37c), so the leaf is production-live.
+            ManaSpendRestriction::FaceDownSpell => true,
             // LIVE — production-live leaves with parser/runtime coverage.
             // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: lowered to
             // `OnlyForSpecialAction(SpecialAction::TurnFaceUp)`, now satisfiable —
@@ -2095,9 +2133,9 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellFromZone(_)
             | ManaSpendRestriction::UnlockDoor => true,
             // CR 106.6: coverage for a disjunction requires every named branch to
-            // be production-live. Partial absorption would drop unsupported
-            // branches from coverage accounting, so mixed Tin Street-style `Any`
-            // remains red until `FaceDownSpell` is supported.
+            // be production-live (`.all()`). Partial absorption would drop
+            // unsupported branches from coverage accounting. With `FaceDownSpell`
+            // now live, only a structurally-empty `Any([])` is coverage-red.
             ManaSpendRestriction::Any(subs) => {
                 !subs.is_empty() && subs.iter().all(ManaSpendRestriction::is_coverage_supported)
             }
@@ -2177,6 +2215,20 @@ pub enum GameRestriction {
         affected_players: RestrictionPlayerScope,
         expiry: RestrictionExpiry,
         activity: ProhibitedActivity,
+    },
+    /// CR 611.2a + CR 614.1d: A resolution-generated continuous effect prohibiting
+    /// objects matching `filter` from entering the battlefield until `expiry`.
+    /// The floating, duration-bound form of `StaticMode::CantEnterBattlefieldFrom`
+    /// (Grafdigger's Cage) — e.g. Bad Wolf Bay: "cards can't enter from exile this
+    /// turn." `filter` encodes both the subject (type) and the origin zone via
+    /// `FilterProp::InAnyZone`, matched against the object's current zone at the
+    /// zones.rs entry gate (the object is still in its origin zone when the gate
+    /// runs). `source` is informational (CR 611.2a: the effect is source-
+    /// independent once created).
+    CantEnterBattlefieldFrom {
+        source: ObjectId,
+        expiry: RestrictionExpiry,
+        filter: TargetFilter,
     },
 }
 
@@ -2985,6 +3037,16 @@ fn is_total_damage_channel(channel: &DamageChannel) -> bool {
     matches!(channel, DamageChannel::Total)
 }
 
+/// CR 120.2a: Back-compat serde default for `PlayerFilter::OpponentDealtDamage`'s
+/// `kind` field. Legacy data serialized before the field existed encoded the
+/// former `OpponentDealtCombatDamage` variant (combat-only semantics), so an
+/// absent `kind` must deserialize to `CombatOnly` — NOT `DamageKindFilter`'s own
+/// `Any` default, which would silently broaden the filter to noncombat damage
+/// too and misresolve reloaded games/scenarios.
+fn damage_kind_combat_only() -> DamageKindFilter {
+    DamageKindFilter::CombatOnly
+}
+
 /// CR 120.6 + CR 120.10: Compatibility deserializer for the `channel` field that
 /// replaced the former `excess_only: bool` on `QuantityRef::DamageDealtThisTurn`
 /// (and `AbilityCondition::PreviousEffectAmount`). Accepts both the current
@@ -3106,6 +3168,14 @@ pub enum ControllerRef {
     /// Curse of Clinging Webs, Curse of the Restless Dead) where the trigger
     /// watches objects controlled by the enchanted player.
     EnchantedPlayer,
+    /// CR 102.1: Filter controller is the active player — the player whose turn
+    /// it is. Exactly one player at any time (unlike `Opponent`, which matches
+    /// every opponent in multiplayer). Resolved live from `state.active_player`
+    /// via `controller_ref_player`. Powers "the active player controls" subjects
+    /// and the card-assembly-bound punisher target on cards that coerce the turn
+    /// player (Siren's Call, Maddening Imp), cast/activated only during an
+    /// opponent's turn.
+    ActivePlayer,
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -3181,6 +3251,17 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 607.2d / CR 607.2m (by analogy) + CR 611.2c: matches objects whose
+    /// CONTROLLER's durable per-player choice records the anchor `label`
+    /// ("creatures controlled by players who last chose red waterfall …", Two
+    /// Streams Facility). Evaluated via `game::players::player_last_chose_label`
+    /// against `obj.controller`. Because the affected set is recomputed each layer
+    /// pass (CR 611.2c), a creature entering under a red-waterfall controller
+    /// joins the buff and one leaving drops it. Object-axis mirror of the
+    /// player-axis `TargetFilter::PlayerWhoChoseLabel`.
+    ControllerChoseLabel {
+        label: String,
+    },
     /// CR 305.1 + CR 601.2a: Matches objects entering from being played
     /// (land play) or cast (spell), excluding tokens put directly onto the
     /// battlefield without a prior zone.
@@ -3587,6 +3668,12 @@ pub enum FilterProp {
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
+    /// CR 302.6 + CR 508.1a: the object has been under its controller's control
+    /// continuously since that player's most recent turn began (haste-INDEPENDENT
+    /// — cares only about the continuity limb, unlike attack-eligibility's
+    /// haste-OR-continuity). Reads the durable `summoning_sick` flag, set on ETB
+    /// and on any control change, cleared at the controller's next turn.
+    ControlledContinuouslySinceTurnBegan,
     /// CR 400.7 + CR 700.4: The object moved between matching zones during
     /// this turn. Parameterized for phrases like "cards in your graveyard that
     /// were put there from the battlefield this turn"; `None` on either side
@@ -4155,6 +4242,16 @@ pub enum TargetFilter {
     SpecificPlayer {
         id: PlayerId,
     },
+    /// CR 607.2d / CR 607.2m (by analogy): matches every player whose durable
+    /// per-player choice (`Player.chosen_attributes`) records the anchor `label`
+    /// ("each player who last chose green anchor …", Two Streams Facility).
+    /// Evaluated against `game::players::player_last_chose_label`. The player-axis
+    /// mirror of the object-scoped anchor gate `StaticCondition::ChosenLabelIs`;
+    /// the split (player vs object subject) mirrors the engine's existing
+    /// `SpecificPlayer` vs `SpecificObject` separation.
+    PlayerWhoChoseLabel {
+        label: String,
+    },
     /// CR 102.1 + CR 103.1: living player seated immediately to controller's
     /// left/right; clockwise turn order, right = previous seat; resolved
     /// against `state.seat_order`. The recipient is computed at the resolver
@@ -4633,6 +4730,23 @@ pub enum CardTypeSetSource {
     },
 }
 
+/// CR 205.3: Which subtypes are excluded when counting distinct subtypes.
+///
+/// A typed qualifier (not a `bool`) so the exclusion axis stays composable and
+/// extensible — `CreatureTypes` covers Subgoyf ("subtypes other than creature
+/// types"); future readings ("subtypes other than land types") add a variant
+/// rather than a second boolean. `None` counts every subtype value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum SubtypeExclusion {
+    /// Count every distinct subtype value with no exclusion.
+    #[default]
+    None,
+    /// CR 205.3m: Exclude subtypes that are creature types (read from
+    /// `GameState::all_creature_types`).
+    CreatureTypes,
+}
+
 /// CR 601.2h: Which cast object a mana-spent quantity reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastManaObjectScope {
@@ -4888,6 +5002,28 @@ pub enum QuantityRef {
     /// source set. Covers zone cards, linked-exile cards, and matching objects
     /// without proliferating card-type-count siblings.
     DistinctCardTypes { source: CardTypeSetSource },
+    /// CR 205.3 + CR 604.3: Count distinct subtype *values* across a
+    /// parameterized source set (Subgoyf — "the number of different subtypes
+    /// other than creature types among cards in all graveyards"). The subtype
+    /// peer of [`QuantityRef::DistinctCardTypes`] (CR 205.2, card types): it
+    /// reuses the same `CardTypeSetSource` scan axis but tallies distinct
+    /// entries of `CardType::subtypes` (CR 205.3) instead of `core_types`.
+    ///
+    /// Not folded into `DistinctCardTypes` because card types (CR 205.2) and
+    /// subtypes (CR 205.3) are distinct CR subsections read from distinct
+    /// object fields (`core_types` vs `subtypes`) — the categorical-boundary
+    /// rule keeps them separate leaves. Not `ObjectCountDistinct` because this
+    /// counts distinct subtype VALUES (a card with three subtypes contributes
+    /// three), not distinct objects.
+    ///
+    /// `exclude` (CR 205.3m) drops subtypes that are creature types when set to
+    /// `CreatureTypes`; `#[serde(default)]` keeps old saves (implicitly `None`)
+    /// deserializable.
+    DistinctSubtypes {
+        source: CardTypeSetSource,
+        #[serde(default)]
+        exclude: SubtypeExclusion,
+    },
     /// CR 406.6 + CR 607.1: Count of cards currently in exile that are linked to the source
     /// via its exile-linked ability. Used by "as long as there are N or more cards exiled
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
@@ -5532,15 +5668,23 @@ pub enum PlayerFilter {
     /// player who has lost the game".
     HasLostTheGame,
     /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
-    /// combat damage this turn, optionally restricted to damage from a source
-    /// matching `source`. Resolved against `state.damage_dealt_this_turn`
-    /// records whose `is_combat = true` and `target = Player(p.id)`. `source =
-    /// None` counts any combat-damage source (Tymna the Weaver); `source =
-    /// Some(f)` (CR 120.9) counts only opponents dealt combat damage by a source
-    /// matching `f` — matched against each record's CR 608.2i look-back source
-    /// snapshot, so the source's qualities are checked as they were at damage
-    /// time (Estinien Varlineau: "by ~ or a Dragon").
-    OpponentDealtCombatDamage {
+    /// damage this turn matching `kind`, optionally restricted to damage from a
+    /// source matching `source`. Resolved against `state.damage_dealt_this_turn`
+    /// records whose `target = Player(p.id)` and whose combat status matches
+    /// `kind` (CR 120.2a combat / CR 120.2b noncombat / `Any` = either).
+    /// `kind = CombatOnly` + `source = None` counts any combat-damage source
+    /// (Tymna the Weaver); `kind = Any` counts any damage combat or noncombat
+    /// (Furious Spinesplitter, You've Been Caught Stealing); `source = Some(f)`
+    /// (CR 120.9) further restricts to opponents dealt matching damage by a
+    /// source matching `f` — matched against each record's CR 608.2i look-back
+    /// source snapshot, so the source's qualities are checked as they were at
+    /// damage time (Estinien Varlineau: "by ~ or a Dragon").
+    #[serde(alias = "OpponentDealtCombatDamage")]
+    OpponentDealtDamage {
+        /// CR 120.2a/120.2b: which damage kind counts. Defaults to `CombatOnly`
+        /// on absence for back-compat with the pre-rename combat-only variant.
+        #[serde(default = "damage_kind_combat_only")]
+        kind: DamageKindFilter,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<Box<TargetFilter>>,
     },
@@ -8787,6 +8931,35 @@ impl DigSource {
     }
 }
 
+/// CR 608.2d + CR 608.2e: what a player other than the controller is asked to
+/// guess during resolution of an `Effect::OpponentGuess`.
+///
+/// The two variants cover the two structural shapes in the printed card pool:
+/// guessing a value the controller secretly committed (`CommittedChoice`), and
+/// guessing whether a typed quantity comparison holds (`Proposition`). Both feed
+/// the same `EffectOutcomeSignal::Guessed { outcome }` branch machinery, so every
+/// downstream effect dispatches onto existing handlers — this is the building
+/// block, not a per-card special case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum GuessSubject {
+    /// CR 608.2d + CR 608.2c: "guesses which number/color/name you chose" — the
+    /// guesser names a value from the committed choice's printed domain; the
+    /// guess is checked against the controller's last committed value on the
+    /// source (CR 608.2c "the last chosen [value]" — an in-resolution
+    /// back-reference within the single ability, not a CR 607.2d link between two
+    /// distinct printed abilities).
+    CommittedChoice { choice_type: ChoiceType },
+    /// CR 608.2d: "guesses whether [lhs] [comparator] [rhs]" — the guesser
+    /// answers a yes/no proposition about a typed quantity comparison resolved
+    /// against game state at resolution.
+    Proposition {
+        lhs: QuantityExpr,
+        comparator: Comparator,
+        rhs: QuantityExpr,
+    },
+}
+
 /// CR 122.1 + CR 208.1: the scaling clause of [`Effect::EachPlayerCopyChosen`]
 /// — put `counter_type` counters on the created copy equal to `scale_property`
 /// of the second chosen object. Absent (`scale: None`) when the effect never
@@ -10336,6 +10509,31 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
         selection: TargetSelectionMode,
     },
+    /// CR 608.2d + CR 608.2e: a player other than the controller makes a guess
+    /// (a choice made during resolution by a player other than the spell/ability
+    /// controller). The controller's source generated the ability (CR 113.7).
+    ///
+    /// This is the deferred-outcome interactive primitive: the resolver only
+    /// raises the `WaitingFor::OpponentGuess` round-trip and computes the legal
+    /// option set; the answer handler stamps the correct/incorrect outcome onto
+    /// the stashed continuation chain via `EffectOutcomeSignal::Guessed`. Both
+    /// the guesser and the thing being guessed are reference-resolved, so this
+    /// effect is non-targeting.
+    OpponentGuess {
+        guesser: ControllerRef,
+        subject: Box<GuessSubject>,
+    },
+    /// CR 311.7 + CR 607.2d / CR 607.2m (by analogy): symmetric per-player anchor
+    /// swap — "each player who last chose `first` chooses `second`, and vice
+    /// versa" (Two Streams Facility's chaos ability). Iterates every
+    /// non-eliminated player: a `first`-anchor player's label becomes `second`
+    /// and a `second`-anchor player's label becomes `first` (other players
+    /// untouched), then re-runs layers. The effect fans internally, so it carries
+    /// no `player_scope`.
+    SwapChosenLabels {
+        first: String,
+        second: String,
+    },
     /// CR 609.7a + CR 120.7: Choose a specific source of damage matching a
     /// source-object filter. This is object/source selection, not a named
     /// string choice, because the chosen source is an ObjectId and prevention
@@ -10901,6 +11099,12 @@ pub enum Effect {
     /// ensues" triggered ability triggers. Payload-less resolving keyword action
     /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
     ChaosEnsues,
+    /// CR 103.1 + CR 101.4: Reverse the game's turn order (Temple of Atropos,
+    /// Aeon Engine, Time Distortion). Flips `state.turn_direction`; turn
+    /// progression, APNAP, and priority passing follow the new direction, while
+    /// physical seating is unchanged. Payload-less resolving keyword action
+    /// (mirrors `Effect::ChaosEnsues`). RUNTIME: reverse_turn_order::resolve.
+    ReverseTurnOrder,
     /// CR 701.51b: Open N Attractions by putting cards from the top of your
     /// Attraction deck onto the battlefield.
     OpenAttractions {
@@ -13072,6 +13276,8 @@ impl Effect {
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
+            // CR 311.7: the chaos anchor swap is a non-targeting per-player effect.
+            | Effect::SwapChosenLabels { .. }
             // CR 109.4: owner/type_filter are non-targeting resolution-time
             // filters; the copy source is chosen from the format pool, not
             // declared as a target.
@@ -13117,6 +13323,7 @@ impl Effect {
             | Effect::Cleanup { .. }
             | Effect::SearchOutsideGame { .. }
             | Effect::Choose { .. }
+            | Effect::OpponentGuess { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::SolveCase
             | Effect::SetClassLevel { .. }
@@ -13183,6 +13390,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
             | Effect::AssembleContraptions { .. }
@@ -13422,6 +13630,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Populate
             | Effect::Clash
+            | Effect::OpponentGuess { .. }
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
@@ -13481,6 +13690,7 @@ impl Effect {
             | Effect::BlightEffect { .. }
             | Effect::Cascade
             | Effect::Choose { .. }
+            | Effect::SwapChosenLabels { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -13551,6 +13761,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -13670,6 +13881,7 @@ impl Effect {
             | Effect::EndCombatPhase
             | Effect::Populate
             | Effect::Clash
+            | Effect::OpponentGuess { .. }
             | Effect::Behold { .. }
             | Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
@@ -13729,6 +13941,7 @@ impl Effect {
             | Effect::BlightEffect { .. }
             | Effect::Cascade
             | Effect::Choose { .. }
+            | Effect::SwapChosenLabels { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -13799,6 +14012,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
@@ -13918,6 +14132,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ExileTop { .. } => "ExileTop",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
+        Effect::OpponentGuess { .. } => "OpponentGuess",
+        Effect::SwapChosenLabels { .. } => "SwapChosenLabels",
         Effect::ChooseDamageSource { .. } => "ChooseDamageSource",
         Effect::Suspect { .. } => "Suspect",
         Effect::Unsuspect { .. } => "Unsuspect",
@@ -13959,6 +14175,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::Planeswalk => "Planeswalk",
         Effect::ChaosEnsues => "ChaosEnsues",
+        Effect::ReverseTurnOrder => "ReverseTurnOrder",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::AssembleContraptions { .. } => "AssembleContraptions",
@@ -14107,6 +14324,9 @@ pub enum EffectKind {
     ProliferateTarget,
     Populate,
     Clash,
+    /// CR 608.2d + CR 608.2e: an opponent / the defending player guesses a
+    /// committed value or proposition during resolution.
+    OpponentGuess,
     /// CR 701.4a: Behold a [quality] (choose-or-reveal keyword action).
     Behold,
     EndTheTurn,
@@ -14197,6 +14417,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     Planeswalk,
     ChaosEnsues,
+    ReverseTurnOrder,
     OpenAttractions,
     RollToVisitAttractions,
     AssembleContraptions,
@@ -14406,6 +14627,10 @@ impl From<&Effect> for EffectKind {
             Effect::ExileTop { .. } => EffectKind::ExileTop,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
+            Effect::OpponentGuess { .. } => EffectKind::OpponentGuess,
+            // CR 311.7: The chaos swap re-chooses each player's anchor, so it
+            // reports as a `Choose`-kind resolution for event/AI purposes.
+            Effect::SwapChosenLabels { .. } => EffectKind::Choose,
             Effect::ChooseDamageSource { .. } => EffectKind::ChooseDamageSource,
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::Unsuspect { .. } => EffectKind::Unsuspect,
@@ -14451,6 +14676,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
+            Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::AssembleContraptions { .. } => EffectKind::AssembleContraptions,
@@ -14864,9 +15090,17 @@ pub enum CastingRestriction {
     DeclareBlockersStep,
     BeforeAttackersDeclared,
     BeforeBlockersDeclared,
+    /// CR 509.1 + CR 510.1 + CR 511.1: "only during combat after blockers are
+    /// declared" — the window that opens once the declare-blockers turn-based
+    /// action has placed blockers and stays open through combat damage and end
+    /// of combat. The exact complement of `BeforeBlockersDeclared` within the
+    /// combat phase (CR 506.1); enforced in `restrictions.rs`.
+    AfterBlockersDeclared,
     BeforeCombatDamage,
     AfterCombat,
-    RequiresCondition { condition: Option<ParsedCondition> },
+    RequiresCondition {
+        condition: Option<ParsedCondition>,
+    },
 }
 
 /// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.
@@ -15665,6 +15899,21 @@ impl AbilityDefinition {
     }
 }
 
+/// The result of an `Effect::OpponentGuess` round-trip.
+///
+/// CR 608.2d: after the guesser answers, the outcome is stamped onto every
+/// stashed continuation branch via `set_guess_outcome_recursive`. Both
+/// polarities are positive tests: "if they guessed right" checks
+/// `GuessOutcome::Correct`, "if they guessed wrong" checks
+/// `GuessOutcome::Incorrect`. When no guess happened (impossible commit per
+/// CR 609.3, or empty hand) `SpellContext::guess_outcome` is `None` and
+/// NEITHER polarity fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuessOutcome {
+    Correct,
+    Incorrect,
+}
+
 /// Which previous-effect outcome a conditional sub-ability asks about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectOutcomeSignal {
@@ -15675,6 +15924,13 @@ pub enum EffectOutcomeSignal {
     /// CR 101.3 + CR 608.2c: "for each opponent who can't" reads whether the
     /// current player-scope iteration's mandatory instruction succeeded.
     CurrentScopeSucceeded,
+    /// CR 608.2d: the just-resolved `Effect::OpponentGuess` outcome. Both
+    /// polarities are positive tests: "if they guessed right" reads
+    /// `Guessed { outcome: GuessOutcome::Correct }`, "if they guessed wrong"
+    /// reads `Guessed { outcome: GuessOutcome::Incorrect }`. When no guess
+    /// happened (impossible commit per CR 609.3, empty hand) the source
+    /// `SpellContext::guess_outcome` is `None` and NEITHER polarity fires.
+    Guessed { outcome: GuessOutcome },
 }
 
 /// Condition on an ability within a sub_ability chain.
@@ -16292,6 +16548,15 @@ pub struct SpellContext {
     /// Used by AbilityCondition::effect_performed() to gate dependent sub_abilities.
     #[serde(default)]
     pub optional_effect_performed: bool,
+    /// CR 608.2d: The just-resolved `Effect::OpponentGuess` outcome, stamped onto
+    /// the stashed continuation chain by the guess answer handler. Tri-state:
+    /// `None` = no guess happened (impossible commit per CR 609.3 / empty hand),
+    /// `Some(GuessOutcome::Correct)` = guessed correctly,
+    /// `Some(GuessOutcome::Incorrect)` = guessed incorrectly.
+    /// Read by `EffectOutcomeSignal::Guessed { outcome }`; `None` makes both
+    /// polarities false so neither rider branch fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guess_outcome: Option<GuessOutcome>,
     /// CR 608.2d: The player who accepted an "any opponent may" optional effect.
     /// Used to resolve "that player" / "them" backreferences and target scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -18350,6 +18615,31 @@ pub struct CopiableValues {
     pub static_definitions: Arc<Vec<StaticDefinition>>,
 }
 
+/// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
+/// granted cost-bearing keyword's cost is DERIVED from each recipient. Extensible
+/// axis (build-for-the-class): today only the reduced-mana-cost form is printed;
+/// `ManaValue` ("cost equal to its mana value") and `Fixed` ("its foretell cost
+/// is {2}{U}") are the next natural leaves when a card needs them — each is a new
+/// leaf here, never a new `ContinuousModification` variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CostDerivation {
+    /// "Its foretell cost is equal to its mana cost reduced by {N}." The
+    /// recipient's printed mana cost with its generic component reduced by this
+    /// amount (floored at 0), colored pips preserved (CR 702.143's foretell-cost
+    /// reduction applies only to generic mana).
+    ManaCostReducedBy(ManaCost),
+}
+
+impl CostDerivation {
+    /// Derive the concrete cost from a recipient's base mana cost.
+    pub fn derive(&self, base_mana_cost: &ManaCost) -> ManaCost {
+        match self {
+            Self::ManaCostReducedBy(reduction) => base_mana_cost.reduced_generic_by(reduction),
+        }
+    }
+}
+
 /// What modification a continuous effect applies to an object.
 /// Each variant knows its own layer implicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18520,6 +18810,22 @@ pub enum ContinuousModification {
     AddDynamicKeyword {
         kind: crate::types::keywords::DynamicKeywordKind,
         value: QuantityExpr,
+    },
+    /// CR 702.143d (and the CR 702 cast-from-off-zone-for-alternative-cost
+    /// family): a continuous static that grants a cost-bearing keyword whose cost
+    /// is DERIVED from each recipient's characteristics. Parameterized over the
+    /// keyword family (`kind`) and the cost-derivation rule (`derivation`) so one
+    /// variant covers Foretell/Madness/Disturb/Mayhem/Dash/Unearth grants — no
+    /// per-keyword `ContinuousModification` leaf. The derived-cost analogue of
+    /// `AddDynamicKeyword` (which parameterizes a numeric keyword value). Applied
+    /// exclusively through the off-zone keyword path
+    /// (`off_zone_characteristics::apply_keyword_modification`), which reads each
+    /// recipient's mana cost and upserts the derived keyword; the battlefield
+    /// layers characteristic pass is a no-op for it (Singing Towers of Darillium
+    /// grants foretell to nonland hand cards).
+    AddKeywordWithDerivedCost {
+        kind: crate::types::keywords::CostBearingKeywordKind,
+        derivation: CostDerivation,
     },
     /// Grants every creature type (Changeling CDA). Expanded at runtime
     /// using `GameState::all_creature_types`.
@@ -19214,6 +19520,40 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2d: Stamp `context.guess_outcome` across the local ability chain.
+    /// Used when the `Effect::OpponentGuess` answer arrives after the prompt
+    /// suspended the parent chain — the stashed branch continuation was captured
+    /// before the guess, so its context must be updated retroactively for
+    /// `EffectOutcomeSignal::Guessed { outcome }` gates to evaluate correctly on
+    /// drain (mirrors `set_optional_effect_performed_recursive`).
+    pub fn set_guess_outcome_recursive(&mut self, outcome: Option<GuessOutcome>) {
+        self.context.guess_outcome = outcome;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_guess_outcome_recursive(outcome);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_guess_outcome_recursive(outcome);
+        }
+    }
+
+    /// CR 608.2d: Make `player` available as a player target across the chain so
+    /// a `TargetFilter::ParentTarget` anaphor ("they lose life ...") resolves to
+    /// the guesser. Inserted at the front so it wins the first-player-target
+    /// lookup. Any existing occurrence of this player is removed first to
+    /// guarantee they land at index 0 regardless of their prior seat position.
+    pub fn push_front_player_target_recursive(&mut self, player: PlayerId) {
+        // CR 608.2d: Remove any existing occurrence first so the guesser is
+        // always at index 0 regardless of seat order in the target list.
+        self.targets.retain(|t| t != &TargetRef::Player(player));
+        self.targets.insert(0, TargetRef::Player(player));
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.push_front_player_target_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.push_front_player_target_recursive(player);
+        }
+    }
+
     pub fn set_original_controller_recursive(&mut self, player: PlayerId) {
         self.original_controller = Some(player);
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -19385,24 +19725,63 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
+    #[test]
+    fn number_range_distinctness_serde_is_backward_compatible() {
+        // Legacy `{min,max}` JSON deserializes to the default Repeatable, and a
+        // Repeatable value re-serializes WITHOUT the field (byte-stable).
+        let legacy: ChoiceType =
+            serde_json::from_str(r#"{"NumberRange":{"min":1,"max":5}}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ChoiceType::NumberRange {
+                min: 1,
+                max: 5,
+                distinctness: NumberDistinctness::Repeatable,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"NumberRange":{"min":1,"max":5}}"#,
+            "Repeatable must not emit the distinctness field"
+        );
+
+        // A DistinctFromSourceHistory value round-trips and emits the field.
+        let distinct = ChoiceType::NumberRange {
+            min: 1,
+            max: 5,
+            distinctness: NumberDistinctness::DistinctFromSourceHistory,
+        };
+        let json = serde_json::to_string(&distinct).unwrap();
+        assert!(
+            json.contains("DistinctFromSourceHistory"),
+            "non-default distinctness must serialize, got {json}"
+        );
+        assert_eq!(serde_json::from_str::<ChoiceType>(&json).unwrap(), distinct);
+    }
+
     /// CR 106.6: `ManaSpendRestriction::is_coverage_supported` must classify each
     /// leaf by whether its lowered semantics are production-live today, and require
     /// every branch of an `Any` disjunction to be coverage-supported.
     ///
+    /// As of CR 708.4 face-down spell casting, every named leaf is production-live
+    /// — `FaceDownSpell` was the last hardcoded-false leaf, now satisfiable at a
+    /// `PaymentContext::Spell` site. The ONLY coverage-red result left is a
+    /// structurally-empty `Any([])` (no branch to support); that emptiness guard is
+    /// the remaining non-vacuous false exemplar, so this test can no longer pin a
+    /// dead *leaf* — it pins full-leaf coverage + the emptiness guard instead.
+    ///
     /// Revert direction (each assertion pins one classification):
-    /// - Flipping a LIVE arm to `false` fails its
-    ///   `assert!(... .is_coverage_supported())`.
-    ///   `TurnPermanentFaceUp` is live via the paid `GameAction::TurnFaceUp`
-    ///   special action (CR 116.2b + CR 702.37e); reverting that flip fails its
-    ///   positive assertion below.
-    /// - Flipping a DEAD arm (`FaceDownSpell`) to `true` fails its `assert!(!...)`.
-    /// - `Any([])`, all-dead `Any([FaceDownSpell])`, and mixed Tin Street
-    ///   `Any([FaceDownSpell, TurnPermanentFaceUp])` pin the false direction.
-    /// - Creeping Peeper's all-live
-    ///   `Any([SpellType, UnlockDoor, TurnPermanentFaceUp])` pins the true
-    ///   direction.
+    /// - Flipping any LIVE arm to `false` fails its `assert!(... .is_coverage_supported())`.
+    ///   In particular, reverting this PR's `FaceDownSpell => true` fails its
+    ///   positive assertion below AND Tin Street's mixed-`Any` assertion — that pair
+    ///   is the guard keeping the D10 coverage flip landed.
+    /// - `Any([])` pins the `!subs.is_empty()` emptiness guard in the false
+    ///   direction (returning `true` on an empty set fails it).
+    /// - Creeping Peeper's all-live `Any([SpellType, UnlockDoor, TurnPermanentFaceUp])`
+    ///   and Tin Street's `Any([FaceDownSpell, TurnPermanentFaceUp])` pin the true
+    ///   direction (treating any leaf as poisoning the disjunction fails them).
     #[test]
-    fn is_coverage_supported_distinguishes_live_and_dead_leaves() {
+    fn is_coverage_supported_all_leaves_supported_empty_any_is_false() {
         // LIVE: every current production-live leaf stays coverage-supported.
         assert!(ManaSpendRestriction::SpellOnly.is_coverage_supported());
         assert!(ManaSpendRestriction::SpellType("Enchantment".into()).is_coverage_supported());
@@ -19448,23 +19827,26 @@ mod tests {
         // CR 116.2b + CR 702.37e: the paid `GameAction::TurnFaceUp` handler makes
         // the turn-face-up special-action gate satisfiable.
         assert!(ManaSpendRestriction::TurnPermanentFaceUp.is_coverage_supported());
+        // CR 708.4: `FaceDownSpell` was the LAST dead leaf — this PR's face-down
+        // spell casting makes it production-live (satisfiable at a
+        // `PaymentContext::Spell` site), so full mana-restriction coverage honesty
+        // is now reached: no hardcoded-false leaf remains.
+        assert!(ManaSpendRestriction::FaceDownSpell.is_coverage_supported());
 
-        // DEAD: `FaceDownSpell` is the only remaining hardcoded-false leaf — no
-        // production path casts a spell through spell payment face down.
-        assert!(!ManaSpendRestriction::FaceDownSpell.is_coverage_supported());
-
+        // The ONE remaining coverage-red case is a structurally-empty disjunction —
+        // no branch to support. This is the sole non-vacuous false exemplar.
         assert!(!ManaSpendRestriction::Any(vec![]).is_coverage_supported());
 
-        // All-dead disjunction is dead: an `Any` whose only leaf is the dead
-        // `FaceDownSpell` has no supported branch.
+        // A single live leaf makes its `Any` supported.
         assert!(
-            !ManaSpendRestriction::Any(vec![ManaSpendRestriction::FaceDownSpell,])
+            ManaSpendRestriction::Any(vec![ManaSpendRestriction::FaceDownSpell])
                 .is_coverage_supported()
         );
 
-        // Mixed Tin Street Gossip disjunction remains coverage-red: the
-        // face-down-cast branch is not production-live yet.
-        assert!(!ManaSpendRestriction::Any(vec![
+        // Mixed Tin Street Gossip disjunction is now coverage-supported: both the
+        // face-down-cast leaf (CR 708.4) and the turn-face-up leaf (CR 116.2b) are
+        // production-live.
+        assert!(ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::FaceDownSpell,
             ManaSpendRestriction::TurnPermanentFaceUp,
         ])
@@ -21814,5 +22196,73 @@ mod modal_ability_tests {
         let json = serde_json::to_string(&modern).expect("serialize modern PayCost");
         let back: Effect = serde_json::from_str(&json).expect("modern PayCost must round-trip");
         assert_eq!(back, modern);
+    }
+
+    /// CR 608.2d: `push_front_player_target_recursive` must promote a guesser
+    /// from any non-leading slot to index 0, and the guesser must appear exactly
+    /// once afterward. This is the regression for the prior bug where a
+    /// continuation with targets `[Player(other), Player(guesser)]` — guesser in
+    /// slot 1 — was NOT corrected before the fix, causing `target_player()` to
+    /// bind `other` instead of `guesser` for the "they lose life" rider.
+    ///
+    /// The fix (`retain` before `insert`) must hold for both top-level targets and
+    /// every recursive sub/else branch.
+    #[test]
+    fn push_front_player_target_recursive_promotes_non_leading_guesser() {
+        let other = PlayerId(1);
+        let guesser = PlayerId(2);
+
+        // Hostile fixture: [Player(other), Player(guesser)] — guesser at slot 1,
+        // not slot 0. Build the same layout into a sub_ability to verify recursion.
+        let sub = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            vec![TargetRef::Player(other), TargetRef::Player(guesser)],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Player(other), TargetRef::Player(guesser)],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+
+        ability.push_front_player_target_recursive(guesser);
+
+        // Top-level: guesser must be at index 0 and appear exactly once.
+        assert_eq!(
+            ability.targets[0],
+            TargetRef::Player(guesser),
+            "guesser must be promoted to index 0 in top-level targets"
+        );
+        assert_eq!(
+            ability
+                .targets
+                .iter()
+                .filter(|t| **t == TargetRef::Player(guesser))
+                .count(),
+            1,
+            "guesser must appear exactly once in top-level targets after promotion"
+        );
+
+        // Sub-ability: the fix must propagate recursively.
+        let sub = ability.sub_ability.as_ref().unwrap();
+        assert_eq!(
+            sub.targets[0],
+            TargetRef::Player(guesser),
+            "guesser must be promoted to index 0 in sub_ability targets"
+        );
+        assert_eq!(
+            sub.targets
+                .iter()
+                .filter(|t| **t == TargetRef::Player(guesser))
+                .count(),
+            1,
+            "guesser must appear exactly once in sub_ability targets after promotion"
+        );
     }
 }

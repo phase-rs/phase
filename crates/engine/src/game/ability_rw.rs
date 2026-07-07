@@ -103,9 +103,10 @@
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
-    ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, RepeatContinuation, ResolvedAbility, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -1346,6 +1347,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::GrantingObject
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -2045,6 +2047,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::CardsExiledBySource
@@ -2125,7 +2128,7 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
         PlayerFilter::OpponentLostLife
         | PlayerFilter::OpponentGainedLife
-        | PlayerFilter::OpponentDealtCombatDamage { .. }
+        | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
@@ -2162,6 +2165,9 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
+        // CR 102.1: the active player is a game-defined role read live, not a
+        // frozen event-context tag.
+        | ControllerRef::ActivePlayer
         | ControllerRef::EnchantedPlayer => false,
     }
 }
@@ -2215,6 +2221,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::GrantingObject
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -2267,6 +2274,9 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         }
         FilterProp::AnyOf { props } => props.iter().any(legacy_filter_prop),
         FilterProp::Not { prop } => legacy_filter_prop(prop),
+        // CR 607.2d / CR 607.2m (by analogy): player-anchor labels are live
+        // per-player state, not one of the frozen-12 event-context refs.
+        FilterProp::ControllerChoseLabel { .. } => false,
         // Resolution-chain tracked-set membership (leaf; only a `TrackedSetId`) —
         // not one of the frozen-12 event-context refs. Member-boundness is handled
         // in `member_bound_filter_prop`.
@@ -2321,6 +2331,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -2440,6 +2451,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::Controller
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -2468,6 +2480,9 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         // no-ordering-input target gate (the target player is a declared target,
         // member-invariant under uniformity, not per-source storage).
         | ControllerRef::TargetOpponent
+        // CR 102.1: the active player is a game-defined role read live from
+        // `state.active_player`, not per-source member-bound storage.
+        | ControllerRef::ActivePlayer
         | ControllerRef::DefendingPlayer => false,
     }
 }
@@ -2503,6 +2518,9 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         }
         FilterProp::AnyOf { props } => props.iter().any(member_bound_filter_prop),
         FilterProp::Not { prop } => member_bound_filter_prop(prop),
+        // CR 607.2d / CR 607.2m (by analogy): this reads durable per-player anchor
+        // state keyed by controller, not per-source member-bound storage.
+        FilterProp::ControllerChoseLabel { .. } => false,
         // CR 603.10a (PR-6.75 c5): membership in the active resolution-chain tracked
         // set — the property form of the member-bound `TargetFilter::TrackedSet`
         // selector (chain-first via `chain_tracked_set_id`). Per-source published
@@ -2558,6 +2576,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -2620,6 +2639,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -2867,8 +2887,18 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             legacy_effect(replacement_effect)
         }
+        Effect::OpponentGuess { guesser, subject } => {
+            legacy_controller_ref(guesser) || legacy_guess_subject(subject)
+        }
         // Payload-less keyword action (planar chaos, CR 311.7) — no tag-bearing field.
         Effect::ChaosEnsues => false,
+        // Payload-less keyword action (reverse turn order, CR 103.1) — no
+        // tag-bearing field and reads no per-object state.
+        Effect::ReverseTurnOrder => false,
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => false,
         Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } => {
             legacy_target_filter(attachment) || legacy_target_filter(target)
         }
@@ -3234,6 +3264,42 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::Unimplemented { .. } => false,
+    }
+}
+
+fn legacy_guess_subject(subject: &GuessSubject) -> bool {
+    match subject {
+        GuessSubject::CommittedChoice { choice_type } => legacy_choice_type(choice_type),
+        GuessSubject::Proposition {
+            lhs,
+            comparator: _,
+            rhs,
+        } => legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs),
+    }
+}
+
+fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
+    match choice_type {
+        crate::types::ability::ChoiceType::Opponent { restriction } => {
+            restriction.as_deref().is_some_and(legacy_player_filter)
+        }
+        crate::types::ability::ChoiceType::CreatureType { .. }
+        | crate::types::ability::ChoiceType::Color { .. }
+        | crate::types::ability::ChoiceType::OddOrEven
+        | crate::types::ability::ChoiceType::BasicLandType
+        | crate::types::ability::ChoiceType::CardType { .. }
+        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::NumberRange { .. }
+        | crate::types::ability::ChoiceType::Labeled { .. }
+        | crate::types::ability::ChoiceType::LandType
+        | crate::types::ability::ChoiceType::CardPredicate { .. }
+        | crate::types::ability::ChoiceType::CardPredicateGuess { .. }
+        | crate::types::ability::ChoiceType::Player
+        | crate::types::ability::ChoiceType::TwoColors
+        | crate::types::ability::ChoiceType::Word
+        | crate::types::ability::ChoiceType::Artist
+        | crate::types::ability::ChoiceType::Keyword { .. }
+        | crate::types::ability::ChoiceType::CounterKind { .. } => false,
     }
 }
 
@@ -3906,6 +3972,11 @@ fn rw_effect(
             p.merge(rw_quantity_expr(count));
             (p, None)
         }
+        Effect::OpponentGuess { guesser, subject } => {
+            let mut p = rw_controller_ref(guesser);
+            p.merge(rw_guess_subject(subject));
+            (p, None)
+        }
         // CR 614.1a + CR 611.2c + CR 603.7 (PR-6.75): a floating planeswalk
         // replacement is a deferred body — descend reads, drop writes (resolves in a
         // future scope). Mirrors CreateDrawReplacement.
@@ -3917,6 +3988,8 @@ fn rw_effect(
         // CR 311.7 + CR 901.9b: fire the active plane's chaos trigger (mirrors
         // Planeswalk / VentureIntoDungeon).
         Effect::ChaosEnsues => (ext_write(StateKind::Other), None),
+        // CR 103.1: reverse turn order writes global turn-direction state.
+        Effect::ReverseTurnOrder => (ext_write(StateKind::Other), None),
 
         // ---- Hand / library ----
         Effect::Draw { count, target: _ } => {
@@ -5198,6 +5271,10 @@ fn rw_effect(
             }
             (p, None)
         }
+        Effect::SwapChosenLabels {
+            first: _,
+            second: _,
+        } => (ext_write(StateKind::Other), None),
 
         // ---- Histogram-absent ⇒ fail-closed conservative ----
         Effect::StartYourEngines { .. }
@@ -5331,6 +5408,53 @@ fn rw_quantity_expr(x: &QuantityExpr) -> RwProfile {
     }
 }
 
+fn rw_guess_subject(subject: &GuessSubject) -> RwProfile {
+    match subject {
+        GuessSubject::CommittedChoice { choice_type } => {
+            let mut p = rw_choice_type(choice_type);
+            // CR 608.2d + CR 603.10a: a committed-value guess consumes the source's
+            // persisted choice, so same-event sibling instances are member-bound.
+            p.reads_member_bound = true;
+            p
+        }
+        GuessSubject::Proposition {
+            lhs,
+            comparator: _,
+            rhs,
+        } => {
+            let mut p = rw_quantity_expr(lhs);
+            p.merge(rw_quantity_expr(rhs));
+            p
+        }
+    }
+}
+
+fn rw_choice_type(choice_type: &crate::types::ability::ChoiceType) -> RwProfile {
+    match choice_type {
+        crate::types::ability::ChoiceType::Opponent { restriction } => match restriction {
+            Some(filter) => rw_player_filter(filter),
+            None => RwProfile::empty(),
+        },
+        crate::types::ability::ChoiceType::CreatureType { .. }
+        | crate::types::ability::ChoiceType::Color { .. }
+        | crate::types::ability::ChoiceType::OddOrEven
+        | crate::types::ability::ChoiceType::BasicLandType
+        | crate::types::ability::ChoiceType::CardType { .. }
+        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::NumberRange { .. }
+        | crate::types::ability::ChoiceType::Labeled { .. }
+        | crate::types::ability::ChoiceType::LandType
+        | crate::types::ability::ChoiceType::CardPredicate { .. }
+        | crate::types::ability::ChoiceType::CardPredicateGuess { .. }
+        | crate::types::ability::ChoiceType::Player
+        | crate::types::ability::ChoiceType::TwoColors
+        | crate::types::ability::ChoiceType::Word
+        | crate::types::ability::ChoiceType::Artist
+        | crate::types::ability::ChoiceType::Keyword { .. }
+        | crate::types::ability::ChoiceType::CounterKind { .. } => RwProfile::empty(),
+    }
+}
+
 fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
     match x {
         // §4.3.1 (CR 401/402): a hand-size read, refined by its player axis
@@ -5387,6 +5511,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::TargetZoneCardCount { zone: _ } => reads_zone_membership(),
         QuantityRef::Devotion { .. }
         | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. } => reads_zone_membership(),
         // CR 603.10a (PR-6.75 c5): promoted out of the fail-closed group below to
@@ -5864,6 +5989,15 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
 // Filter / player / scope reads.
 // ---------------------------------------------------------------------------
 
+fn filter_prop_reads_player_choice_label(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::ControllerChoseLabel { .. } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_reads_player_choice_label),
+        FilterProp::Not { prop } => filter_prop_reads_player_choice_label(prop),
+        _ => false,
+    }
+}
+
 /// A filter used as a READ carrier (target_chooser, nested filters). Selectors
 /// are read-free; event-context refs contribute event reads (and D5 flags for
 /// the 12 tags). Composite filters descend to catch nested event refs.
@@ -5900,13 +6034,25 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
             }
             p
         }
+        // CR 607.2d / CR 607.2m (by analogy): durable per-player anchor-label reads.
+        TargetFilter::PlayerWhoChoseLabel { label: _ } => reads_player_of(StateKind::Other),
+        TargetFilter::Typed(tf) => {
+            if tf
+                .properties
+                .iter()
+                .any(filter_prop_reads_player_choice_label)
+            {
+                reads_player_of(StateKind::Other)
+            } else {
+                RwProfile::empty()
+            }
+        }
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
-        | TargetFilter::Typed(..)
         | TargetFilter::StackAbility { .. }
         // CR 201.5a: a bare object reference is a read-free selector (mirrors
         // `SpecificObject`); the member-bound bit is added by the trailing
@@ -5943,7 +6089,7 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => {
             reads_player_of(StateKind::JournalLife)
         }
-        PlayerFilter::OpponentDealtCombatDamage { source: _ } => {
+        PlayerFilter::OpponentDealtDamage { source: _, kind: _ } => {
             reads_player_of(StateKind::JournalLife)
         }
         // D5 carrier.
@@ -6032,6 +6178,9 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
         // no sibling-mutable state).
         | ControllerRef::TargetOpponent
         | ControllerRef::DefendingPlayer
+        // CR 102.1: a live read of `state.active_player` — no sibling-mutable
+        // state, empty RW profile (mirrors `DefendingPlayer`).
+        | ControllerRef::ActivePlayer
         // resolution-local (ResolvedAbility.chosen_players)
         | ControllerRef::ChosenPlayer { .. } => RwProfile::empty(),
     }

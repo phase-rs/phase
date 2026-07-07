@@ -3319,6 +3319,14 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             tag("target opponent's hand"),
         ),
+        // "look at an opponent's hand" (Anointed Peacekeeper ETB) — a
+        // non-targeted controller choice. Ordered AFTER the longer "target …"
+        // tags so those still win. Routes the LookAt path to
+        // `Effect::RevealHand { reveal: false, target: Typed(Opponent) }`.
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("an opponent's hand"),
+        ),
         value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
         value(TargetFilter::TriggeringPlayer, tag("their hand")),
         value(
@@ -3528,6 +3536,11 @@ pub(super) fn parse_choose_ast(
         } else {
             TargetSelectionMode::Chosen
         };
+        // CR 608.2c: stash the committed domain so a later "an opponent guesses
+        // which [value] you chose" clause in this same ability resolution embeds
+        // it in `GuessSubject::CommittedChoice` (in-order instructions within one
+        // ability — not a CR 607.2d link between two distinct printed abilities).
+        ctx.pending_choice_type = Some(choice_type.clone());
         return Some(ChooseImperativeAst::NamedChoice {
             choice_type,
             selection,
@@ -4601,6 +4614,12 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // control gain that ability" clause can read the typed
             // `ChosenAttribute::Keyword` via
             // `ContinuousModification::AddChosenKeyword` at layer evaluation.
+            // CR 609.3 + CR 608.2d: a `DistinctFromSourceHistory` number choice
+            // ("...that hasn't been chosen") must persist each committed value on
+            // the source so successive resolutions exclude prior picks — an
+            // already-chosen number is an illegal option (CR 608.2d). The same
+            // persisted value lets the guess answer read the last committed
+            // number within that resolution (CR 608.2c; The Toymaker's Trap).
             persist: matches!(
                 choice_type,
                 ChoiceType::CardName
@@ -4608,6 +4627,11 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                     | ChoiceType::CardType { .. }
                     | ChoiceType::Labeled { .. }
                     | ChoiceType::Keyword { .. }
+                    | ChoiceType::NumberRange {
+                        distinctness:
+                            crate::types::ability::NumberDistinctness::DistinctFromSourceHistory,
+                        ..
+                    }
             ),
             choice_type,
         },
@@ -5754,6 +5778,19 @@ pub(super) fn parse_put_ast(
         }
     }
 
+    // CR 401.4 + CR 608.2c: "put the cards {in|from} <possessive> hand on the
+    // bottom/top [of <possessive> library] [in any order]" — whole-hand library
+    // reposition (Teferi's Puzzle Box). The "the cards {in|from} <possessive>
+    // hand" guard keeps single-card "put that card on the bottom" and "put the
+    // rest on the bottom" out of this branch (they lack the hand-origin phrase),
+    // so those still route to the positional `BottomOfLibrary`/`TopOfLibrary`
+    // forms below.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("put ").parse(lower) {
+        if let Some(position) = parse_hand_to_library_position(rest) {
+            return Some(PutImperativeAst::HandToLibraryPosition { position });
+        }
+    }
+
     let has_mass_zone_origin = (nom_primitives::scan_contains(lower, "all")
         || nom_primitives::scan_contains(lower, "each"))
         && nom_primitives::scan_contains(lower, "from");
@@ -6084,6 +6121,26 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             profile,
             enters_under,
         },
+        // CR 401.4 + CR 608.2c: "put the cards in their hand on the bottom of
+        // their library in any order" (Teferi's Puzzle Box) moves the mover's
+        // whole hand to the named library position at once. Mirrors the
+        // hand→library field set of `change_zone_all_to_library_effect`, but
+        // pins `library_position` and OMITS that helper's trailing `Shuffle`
+        // sub-ability — a shuffle would scatter the cards the effect just placed
+        // on the bottom/top. `target: Controller` is rebound to the acting
+        // player ("that player") by `inject_subject_target` when the enclosing
+        // subject-predicate clause carries a player subject.
+        PutImperativeAst::HandToLibraryPosition { position } => Effect::ChangeZoneAll {
+            origin: Some(Zone::Hand),
+            destination: Zone::Library,
+            target: TargetFilter::Controller,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: Some(position),
+            random_order: false,
+        },
     }
 }
 
@@ -6320,6 +6377,54 @@ fn parse_mass_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
     let (rest, _) = parse_possessive_determiner(rest).ok()?;
     let (_rest, _) = tag::<_, _, OracleError<'_>>(" library").parse(rest).ok()?;
     Some(origins)
+}
+
+/// Parse "the cards {in|from} {possessive} hand on the bottom/top [of
+/// {possessive} library] [in any order]" and return the target library position.
+///
+/// CR 401.4 + CR 608.2c: The whole-hand reposition of Teferi's Puzzle Box —
+/// "that player puts the cards in their hand on the bottom of their library in
+/// any order". Modeled on `parse_mass_zones_to_library`'s combinator style; the
+/// optional " of {possessive} library" and "in any order" tail is matched to be
+/// consumed but the trailing remainder is discarded (the position is the whole
+/// payload). The leading "the cards {in|from} {possessive} hand" guard is what
+/// keeps single-card "put that card on the bottom" and "put the rest on the
+/// bottom" from routing here.
+fn parse_hand_to_library_position(rest: &str) -> Option<LibraryPosition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the cards ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("in "),
+        tag::<_, _, OracleError<'_>>("from "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = parse_possessive_determiner(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" hand").parse(rest).ok()?;
+    let (rest, position) = alt((
+        value(
+            LibraryPosition::Bottom,
+            tag::<_, _, OracleError<'_>>(" on the bottom"),
+        ),
+        value(LibraryPosition::Top, tag(" on top")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // Optional " of {possessive} library" and "in any order" tail — matched to
+    // consume when present, but not required. Only "in any order" appears in this
+    // class (CR 401.4 owner arrangement); bottom-of-library order is gameplay-inert
+    // so it is not modeled as an interactive choice.
+    let (rest, _) = opt(preceded(
+        tag::<_, _, OracleError<'_>>(" of "),
+        (parse_possessive_determiner, tag(" library")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_rest, _) = opt(tag::<_, _, OracleError<'_>>(" in any order"))
+        .parse(rest)
+        .ok()?;
+    Some(position)
 }
 
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
@@ -8200,6 +8305,26 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues));
     }
 
+    // CR 103.1 + CR 101.4: "reverse the game's turn order" / "reverse the turn
+    // order" (Temple of Atropos chaos, Aeon Engine activated ability, Time
+    // Distortion phenomenon). Whole-phrase imperative with no target; anchored
+    // nom production mirroring the "chaos ensues" parse so unrelated clauses
+    // cannot accidentally match it. The "(For example …)" reminder is stripped
+    // upstream, and the apostrophe reaching the parser is straight. The two
+    // surface forms are a single `alt()` axis (compose, don't enumerate).
+    if all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("reverse the game's turn order"),
+            tag("reverse the turn order"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::ReverseTurnOrder));
+    }
+
     // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
     // of Mortality). The subject ("two target players") precedes the verb, so
     // `first_word` is "two"/"target"/"have" rather than a verb keyword —
@@ -8272,6 +8397,25 @@ pub(super) fn parse_imperative_family_ast(
             target: TargetFilter::Controller,
             phase: Phase::End,
             after: Phase::End,
+            followed_by: vec![],
+            count: parse_additional_phase_count(lower),
+            attacker_restriction: None,
+        }));
+    }
+    // CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+    // phase" (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus). The
+    // beginning phase is untap → upkeep → draw (CR 501.1). `phase: Untap` is the
+    // self-documenting marker the resolver keys the beginning-phase schedule on
+    // (untap begins only the beginning phase, CR 502) — no other AdditionalPhase
+    // producer emits `phase: Untap`. `after`/`followed_by` are unused for this
+    // shape: the resolver derives the anchor from the phase this ability resolves
+    // in ("this phase", CR 500.8) via `last_step_of_phase`, and resumes the turn
+    // at that phase's natural successor. `after` is a don't-care sentinel.
+    if nom_primitives::scan_contains(lower, "additional beginning phase") {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::Untap,
+            after: Phase::PostCombatMain,
             followed_by: vec![],
             count: parse_additional_phase_count(lower),
             attacker_restriction: None,
@@ -9654,7 +9798,7 @@ fn count_ticket_symbols(rest: &str) -> Option<u32> {
 /// - "gets two experience counters"
 /// - "get ten rad counters"
 /// - "get {TK}{TK}" (CR 107.17 ticket symbol form; see `count_ticket_symbols`)
-fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
+pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
     // Strip "get/gets " prefix
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
         .parse(lower)
@@ -12482,6 +12626,78 @@ mod tests {
                 .iter()
                 .any(|ability| matches!(&*ability.effect, Effect::CastFromZone { .. })),
             "Wish must not parse to a permanent-targeting CastFromZone"
+        );
+    }
+
+    /// SHAPE (issue #4241): Teferi's Puzzle Box's verbatim Oracle text parses to
+    /// a per-player draw-step trigger whose execute effect is a whole-hand
+    /// `ChangeZoneAll { origin: Hand, destination: Library, library_position:
+    /// Some(Bottom) }` with a `Draw` sub-ability ("then draws that many cards"),
+    /// NOT a no-op `PutAtLibraryPosition`/`Unimplemented`. The zero-Unimplemented
+    /// sweep is the positive reach-guard that keeps the shape assertion from
+    /// passing vacuously (card-test foot-gun #6).
+    #[test]
+    fn puzzle_box_hand_to_bottom_then_draw_shape() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of each player's draw step, that player puts the cards \
+             in their hand on the bottom of their library in any order, then draws \
+             that many cards.",
+            "Teferi's Puzzle Box",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+
+        // Positive reach-guard: nothing anywhere fell to Unimplemented.
+        fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&ability.effect);
+            if let Some(sub) = &ability.sub_ability {
+                walk(sub, out);
+            }
+        }
+        let mut effects: Vec<&Effect> = Vec::new();
+        for ability in &parsed.abilities {
+            walk(ability, &mut effects);
+        }
+        for trigger in &parsed.triggers {
+            if let Some(exec) = &trigger.execute {
+                walk(exec, &mut effects);
+            }
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "no clause may fall to Unimplemented; got {effects:?}"
+        );
+
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("Puzzle Box yields a triggered ability");
+        let exec = trigger.execute.as_ref().unwrap();
+
+        match &*exec.effect {
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                library_position: Some(LibraryPosition::Bottom),
+                ..
+            } => {}
+            other => panic!(
+                "execute must be a hand->library ChangeZoneAll placed on the bottom, got {other:?}"
+            ),
+        }
+
+        let draw_sub = exec
+            .sub_ability
+            .as_ref()
+            .expect("the hand-cycle must chain a 'draw that many' sub-ability");
+        assert!(
+            matches!(&*draw_sub.effect, Effect::Draw { .. }),
+            "the sub-ability must be a Draw, got {:?}",
+            draw_sub.effect
         );
     }
 

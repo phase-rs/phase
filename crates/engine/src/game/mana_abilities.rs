@@ -1188,6 +1188,14 @@ fn mana_ability_ready_without_simulation_gated(
     if mana_sources::has_tap_component(&ability_def.cost) && obj.tapped {
         return false;
     }
+    // CR 701.26a + CR 508.1f: a "can't become tapped" source (e.g. a goaded mana
+    // dork) can't activate a tap-cost mana ability. A {Q} untap-cost ability is
+    // unaffected — untapping is governed by `StaticMode::CantUntap`.
+    if mana_sources::has_tap_component(&ability_def.cost)
+        && crate::game::restrictions::object_cant_tap(state, source_id)
+    {
+        return false;
+    }
     // CR 107.6: A {Q}-cost mana ability requires a currently-tapped source — an
     // already-untapped permanent can't be untapped to pay the cost (Pili-Pala).
     if mana_sources::has_untap_component(&ability_def.cost) && !obj.tapped {
@@ -3009,12 +3017,9 @@ fn tap_source(
             "Cannot activate tap ability: permanent is tapped".to_string(),
         ));
     }
-    let obj = state.objects.get_mut(&source_id).unwrap();
-    obj.tapped = true;
-    events.push(GameEvent::PermanentTapped {
-        object_id: source_id,
-        caused_by: None,
-    });
+    // CR 701.26a + CR 508.1f: route the {T} mana-ability tap through the single
+    // authority so a "can't become tapped" source is refused.
+    crate::game::restrictions::tap_permanent_for_cost(state, source_id, events)?;
     Ok(())
 }
 
@@ -3209,11 +3214,9 @@ fn tap_selected_creature_for_mana_cost(
         ));
     }
 
-    state.objects.get_mut(&chosen_id).unwrap().tapped = true;
-    events.push(GameEvent::PermanentTapped {
-        object_id: chosen_id,
-        caused_by: None,
-    });
+    // CR 701.26a + CR 508.1f: route the tap-another-creature mana cost through the
+    // single authority so a "can't become tapped" creature is refused.
+    crate::game::restrictions::tap_permanent_for_cost(state, chosen_id, events)?;
     Ok(())
 }
 

@@ -1,6 +1,32 @@
 {
   "entries": [
     {
+      "id": 165,
+      "date": "2026-07-06",
+      "title": "Morph face-down casting arrives",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Morph, megamorph, and disguise cards can now be cast face down for {3}, including from other zones when another effect lets you cast them there\n• Disguise face-down spells carry ward {2}, and the alternative-cost modal now shows the face-down option with localized labels\n• “Permanents enter tapped this turn” effects now work for cards like Due Respect and Nahiri’s Lithoforming\n• Life and Limb-style compound animation, dynamic power/toughness counts, “for each creature you control with flying” quantities, and Alchemy spellbooks now have broader support\n\n🛠️ Cards That Now Work Right\n• Split cards such as Fire // Ice, Wear // Tear, and Assault // Battery now report their combined mana value and colors when they’re not on the stack\n• Light-Paws-style Aura searches and Curse tutors now attach to the chosen player or permanent instead of losing the host target\n• Teferi’s Puzzle Box now cycles each player’s whole hand to the bottom of their library and draws that many cards\n• Hollow One now discounts from cards cycled or discarded this turn, not random battlefield objects\n• Soulblast, Kaervek’s Spite, Tomb of Urami, Mob Mentality, Blizzard, Goblin Ski Patrol, and same-name/Coven checks now preserve their printed restrictions\n• Dagger Caster, Radiating Lightning, Seismic Wave, The Fall of Kroog, and Wildfire Howl now deal their “each creature/player” follow-up damage to the full group\n\n⚔️ Combat & Gameplay\n• Spells that can only be cast after blockers are declared now wait for the correct combat steps, covering Aleatory, Chaotic Strike, Curtain of Light, and Flash Foliage\n• Damage prevention and replacement shields with conditions now apply correctly to pending damage\n• Chosen-color alternative mana can auto-tap correctly again\n\n🖥️ Interface\n• Setup deck selection has a cleaner, easier-to-scan flow before starting a game",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1523896688463446038"
+    },
+    {
+      "id": 164,
+      "date": "2026-07-06",
+      "title": "Spider-Man cards arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• A 33-card Standard-set Spider-Man tranche is now live, including Stargaze, Quick Draw, Memory Vessel, Stolen Uniform, Symbiote Spider-Man, Vraska the Silencer, The Skullspore Nexus, Parker Luck, and more\n• New building blocks unlock more card classes: dynamic dig keeps, reflexive “this way” triggers, face-down exile play permissions, Behold choices, cloak from non-library sources, and “repeat this process” effects\n• Gollum, Scheming Guide now handles land/nonland opponent guesses, and opponent-guess cards have a more general choice engine behind them\n• Scavenge, Encore, Embalm, and related granted keyword abilities now work from the right zones and use each card’s own costs\n• Talruum Piper, Deathknell Berserker, Wretched Banquet, Anointed Peacekeeper, Verdeloth the Ancient, Angry Mob, Frantic Inventory, Furious Spinesplitter, and You’ve Been Caught Stealing are newly supported or more complete\n\n🛠️ Cards That Now Work Right\n• Vraska’s Fall and similar “each opponent … and gets a counter” effects now give poison, experience, rad, or ticket counters to each opponent instead of the caster\n• “N additional counters” now strips the word “additional” from the counter type, so Necromantic Summons, Heroic Return, Turntimber Symbiosis, Curator Beastie, and Ravaging Riftwurm place real +1/+1 or time counters\n• Frantic Inventory, Accumulated Knowledge, Take Inventory, Undead Servant, Goblin Gathering, Galvanic Bombardment, Ancestral Anger, Plague Rats, and similar named-card counts now look in the printed zone instead of treating “in your graveyard” as part of the card name\n• Imprisoned in the Moon and Sugar Coat now remove the right card types and abilities while preserving the granted ability they add\n• Anje Falkenrath now untaps only when the discarded card actually has madness, and behold choices are re-prompted when a spell is cast again from a new zone\n• Path to Exile and Erode now offer the library-search choice to the creature’s controller at the moment it left, not its owner after it moved zones\n• Amass Army references, Containment Priest, Orochi/Witherbloom/Cloud edge cases, and pilot-token crew checks now line up with the current board state\n\n⚔️ Combat & Gameplay\n• “Before attackers are declared” restrictions now use the actual combat window, so cards like Master Warcraft and Siren’s Call can be cast or activated by the right players before attackers are chosen\n• Divided-damage and divided-counter spells now pause for distribution after slot-by-slot target selection instead of skipping that assignment step\n• Cast cancellation works cleanly during distribution prompts, and orphaned pending triggers can surface recoverably instead of stalling the game\n• Filtered Lure-style effects now force only the matching blockers, so Talruum Piper, Marble Priest, and You Look Upon the Tarrasque apply their printed blocker sets\n\n🖥️ Interface\n• The card-problem picker now has player filters, art thumbnails, sticky search controls, full-row report confirmation, and clearer localized debug labels\n• Report-card entry points are easier to find from the board and debug menu, and priority-yield auto-pass controls are more discoverable\n• Deck import and card images no longer break on names that literally contain “//” or on hand-typed glued double-faced names\n• A rare degenerate viewport resize path no longer collapses the board layout",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1523742176402608250"
+    },
+    {
       "id": 163,
       "date": "2026-07-05",
       "title": "Priority yields and card reports",

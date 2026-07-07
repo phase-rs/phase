@@ -134,6 +134,12 @@ pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
             ControllerRef::EnchantedPlayer,
             tag("enchanted player controls"),
         ),
+        // CR 102.1: "the active player controls" — the turn player. Shares no
+        // prefix with the arms above, so dispatch order is not load-bearing.
+        value(
+            ControllerRef::ActivePlayer,
+            tag("the active player controls"),
+        ),
     ))
     .parse(input)
 }

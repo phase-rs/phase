@@ -92,10 +92,12 @@ fn collect_evidence_candidate_combos(
         if combo.is_empty() || combos.len() >= MAX_COMBOS {
             return;
         }
+        // CR 202.3d + CR 701.59a: a split card in the graveyard is off the stack, so
+        // collect-evidence exile totals must use its combined mana value.
         let total: u32 = combo
             .iter()
             .filter_map(|id| state.objects.get(id))
-            .map(|obj| obj.mana_cost.mana_value())
+            .map(|obj| obj.effective_mana_value())
             .sum();
         if total < minimum_mana_value {
             return;
@@ -113,7 +115,7 @@ fn collect_evidence_candidate_combos(
             state
                 .objects
                 .get(&id)
-                .map(|obj| (id, obj.mana_cost.mana_value()))
+                .map(|obj| (id, obj.effective_mana_value()))
         })
         .collect();
     valued_cards.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0 .0.cmp(&a.0 .0)));
@@ -1351,7 +1353,26 @@ pub fn candidate_actions_broad_with_probe(
             options,
             choice_type,
             source_id,
+            ..
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        // CR 608.2d: every printed guess is a legal candidate. Enumerated
+        // uniformly here for legality + server validation; the AI's actual pick
+        // is made by a hidden-info determinization pre-emption in
+        // `phase-ai::search::choose_action` so it cannot read the committed value.
+        WaitingFor::OpponentGuess {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|choice| {
+                candidate(
+                    GameAction::ChooseOption {
+                        choice: choice.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 601.2b + CR 701.4a: pre-choice behold type prompt — one ChooseOption
         // per FEASIBLE creature type (options already exclude unpayable types).
         WaitingFor::CostTypeChoice {
@@ -2949,7 +2970,10 @@ pub fn candidate_actions_with_probe(
     let mut actions = candidate_actions_exact(state);
     actions.extend(candidate_actions_broad_with_probe(state, probe));
 
-    if state.waiting_for.has_pending_cast() {
+    let has_pending_cast = state.waiting_for.has_pending_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
+    if has_pending_cast {
         if let Some(player) = state.waiting_for.acting_player() {
             actions.push(candidate(
                 GameAction::CancelCast,
@@ -3465,6 +3489,10 @@ pub(crate) fn priority_actions_with_probe(
                         && !c.tapped
                         && c.card_types.core_types.contains(&CoreType::Creature)
                 })
+                // CR 701.26a + CR 508.1f: crew/saddle/station all tap the chosen
+                // creature, so a "can't become tapped" creature is never eligible
+                // (attacking, CR 508.1f, is the only exemption and is not a cost).
+                && !crate::game::restrictions::object_cant_tap(state, cid)
             })
             .collect();
         // CR 702.122a: Crew additionally excludes creatures with a "can't crew"
@@ -4350,6 +4378,12 @@ fn mana_payment_actions(
                 let Some(obj) = state.objects.get(&obj_id) else {
                     continue;
                 };
+                // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
+                // tapped for convoke/improvise/waterbend (all tap the creature to
+                // pay). Delve (graveyard exile above) never taps, so it's exempt.
+                if crate::game::restrictions::object_cant_tap(state, obj_id) {
+                    continue;
+                }
                 match mode {
                     ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
                         // Waterbend: always colorless
@@ -4830,6 +4864,44 @@ mod tests {
         }
     }
 
+    /// CR 202.3d + CR 701.59a: collect-evidence candidate generation values a
+    /// graveyard split card by its COMBINED mana value. Assault // Battery is
+    /// {R} (front, MV 1) + {3}{G} (MV 4) → combined MV 5. An evidence threshold
+    /// of 5 must be satisfiable by this single card; a threshold of 6 must not.
+    ///
+    /// Revert-failing discriminator: reading the front-only MV (1) omits the card
+    /// at threshold 5, so the `contains(&assault)` assertion fails on revert.
+    #[test]
+    fn collect_evidence_candidates_use_combined_split_mana_value() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let assault = sc.add_real_card(P0, "Assault", Zone::Graveyard, db);
+        let state = sc.state;
+
+        // Sanity: combined MV off the stack is 5 (front-only would be 1).
+        assert_eq!(
+            state.objects.get(&assault).unwrap().effective_mana_value(),
+            5,
+            "Assault // Battery in the graveyard reports combined MV 5"
+        );
+
+        let at_five = collect_evidence_candidate_combos(&state, &[assault], 5);
+        assert!(
+            at_five.iter().any(|combo| combo.contains(&assault)),
+            "combined MV 5 must satisfy collect-evidence threshold 5; the front-only \
+             MV (1) would wrongly omit Assault // Battery"
+        );
+
+        let at_six = collect_evidence_candidate_combos(&state, &[assault], 6);
+        assert!(
+            at_six.is_empty(),
+            "combined MV 5 cannot satisfy a collect-evidence threshold of 6"
+        );
+    }
+
     #[test]
     fn two_hg_priority_actions_offer_single_pass_for_team_representative() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
@@ -5029,6 +5101,33 @@ mod tests {
         assert!(
             !has_crew(&priority_actions(&state, PlayerId(0))),
             "a tapped-only board offers no Crew"
+        );
+    }
+
+    /// CR 701.26a + CR 508.1f (Ood Sphere): a creature that "can't become tapped"
+    /// is excluded from the crew/saddle/station eligibility hoist, so the AI/MP
+    /// legal-action set never offers a Crew that would tap it.
+    #[test]
+    fn cant_become_tapped_creature_is_not_crew_eligible() {
+        let mut state = crew_priority_state();
+        add_crew_vehicle(&mut state, 100, PlayerId(0));
+        let creature = add_untapped_creature(&mut state, 200, PlayerId(0));
+        assert!(
+            has_crew(&priority_actions(&state, PlayerId(0))),
+            "baseline: an untapped creature enables the Crew offer"
+        );
+
+        // Grant CantTap (printed onto the creature's own static definitions).
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            let def = StaticDefinition::new(crate::types::statics::StaticMode::CantTap)
+                .affected(TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        assert!(
+            !has_crew(&priority_actions(&state, PlayerId(0))),
+            "a can't-become-tapped creature must not be offered to crew"
         );
     }
 
@@ -5611,6 +5710,7 @@ mod tests {
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
             source_id: Some(source),
+            persist_player: None,
         };
 
         let actions = candidate_actions(&state);

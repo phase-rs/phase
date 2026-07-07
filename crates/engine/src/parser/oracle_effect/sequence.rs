@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, opt, value};
+use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -16,15 +16,16 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
 use crate::parser::oracle_quantity::{
-    parse_cda_quantity, parse_for_each_object_filter_clause, parse_quantity_ref,
+    parse_cda_quantity, parse_event_context_quantity, parse_for_each_object_filter_clause,
+    parse_quantity_ref,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    LibraryPosition, MultiTargetSpec, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -32,6 +33,99 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+/// CR 303.4f: Parse the host of "put it onto the battlefield attached to X"
+/// inside a library-search compound.
+fn parse_search_attach_host_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(
+            TargetFilter::SelfRef,
+            alt((
+                tag("~"),
+                tag("this creature"),
+                tag("this permanent"),
+                tag("this artifact"),
+            )),
+        ),
+        value(
+            TargetFilter::ParentTarget,
+            alt((
+                tag("that enchanted creature"),
+                tag("that enchanted permanent"),
+                tag("enchanted player"),
+                tag("that player"),
+                tag("that creature"),
+                tag("that permanent"),
+                tag("that token"),
+                tag("that card"),
+                tag("the creature"),
+                tag("the permanent"),
+                tag("the token"),
+            )),
+        ),
+        parse_search_attach_host_target,
+    ))
+    .parse(input)
+}
+
+fn parse_search_attach_host_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (filter, remainder) = parse_target(input);
+    if remainder.trim().is_empty() {
+        Ok((remainder, filter))
+    } else {
+        Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )))
+    }
+}
+
+fn parse_search_attach_host_phrase_comma(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, phrase) = take_until(",")(input)?;
+    let (rest, _) = tag(",")(rest)?;
+    let (_, filter) = parse_search_attach_host_ref(phrase.trim())?;
+    Ok((rest, filter))
+}
+
+fn parse_search_attach_host_phrase_then(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, phrase) = take_until(" then ")(input)?;
+    let (rest, _) = tag(" then ")(rest)?;
+    let (_, filter) = parse_search_attach_host_ref(phrase.trim())?;
+    Ok((rest, filter))
+}
+
+fn parse_search_attach_host_phrase_period(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, phrase) = take_until(".")(input)?;
+    let (rest, _) = tag(".")(rest)?;
+    let (_, filter) = parse_search_attach_host_ref(phrase.trim())?;
+    Ok((rest, filter))
+}
+
+fn parse_search_attach_host_phrase_eof(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (_, filter) = all_consuming(parse_search_attach_host_ref).parse(input)?;
+    Ok(("", filter))
+}
+
+fn parse_search_attach_host_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        parse_search_attach_host_phrase_comma,
+        parse_search_attach_host_phrase_then,
+        parse_search_attach_host_phrase_period,
+        parse_search_attach_host_phrase_eof,
+    ))
+    .parse(input)
+}
+
+fn parse_search_attach_host(text: &str) -> Option<TargetFilter> {
+    let lower = text.to_ascii_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = take_until("attached to").parse(input)?;
+        let (input, _) = tag("attached to ").parse(input)?;
+        let (input, filter) = parse_search_attach_host_phrase(input)?;
+        Ok((input, filter))
+    })
+    .map(|(filter, _)| filter)
+}
 
 /// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
 /// continuation chunk so the absorption matcher sees the bare verb form. Used
@@ -496,6 +590,10 @@ fn ability_uses_chosen_card_predicate(def: &AbilityDefinition) -> bool {
 
 fn effect_uses_chosen_card_predicate(effect: &Effect) -> bool {
     match effect {
+        Effect::Choose {
+            choice_type: ChoiceType::CardPredicateGuess { .. },
+            ..
+        } => true,
         Effect::Dig { filter, .. }
         | Effect::RevealUntil { filter, .. }
         | Effect::SearchLibrary { filter, .. }
@@ -2166,6 +2264,49 @@ fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
     Ok((rest, ()))
 }
 
+/// CR 122.1 + CR 608.2c + CR 109.5: a bare "gets a/an/N <kind> counter[s]"
+/// conjunct joined by " and " is an independent player-counter instruction whose
+/// subject carries over from the prior conjunct — Vraska's Fall: "Each opponent
+/// sacrifices a creature or planeswalker of their choice and gets a poison
+/// counter." Without this split the counter clause stays glued to the sacrifice
+/// as an unscoped `try_split_targeted_compound` sub-ability, so the carried
+/// "each opponent" `player_scope` never reaches it and the counter is given to
+/// the source's controller instead of each opponent. Splitting it off routes it
+/// through the chunk loop's scope-carry (mirroring "... and loses 2 life").
+///
+/// The discriminator is the SAME classifier the lowerer uses:
+/// `imperative::try_parse_player_counter` (CR 122.1b — poison/experience/rad/
+/// ticket only; it rejects energy, which lowers to `GainEnergy`, and object/P-T
+/// counters like `+1/+1`). Reusing it guarantees the split set can never diverge
+/// from what the chunk parser accepts as `GivePlayerCounter`, so no object/energy
+/// counter text is split into a chunk the parser would reject or misroute. The
+/// segment is bounded to THIS conjunct (up to the next " and ") so a later
+/// `counter` token can't false-trigger. Mirrors the trailing `.or()` arm
+/// `starts_remove_counter_clause_lower`.
+fn starts_gets_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    // Bound to THIS conjunct (up to the next " and ").
+    let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(s) {
+        Ok((_, seg)) => seg,
+        Err(_) => s,
+    };
+    // Drop a trailing sentence period so the classifier's "ends with
+    // counter[s]" check matches a chunk-final clause ("… gets a poison counter.").
+    let core = match terminated(
+        take_until::<_, _, OracleError<'_>>("."),
+        tag::<_, _, OracleError<'_>>("."),
+    )
+    .parse(segment)
+    {
+        Ok((_, c)) => c,
+        Err(_) => segment,
+    };
+    if super::imperative::try_parse_player_counter(core).is_some() {
+        Ok((s, ()))
+    } else {
+        nom::combinator::fail::<_, (), OracleError<'_>>().parse(s)
+    }
+}
+
 /// CR 601.2c + CR 508.1d + CR 509.1c: A second `"[up to] <n> target <filter>"`
 /// conjunct joined by a bare `" and "` opens its OWN target (each instance of
 /// the word "target" is a distinct target — CR 601.2c) and applies its own
@@ -2506,6 +2647,10 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `.or()` arm (mirroring `starts_target_continuous_clause_lower`) so the
     // verb-prefix `alt(...)` cluster stays under nom's 21-arm limit.
     .or(value((), starts_remove_counter_clause_lower))
+    // CR 122.1 + CR 109.5: a bare "gets a/an/N <kind> counter[s]" conjunct is a
+    // carried-subject player-counter clause (Vraska's Fall). Trailing `.or()` arm
+    // mirroring `starts_remove_counter_clause_lower`.
+    .or(value((), starts_gets_counter_clause_lower))
     // CR 205.1a + CR 613.1d + CR 702.171b: a bare "becomes <descriptor>"
     // conjunct joined by " and " is a second animation/designation predicate whose
     // subject is carried over (anaphorically) from the prior conjunct — the same
@@ -3119,7 +3264,7 @@ pub(super) fn apply_clause_continuation(
             enter_tapped,
             enters_under,
             reveal,
-            attach_to_source,
+            attach_host,
         } => {
             // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
             // finds the card in any searched zone, so the put-step must move it
@@ -3167,14 +3312,13 @@ pub(super) fn apply_clause_continuation(
                     enters_modified_if: None,
                 },
             );
-            // CR 303.4f: "attached to [source]" — forward the moved card to an Attach sub_ability
-            if attach_to_source {
+            if let Some(host) = attach_host {
                 change_zone.forward_result = true;
                 change_zone.sub_ability = Some(Box::new(AbilityDefinition::new(
                     kind,
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
-                        target: TargetFilter::Any,
+                        target: host,
                     },
                 )));
             }
@@ -3965,6 +4109,24 @@ pub(super) fn apply_clause_continuation(
                 enter_with_counters.push((counter_type, count));
             }
         }
+        ContinuationAst::TokenSourcePowerToughness {
+            power: followup_power,
+            toughness: followup_toughness,
+        } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // CR 608.2h + CR 111.3: source-defined token P/T is locked in as
+            // the token is created, using the resolving ability source's
+            // characteristics.
+            if let Effect::Token {
+                power, toughness, ..
+            } = &mut *previous.effect
+            {
+                *power = followup_power;
+                *toughness = followup_toughness;
+            }
+        }
         ContinuationAst::RevealUntilKept {
             destination,
             enter_tapped: tapped,
@@ -4269,6 +4431,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking { .. } => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
+        ContinuationAst::TokenSourcePowerToughness { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::FaceDownProfileSpec { .. } => true,
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
@@ -4341,8 +4504,13 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 return None;
             }
             let lower = text.to_lowercase();
-            let attach_to_source = nom_primitives::scan_contains(&full_lower, "attached to")
-                || nom_primitives::scan_contains(&lower, "attached to");
+            let attach_host = if nom_primitives::scan_contains(&full_lower, "attached to")
+                || nom_primitives::scan_contains(&lower, "attached to")
+            {
+                parse_search_attach_host(&full_lower).or(Some(TargetFilter::Any))
+            } else {
+                None
+            };
             // CR 701.23a + CR 701.18a: Scan "onto the battlefield tapped" across
             // the whole sentence (full_lower) so the destination compound's
             // "enters tapped" modifier is detected even when the put-step is
@@ -4388,7 +4556,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 enters_under: nom_primitives::scan_contains(&full_lower, "under your control")
                     .then_some(ControllerRef::You),
                 reveal,
-                attach_to_source,
+                attach_host,
             })
         }
         _ => None,
@@ -5242,6 +5410,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -5283,6 +5453,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -5586,11 +5757,12 @@ pub(super) fn parse_followup_continuation_ast(
             // restrictions are deliberately left unabsorbed so the residual clause
             // remains an `Effect::Unimplemented` (honest coverage red) instead of
             // marking a card supported while dropping an unsupported branch from
-            // coverage accounting. Do not partially absorb mixed disjunctions:
-            // Tin Street Gossip must stay red until face-down spell casting exists.
-            // A dropped unsupported restriction also drops any paired `grants`; that
-            // is intentional (no real card pairs a grant with an unsupported
-            // restriction).
+            // coverage accounting. Do not partially absorb mixed disjunctions. As of
+            // CR 708.4 face-down spell casting every spend-restriction leaf is
+            // production-live, so Tin Street Gossip's mixed disjunction now absorbs
+            // (coverage green). A dropped unsupported restriction also drops any
+            // paired `grants`; that is intentional (no real card pairs a grant with
+            // an unsupported restriction).
             if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
                 if restriction.is_coverage_supported() {
                     return Some(ContinuationAst::ManaRestriction {
@@ -6297,7 +6469,12 @@ pub(super) fn parse_followup_continuation_ast(
         // so counters apply as the token enters (CR 614.1c replacement)
         // rather than as a post-ETB PutCounter effect that would mistakenly
         // target the source ability via `SelfRef`/`ParentTarget`.
-        Effect::Token { .. } => try_parse_token_enters_with_counters(&lower)
+        Effect::Token { .. } => parse_token_source_power_toughness_followup(&lower)
+            .map(|(power, toughness)| ContinuationAst::TokenSourcePowerToughness {
+                power,
+                toughness,
+            })
+            .or_else(|| try_parse_token_enters_with_counters(&lower))
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
         _ => None,
     }
@@ -6410,6 +6587,109 @@ fn try_parse_tokens_goaded_continuation(lower: &str) -> Option<ContinuationAst> 
         return None;
     }
     Some(ContinuationAst::GoadLastCreated { duration })
+}
+
+pub(super) fn source_token_power_value() -> PtValue {
+    PtValue::Quantity(QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Source,
+        },
+    })
+}
+
+pub(super) fn source_token_toughness_value() -> PtValue {
+    PtValue::Quantity(QuantityExpr::Ref {
+        qty: QuantityRef::Toughness {
+            scope: ObjectScope::Source,
+        },
+    })
+}
+
+pub(super) fn parse_token_source_power_toughness_followup(
+    text: &str,
+) -> Option<(PtValue, PtValue)> {
+    let lower = text.trim().to_ascii_lowercase();
+    let mut parser = all_consuming(terminated(
+        parse_token_source_power_toughness_clause,
+        opt(tag(".")),
+    ));
+    parser.parse(lower.as_str()).ok().map(|(_, values)| values)
+}
+
+fn parse_token_source_power_toughness_clause(
+    input: &str,
+) -> Result<(&str, (PtValue, PtValue)), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("its power is equal to ").parse(input)?;
+    let (input, power_text) = take_until(" and its toughness is equal to ").parse(input)?;
+    let power = parse_token_followup_pt_value(power_text, TokenFollowupStat::Power)
+        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
+    let (input, _) = tag(" and its toughness is equal to ").parse(input)?;
+    let (input, toughness_text) = alt((take_until("."), rest)).parse(input)?;
+    let toughness = parse_token_followup_pt_value(toughness_text, TokenFollowupStat::Toughness)
+        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
+    Ok((input, (power, toughness)))
+}
+
+#[derive(Clone, Copy)]
+enum TokenFollowupStat {
+    Power,
+    Toughness,
+}
+
+fn parse_token_followup_pt_value(input: &str, stat: TokenFollowupStat) -> Option<PtValue> {
+    let input = input.trim();
+    if all_consuming(|i| parse_source_pt_ref(i, stat))
+        .parse(input)
+        .is_ok()
+    {
+        return Some(match stat {
+            TokenFollowupStat::Power => source_token_power_value(),
+            TokenFollowupStat::Toughness => source_token_toughness_value(),
+        });
+    }
+    let expr = parse_event_context_quantity(input).or_else(|| parse_cda_quantity(input))?;
+    token_followup_pt_expr_is_allowed(&expr, stat).then_some(PtValue::Quantity(expr))
+}
+
+fn token_followup_pt_expr_is_allowed(expr: &QuantityExpr, stat: TokenFollowupStat) -> bool {
+    let QuantityExpr::Ref { qty } = expr else {
+        return false;
+    };
+    let scope = match (qty, stat) {
+        (QuantityRef::Power { scope }, TokenFollowupStat::Power)
+        | (QuantityRef::Toughness { scope }, TokenFollowupStat::Toughness) => scope,
+        _ => return false,
+    };
+    matches!(
+        scope,
+        ObjectScope::Source
+            | ObjectScope::Demonstrative
+            | ObjectScope::CostPaidObject
+            | ObjectScope::EventSource
+    )
+}
+
+fn parse_source_pt_ref(
+    input: &str,
+    stat: TokenFollowupStat,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (input, _) = parse_source_possessive(input)?;
+    let (input, _) = match stat {
+        TokenFollowupStat::Power => tag("power").parse(input)?,
+        TokenFollowupStat::Toughness => tag("toughness").parse(input)?,
+    };
+    Ok((input, ()))
+}
+
+fn parse_source_possessive(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("this creature's "),
+            tag("~'s "),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
@@ -10037,6 +10317,208 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[test]
+    fn source_power_toughness_token_followup_recognizes_source_refs() {
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "Its power is equal to this creature's power and its toughness is equal to this creature's toughness."
+            ),
+            Some((source_token_power_value(), source_token_toughness_value()))
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to ~'s power and its toughness is equal to ~'s toughness"
+            ),
+            Some((source_token_power_value(), source_token_toughness_value()))
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to that card's power and its toughness is equal to that card's toughness"
+            ),
+            Some((
+                PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                }),
+                PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                }),
+            ))
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to target creature's power and its toughness is equal to target creature's toughness"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to this creature's power and its toughness is equal to this creature's toughness and it has flying"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn gemini_engine_construct_token_uses_source_power_toughness_followup() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{
+            AbilityKind, DelayedTriggerCondition, Effect, ObjectScope, PtValue, QuantityExpr,
+            QuantityRef, TargetFilter,
+        };
+        use crate::types::phase::Phase;
+
+        let def = parse_effect_chain(
+            "create a colorless Construct artifact creature token named Twin that's attacking. \
+             Its power is equal to this creature's power and its toughness is equal to this \
+             creature's toughness. Sacrifice the token at end of combat.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            enters_attacking,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected Gemini token effect, got {:?}", def.effect);
+        };
+        assert_eq!(name, "Twin");
+        assert!(types.iter().any(|ty| ty == "Construct"));
+        assert!(*enters_attacking);
+        assert_eq!(
+            power,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source
+                }
+            })
+        );
+        assert_eq!(
+            toughness,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Source
+                }
+            })
+        );
+
+        let Some(sub) = def.sub_ability.as_ref() else {
+            panic!("expected end-of-combat sacrifice sub-ability");
+        };
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*sub.effect
+        else {
+            panic!("expected delayed sacrifice, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            condition,
+            &DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        );
+        assert!(
+            matches!(
+                &*effect.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    ..
+                }
+            ),
+            "expected delayed sacrifice to target LastCreated, got {:?}",
+            effect.effect
+        );
+    }
+
+    #[test]
+    fn ritual_of_the_returned_zombie_uses_demonstrative_card_power_toughness_followup() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{
+            AbilityKind, Effect, ObjectScope, PtValue, QuantityExpr, QuantityRef,
+        };
+
+        let def = parse_effect_chain(
+            "exile target creature card from your graveyard. create a black Zombie creature token. \
+             Its power is equal to that card's power and its toughness is equal to that card's toughness.",
+            AbilityKind::Spell,
+        );
+
+        let Some(sub) = def.sub_ability.as_ref() else {
+            panic!("expected token sub-ability after exile, got {def:?}");
+        };
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("expected Zombie token effect, got {:?}", sub.effect);
+        };
+        assert_eq!(name, "Zombie");
+        assert!(types.iter().any(|ty| ty == "Zombie"));
+        assert_eq!(
+            power,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+        assert_eq!(
+            toughness,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn source_power_toughness_token_requires_immediate_followup() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, Effect};
+
+        let def = parse_effect_chain(
+            "create a colorless Construct artifact creature token named Twin that's attacking.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "missing token P/T without the followup must remain unsupported, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn source_power_toughness_followup_does_not_license_multi_token_sequence() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, Effect};
+
+        let def = parse_effect_chain(
+            "create a colorless Construct artifact creature token named Twin and a colorless \
+             Construct artifact creature token named Echo. Its power is equal to this creature's \
+             power and its toughness is equal to this creature's toughness.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "a singular source-P/T followup must not fill multiple missing-P/T tokens, got {:?}",
+            def.effect
+        );
+    }
+
     /// CR 122.1 + CR 614.1c + CR 607.2a: Oversimplify's third-person
     /// dynamic followup. "Each player creates ... and puts a number of +1/+1
     /// counters on it equal to the total power of creatures they controlled
@@ -10304,6 +10786,66 @@ mod tests {
         assert!(starts_bare_and_clause(
             "remove a number of +1/+1 counters from this creature equal to the result"
         ));
+    }
+
+    /// CR 122.1 + CR 109.5 (issue #4733): a bare "gets a/an/N <kind> counter[s]"
+    /// conjunct is a carried-subject player-counter clause that must split so it
+    /// inherits the prior conjunct's `player_scope` (Vraska's Fall: "Each opponent
+    /// sacrifices … and gets a poison counter"). The split predicate reuses
+    /// `try_parse_player_counter`, so it accepts exactly the lowerer's set
+    /// (poison/experience/rad/ticket) and rejects energy (→ GainEnergy), object
+    /// P/T counters, and non-player "charge" counters — the split set can't
+    /// diverge from what the chunk parser will accept.
+    #[test]
+    fn gets_player_counter_clause_splits() {
+        // Player counters the lowerer accepts → split so the scope carries.
+        assert!(starts_bare_and_clause("gets a poison counter"));
+        assert!(starts_bare_and_clause("gets three experience counters"));
+        assert!(starts_bare_and_clause("gets a rad counter"));
+        assert!(starts_bare_and_clause("gets a ticket counter"));
+        // Energy is NOT a player counter (lowers to GainEnergy) → must not split.
+        assert!(!starts_bare_and_clause("gets an energy counter"));
+        // Object counters must not split.
+        assert!(!starts_bare_and_clause("gets a +1/+1 counter"));
+        assert!(!starts_bare_and_clause("gets a charge counter"));
+        // Bare pump → no counter token at all.
+        assert!(!starts_bare_and_clause("gets +2/+0 until end of turn"));
+    }
+
+    /// CR 122.1 + CR 109.5 (issue #4733): end-to-end — Vraska's Fall's "and gets a
+    /// poison counter" conjunct must carry the "each opponent" `player_scope`, so
+    /// the counter is given to each opponent (not the source's controller).
+    #[test]
+    fn vraska_fall_poison_scoped_to_each_opponent() {
+        use crate::types::ability::{Effect, PlayerFilter};
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each opponent sacrifices a creature or planeswalker of their choice and gets a poison counter.",
+            "Vraska's Fall",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let root = &parsed.abilities[0];
+        assert!(
+            matches!(*root.effect, Effect::Sacrifice { .. }),
+            "root should be the sacrifice, got {:?}",
+            root.effect
+        );
+        assert_eq!(root.player_scope, Some(PlayerFilter::Opponent));
+        let sub = root
+            .sub_ability
+            .as_ref()
+            .expect("poison counter must be a sub_ability of the sacrifice");
+        assert!(
+            matches!(*sub.effect, Effect::GivePlayerCounter { .. }),
+            "sub should give a player counter, got {:?}",
+            sub.effect
+        );
+        assert_eq!(
+            sub.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the poison sub must carry player_scope: Opponent so each opponent (not the controller) gets the counter"
+        );
     }
 
     /// CR 102.2 + CR 608.2c: end-to-end chunk split. The "you draw ... and each
@@ -10856,6 +11398,35 @@ mod tests {
                 })
             ),
             "expected bare of-them DigFromAmong, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn search_attach_host_that_creature_is_parent_target() {
+        use crate::types::ability::TypedFilter;
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put it onto the battlefield attached to that creature, then shuffle"
+            ),
+            Some(TargetFilter::ParentTarget)
+        );
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put it onto the battlefield attached to target creature. if you search your library this way, shuffle"
+            ),
+            Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put it onto the battlefield attached to target player, then shuffle"
+            ),
+            Some(TargetFilter::Player)
+        );
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put that card onto the battlefield attached to ~, then shuffle"
+            ),
+            Some(TargetFilter::SelfRef)
         );
     }
 

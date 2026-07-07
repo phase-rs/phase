@@ -315,6 +315,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Myriad
         | Effect::NoOp
         | Effect::OpenAttractions { .. }
+        | Effect::OpponentGuess { .. }
         | Effect::PairWith { .. }
         | Effect::PayCost { .. }
         | Effect::PhaseIn { .. }
@@ -341,6 +342,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::RevealUntil { .. }
+        | Effect::ReverseTurnOrder
         | Effect::RingTemptsYou
         | Effect::Ripple { .. }
         | Effect::RollDie { .. }
@@ -358,6 +360,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SolveCase
         | Effect::Specialize
         | Effect::StartYourEngines { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::SwitchPT { .. }
         | Effect::TakeTheInitiative
         | Effect::TargetOnly { .. }
@@ -856,6 +859,7 @@ pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarit
         ContinuousModification::AddDynamicPower { .. }
         | ContinuousModification::AddDynamicToughness { .. } => EffectPolarity::Beneficial,
         ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddColor { .. }

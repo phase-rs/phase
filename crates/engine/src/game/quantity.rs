@@ -18,8 +18,8 @@ use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
     FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, RoundingMode, StaticCondition, TargetFilter, TargetRef, TrackedAnaphorSource,
-    TypeFilter, TypedFilter, ZoneRef,
+    ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion, TargetFilter, TargetRef,
+    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -149,6 +149,10 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ObjectCountBySharedQuality { filter, .. }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
+            }
+            | QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Objects { filter },
+                ..
             }
             | QuantityRef::ManaSpentToCast {
                 metric:
@@ -370,6 +374,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
@@ -462,6 +467,9 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        // Derived-cost keyword grant: its cost is derived from the recipient's
+        // mana cost, not a `QuantityExpr` magnitude — no dynamic value here.
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
@@ -597,6 +605,15 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // Distinct card types reads battlefield population ONLY when its source
         // is the object-filter variant; zone / linked-exile sources do not.
         QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Objects { .. } => true,
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+        // Distinct subtypes mirrors distinct card types: only the object-filter
+        // source reads battlefield population; zone / linked-exile / tracked-set
+        // sources do not.
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
             CardTypeSetSource::Objects { .. } => true,
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
@@ -756,6 +773,14 @@ fn entered_object_perturbs_quantity_ref(
             // Zone / linked-exile / tracked-set sources are not battlefield
             // population — the classifier returns false for them, so they cannot
             // be perturbed.
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
+            CardTypeSetSource::Objects { filter } => {
+                matches_target_filter(state, entered.id, filter, ctx)
+            }
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
             | CardTypeSetSource::TrackedSet { .. } => false,
@@ -1427,9 +1452,7 @@ pub(crate) fn aggregate_property_over(
             ObjectProperty::Power => obj.power,
             ObjectProperty::Toughness => obj.toughness,
             // CR 202.3e: include X when on the stack (cost_x_paid).
-            ObjectProperty::ManaValue => Some(u32_to_i32_saturating(
-                obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-            )),
+            ObjectProperty::ManaValue => Some(u32_to_i32_saturating(obj.effective_mana_value())),
             // CR 107.4a + CR 107.4e + CR 202.1: colored mana symbols of `color`;
             // hybrid symbols contribute to each of their colors.
             ObjectProperty::ManaSymbolCount(color) => Some(u32_to_i32_saturating(
@@ -1491,6 +1514,25 @@ pub(crate) fn object_count_matching_ids(
         ids.retain(|&id| id != triggering_id);
     }
     ids
+}
+
+fn filter_binds_owned_you(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }
+            )
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_binds_owned_you)
+        }
+        TargetFilter::Not { filter } => filter_binds_owned_you(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_binds_owned_you(filter),
+        _ => false,
+    }
 }
 
 fn resolve_ref(
@@ -1860,9 +1902,7 @@ fn resolve_ref(
         QuantityRef::SelfManaValue => state
             .objects
             .get(&source_id)
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .or_else(|| {
                 state
                     .lki_cache
@@ -1896,7 +1936,27 @@ fn resolve_ref(
             // selection + the `OtherThanTriggerObject` exclusion); per-object
             // aggregation delegated to `aggregate_property_over` (single
             // summation authority, live-then-LKI per property).
-            let ids = object_count_matching_ids(state, filter, &filter_ctx, source_id);
+            let mut scoped_exile_filter_ctx;
+            let aggregate_filter_ctx = if filter.references_exiled_by_source()
+                && filter_binds_owned_you(filter)
+                && ability.is_some_and(|a| {
+                    a.scoped_player.is_some()
+                        || a.original_controller
+                            .is_some_and(|orig| orig != a.controller)
+                }) {
+                let scoped = ability
+                    .and_then(|a| a.scoped_player.or(Some(a.controller)))
+                    .unwrap_or(controller);
+                scoped_exile_filter_ctx = match ability {
+                    Some(a) => FilterContext::from_ability_with_controller(a, scoped),
+                    None => FilterContext::from_source_with_controller(source_id, scoped),
+                };
+                scoped_exile_filter_ctx.recipient_id = ctx.recipient;
+                &scoped_exile_filter_ctx
+            } else {
+                &filter_ctx
+            };
+            let ids = object_count_matching_ids(state, filter, aggregate_filter_ctx, source_id);
             aggregate_property_over(state, &ids, *function, *property)
         }
         // CR 107.1 + CR 700.1: min/max across players of the count of
@@ -2120,6 +2180,113 @@ fn resolve_ref(
                                 }
                             }
                         }
+                    }
+                }
+            }
+            usize_to_i32_saturating(seen.len())
+        }
+        // CR 205.3 + CR 604.3: Count distinct subtype VALUES across the same
+        // `CardTypeSetSource` scan as `DistinctCardTypes`, but reading
+        // `card_types.subtypes` (CR 205.3) rather than `core_types` (CR 205.2).
+        // A card contributing three subtypes adds three distinct entries; the
+        // HashSet dedupes shared subtype values across cards. When
+        // `exclude == CreatureTypes` (CR 205.3m), subtypes present in
+        // `state.all_creature_types` are skipped (Subgoyf: "different subtypes
+        // other than creature types"). Subtype values are stored capitalized
+        // (e.g. "Goblin"); inserted as-is to preserve consistent casing.
+        QuantityRef::DistinctSubtypes { source, exclude } => {
+            // Gather the source object set first (same scan axis as
+            // `DistinctCardTypes`), then tally distinct subtype values across it.
+            // Collecting ids up front keeps the `&str` subtype borrows tied to
+            // `state.objects` for the lifetime of `seen`.
+            let mut obj_ids: Vec<ObjectId> = Vec::new();
+            match source {
+                CardTypeSetSource::Zone { zone, scope } => match zone {
+                    ZoneRef::Exile => {
+                        for &obj_id in &state.exile {
+                            if let Some(obj) = state.objects.get(&obj_id) {
+                                if count_scope_owner_matches(
+                                    state, scope, ctx, controller, obj.owner,
+                                ) {
+                                    obj_ids.push(obj_id);
+                                }
+                            }
+                        }
+                    }
+                    ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
+                        for player in scoped_players(state, scope, ctx, controller) {
+                            let zone_ids = match zone {
+                                ZoneRef::Graveyard => &player.graveyard,
+                                ZoneRef::Library => &player.library,
+                                ZoneRef::Hand => &player.hand,
+                                ZoneRef::Exile => unreachable!(),
+                            };
+                            obj_ids.extend(zone_ids.iter().copied());
+                        }
+                    }
+                },
+                CardTypeSetSource::ExiledBySource => {
+                    for linked in
+                        crate::game::players::linked_exile_cards_for_source(state, source_id)
+                    {
+                        obj_ids.push(linked.exiled_id);
+                    }
+                }
+                CardTypeSetSource::Objects { filter } => {
+                    let zone = filter
+                        .extract_in_zone()
+                        .unwrap_or(crate::types::zones::Zone::Battlefield);
+                    for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
+                        if matches_target_filter(state, obj_id, filter, &filter_ctx) {
+                            obj_ids.push(obj_id);
+                        }
+                    }
+                }
+                CardTypeSetSource::TrackedSet { caused_by } => {
+                    if let Some((set_id, ids)) =
+                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                    {
+                        for &oid in ids {
+                            let cause_ok = match caused_by {
+                                None => true,
+                                Some(cause) => state
+                                    .tracked_set_member_causes
+                                    .get(set_id)
+                                    .and_then(|causes| causes.get(&oid))
+                                    .is_some_and(|member_cause| member_cause == cause),
+                            };
+                            if cause_ok {
+                                obj_ids.push(oid);
+                            }
+                        }
+                    }
+                }
+            }
+            // CR 205.3m: skip subtypes that are creature types when excluding
+            // creature types. Subtype values are stored capitalized ("Goblin")
+            // and inserted as-is; a card with three subtypes contributes three.
+            let exclude_creature = matches!(exclude, SubtypeExclusion::CreatureTypes);
+            // Collect the creature-type names into a set ONCE for O(1) membership,
+            // rather than a linear scan of `all_creature_types` (hundreds of entries)
+            // per subtype per object — layer 7a recomputes this every pass, so the
+            // inner loop is hot.
+            let creature_types: HashSet<&str> = if exclude_creature {
+                state
+                    .all_creature_types
+                    .iter()
+                    .map(|ct| ct.as_str())
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let mut seen: HashSet<&str> = HashSet::new();
+            for obj_id in &obj_ids {
+                if let Some(obj) = state.objects.get(obj_id) {
+                    for sub in &obj.card_types.subtypes {
+                        if exclude_creature && creature_types.contains(sub.as_str()) {
+                            continue;
+                        }
+                        seen.insert(sub.as_str());
                     }
                 }
             }
@@ -2454,11 +2621,7 @@ fn resolve_ref(
             // Return mana value of first matching commander (any one if multiple exist)
             ids.first()
                 .and_then(|&id| state.objects.get(&id))
-                .map(|obj| {
-                    u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )
-                })
+                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .unwrap_or(0)
         }
         // CR 106.1 + CR 109.1: Count distinct colors (W/U/B/R/G) among permanents
@@ -3037,6 +3200,8 @@ fn resolve_ref(
                             )
                             .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 102.1: attachment controlled by the active player.
+                        Some(ControllerRef::ActivePlayer) => snap.controller == state.active_player,
                     })
                     .count(),
             )
@@ -3109,6 +3274,8 @@ fn damage_source_controller_matches(
             &ControllerRef::EnchantedPlayer,
         )
         .is_some_and(|player| actual == player),
+        // CR 102.1: damage source controlled by the active player (read live).
+        ControllerRef::ActivePlayer => actual == state.active_player,
     }
 }
 
@@ -4079,9 +4246,7 @@ fn resolve_object_mana_value(
         ObjectScope::Source => state
             .objects
             .get(&ctx.source)
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .or_else(|| {
                 state
                     .lki_cache
@@ -4095,14 +4260,10 @@ fn resolve_object_mana_value(
                 TargetRef::Object(id) => state.objects.get(id),
                 _ => None,
             })
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
-            .map(|obj| {
-                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
-            })
+            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
             let Some(object_id) =
@@ -4113,11 +4274,7 @@ fn resolve_object_mana_value(
             state
                 .objects
                 .get(&object_id)
-                .map(|obj| {
-                    u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )
-                })
+                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .or_else(|| {
                     state
                         .lki_cache
@@ -4137,11 +4294,7 @@ fn resolve_object_mana_value(
             state
                 .objects
                 .get(&object_id)
-                .map(|obj| {
-                    u32_to_i32_saturating(
-                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                    )
-                })
+                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .or_else(|| {
                     state
                         .lki_cache
@@ -4176,7 +4329,10 @@ fn resolve_object_mana_value(
                     state
                         .objects
                         .get(&id)
-                        .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                        // CR 202.3d + CR 709.4b: combined MV for a split card off
+                        // the stack; CR 202.3e: chosen X for an on-stack source
+                        // (parity with the sibling Anaphoric event-source arm).
+                        .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                         .or_else(|| {
                             state
                                 .lki_cache
@@ -4232,11 +4388,7 @@ fn resolve_object_mana_value(
                     state
                         .objects
                         .get(&id)
-                        .map(|obj| {
-                            u32_to_i32_saturating(
-                                obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
-                            )
-                        })
+                        .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                         .or_else(|| {
                             state
                                 .lki_cache
@@ -4629,19 +4781,20 @@ pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
     best as i32
 }
 
-/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Single authority for
-/// `PlayerFilter::OpponentDealtCombatDamage` matching. `player` was dealt combat
-/// damage this turn (relative to `controller`'s opponents) when a
-/// `damage_dealt_this_turn` record targets it with `is_combat = true` AND its
-/// source matches `source`. `source = None` accepts any source (Tymna the
-/// Weaver); otherwise (CR 120.9) the record's CR 608.2i look-back source
-/// snapshot is matched against the filter (`TargetFilter::Any` matching every
-/// source via the matcher), so the source's qualities are evaluated as of
-/// damage time.
-pub(crate) fn opponent_dealt_combat_damage_matches(
+/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Single
+/// authority for `PlayerFilter::OpponentDealtDamage` matching. `player` was
+/// dealt damage this turn (relative to `controller`'s opponents) when a
+/// `damage_dealt_this_turn` record targets it, its combat status matches `kind`
+/// (CR 120.2a combat / CR 120.2b noncombat / `Any` = either), AND its source
+/// matches `source`. `source = None` accepts any source (Tymna the Weaver);
+/// otherwise (CR 120.9) the record's CR 608.2i look-back source snapshot is
+/// matched against the filter (`TargetFilter::Any` matching every source via the
+/// matcher), so the source's qualities are evaluated as of damage time.
+pub(crate) fn opponent_dealt_damage_matches(
     state: &GameState,
     player: PlayerId,
     controller: PlayerId,
+    kind: crate::types::ability::DamageKindFilter,
     source: &Option<Box<TargetFilter>>,
     ability_source_id: ObjectId,
 ) -> bool {
@@ -4650,7 +4803,7 @@ pub(crate) fn opponent_dealt_combat_damage_matches(
     }
     let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
     state.damage_dealt_this_turn.iter().any(|r| {
-        r.is_combat
+        damage_record_matches_kind(r, kind)
             && matches!(r.target, TargetRef::Player(pid) if pid == player)
             && match source {
                 None => true,
@@ -4716,12 +4869,13 @@ pub(crate) fn resolve_player_count(
                         }
                         // Handled by the early return above; unreachable here.
                         PlayerFilter::HasLostTheGame => false,
-                        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each
-                        // opponent who was dealt combat damage this turn,
-                        // optionally restricted to a matching source.
-                        PlayerFilter::OpponentDealtCombatDamage { source } => {
-                            opponent_dealt_combat_damage_matches(
-                                state, p.id, controller, source, source_id,
+                        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
+                        // CR 120.2a/120.2b: Each opponent who was dealt damage of
+                        // the given kind this turn, optionally restricted to a
+                        // matching source.
+                        PlayerFilter::OpponentDealtDamage { kind, source } => {
+                            opponent_dealt_damage_matches(
+                                state, p.id, controller, *kind, source, source_id,
                             )
                         }
                         // CR 508.6: opponent the subject attacked within scope.
@@ -5189,6 +5343,7 @@ mod tests {
 
         let creature_lki = |name: &str, controller: PlayerId| LKISnapshot {
             name: name.to_string(),
+            token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
             base_power: Some(2),
@@ -8406,7 +8561,7 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
-    /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtCombatDamage }`
+    /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtDamage }`
     /// against `damage_dealt_this_turn` records counts only opponents whose
     /// player target appears in the ledger with `is_combat = true`. Mirrors
     /// the partner-quality "for each opponent that was dealt combat damage
@@ -8450,11 +8605,110 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
+                    source: None,
+                },
             },
         };
         // Controller = player 0: only player 1 satisfies (combat + opponent).
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 120.2a/120.2b: The `kind` axis discriminates on the SAME ledger.
+    /// One opponent (P1) was dealt combat damage, a different opponent (P2)
+    /// noncombat damage. `Any` counts both (2); `CombatOnly` counts only P1 (1);
+    /// `NoncombatOnly` counts only P2 (1). This is the non-vacuous test that
+    /// fails on any single-kind regression: pre-fix combat-only would return 1
+    /// for the `Any` case, and a broadened-to-Any resolver would return 2 for
+    /// the `CombatOnly`/`NoncombatOnly` cases.
+    #[test]
+    fn resolve_quantity_player_count_opponent_dealt_damage_kind_discriminates() {
+        use crate::types::ability::DamageKindFilter;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // P1: combat damage.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 4,
+            is_combat: true,
+            ..Default::default()
+        });
+        // P2: noncombat damage.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(2)),
+            target_controller: PlayerId(2),
+            amount: 2,
+            is_combat: false,
+            ..Default::default()
+        });
+
+        let count = |kind: DamageKindFilter| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::OpponentDealtDamage { kind, source: None },
+                    },
+                },
+                PlayerId(0),
+                ObjectId(1),
+            )
+        };
+
+        assert_eq!(count(DamageKindFilter::Any), 2, "Any counts both opponents");
+        assert_eq!(
+            count(DamageKindFilter::CombatOnly),
+            1,
+            "CombatOnly counts only the combat-damaged opponent (P1)"
+        );
+        assert_eq!(
+            count(DamageKindFilter::NoncombatOnly),
+            1,
+            "NoncombatOnly counts only the noncombat-damaged opponent (P2)"
+        );
+    }
+
+    /// Serde back-compat: legacy data serialized the combat-only variant as
+    /// `{"type":"OpponentDealtCombatDamage"}` with no `kind` field. The
+    /// `#[serde(alias)]` routes the old tag and the `#[serde(default =
+    /// "damage_kind_combat_only")]` fills `kind = CombatOnly` — NOT the
+    /// `DamageKindFilter::Any` type-default, which would broaden the filter and
+    /// misresolve reloaded games. The current tag round-trips through `Any`.
+    #[test]
+    fn opponent_dealt_damage_serde_legacy_and_roundtrip() {
+        use crate::types::ability::DamageKindFilter;
+
+        // Legacy tag, absent `kind` → CombatOnly (NOT Any).
+        let legacy: PlayerFilter =
+            serde_json::from_str(r#"{"type":"OpponentDealtCombatDamage"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            PlayerFilter::OpponentDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+                source: None
+            }
+        );
+
+        // Current tag with explicit `kind: Any` round-trips.
+        let any: PlayerFilter =
+            serde_json::from_str(r#"{"type":"OpponentDealtDamage","kind":"Any"}"#).unwrap();
+        assert_eq!(
+            any,
+            PlayerFilter::OpponentDealtDamage {
+                kind: DamageKindFilter::Any,
+                source: None
+            }
+        );
+        let reser = serde_json::to_string(&any).unwrap();
+        let back: PlayerFilter = serde_json::from_str(&reser).unwrap();
+        assert_eq!(any, back);
     }
 
     /// CR 120.1 + CR 510.1: With no combat damage dealt this turn, the
@@ -8465,13 +8719,16 @@ mod tests {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
+                    source: None,
+                },
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
-    /// CR 608.2i (the whole point): a source-restricted `OpponentDealtCombatDamage`
+    /// CR 608.2i (the whole point): a source-restricted `OpponentDealtDamage`
     /// must match against the record's damage-time source snapshot, NOT the live
     /// object. Record combat damage from a Dragon to an opponent, then remove
     /// the live Dragon from the battlefield. A resolve-now model would see no
@@ -8508,7 +8765,8 @@ mod tests {
             TargetFilter::Typed(TypedFilter::default().subtype("Dragon".to_string()));
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(dragon_filter)),
                 },
             },
@@ -8548,7 +8806,8 @@ mod tests {
                 &state,
                 &QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentDealtCombatDamage {
+                        filter: PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
                             source: Some(Box::new(source)),
                         },
                     },
@@ -10865,6 +11124,7 @@ mod tests {
             dead_id,
             LKISnapshot {
                 name: String::new(),
+                token_image_ref: None,
                 power: Some(6),
                 toughness: Some(5),
                 base_power: Some(6),
@@ -10927,6 +11187,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Regal Force".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
                 base_power: Some(5),
@@ -11074,6 +11335,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrificed Hulk".to_string(),
+                token_image_ref: None,
                 power: Some(99),
                 toughness: Some(99),
                 base_power: Some(99),
@@ -11152,6 +11414,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Effect-Sacrificed Creature".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
                 base_power: Some(5),
@@ -11229,6 +11492,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Sacrificed Creature".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -11292,6 +11556,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -11352,6 +11617,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Revealed Card".to_string(),
+                token_image_ref: None,
                 power: Some(0),
                 toughness: Some(0),
                 base_power: Some(0),
@@ -11405,6 +11671,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -11469,6 +11736,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(power),
                 toughness: Some(power),
                 base_power: Some(power),
@@ -11510,6 +11778,7 @@ mod tests {
             ObjectId(1),
             LKISnapshot {
                 name: String::new(),
+                token_image_ref: None,
                 power: Some(3),
                 toughness: Some(3),
                 base_power: Some(3),
@@ -12130,6 +12399,7 @@ mod tests {
                 exiled,
                 crate::types::game_state::LKISnapshot {
                     name: format!("Exiled {card_id}"),
+                    token_image_ref: None,
                     power: Some(power),
                     toughness: Some(toughness),
                     base_power: Some(power),

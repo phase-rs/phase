@@ -628,6 +628,15 @@ export interface TokenImageRef {
   preset_id: string;
 }
 
+export type TokenPtProvenance =
+  | "FixedOrAbsent"
+  | {
+      SourceDefinedOrDynamic: {
+        power?: string | null;
+        toughness?: string | null;
+      };
+    };
+
 // ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
 
 export type CastChoice = { type: "Cast" } | { type: "Decline" };
@@ -655,19 +664,41 @@ export type CastingPermission =
 
 // ── Game Restriction ────────────────────────────────────────────────────
 
-export type RestrictionExpiry = { type: "EndOfTurn" } | { type: "EndOfCombat" };
+export type RestrictionExpiry =
+  | { type: "EndOfTurn" }
+  | { type: "EndOfCombat" }
+  | { type: "UntilPlayerNextTurn"; player: PlayerId }
+  | { type: "UntilEndOfNextTurnOf"; player: PlayerId };
 
 export type RestrictionScope =
   | { type: "SourcesControlledBy"; data: PlayerId }
   | { type: "SpecificSource"; data: ObjectId }
   | { type: "DamageToTarget"; data: ObjectId };
 
-export type GameRestriction = {
-  type: "DamagePreventionDisabled";
-  source: ObjectId;
-  expiry: RestrictionExpiry;
-  scope?: RestrictionScope | null;
-};
+export type GameRestriction =
+  | {
+      type: "DamagePreventionDisabled";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      scope?: RestrictionScope | null;
+    }
+  | {
+      // CR 101.2 + CR 601.2a: player-scoped activity prohibition. Mirrored
+      // loosely — the display layer never inspects the nested activity axis.
+      type: "ProhibitActivity";
+      source: ObjectId;
+      affected_players: Record<string, unknown>;
+      expiry: RestrictionExpiry;
+      activity: Record<string, unknown>;
+    }
+  | {
+      // CR 611.2a + CR 614.1d: floating "cards can't enter the battlefield from
+      // <zone>" restriction (Bad Wolf Bay). Mirrors the engine variant.
+      type: "CantEnterBattlefieldFrom";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      filter: TargetFilter;
+    };
 
 export interface SerializedManaProduction {
   type: string;
@@ -1037,6 +1068,7 @@ export interface TriggerContextDisplay {
 
 export interface StackEntryDisplay {
   source_name: string;
+  token_image_ref?: TokenImageRef | null;
   kind_label: string;
   ability_description?: string;
   targets?: StackTargetDisplay[];
@@ -1247,6 +1279,7 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
+  | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source_id: ObjectId; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
@@ -1261,7 +1294,7 @@ export type WaitingFor =
   // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.
   // Keep this union exhaustive with the engine enum so the modal's keyword
   // switch is type-checked against every variant the engine can emit.
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" } | { type: "FaceDown" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -1581,6 +1614,8 @@ export type DebugTokenRequest =
       data: {
         preset_id: string;
         owner: PlayerId;
+        power_override?: number | null;
+        toughness_override?: number | null;
         enter_with_counters?: [CounterType, number][];
       };
     }

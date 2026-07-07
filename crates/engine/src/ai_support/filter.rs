@@ -753,7 +753,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         FilterProp::Not { prop } => filterprop_reads_only_candidate_fp(prop),
 
         // POISON — read another object / side-table / combat / history / identity.
-        FilterProp::Attacking { .. }
+        // ControllerChoseLabel reads the controller's per-player anchor state.
+        FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
@@ -762,6 +764,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        // CR 302.6: per-turn control-continuity marker — a turn/history-relative
+        // predicate like the siblings here (POISON for memoization).
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn

@@ -1,10 +1,11 @@
 use rand::Rng;
 
+use crate::game::game_object::AttachTarget;
 use crate::game::zones;
 use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, FilterProp, LibraryPosition,
     QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
-    TargetSelectionMode, TypedFilter,
+    TargetSelectionMode, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -14,6 +15,122 @@ use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::{EtbTapState, Zone};
+
+/// CR 303.4f + CR 701.23a: Search effects that put an Aura onto the battlefield
+/// "attached to ~" (Light-Paws) or "attached to that/enchanted player" (Curse
+/// tutors) carry a `forward_result` Attach sub. Pre-resolve the host so the
+/// zone pipeline attaches on entry instead of surfacing a host-choice prompt.
+fn forward_result_search_attach_host(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<AttachTarget> {
+    if let Some(host) = state.search_continuation_attach_host {
+        return Some(host);
+    }
+    resolve_forward_result_search_attach_host(state, ability)
+}
+
+fn forward_result_attach_host_targets(ability: &ResolvedAbility) -> &[TargetRef] {
+    // CR 601.2c: Deferred search put-steps assign the attach-host target onto
+    // the `forward_result` Attach sub, not the ChangeZone head that carries
+    // `forward_result = true`. Read the sub's targets when present.
+    if let Some(sub) = ability.sub_ability.as_ref() {
+        if matches!(sub.effect, Effect::Attach { .. }) && !sub.targets.is_empty() {
+            return &sub.targets;
+        }
+    }
+    &ability.targets
+}
+
+fn resolve_forward_result_search_attach_host(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<AttachTarget> {
+    if !ability.forward_result {
+        return None;
+    }
+    let sub = ability.sub_ability.as_ref()?;
+    let Effect::Attach { attachment, target } = &sub.effect else {
+        return None;
+    };
+    if !matches!(attachment, TargetFilter::SelfRef) {
+        return None;
+    }
+    let targets = forward_result_attach_host_targets(ability);
+    match target {
+        TargetFilter::SelfRef => Some(AttachTarget::Object(ability.source_id)),
+        TargetFilter::ParentTarget => targets.first().map(|target| match target {
+            TargetRef::Object(id) => AttachTarget::Object(*id),
+            TargetRef::Player(id) => AttachTarget::Player(*id),
+        }),
+        TargetFilter::Any => {
+            let source = state.objects.get(&ability.source_id)?;
+            if source
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+            {
+                source.attached_to
+            } else {
+                Some(AttachTarget::Object(ability.source_id))
+            }
+        }
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+            crate::game::targeting::resolve_event_context_target(state, target, ability.source_id)
+                .map(|target| match target {
+                    TargetRef::Object(id) => AttachTarget::Object(id),
+                    TargetRef::Player(id) => AttachTarget::Player(id),
+                })
+        }
+        TargetFilter::Player => targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Player(id) => Some(AttachTarget::Player(*id)),
+                _ => None,
+            })
+            .next(),
+        TargetFilter::Typed(tf)
+            if tf
+                .type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Creature)) =>
+        {
+            targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
+                    _ => None,
+                })
+                .next()
+        }
+        // Typed "target creature/player" hosts (Arachnus Spinner, Curse tutors)
+        // resolve from the ability's chosen targets carried through search.
+        _ => targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => AttachTarget::Object(*id),
+                TargetRef::Player(id) => AttachTarget::Player(*id),
+            })
+            .next(),
+    }
+}
+
+/// CR 303.4f: Resolve the attach host for a search continuation using the
+/// chain's current target provenance (before found-card ids replace them).
+pub(crate) fn resolve_search_continuation_attach_host(
+    state: &GameState,
+    chain: &ResolvedAbility,
+) -> Option<AttachTarget> {
+    let mut cursor = Some(chain);
+    while let Some(ability) = cursor {
+        if let Some(host) = resolve_forward_result_search_attach_host(state, ability) {
+            return Some(host);
+        }
+        cursor = ability.sub_ability.as_deref();
+    }
+    None
+}
 
 /// CR 701.24a: Shuffle a player's library using the game's seeded RNG.
 /// Reusable helper for auto-shuffle after zone moves to Library.
@@ -503,6 +620,7 @@ pub fn resolve(
                 face_down_profile.as_ref(),
                 track_exiled_by_source,
                 None,
+                None,
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -584,6 +702,7 @@ pub fn resolve(
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
                 track_exiled_by_source,
+                None,
                 None,
                 events,
             ) {
@@ -685,6 +804,7 @@ pub fn resolve(
         face_down_profile: face_down_profile.clone(),
         library_placement: None,
         enters_modified_if: effect_enters_modified_if,
+        enter_attached_to: forward_result_search_attach_host(state, ability),
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
@@ -786,6 +906,7 @@ pub fn resolve(
                         // CR 614.12: preserve the moved-object type gate across a
                         // further as-enters / replacement pause.
                         enters_modified_if: ctx.enters_modified_if.clone(),
+                        enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -825,6 +946,7 @@ pub fn resolve(
                         // CR 614.12: preserve the moved-object type gate across a
                         // further as-enters / replacement pause.
                         enters_modified_if: ctx.enters_modified_if.clone(),
+                        enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 // CR 608.2c: this object is paused mid-move on a replacement choice
@@ -965,6 +1087,8 @@ pub(crate) struct ChangeZoneIterationCtx {
     /// unconditionally. Carried so the gate survives the `EffectZoneChoice`
     /// pick pause and is evaluated per chosen object in `process_one_zone_move`.
     pub enters_modified_if: Option<TargetFilter>,
+    /// CR 303.4f: Pre-resolved Aura host for search/tutor "enters attached" wiring.
+    pub enter_attached_to: Option<AttachTarget>,
 }
 
 /// CR 614.12 + CR 614.12a: Resolve the effective enter-modifiers for one moved
@@ -1074,6 +1198,7 @@ pub(crate) fn process_one_zone_move(
         ctx.face_down_profile.as_ref(),
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
+        ctx.enter_attached_to,
         events,
     );
 
@@ -1193,6 +1318,17 @@ pub fn resolve_all(
             state,
             ability,
             &TargetFilter::ParentTargetOwner,
+        ),
+        // CR 603.2b + CR 102.1: "At the beginning of each player's draw step,
+        // that player puts the cards in their hand on the bottom of their
+        // library" (Teferi's Puzzle Box). The per-player trigger binds "that
+        // player" to `ScopedPlayer` (the active player whose step it is), so the
+        // whole-hand move must scan that player's hand, not the source
+        // controller's.
+        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
+            state,
+            ability,
+            &TargetFilter::ScopedPlayer,
         ),
         _ => None,
     };
@@ -1399,6 +1535,7 @@ pub fn resolve_all(
             face_down_profile.as_ref(),
             track_exiled_by_source,
             effect_library_position.clone(),
+            None,
             events,
         ) {
             ZoneMoveResult::Done => {
@@ -1465,6 +1602,7 @@ pub fn resolve_all(
                         library_placement: effect_library_position.clone(),
                         // CR 614.12: mass zone moves carry no moved-object type gate.
                         enters_modified_if: None,
+                        enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 // CR 608.2c: record the replacement-paused member as in-flight (with
@@ -1514,6 +1652,7 @@ pub fn resolve_all(
                         library_placement: effect_library_position.clone(),
                         // CR 614.12: mass zone moves carry no moved-object type gate.
                         enters_modified_if: None,
+                        enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
                 return Ok(());
@@ -3307,6 +3446,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut events,
         );
         assert!(matches!(result, ZoneMoveResult::Done));
@@ -5056,6 +5196,7 @@ mod tests {
                 face_down_profile: None,
                 library_placement: None,
                 enters_modified_if: None,
+                enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
             });
         state.resolving_stack_entry = Some(StackEntry {

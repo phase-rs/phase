@@ -744,6 +744,8 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::ScopedPlayer => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,
+        // CR 607 (by analogy): PlayerWhoChoseLabel scopes to players, not objects.
+        TargetFilter::PlayerWhoChoseLabel { .. } => false,
         // CR 102.1 + CR 103.1: Neighbor scopes to a seating-relative player,
         // not an object — never matches an object.
         TargetFilter::Neighbor { .. } => false,

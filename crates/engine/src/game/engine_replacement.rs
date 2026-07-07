@@ -1640,7 +1640,9 @@ fn find_copy_targets(
             // Check mana value constraint if present
             if let Some(max) = max_mana_value {
                 if let Some(obj) = state.objects.get(&card_id) {
-                    if obj.mana_cost.mana_value() > max {
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card's mana value is its combined halves.
+                    if obj.effective_mana_value() > max {
                         return vec![];
                     }
                 }
@@ -1663,7 +1665,10 @@ fn find_copy_targets(
         .filter(|(id, obj)| {
             obj.zone == source_zone
                 && **id != source_id
-                && max_mana_value.is_none_or(|max| obj.mana_cost.mana_value() <= max)
+                // CR 202.3d + CR 709.4b: `source_zone` is a non-stack zone
+                // (battlefield/graveyard/exile), so a split clone source reports
+                // its combined mana value for the MV cap.
+                && max_mana_value.is_none_or(|max| obj.effective_mana_value() <= max)
                 && super::filter::matches_target_filter(state, **id, filter, &ctx)
         })
         .map(|(id, _)| *id)

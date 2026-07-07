@@ -1331,6 +1331,7 @@ fn oracle_face_for(
             scryfall_id: Some(format!("{}-face", name.to_lowercase())),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     };
     crate::database::synthesis::build_oracle_face(&card, None)
 }
@@ -1844,6 +1845,7 @@ fn pupu_ufo_full_card_supported_dynamic_base_power() {
                 scryfall_id: Some("pupu-ufo-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
@@ -1894,6 +1896,7 @@ fn sita_varma_full_card_supported_inverted_genitive_base_pt() {
                 scryfall_id: Some("sita-varma-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
@@ -6950,19 +6953,23 @@ fn overgrown_zealot_turn_face_up_only_supported() {
 
 /// CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e: Tin Street Gossip's mana
 /// ability — "Add {R}{G}. Spend this mana only to cast face-down spells or to
-/// turn creatures face up" — parses the mana head but must remain coverage-red.
-/// The spend restriction is a disjunction `Any([FaceDownSpell,
-/// TurnPermanentFaceUp])`; `FaceDownSpell` is not production-live (gate
-/// `meta.is_face_down`, never true at a payment site, CR 708.4), so
-/// `is_coverage_supported` for the whole disjunction is `false`. The seam leaves
-/// the restriction unabsorbed, producing an explicit `Effect::Unimplemented`
-/// residual instead of partially absorbing the live turn-face-up branch.
+/// turn creatures face up" — is now coverage-SUPPORTED. The spend restriction is
+/// a disjunction `Any([FaceDownSpell, TurnPermanentFaceUp])`; both leaves are
+/// production-live (FaceDownSpell via this PR's face-down spell casting, gate
+/// `meta.is_face_down` at a `PaymentContext::Spell` site, CR 708.4;
+/// TurnPermanentFaceUp via the paid `GameAction::TurnFaceUp`, CR 116.2b), so
+/// `is_coverage_supported` for the whole disjunction is `true` and the seam
+/// ABSORBS the restriction into the `Effect::Mana` line — no residual
+/// `Effect::Unimplemented`.
 ///
-/// Revert direction: if `Any` returns supported when any branch is live, this test
-/// fails because the restriction folds into `Effect::Mana` and the residual
-/// `Unimplemented` disappears.
+/// This is the parser half of the #5155 D10 closure: #5165 deferred Tin Street's
+/// coverage "until face-down spell casting exists" — it exists now.
+///
+/// Revert direction: if `FaceDownSpell` were reclassified unsupported, `Any` would
+/// return `false`, the seam would leave the restriction unabsorbed, and the
+/// `!parsed_has_unimplemented` + non-empty `restrictions` assertions below flip.
 #[test]
-fn tin_street_gossip_face_down_or_turn_face_up_stays_coverage_red() {
+fn tin_street_gossip_face_down_or_turn_face_up_is_coverage_supported() {
     let r = parse(
             "Vigilance\n{T}: Add {R}{G}. Spend this mana only to cast face-down spells or to turn creatures face up.",
             "Tin Street Gossip",
@@ -6972,8 +6979,8 @@ fn tin_street_gossip_face_down_or_turn_face_up_stays_coverage_red() {
         );
     assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
-        parsed_has_unimplemented(&r),
-        "Tin Street Gossip must remain coverage-red until face-down spell casting exists: abilities={:?} triggers={:?}",
+        !parsed_has_unimplemented(&r),
+        "Tin Street Gossip's face-down/turn-up disjunction is now production-live, so the line must be supported (no Effect::Unimplemented): abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
     );
@@ -6991,25 +6998,15 @@ fn tin_street_gossip_face_down_or_turn_face_up_stays_coverage_red() {
     );
     assert_eq!(
         restrictions,
-        &Vec::<ManaSpendRestriction>::new(),
-        "unsupported face-down/turn-up disjunction must remain unabsorbed"
+        &vec![ManaSpendRestriction::Any(vec![
+            ManaSpendRestriction::FaceDownSpell,
+            ManaSpendRestriction::TurnPermanentFaceUp,
+        ])],
+        "the face-down/turn-up disjunction must fold into the mana effect"
     );
-    let residual = r.abilities[0]
-        .sub_ability
-        .as_deref()
-        .expect("unsupported spend restriction must remain as a residual gap");
-    let Effect::Unimplemented { name, description } = &*residual.effect else {
-        panic!(
-            "expected residual Effect::Unimplemented, got {:?}",
-            residual.effect
-        );
-    };
-    assert_eq!(name, "spend");
     assert!(
-        description
-            .as_deref()
-            .is_some_and(|text| text.contains("face-down spells or to turn creatures face up")),
-        "residual gap must be the unsupported spend restriction, got {description:?}"
+        r.abilities[0].sub_ability.is_none(),
+        "the restriction sentence must be folded into the mana effect, leaving no residual gap"
     );
     assert!(
         crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
@@ -8980,6 +8977,185 @@ fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
         r.abilities[1].effect.as_ref(),
         Effect::CreateDelayedTrigger { .. }
     ));
+}
+
+/// CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+/// phase" lowers to `Effect::AdditionalPhase { phase: Untap, .. }` (the
+/// beginning-phase marker), covering Temple of Atropos, Sphinx/Shadow of the
+/// Second Sun, and Cyclonus.
+#[test]
+fn additional_beginning_phase_parses_as_untap_phase_insert() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("there is an additional beginning phase after this phase"),
+        Effect::AdditionalPhase {
+            phase: Phase::Untap,
+            ..
+        }
+    ));
+}
+
+/// CR 103.1 + CR 101.4: both surface forms of the turn-order reversal lower to
+/// `Effect::ReverseTurnOrder` (Temple of Atropos chaos, Aeon Engine, Time
+/// Distortion).
+#[test]
+fn reverse_turn_order_parses_as_reverse_turn_order_effect() {
+    use crate::parser::oracle_effect::parse_effect;
+    assert!(matches!(
+        parse_effect("reverse the game's turn order"),
+        Effect::ReverseTurnOrder
+    ));
+    assert!(matches!(
+        parse_effect("reverse the turn order"),
+        Effect::ReverseTurnOrder
+    ));
+}
+
+/// Temple of Atropos parses with ZERO Unimplemented: the phase trigger inserts a
+/// beginning phase (CR 501.1), and the chaos trigger reverses the turn order
+/// (CR 103.1) then planeswalks (the already-supported `Planeswalk` sub-ability).
+#[test]
+fn temple_of_atropos_parses_with_zero_unimplemented() {
+    let text = "At the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)\nWhen chaos ensues, reverse the game's turn order. Then planeswalk. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)";
+    let r = parse(text, "Temple of Atropos", &[], &["Plane"], &["Time"]);
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Temple of Atropos must parse with zero Unimplemented: {r:#?}"
+    );
+    assert_eq!(r.triggers.len(), 2, "two triggers: {:?}", r.triggers);
+
+    let phase_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("postcombat-main phase trigger");
+    let phase_exec = phase_trigger.execute.as_deref().expect("phase execute");
+    assert!(
+        matches!(
+            phase_exec.effect.as_ref(),
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        ),
+        "phase trigger must insert a beginning phase, got {:?}",
+        phase_exec.effect
+    );
+
+    let chaos_trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChaosEnsues)
+        .expect("chaos trigger");
+    let chaos_exec = chaos_trigger.execute.as_deref().expect("chaos execute");
+    assert!(
+        matches!(chaos_exec.effect.as_ref(), Effect::ReverseTurnOrder),
+        "chaos trigger head must reverse turn order, got {:?}",
+        chaos_exec.effect
+    );
+    let sub = chaos_exec
+        .sub_ability
+        .as_deref()
+        .expect("planeswalk sub-ability");
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Planeswalk),
+        "chaos trigger's second sentence must planeswalk, got {:?}",
+        sub.effect
+    );
+}
+
+#[test]
+fn turn_order_and_additional_beginning_phase_cards_parse_claimed_signatures() {
+    fn ability_has_effect(ability: &AbilityDefinition, pred: fn(&Effect) -> bool) -> bool {
+        pred(ability.effect.as_ref())
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| ability_has_effect(sub, pred))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|else_ability| ability_has_effect(else_ability, pred))
+    }
+
+    fn parsed_has_effect(parsed: &ParsedAbilities, pred: fn(&Effect) -> bool) -> bool {
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| ability_has_effect(ability, pred))
+            || parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .any(|ability| ability_has_effect(ability, pred))
+    }
+
+    fn is_reverse_turn_order(effect: &Effect) -> bool {
+        matches!(effect, Effect::ReverseTurnOrder)
+    }
+
+    fn is_additional_beginning_phase(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                ..
+            }
+        )
+    }
+
+    for (name, text, keywords, types, subtypes, pred) in [
+        (
+            "Aeon Engine",
+            "This artifact enters tapped.\n{T}, Exile this artifact: Reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise.)",
+            &[][..],
+            &["Artifact"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Time Distortion",
+            "When you encounter Time Distortion, reverse the game's turn order. (For example, if play had proceeded clockwise around the table, it now goes counterclockwise. Then planeswalk away from this phenomenon.)",
+            &[][..],
+            &["Phenomenon"][..],
+            &[][..],
+            is_reverse_turn_order as fn(&Effect) -> bool,
+        ),
+        (
+            "Sphinx of the Second Sun",
+            "Flying\nAt the beginning of each of your postcombat main phases, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::Flying][..],
+            &["Creature"][..],
+            &["Sphinx"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Shadow of the Second Sun",
+            "Enchant player\nAt the beginning of each of enchanted player's postcombat main phases, there is an additional beginning phase after this phase. (The end step happens after the added untap, upkeep, and draw steps.)",
+            &[Keyword::Enchant(TargetFilter::Player)][..],
+            &["Enchantment"][..],
+            &["Aura"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+        (
+            "Cyclonus, Cybertronian Fighter",
+            "Living metal (During your turn, this Vehicle is also a creature.)\nFlying\nWhenever Cyclonus deals combat damage to a player, convert it. If you do, there is an additional beginning phase after this phase. (The beginning phase includes the untap, upkeep, and draw steps.)",
+            &[Keyword::LivingMetal, Keyword::Flying][..],
+            &["Artifact"][..],
+            &["Vehicle"][..],
+            is_additional_beginning_phase as fn(&Effect) -> bool,
+        ),
+    ] {
+        let parsed = parse(text, name, keywords, types, subtypes);
+        assert!(
+            !parsed_has_unimplemented(&parsed),
+            "{name} must parse with zero Unimplemented effects: {parsed:#?}"
+        );
+        assert!(
+            parsed_has_effect(&parsed, pred),
+            "{name} must contain the claimed parse-diff signature: {parsed:#?}"
+        );
+    }
 }
 
 #[test]
@@ -13764,6 +13940,49 @@ fn top_level_static_scavenge_and_encore_grants_stay_on_graveyard_cards() {
                 static_def.modifications
             );
         }
+}
+
+/// CR 702.128a: Naktamun grants Embalm to every creature card in the
+/// controller's graveyard, with the embalm cost equal to that card's own
+/// mana cost — the same continuation-sentence shape as Scavenge/Encore, but
+/// for a keyword that was previously absent from `GrantedCastKeywordKind`
+/// even though the runtime resolver already supported it.
+#[test]
+fn top_level_static_embalm_grant_stays_on_graveyard_cards() {
+    let result = parse(
+        "Each creature card in your graveyard has embalm. Its embalm cost is equal to its mana cost.",
+        "Naktamun",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(result.statics.len(), 1, "{:?}", result.statics);
+    let static_def = &result.statics[0];
+    let TargetFilter::Typed(tf) = static_def
+        .affected
+        .as_ref()
+        .expect("expected affected filter")
+    else {
+        panic!("expected typed affected filter");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "missing graveyard filter: {:?}",
+        tf.properties
+    );
+    assert!(
+        static_def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                    ManaCost::SelfManaCost
+                )),
+            }),
+        "missing embalm grant: {:?}",
+        static_def.modifications
+    );
 }
 
 #[test]
@@ -18831,4 +19050,76 @@ fn curse_of_vitality_rider_clones_gain_life_across_attacking_opponents() {
         !has_unimplemented(&execute),
         "no Unimplemented residual may survive: {execute:#?}"
     );
+}
+
+/// CR 122.1 + CR 614.1c: "enters with N additional +1/+1 counters on it" must
+/// parse the counter TYPE as the canonical `Plus1Plus1`, not leak the "additional"
+/// qualifier into a bogus `Generic("additional +1/+1")`. The qualifier follows the
+/// count word ("two additional …"), so it is stripped after the count is parsed.
+/// Fail-on-revert: before the fix these all produced `Generic("additional +1/+1")`
+/// / `Generic("additional time")`, which matches no real counter at runtime.
+#[test]
+fn enters_with_n_additional_counters_parses_canonical_type() {
+    fn enters_counter(text: &str, name: &str, types: &[&str]) -> (CounterType, QuantityExpr) {
+        let t: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &t, &[]);
+        let rep = parsed
+            .replacements
+            .iter()
+            .find(|r| {
+                r.execute
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.effect.as_ref(), Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| panic!("{name}: no PutCounter replacement: {parsed:?}"));
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = rep.execute.as_ref().unwrap().effect.as_ref()
+        else {
+            unreachable!()
+        };
+        (counter_type.clone(), count.clone())
+    }
+
+    // "that creature enters with two additional +1/+1 counters on it" (Necromantic Summons)
+    let (ct, count) = enters_counter(
+        "Put target creature card from a graveyard onto the battlefield under your control.\n\
+         Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
+         that creature enters with two additional +1/+1 counters on it.",
+        "Necromantic Summons",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Necromantic Summons type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 2 }, "count");
+
+    // "it enters with two additional +1/+1 counters on it" (Heroic Return)
+    let (ct, _) = enters_counter(
+        "Return target creature card from your graveyard to the battlefield. \
+         If a Hero enters this way, it enters with two additional +1/+1 counters on it.",
+        "Heroic Return",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Heroic Return type");
+
+    // "it enters with three additional +1/+1 counters on it" (Turntimber Symbiosis)
+    let (ct, count) = enters_counter(
+        "Look at the top seven cards of your library. You may put a creature card from among them \
+         onto the battlefield. If that card has mana value 3 or less, it enters with three \
+         additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+        "Turntimber Symbiosis",
+        &["Sorcery"],
+    );
+    assert_eq!(ct, CounterType::Plus1Plus1, "Turntimber Symbiosis type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
+
+    // Non-P/T counter class: "it enters with three additional time counters on it" (Ravaging Riftwurm)
+    let (ct, count) = enters_counter(
+        "If this creature was kicked, it enters with three additional time counters on it.",
+        "Ravaging Riftwurm",
+        &["Creature"],
+    );
+    assert_eq!(ct, CounterType::Time, "Ravaging Riftwurm type");
+    assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
 }

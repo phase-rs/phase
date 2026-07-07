@@ -12,6 +12,7 @@ import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { type AttackerStack, evenSplit, groupAttackers } from "../../utils/combat.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { PeekTab } from "../modal/DialogShell.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
 /** Internal assignment map: every attacker maps to its chosen target, or `null`
  *  while it sits in the Unassigned bucket. */
@@ -702,9 +703,11 @@ function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
       {counters.length > 0 && (
         <div className="mt-0.5 flex flex-wrap gap-1">
           {counters.map(({ type, count }) => (
-            <span key={type} className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
-              {formatCounterType(type)} x{count}
-            </span>
+            <CounterTooltip key={type} type={type} count={count}>
+              <span className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
+                {formatCounterType(type)} x{count}
+              </span>
+            </CounterTooltip>
           ))}
         </div>
       )}

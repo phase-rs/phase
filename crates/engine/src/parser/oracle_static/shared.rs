@@ -579,6 +579,12 @@ pub(crate) enum GrantedCastKeywordKind {
     Foretell,
     /// CR 702.94a: Miracle functions from hand (Aminatou, Veil Piercer grant).
     Miracle,
+    /// CR 702.128a: Naktamun ("Each creature card in your graveyard has
+    /// embalm. Its embalm cost is equal to its mana cost.") — the runtime
+    /// resolver (`resolve_self_cost_graveyard_activated_keyword`) already
+    /// concretizes `Keyword::Embalm(EmbalmCost::Mana(SelfManaCost))`; this was
+    /// a pure parser-recognition gap.
+    Embalm,
 }
 
 impl GrantedCastKeywordKind {
@@ -594,10 +600,12 @@ impl GrantedCastKeywordKind {
             GrantedCastKeywordKind::Mayhem => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
-            // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
-            // keywords share `KeywordKind::Unknown`, so match the variant directly.
+            // CR 702.97 (Scavenge) / CR 702.141 (Encore) / CR 702.128 (Embalm):
+            // activated graveyard keywords share `KeywordKind::Unknown`, so
+            // match the variant directly.
             GrantedCastKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
             GrantedCastKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
+            GrantedCastKeywordKind::Embalm => matches!(keyword, Keyword::Embalm(_)),
             // CR 702.143a / CR 702.94a: hand-zone cast keywords.
             GrantedCastKeywordKind::Foretell => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Foretell
@@ -617,7 +625,8 @@ impl GrantedCastKeywordKind {
             | GrantedCastKeywordKind::Escape
             | GrantedCastKeywordKind::Mayhem
             | GrantedCastKeywordKind::Scavenge
-            | GrantedCastKeywordKind::Encore => Zone::Graveyard,
+            | GrantedCastKeywordKind::Encore
+            | GrantedCastKeywordKind::Embalm => Zone::Graveyard,
             GrantedCastKeywordKind::Foretell | GrantedCastKeywordKind::Miracle => Zone::Hand,
         }
     }
@@ -1068,7 +1077,34 @@ pub(crate) fn parse_tiered_enters_with_additional_counters_pattern(
     parse_tiered_enters_with_additional_counters_parts(&tp).map(|(_, pattern)| pattern)
 }
 
+/// CR 207.2c: An ability word is italicized flavor text with no rules meaning
+/// (e.g. `Chroma`, `Metalcraft`, `Fateful hour`, and the set-specific `Protector`
+/// / `Proclamator Hailer`). The subject-anchored static parsers match their
+/// subject at the *start* of the line, so a leading ability-word label like
+/// `"Chroma — Each creature you control gets ..."` prevents them from firing and
+/// the whole static silently drops. When the ordinary dispatch classifies
+/// nothing, strip a *recognized* ability-word label — whitelist-gated through the
+/// shared `is_known_ability_word` authority, exactly as the token-grant path in
+/// `keyword_grant.rs` does — and re-enter the dispatch once on the body.
+///
+/// This is a strict fallback: any line the dispatch already parses is returned
+/// untouched, so no existing coverage can regress. The stripped body carries no
+/// further label, so `strip_ability_word_with_name` yields `None` on the retry
+/// and the recursion terminates after a single hop.
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
+    let defs = parse_static_line_multi_dispatch(text);
+    if !defs.is_empty() {
+        return defs;
+    }
+    if let Some((ability_word, body)) = super::oracle_modal::strip_ability_word_with_name(text) {
+        if super::oracle_modal::is_known_ability_word(&ability_word) {
+            return parse_static_line_multi_dispatch(&body);
+        }
+    }
+    defs
+}
+
+fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
@@ -2709,6 +2745,97 @@ fn parse_shared_controller_compound_subject_filter(subject: &TextPair<'_>) -> Op
     Some(TargetFilter::Or { filters })
 }
 
+/// CR 702.143d (and the CR 702 alternative-cost cast-from-off-zone family):
+/// parse "<type> cards in your hand [without <kw>] have <kw>. Its <kw> cost is
+/// equal to its mana cost reduced by {N}." into a continuous
+/// `AddKeywordWithDerivedCost` static (Singing Towers of Darillium). The granted
+/// keyword name selects the `CostBearingKeywordKind`, so a future
+/// "... have madness. Its madness cost is …" card reuses this branch with a
+/// different kind. Combinator dispatch throughout — the per-recipient "without
+/// foretell" dedup is enforced by the off-zone applier, so the leading "without
+/// <kw>" qualifier is consumed but not re-encoded in the affected filter.
+pub(crate) fn parse_hand_cards_have_derived_cost_keyword(text: &str) -> Option<StaticDefinition> {
+    let stripped = strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+    let tp = TextPair::new(&stripped, &lower);
+    let tp = nom_tag_tp(&tp, "each ").unwrap_or(tp);
+    let (type_tp, after_hand) = tp.split_around(" in your hand ")?;
+
+    fn kw_word(i: &str) -> OracleResult<'_, &str> {
+        take_while1(|c: char| c.is_ascii_alphabetic()).parse(i)
+    }
+    fn body(i: &str) -> OracleResult<'_, (&str, ManaCost)> {
+        // Optional "without <kw> " qualifier before "has/have <kw>".
+        let (i, _) = opt((tag("without "), kw_word, tag(" ")).map(|_| ())).parse(i)?;
+        let (i, _) = alt((tag("has "), tag("have "))).parse(i)?;
+        let (i, kw1) = kw_word(i)?;
+        let (i, _) = tag(". its ").parse(i)?;
+        let (i, kw2) = kw_word(i)?;
+        let (i, _) = tag(" cost is equal to its mana cost reduced by ").parse(i)?;
+        let (i, reduction) = nom_primitives::parse_mana_cost(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        if !kw1.eq_ignore_ascii_case(kw2) {
+            return Err(nom::Err::Error(OracleError::new(
+                i,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((i, (kw1, reduction)))
+    }
+    let (_, (kw_name, reduction)) = body(after_hand.lower).ok()?;
+
+    let kind = crate::types::keywords::CostBearingKeywordKind::from_name(kw_name)?;
+
+    // Affected: the parsed type phrase (e.g. "nonland card"), owned by "you",
+    // restricted to your hand. The off-zone applier reads each recipient's mana
+    // cost to derive the granted cost.
+    let (base_filter, rest) = parse_type_phrase(type_tp.original.trim());
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(mut typed) = base_filter else {
+        return None;
+    };
+    typed = typed.controller(ControllerRef::You);
+    typed.properties.push(FilterProp::InAnyZone {
+        zones: vec![Zone::Hand],
+    });
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(typed))
+            .modifications(vec![ContinuousModification::AddKeywordWithDerivedCost {
+                kind,
+                derivation: crate::types::ability::CostDerivation::ManaCostReducedBy(reduction),
+            }])
+            .description(text.to_string()),
+    )
+}
+
+/// CR 607.2d / CR 607.2m (by analogy): parse "<type> controlled by players who
+/// last chose <label>" into the base type filter carrying
+/// `FilterProp::ControllerChoseLabel`. Splits on the "controlled by player[s]
+/// who last chose " head, parses the leading type phrase (must fully consume),
+/// and canonicalizes the trailing anchor label. Returns `None` for any other
+/// shape so it never shadows the generic subject parser.
+fn parse_controlled_by_anchor_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    let (type_tp, label_tp) = subject
+        .split_around(" controlled by players who last chose ")
+        .or_else(|| subject.split_around(" controlled by player who last chose "))?;
+    let (type_filter, rest) = parse_type_phrase(type_tp.original.trim());
+    if !rest.trim().is_empty() || matches!(type_filter, TargetFilter::Any) {
+        return None;
+    }
+    let label = canonicalize_anchor_label(label_tp.original.trim());
+    if label.is_empty() {
+        return None;
+    }
+    Some(merge_filter_prop(
+        type_filter,
+        FilterProp::ControllerChoseLabel { label },
+    ))
+}
+
 /// True when `filter` is a typed filter carrying a creature subtype constraint.
 /// The gate for the bare tribal compound below, so a generic
 /// "creatures and <X>" compound is left to the type-phrase fallback.
@@ -2794,6 +2921,15 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     }
 
     if let Some(filter) = parse_shared_controller_compound_subject_filter(&tp) {
+        return Some(filter);
+    }
+
+    // CR 607.2d / CR 607.2m (by analogy): "<type> controlled by players who last
+    // chose <label>" — the object anthem subject keyed on the controller's
+    // durable anchor (Two Streams Facility's "Creatures controlled by players
+    // who last chose red waterfall get +2/+0 and have haste"). Runs before the
+    // "X and Y" compound split so the "who last chose ..." tail is not misread.
+    if let Some(filter) = parse_controlled_by_anchor_subject_filter(&tp) {
         return Some(filter);
     }
 
@@ -3665,6 +3801,22 @@ fn merge_filter_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
     }
 }
 
+/// CR 607.2d / CR 607.2m (by analogy): canonicalize an anchor label ("green anchor") to the
+/// capitalized casing used by `ChoiceType::Labeled`'s option list ("Green
+/// anchor"), so the parsed static/filter/effect labels read identically to the
+/// choice options. Runtime matching (`player_last_chose_label`) is
+/// case-insensitive, so this is a readability/consistency canonicalization, not
+/// a correctness dependency. Capitalizes only the first character (anchor labels
+/// are "<color> <noun>", matching the printed "Green anchor" / "Red waterfall").
+pub(crate) fn canonicalize_anchor_label(label: &str) -> String {
+    let trimmed = label.trim().trim_end_matches('.').trim();
+    let mut chars = trimmed.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
     let (subject, attachment_prop) = strip_attachment_relative_clause(subject);
     let lower = subject.to_lowercase();
@@ -3685,6 +3837,25 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
 
     if matches!(tp.lower, "players" | "each player") {
         return Some(TargetFilter::Player);
+    }
+
+    // CR 607.2d / CR 607.2m (by analogy): "[each ]player[s] who last chose <label>"
+    // player-scope subject — the durable per-player anchor gate (Two Streams
+    // Facility's "Each player who last chose green anchor …"). Combinator strips
+    // the optional "each " prefix, then the "player[s] who last chose " head, and
+    // canonicalizes the trailing anchor label to match `ChoiceType::Labeled`'s
+    // capitalized option casing. Runs AFTER the plain "players"/"each player"
+    // arm so it never shadows the un-anchored player scope.
+    {
+        let cursor = nom_tag_tp(&tp, "each ").unwrap_or(tp);
+        if let Some(rest) = nom_tag_tp(&cursor, "players who last chose ")
+            .or_else(|| nom_tag_tp(&cursor, "player who last chose "))
+        {
+            let label = canonicalize_anchor_label(rest.original.trim());
+            if !label.is_empty() {
+                return Some(TargetFilter::PlayerWhoChoseLabel { label });
+            }
+        }
     }
 
     // CR 205.3 + CR 604.1: "All/Each <subtype>" universal-quantifier subject for a

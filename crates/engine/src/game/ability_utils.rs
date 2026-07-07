@@ -2964,6 +2964,9 @@ pub(crate) fn collect_player_targets(
                         .and_then(|host| host.as_player())
                         == Some(p.id)
                 }
+                // CR 102.1 + CR 109.4: the active player, resolvable directly
+                // (unlike the fail-closed DefendingPlayer arm above).
+                Some(ControllerRef::ActivePlayer) => p.id == state.active_player,
                 None => true,
             })
             .map(|p| p.id)
@@ -3348,6 +3351,12 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
             filter.as_ref().and_then(filter_target_slot_filter)
         }
         QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. } => None,
+        },
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
             CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
@@ -5951,10 +5960,13 @@ fn validate_target_constraints(
                 let sum: i32 = targets
                     .iter()
                     .filter_map(|t| match t {
+                        // CR 202.3d + CR 709.4b: object targets may be off the
+                        // stack (cards in a graveyard), where a split card's mana
+                        // value is its combined halves; chosen X on the stack.
                         TargetRef::Object(id) => state
                             .objects
                             .get(id)
-                            .map(|o| o.mana_cost.mana_value_with_x(o.zone, o.cost_x_paid) as i32),
+                            .map(|o| o.effective_mana_value() as i32),
                         TargetRef::Player(_) => None,
                     })
                     .sum();
@@ -6757,6 +6769,38 @@ mod tests {
             !targets.contains(&TargetRef::Player(PlayerId(0))),
             "the controller (P0) must never be a legal opponent payer"
         );
+    }
+
+    /// CR 102.1 (Test 2b, coerced-attack-punisher): an empty-type-filter
+    /// controller-only `ActivePlayer` filter resolves through
+    /// `collect_player_targets` to EXACTLY the active player. Reverting the
+    /// `Some(ControllerRef::ActivePlayer)` arm is a compile error (exhaustive
+    /// match); this test also proves it resolves (not fail-closed) by contrast
+    /// with the fail-closed `DefendingPlayer` sibling.
+    #[test]
+    fn collect_player_targets_active_player_resolves_live() {
+        let mut state = GameState::new(FormatConfig::duel_commander(), 3, 7);
+        state.active_player = PlayerId(2);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let active_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::ActivePlayer));
+        assert_eq!(
+            collect_player_targets(&state, &ability, &active_filter),
+            vec![PlayerId(2)]
+        );
+        // Sibling: DefendingPlayer stays fail-closed (empty) — proves the new arm
+        // is genuinely resolvable, not a fail-closed default.
+        let defending =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::DefendingPlayer));
+        assert!(collect_player_targets(&state, &ability, &defending).is_empty());
     }
 
     /// Issue #478 regression: a delayed-trigger return effect
@@ -11681,6 +11725,7 @@ mod tests {
             object_id: gone_id,
             lki: LKISnapshot {
                 name: "Exiled Creature".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),

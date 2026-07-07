@@ -1298,6 +1298,28 @@ pub fn parse_target_with_syntax<'a>(
     {
         let phrase_start = lower.len() - rest_lower.len();
         let phrase = &text[phrase_start..];
+        // CR 608.2c: A trailing predicate on a bare-noun anaphor ("each of those
+        // creatures that didn't attack this turn", Maddening Imp) must fold into
+        // the tracked set as `TrackedSetFiltered{Not(AttackedThisTurn)}` — the
+        // frozen "those creatures" population INTERSECTED with the did-not-attack
+        // predicate. Parse the whole typed phrase first; if it carries any
+        // predicate PROPERTY beyond the head type noun, wrap it. A bare noun
+        // ("creatures"/"permanents"/"cards") with no trailing predicate yields
+        // only a head `type_filter` and no properties → the plain `TrackedSet`.
+        let (filter, remainder) = parse_type_phrase_with_ctx(phrase, ctx);
+        if target_filter_carries_predicate_property(&filter) {
+            return (
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(filter),
+                    // "each of those <type>" is an anaphor over the affected set
+                    // with no verb-specific zone binding.
+                    caused_by: None,
+                },
+                remainder,
+                syntax,
+            );
+        }
         if let Ok((rest_lower, _)) = alt((
             tag::<_, _, OracleError<'_>>("creatures"),
             tag("permanents"),
@@ -1313,14 +1335,11 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
-        let (filter, remainder) = parse_type_phrase_with_ctx(phrase, ctx);
         if target_filter_has_meaningful_content(&filter) {
             return (
                 TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(filter),
-                    // "each of those <type>" is an anaphor over the affected set
-                    // with no verb-specific zone binding.
                     caused_by: None,
                 },
                 remainder,
@@ -1714,6 +1733,31 @@ fn parse_named_filter_origin_zone_terminator(
     Ok((&input[consumed..], ()))
 }
 
+/// CR 201.2 + CR 400.1: A locative zone constraint ("in your graveyard", "in
+/// all graveyards", "on the battlefield") scopes *where the named objects are
+/// counted/filtered*; it is outside the literal card name. Unlike the
+/// "from <zone>" move-origin suffix (`parse_named_filter_origin_zone_terminator`,
+/// which the caller consumes as a move source and leaves in the remainder), an
+/// "in"/"on" locative both terminates the name and is re-attached as an
+/// `InZone`/`InAnyZone` filter prop by the caller. Requires a real zone after
+/// the "in"/"on" preposition so a name-internal "in"/"on" stays whole. Covers
+/// the "cards named X in your graveyard / in all graveyards" count class
+/// (Frantic Inventory, Accumulated Knowledge, Take Inventory, Undead Servant,
+/// Goblin Gathering, Galvanic Bombardment, Ancestral Anger) and "creatures
+/// named X on the battlefield" (Plague Rats).
+fn parse_named_filter_locative_zone_terminator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((tag::<_, _, OracleError<'_>>(" in "), tag(" on "))).parse(input)?;
+    let Some((_, _, consumed)) = parse_zone_suffix(input) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((&input[consumed..], ()))
+}
+
 fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     alt((
         // Controller-scope suffixes (CR 109.4). Longest-match-first.
@@ -1730,6 +1774,10 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         // card name ("card named X from your graveyard"). Require a real zone
         // suffix after "from" so names like "Extract from Darkness" stay whole.
         parse_named_filter_origin_zone_terminator,
+        // CR 201.2 + CR 400.1: locative "in <zone>"/"on the battlefield" count
+        // scope ("cards named X in your graveyard") — reattached as InZone by
+        // the caller. Requires a real zone so name-internal "in"/"on" is kept.
+        parse_named_filter_locative_zone_terminator,
         // Copular / state predicates opening a relative clause.
         value((), tag(" is ")),
         value((), tag(" are ")),
@@ -1882,20 +1930,53 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 109.2: A description that includes a card type or subtype means
+    // permanents of that type/subtype on the battlefield. A leading universal
+    // quantifier — "all", "each", or "every" — ranges over every such object,
+    // source included, so it is a semantic no-op on the filter and adds NO
+    // FilterProp::Another (unlike "other"/"another" below, which exclude the
+    // source). Strip it so a subject like "Each Vehicle you control" / "All Cats
+    // you control" reaches the type word instead of leaking the quantifier into
+    // the subtype string (e.g. Subtype("Each Vehicle")). Guarded on a following
+    // type-phrase lead so a bare quantifier without a type word is left intact.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("all "),
+        tag("each "),
+        tag("every "),
+    ))
+    .parse(&lower[pos..])
+    {
+        // Strip the quantifier when a type-phrase lead follows directly OR through
+        // an "other"/"another" exclusion ("each other creature", "all other
+        // nonland permanents"); in the latter case only the quantifier is consumed
+        // here and the handler below adds `FilterProp::Another`.
+        let after_other = alt((tag::<_, _, OracleError<'_>>("other "), tag("another ")))
+            .parse(rest)
+            .map(|(r, _)| r)
+            .ok();
+        if starts_with_type_phrase_lead(rest)
+            || after_other.is_some_and(starts_with_type_phrase_lead)
+        {
+            pos = lower.len() - rest.len();
+        }
+    }
+
     // Handle "other"/"another" prefix: "other creatures", "another creature",
-    // "other nonland permanents", "another target creature"
+    // "other nonland permanents", "another target creature". Reads from the
+    // current `pos` (not the raw trimmed head) so it composes with a universal
+    // quantifier already stripped above ("all other creatures" → Another + type).
     if tag::<_, _, OracleError<'_>>("other ")
-        .parse(lower_trimmed)
+        .parse(&lower[pos..])
         .is_ok()
     {
         properties.push(FilterProp::Another);
-        pos = offset + "other ".len();
+        pos += "other ".len();
     } else if tag::<_, _, OracleError<'_>>("another ")
-        .parse(lower_trimmed)
+        .parse(&lower[pos..])
         .is_ok()
     {
         properties.push(FilterProp::Another);
-        pos = offset + "another ".len();
+        pos += "another ".len();
     }
     // "another target [type]" — strip "target " after "another " so the type is reachable.
     if properties.contains(&FilterProp::Another) {
@@ -2934,6 +3015,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 name: orig_name.to_string(),
             });
             pos += named_offset + "named ".len() + name_end;
+
+            // CR 201.2 + CR 400.1: Re-run the zone-suffix pass now that the name
+            // is consumed, so a trailing locative constraint ("named X in your
+            // graveyard", "named X in all graveyards", "named X on the
+            // battlefield") attaches as an `InZone`/`InAnyZone` filter prop —
+            // parity with the non-named "creature card in your graveyard" path.
+            // The primary `parse_zone_suffix` pass above ran before the name was
+            // consumed and could not see it. Scoped to "in"/"on" locatives so
+            // "from <zone>" move-origins stay in the remainder for the caller
+            // (CR 115.2 target zones, return-from-graveyard move sources).
+            let after_named = lower[pos..].trim_start();
+            let is_locative =
+                alt((tag::<_, _, OracleError<'_>>("in "), tag("on "))).parse(after_named);
+            if is_locative.is_ok() {
+                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+                    properties.extend(zone_props);
+                    pos += consumed;
+                    if controller.is_none() {
+                        controller = zone_ctrl;
+                    }
+                }
+            }
         }
     }
 
@@ -3262,6 +3365,23 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_has_meaningful_content)
         }
+        _ => false,
+    }
+}
+
+/// CR 608.2c: True when a typed filter carries a `FilterProp` PREDICATE beyond
+/// the bare head type noun (e.g. `Not(AttackedThisTurn)`, `Untapped`, a
+/// controller-scoping property). Used by the "each of those <noun> that
+/// <predicate>" anaphor to decide whether the trailing predicate must fold into
+/// a `TrackedSetFiltered` (frozen set ∩ predicate) rather than collapsing to a
+/// bare `TrackedSet` that would drop the predicate.
+fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => !tf.properties.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_carries_predicate_property)
+        }
+        TargetFilter::Not { filter } => target_filter_carries_predicate_property(filter),
         _ => false,
     }
 }
@@ -3712,6 +3832,13 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         value(
             ControllerRef::Opponent,
             tag::<_, _, OracleError<'_>>("your opponents controlled"),
+        ),
+        // CR 102.1 + CR 608.2i: past-tense "the active player controlled"
+        // look-back. Longest-match-first preserved (no prefix collision with
+        // the arms above).
+        value(
+            ControllerRef::ActivePlayer,
+            tag::<_, _, OracleError<'_>>("the active player controlled"),
         ),
     ))
     .parse(trimmed)
@@ -7001,6 +7128,87 @@ mod tests {
         // Period still ends the name.
         let (name, _) = named_of("a creature named Storm Crow.");
         assert_eq!(name, "Storm Crow");
+    }
+
+    /// CR 201.2 + CR 400.1: A locative "in <zone>" / "on the battlefield" count
+    /// scope is NOT part of the card name — it must terminate the name and
+    /// re-attach as an `InZone`/`InAnyZone` filter prop. Regression guard for
+    /// the "cards named X in your graveyard" misparse (Frantic Inventory,
+    /// Accumulated Knowledge, Plague Rats, Undead Servant, ...), where the zone
+    /// was swallowed into the name — producing `Named { name: "Frantic
+    /// Inventory in your graveyard" }`, a name no card ever has, so the count
+    /// always resolved to 0.
+    #[test]
+    fn named_filter_terminates_at_locative_zone() {
+        fn named_and_props(text: &str) -> (String, Vec<FilterProp>, Option<ControllerRef>, String) {
+            let (filter, rest) = parse_type_phrase(text);
+            let tf = typed_leg(&filter)
+                .unwrap_or_else(|| panic!("expected a Typed filter in {filter:?}"));
+            let name = tf
+                .properties
+                .iter()
+                .find_map(|p| match p {
+                    FilterProp::Named { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a Named property in {filter:?}"));
+            (
+                name,
+                tf.properties.clone(),
+                tf.controller.clone(),
+                rest.to_string(),
+            )
+        }
+
+        // "in your graveyard": name terminates, InZone Graveyard + You attached,
+        // remainder fully consumed.
+        let (name, props, ctrl, rest) =
+            named_and_props("cards named Frantic Inventory in your graveyard");
+        assert_eq!(name, "Frantic Inventory");
+        assert!(
+            props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Graveyard)),
+            "expected InZone Graveyard, got {props:?}"
+        );
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(rest, "");
+
+        // "in all graveyards": name terminates, InZone Graveyard, no controller
+        // restriction (counts every player's graveyard).
+        let (name, props, ctrl, rest) =
+            named_and_props("cards named Accumulated Knowledge in all graveyards");
+        assert_eq!(name, "Accumulated Knowledge");
+        assert!(
+            props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Graveyard)),
+            "expected InZone Graveyard, got {props:?}"
+        );
+        assert_eq!(ctrl, None);
+        assert_eq!(rest, "");
+
+        // "on the battlefield": name terminates, remainder consumed.
+        let (name, _props, _ctrl, rest) =
+            named_and_props("creatures named Plague Rats on the battlefield");
+        assert_eq!(name, "Plague Rats");
+        assert_eq!(rest, "");
+
+        // "from <zone>" move-origin is unchanged: the name still terminates at
+        // "Deathpact Angel" but the "from" suffix stays in the remainder for the
+        // caller (no InZone attached here).
+        let (name, props, _ctrl, rest) =
+            named_and_props("card named Deathpact Angel from your graveyard");
+        assert_eq!(name, "Deathpact Angel");
+        assert!(
+            !props.iter().any(|p| matches!(p, FilterProp::InZone { .. })),
+            "'from' origin-zone must not attach InZone here, got {props:?}"
+        );
+        assert_eq!(rest, " from your graveyard");
+
+        // A "from" inside a real card name is still preserved.
+        let (name, _props, _ctrl, _rest) = named_and_props("a card named Extract from Darkness");
+        assert_eq!(name, "Extract from Darkness");
     }
 
     fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
@@ -13528,6 +13736,87 @@ mod tests {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
+        }
+    }
+
+    /// CR 109.2: A leading universal quantifier ("all"/"each"/"every") ranging
+    /// over a type/subtype subject must be stripped to reach the type word — it
+    /// must NOT leak into the subtype string (e.g. Subtype("Each Vehicle")) and
+    /// must NOT add `FilterProp::Another` (it selects the source too, unlike
+    /// "other"). Consumers of `parse_type_phrase` that exercise this: the
+    /// "sacrifice all <type> you control" additional/activation cost filters
+    /// (Soulblast — creatures; Kaervek's Spite — permanents; Tomb of Urami —
+    /// lands) and the "Whenever all <type> you control attack" trigger
+    /// `valid_card` (Mob Mentality — non-Wall creatures). Before this fix those
+    /// filters were left empty/untyped (matching every object) or the trigger
+    /// failed to classify.
+    #[test]
+    fn parse_type_phrase_universal_quantifier_stripped_no_leak() {
+        for (text, subtype) in [
+            ("each Vehicle you control", "Vehicle"),
+            ("all Cats you control", "Cat"),
+            ("every Skeleton you control", "Skeleton"),
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(subtype.to_string())),
+                "expected Subtype(\"{subtype}\") for '{text}', got {:?}",
+                tf.type_filters
+            );
+            // The quantifier must NOT survive inside the subtype string.
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+                "quantifier leaked into subtype for '{text}': {:?}",
+                tf.type_filters
+            );
+            // Universal quantifiers select the source too — no Another exclusion.
+            assert!(
+                !tf.properties.contains(&FilterProp::Another),
+                "unexpected Another for '{text}': {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+
+        // "all/each/every OTHER <type>" must strip the quantifier AND still carry
+        // the type plus `FilterProp::Another` (source excluded) — the quantifier
+        // must not leave the "other" exclusion stranded. Covers "each other
+        // creature" / "all other creatures" (review-flagged gap).
+        for text in [
+            "each other creature you control",
+            "all other creatures you control",
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature for '{text}', got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+                "quantifier/other leaked into subtype for '{text}': {:?}",
+                tf.type_filters
+            );
+            // "other" excludes the source → Another IS present here.
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "expected Another for '{text}': {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
         }
     }
 

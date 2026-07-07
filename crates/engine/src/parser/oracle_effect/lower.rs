@@ -2211,6 +2211,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         result.repeat_until = Some(continuation.clone());
     }
 
+    // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
+    super::propagate_committed_choice_type_to_guesses(&mut result);
+    // CR 608.2d: gate the whole "if they guessed wrong/right" branch, including
+    // any "and ..." continuation steps.
+    super::propagate_guess_branch_condition_to_continuations(&mut result);
+
     result
 }
 
@@ -4175,6 +4181,20 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     // misroutes to `Effect::CastFromZone` instead of `GrantCastingPermission`.
     let rest_lower = rest.trim_start().to_lowercase();
     if alt((tag::<_, _, OracleError<'_>>("may play "), tag("may cast ")))
+        .parse(rest_lower.as_str())
+        .is_ok()
+    {
+        return (None, text.to_string());
+    }
+
+    // CR 311.7 + CR 607.2d / CR 607.2m (by analogy): "each player who last chose
+    // <A> chooses <B>, and vice versa" (Two Streams Facility's chaos swap) is a
+    // symmetric per-player anchor swap owned by `parse_swap_chosen_labels`, NOT a
+    // player-scoped imperative subject. Stripping "each player " would leave "who
+    // last chose …", which misroutes to `Unimplemented { who }`. Bail with
+    // `(None, full_text)` so the whole clause survives for the dedicated handler
+    // (mirrors the "may play"/"may cast" bail above).
+    if tag::<_, _, OracleError<'_>>("who last chose ")
         .parse(rest_lower.as_str())
         .is_ok()
     {
@@ -8138,7 +8158,6 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::Token { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
@@ -8146,6 +8165,16 @@ pub(super) fn apply_where_x_effect_expression(
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+            *power = apply_where_x_expression(power.clone(), where_x_expression);
+            *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
         }
         // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
         // is …" binds the search count (Oreskos Explorer). Eldritch Evolution
@@ -8317,6 +8346,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
@@ -8412,6 +8442,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
@@ -9880,7 +9911,7 @@ mod where_x_tests {
     use super::parse_where_x_quantity_expression;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
-        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, QuantityExpr,
+        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::triggers::TriggerMode;
@@ -10192,6 +10223,58 @@ mod where_x_tests {
         assert!(
             exprs.iter().all(has_event_context_amount),
             "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    #[test]
+    fn apply_where_x_effect_expression_rewrites_token_count_and_pt() {
+        let mut effect = Effect::Token {
+            name: "Ooze".to_string(),
+            power: PtValue::Variable("X".to_string()),
+            toughness: PtValue::Variable("X".to_string()),
+            types: vec!["Creature".to_string(), "Ooze".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        super::apply_where_x_effect_expression(&mut effect, Some("that spell's mana value"));
+
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::EventSource,
+            },
+        };
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = effect
+        else {
+            panic!("expected Token");
+        };
+        assert_eq!(count, expected.clone(), "token count must bind where-X");
+        assert_eq!(
+            power,
+            PtValue::Quantity(expected.clone()),
+            "token power must bind where-X"
+        );
+        assert_eq!(
+            toughness,
+            PtValue::Quantity(expected),
+            "token toughness must bind where-X"
         );
     }
 
