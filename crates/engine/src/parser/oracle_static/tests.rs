@@ -15267,6 +15267,21 @@ fn lignify_creature_subtype_with_base_pt_and_loses_abilities() {
     }
 }
 
+// Issue #5300: trailing period on base P/T must not feed "." into clause parsing.
+#[test]
+fn lignify_trailing_dot_on_base_pt_does_not_parse_spurious_clause() {
+    let def =
+        parse_static_line("Enchanted creature is a Treefolk with base power and toughness 0/4.")
+            .unwrap();
+    assert!(
+        !def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+        "trailing dot must not synthesize a clause mod: {:?}",
+        def.modifications
+    );
+}
+
 // Issue #5300 sibling — Frogify-style leading ability-strip before the copula.
 #[test]
 fn lignify_prefix_loses_abilities_before_subtype_copula() {

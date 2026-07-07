@@ -609,7 +609,7 @@ pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
 
     let after_pt_trimmed = after_pt.original.trim().trim_end_matches('.');
     let (p, t) = parse_pt_mod(after_pt_trimmed)?;
-    let pt_part_lower = after_pt.lower.trim();
+    let pt_part_lower = after_pt.lower.trim().trim_end_matches('.');
     let slash_pos = pt_part_lower.find('/')?;
     let after_slash = &pt_part_lower[slash_pos + 1..];
     let t_end = after_slash
@@ -622,11 +622,14 @@ pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
         parse_continuous_modifications(remainder)
     };
 
+    // CR 205.1a: "is a Treefolk" replaces existing card types with Creature.
     modifications.push(ContinuousModification::SetCardTypes {
         core_types: vec![CoreType::Creature],
     });
+    // CR 613.4b: Layer 7b — "with base power and toughness N/N" sets base P/T.
     modifications.push(ContinuousModification::SetPower { value: p });
     modifications.push(ContinuousModification::SetToughness { value: t });
+    // CR 205.1a: new creature subtype(s) replace existing creature subtypes.
     modifications.push(ContinuousModification::RemoveAllSubtypes {
         set: SubtypeSet::Creature,
     });
