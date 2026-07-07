@@ -64,6 +64,58 @@ describe("OpponentHud", () => {
     cleanup();
   });
 
+  it("renders Next Up badge on the next multiplayer opponent tab", () => {
+    useGameStore.setState({
+      gameState: createGameState({
+        derived: {
+          turn_order: [{ player: 2, slot_index: 1, turns_from_now: 1 }],
+        },
+      }),
+    });
+
+    render(<OpponentHud />);
+
+    expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
+  });
+
+  it("keeps multiplayer opponent tabs in stable seat order while marking next up", () => {
+    useGameStore.setState({
+      gameState: createGameState({
+        seat_order: [0, 3, 1, 2],
+        derived: {
+          turn_order: [
+            { player: 2, slot_index: 1, turns_from_now: 1 },
+            { player: 3, slot_index: 2, turns_from_now: 2 },
+            { player: 1, slot_index: 3, turns_from_now: 3 },
+          ],
+        },
+      }),
+    });
+
+    render(<OpponentHud />);
+
+    const tabs = Array.from(document.querySelectorAll('button[data-player-hud]'));
+    expect(tabs.map((tab) => tab.getAttribute("data-player-hud"))).toEqual(["3", "1", "2"]);
+    expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
+  });
+
+  it("shows a tooltip and hover preview for opponent avatars with art", async () => {
+    useMultiplayerStore.setState({
+      playerAvatars: new Map([[1, "https://example.test/opponent-avatar.jpg"]]),
+    });
+
+    render(<OpponentHud />);
+
+    const avatar = screen.getByTitle("Opp 2");
+    expect(avatar).toBeInTheDocument();
+
+    fireEvent.mouseEnter(avatar);
+
+    await waitFor(() => {
+      expect(screen.getAllByAltText("Opp 2")).toHaveLength(2);
+    });
+  });
+
   it("auto-selects the active opponent when Follow is enabled", async () => {
     render(<OpponentHud />);
 
@@ -434,7 +486,7 @@ describe("OpponentHud", () => {
     render(<OpponentHud />);
 
     const badge = screen.getByTestId("opponent-aura-badge-1");
-    expect(badge.className).toContain("-top-1.5");
+    expect(badge.className).toContain("-bottom-1.5");
     expect(badge.className).not.toContain("-bottom-5");
   });
 

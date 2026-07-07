@@ -18,7 +18,8 @@ use engine::game::effects::attach::attach_to_player;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
-use engine::types::game_state::WaitingFor;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -158,9 +159,6 @@ fn curse_of_echoes_fires_on_instant_cast() {
 /// We manually drive the cast and verify the trigger appears on the stack.
 #[test]
 fn maddening_hex_fires_on_noncreature_spell_cast() {
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::CastPaymentMode;
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -224,5 +222,57 @@ fn maddening_hex_fires_on_noncreature_spell_cast() {
     assert!(
         trigger_on_stack || at_trigger_target,
         "Maddening Hex must trigger when enchanted player casts a noncreature spell"
+    );
+}
+
+/// Maddening Hex must not trigger for a matching spell cast by anyone other
+/// than the enchanted player.
+#[test]
+fn maddening_hex_does_not_fire_for_non_enchanted_player_spell_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let curse_id = {
+        let mut builder =
+            scenario.add_creature_from_oracle(P0, "Maddening Hex", 0, 0, MADDENING_HEX);
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura", "Curse"]);
+        builder.id()
+    };
+
+    let spell_id = scenario.add_spell_to_hand(P0, "Explore", false).id();
+    scenario.with_mana_pool(P0, vec![mana(ManaType::Green), mana(ManaType::Colorless)]);
+
+    for _ in 0..10 {
+        scenario.add_card_to_library_top(P0, "Plains");
+        scenario.add_card_to_library_top(P1, "Island");
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    attach_to_player(runner.state_mut(), curse_id, P1);
+    evaluate_layers(runner.state_mut());
+    reindex_object_triggers(runner.state_mut(), curse_id);
+
+    let card_id = runner.state().objects[&spell_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("CastSpell must succeed");
+
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| entry.source_id != curse_id),
+        "Maddening Hex must not trigger for a spell cast by the non-enchanted player"
     );
 }

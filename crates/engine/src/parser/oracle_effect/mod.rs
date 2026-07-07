@@ -16998,6 +16998,42 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
     }
 }
 
+fn apply_anchor_subject_to_clause(
+    clause: &mut ParsedEffectClause,
+    anchor: &TargetFilter,
+    text_lower: &str,
+) {
+    apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
+    apply_anchor_subject(&mut clause.effect, anchor);
+    let mut sub = clause.sub_ability.as_deref_mut();
+    while let Some(def) = sub {
+        apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
+        apply_anchor_subject(def.effect.as_mut(), anchor);
+        sub = def.sub_ability.as_deref_mut();
+    }
+}
+
+/// CR 608.2c: A subjectless reveal continuation that explicitly says
+/// "their library" inherits the prior non-caster player anchor. Do not apply
+/// this to "your library": `RevealTop { Controller }` cannot otherwise
+/// distinguish an explicit caster possessive from an implicit default.
+fn apply_their_library_reveal_anchor(effect: &mut Effect, anchor: &TargetFilter, text_lower: &str) {
+    if !scan_contains_phrase(text_lower, "their library")
+        || !target_filter_can_target_player(anchor)
+    {
+        return;
+    }
+    let Effect::RevealTop { player, .. } = effect else {
+        return;
+    };
+    if matches!(
+        *player,
+        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ParentTargetController
+    ) {
+        *player = anchor.clone();
+    }
+}
+
 /// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
 /// variant a typed object filter should adopt to match "permanents that player
 /// controls". `TriggeringPlayer` is event-contextual and must not create a
@@ -22626,6 +22662,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     finalize_effect_chain(&mut def);
+    apply_owner_library_reveal_anchor_from_text(&mut def, text);
     def
 }
 
@@ -22667,6 +22704,7 @@ pub(crate) fn parse_effect_chain_with_context(
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
     finalize_effect_chain(&mut def);
+    apply_owner_library_reveal_anchor_from_text(&mut def, text);
     def
 }
 
@@ -22763,6 +22801,44 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
     fold_additional_combat_attacker_restriction(def);
+}
+
+fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {
+    let lower = text.to_lowercase();
+    if !scan_contains_phrase(&lower, "shuffles it into their library")
+        || !scan_contains_phrase(&lower, "reveals the top card of their library")
+        || scan_contains_phrase(&lower, "reveals the top card of your library")
+    {
+        return;
+    }
+
+    // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
+    // a following "their library" reveal refers to that same owner. The
+    // generic reveal parser defaults subjectless reveals to the controller, so
+    // repair only the owner-shuffle chain and leave explicit "your library"
+    // reveals untouched.
+    let mut saw_owner_shuffle = false;
+    let mut current = Some(def);
+    while let Some(node) = current {
+        match node.effect.as_mut() {
+            Effect::Shuffle { target } if *target == TargetFilter::ParentTargetOwner => {
+                saw_owner_shuffle = true;
+            }
+            Effect::RevealTop { player, .. }
+                if saw_owner_shuffle
+                    && matches!(
+                        *player,
+                        TargetFilter::Controller
+                            | TargetFilter::Player
+                            | TargetFilter::ParentTargetController
+                    ) =>
+            {
+                *player = TargetFilter::ParentTargetOwner;
+            }
+            _ => {}
+        }
+        current = node.sub_ability.as_deref_mut();
+    }
 }
 
 /// CR 509.1g + CR 506.3e + CR 707.2 + CR 603.7: Mirror Match's whole-card idiom
@@ -25703,7 +25779,8 @@ pub(crate) fn parse_effect_chain_ir(
             anchor_subject = None;
         }
         if let Some(ref anchor) = anchor_subject {
-            apply_anchor_subject(&mut clause.effect, anchor);
+            let text_lower_for_anchor = text.to_lowercase();
+            apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor);
         }
 
         // Update anchor from this clause's subject (e.g., SearchLibrary.target_player
@@ -25713,6 +25790,10 @@ pub(crate) fn parse_effect_chain_ir(
         // ParentTargetOwner anchor for a following villainous-choice clause.
         if let Some(extracted) = extract_player_anchor_in_chain(&clause) {
             anchor_subject = Some(extracted);
+            if let Some(ref anchor) = anchor_subject {
+                let text_lower_for_anchor = text.to_lowercase();
+                apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor);
+            }
         }
 
         // Anaphoric resolution: parse-time pronoun→parent-target rewrites.
@@ -28133,7 +28214,7 @@ fn issue_2403_sin_spira_tracked_set_copy_after_random_exile() {
 #[test]
 fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
     let def = parse_effect_chain(
-        "The owner of target permanent shuffles it into their library, then reveals the top card of that library. If it's a permanent card, they put it onto the battlefield.",
+        "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
         AbilityKind::Spell,
     );
     let Effect::ChangeZone {
@@ -28158,6 +28239,25 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
         panic!("expected RevealTop of owner's library, got {reveal:?}");
     };
     assert_eq!(*player, TargetFilter::ParentTargetOwner);
+}
+
+#[test]
+fn owner_anchor_does_not_rewrite_explicit_your_library_reveal() {
+    let def = parse_effect_chain(
+        "The owner of target permanent shuffles it into their library, then reveals the top card of your library.",
+        AbilityKind::Spell,
+    );
+    let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
+    let reveal = shuffle
+        .sub_ability
+        .as_ref()
+        .expect("reveal sub")
+        .effect
+        .as_ref();
+    let Effect::RevealTop { player, count: 1 } = reveal else {
+        panic!("expected RevealTop of your library, got {reveal:?}");
+    };
+    assert_eq!(*player, TargetFilter::Controller);
 }
 
 #[test]

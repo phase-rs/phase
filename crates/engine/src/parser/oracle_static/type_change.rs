@@ -1045,7 +1045,23 @@ pub(crate) fn parse_enchanted_is_type(
         // "is a [land subtype]" ("Enchanted land is a Mountain") grants no
         // core type and is a basic-land-type change — defer to the dedicated
         // SetBasicLandType parser by returning None here.
-        if granted_core_types.is_empty() {
+        // CR 205.1a + CR 613.4b (issue #5300): the Lignify class names only a
+        // creature SUBTYPE in the copula — "Enchanted creature is a Treefolk with
+        // base power and toughness 0/4 and loses all abilities." Setting a creature
+        // subtype replaces the object's creature subtypes but does NOT set or
+        // overwrite its card types (CR 205.1a: removing/replacing a subtype does not
+        // affect card types), so an enchanted Artifact/Land creature keeps
+        // Artifact/Land (Lignify on Gingerbrute → Artifact Creature — Treefolk;
+        // on Dryad Arbor → Land Creature — Forest Treefolk). We therefore do NOT
+        // synthesize a Creature core type — leaving `granted_core_types` empty so
+        // NO `SetCardTypes` is emitted — but still emit the subtype replacement
+        // (`RemoveAllSubtypes{Creature}` → `AddSubtype`) below. A base P/T is
+        // creature-only, disambiguating from the basic-land subtype change
+        // ("Enchanted land is a Mountain", no P/T → None, deferring to
+        // SetBasicLandType).
+        let subtype_only_creature_change =
+            granted_core_types.is_empty() && base_pt.is_some() && !granted_subtypes.is_empty();
+        if granted_core_types.is_empty() && !subtype_only_creature_change {
             return None;
         }
 
@@ -1080,7 +1096,9 @@ pub(crate) fn parse_enchanted_is_type(
         // 1. Core types: replacement (SetCardTypes) when CR 205.1a applies (no
         //    "in addition" suffix) or the clause says "loses all other card
         //    types"; else additive AddType (CR 205.1b "in addition").
-        if needs_set_card_types {
+        // CR 205.1a (issue #5300): the subtype-only Lignify branch grants NO core
+        // type — emit no SetCardTypes so the object keeps its existing card types.
+        if needs_set_card_types && !granted_core_types.is_empty() {
             modifications.push(ContinuousModification::SetCardTypes {
                 core_types: granted_core_types.clone(),
             });
@@ -1118,7 +1136,7 @@ pub(crate) fn parse_enchanted_is_type(
         // already provides it (Darksteel Mutation explicitly says "loses all
         // other creature types" and its clause_mods contains the wipe).
         if !is_additive
-            && granted_core_types.contains(&CoreType::Creature)
+            && (granted_core_types.contains(&CoreType::Creature) || subtype_only_creature_change)
             && !granted_subtypes.is_empty()
             && !modifications
                 .iter()

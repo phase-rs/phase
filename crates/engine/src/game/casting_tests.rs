@@ -28667,9 +28667,9 @@ fn sneak_cast_requires_source_in_hand() {
 // may pay 2 life rather than pay that mana." Engine wires the static
 // through `PayLifeAsColoredMana { color: Black }` → `LifePaymentColors` →
 // `effective_shard_requirement` promotion → existing Phyrexian pause/
-// payment infrastructure. These tests cover the spell-cast side only.
-// Activated-ability mana costs are deferred to GH #600 (require
-// `pending_activation` pause/resume primitive not yet built).
+// payment infrastructure. Spell-cast and activated-ability mana legs share the
+// same Phyrexian pause/resume path via `pending_cast` + `SubmitPhyrexianChoices`
+// (GH #595 spell casts, GH #600 activated abilities).
 mod krrik_life_for_color {
     use super::*;
 
@@ -29018,6 +29018,259 @@ mod krrik_life_for_color {
             !can_cast_object_now(&state, PlayerId(0), spell),
             "CR 119.8: CantLoseLife must forbid the K'rrik life-substitution branch"
         );
+    }
+
+    /// Build a creature on the battlefield with `{B}, {T}: draw a card`.
+    fn create_creature_with_black_tap_activated(
+        state: &mut GameState,
+        player: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0x6001),
+            player,
+            "Krrik Activation Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::Black],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+        id
+    }
+
+    /// Build a creature on the battlefield with `{B}, {T}: deal 1 damage to
+    /// target creature`.
+    fn create_creature_with_black_tap_targeted_damage(
+        state: &mut GameState,
+        player: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0x6002),
+            player,
+            "Krrik Targeted Activation Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::Black],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+        id
+    }
+
+    /// CR 107.4f + GH #600: Target-first activations (`{B}, {T}: deal 1 damage
+    /// to target creature`) must pause at `PhyrexianPayment` after target
+    /// selection, not silently auto-pay life during `pay_activation_costs_after_target_selection`.
+    #[test]
+    fn krrik_offers_life_payment_for_targeted_black_activation_cost() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
+        let mut state = setup_game_at_main_phase();
+        add_krrik_static(&mut state, PlayerId(0));
+        state.players[0].life = 20;
+        let activator = create_creature_with_black_tap_targeted_damage(&mut state, PlayerId(0));
+        let target_creature = create_object(
+            &mut state,
+            CardId(0x6003),
+            PlayerId(1),
+            "Target Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let life_before = state.players[0].life;
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: activator,
+                ability_index: 0,
+            },
+        )
+        .expect("CR 107.4f: targeted activation announcement must succeed");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::TargetSelection { .. }),
+            "targeted {{B}}, {{T}} activation must open TargetSelection before payment"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target_creature)),
+            },
+        )
+        .expect("target creature must be selectable");
+
+        match &state.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(
+                    matches!(shards[0].options, ShardOptions::LifeOnly),
+                    "CR 107.4f: after target selection, K'rrik-promoted shard is LifeOnly"
+                );
+            }
+            other => panic!("expected PhyrexianPayment after target selection, got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted before the activator confirms"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            },
+        )
+        .expect("CR 107.4f: PayLife submit");
+
+        assert_eq!(
+            state.players[0].life,
+            life_before - 2,
+            "CR 118.3b: K'rrik life payment must deduct exactly 2 life"
+        );
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == activator),
+            "CR 602.2: successful targeted activation must push the ability onto the stack"
+        );
+        assert!(
+            state.objects.get(&activator).unwrap().tapped,
+            "CR 602.2: residual {{T}} cost must be paid after mana"
+        );
+    }
+
+    /// CR 107.4f + GH #600: K'rrik life-for-{B} on activated ability mana costs.
+    /// With 0 black mana and ample life, activating `{B}, {T}: draw` pauses at
+    /// `PhyrexianPayment` (`LifeOnly`); confirming deducts 2 life and puts the
+    /// ability on the stack.
+    #[test]
+    fn krrik_offers_life_payment_for_black_activation_cost() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
+        let mut state = setup_game_at_main_phase();
+        add_krrik_static(&mut state, PlayerId(0));
+        state.players[0].life = 20;
+        let creature = create_creature_with_black_tap_activated(&mut state, PlayerId(0));
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), creature, 0),
+            "CR 107.4f: K'rrik must make {{B}} activation affordable with life only"
+        );
+
+        let life_before = state.players[0].life;
+        let activate = GameAction::ActivateAbility {
+            source_id: creature,
+            ability_index: 0,
+        };
+        let result = apply_as_current(&mut state, activate)
+            .expect("CR 107.4f: {{B}} activation announcement must succeed");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(
+                    matches!(shards[0].options, ShardOptions::LifeOnly),
+                    "CR 107.4f: with no black mana, K'rrik-promoted activation shard is LifeOnly"
+                );
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted before the activator confirms"
+        );
+
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        };
+        apply_as_current(&mut state, submit).expect("CR 107.4f: PayLife submit");
+
+        assert_eq!(
+            state.players[0].life,
+            life_before - 2,
+            "CR 118.3b: K'rrik life payment must deduct exactly 2 life"
+        );
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == creature),
+            "CR 602.2: successful activation must push the ability onto the stack"
+        );
+        assert!(
+            state.objects.get(&creature).unwrap().tapped,
+            "CR 602.2: residual {{T}} cost must be paid after mana"
+        );
+    }
+
+    /// CR 107.4f + GH #600: When both black mana and life routes are viable for
+    /// an activated `{B}` mana leg, the engine pauses with `ManaOrLife`.
+    #[test]
+    fn krrik_pauses_activation_when_mana_and_life_both_viable() {
+        use crate::types::game_state::ShardOptions;
+
+        let mut state = setup_game_at_main_phase();
+        add_krrik_static(&mut state, PlayerId(0));
+        state.players[0].life = 20;
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+        let creature = create_creature_with_black_tap_activated(&mut state, PlayerId(0));
+
+        let mut events = Vec::new();
+        let waiting = handle_activate_ability(&mut state, PlayerId(0), creature, 0, &mut events)
+            .expect("CR 107.4f: activation must be legal");
+        match waiting {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(
+                    matches!(shards[0].options, ShardOptions::ManaOrLife),
+                    "CR 107.4f: with both mana and life viable, surface ManaOrLife"
+                );
+            }
+            other => panic!("expected PhyrexianPayment ManaOrLife, got {other:?}"),
+        }
     }
 }
 

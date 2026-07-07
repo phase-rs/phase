@@ -1,5 +1,6 @@
 mod abigale_integration;
 mod abundance_optional_draw_replacement;
+mod ad_nauseam_repeat;
 mod adapter_contract_fixtures;
 mod advanced_reconstruction_regression;
 mod ajani_nacatl_pariah_transform;
@@ -440,6 +441,7 @@ mod issue_688_mind_into_matter;
 mod issue_689_resonating_lute_hand_size;
 mod issue_691_sheoldred_saga_lore;
 mod issue_709_regression;
+mod issue_718_dina_sacrifice_draw;
 mod issue_735_amalia_power_threshold;
 mod issue_735_cost_paid_object_non_regression;
 mod issue_735_lily_bowen_power_double;

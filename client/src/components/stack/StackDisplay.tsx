@@ -257,7 +257,7 @@ export function StackDisplay() {
             <button
               type="button"
               onClick={() => setIsCollapsed(false)}
-              className={`pointer-events-auto absolute top-1/2 z-20 flex h-20 w-7 -translate-y-1/2 items-center justify-center border border-white/10 bg-gray-950/95 text-gray-300 shadow-[0_18px_36px_rgba(0,0,0,0.45)] transition-colors hover:bg-gray-900 hover:text-white ${dockedLeft ? "right-0 translate-x-1/2 rounded-l-md rounded-r-xl" : "left-0 -translate-x-1/2 rounded-l-xl rounded-r-md"}`}
+              className={`pointer-events-auto absolute top-1/2 z-20 flex h-16 w-7 -translate-y-1/2 items-center justify-center rounded-[6px] border border-white/12 bg-gray-950 text-gray-300 shadow-[0_8px_18px_rgba(0,0,0,0.36)] transition-colors hover:bg-gray-900 hover:text-white ${dockedLeft ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2"}`}
               aria-label={t("stack.expandPanel")}
             >
               {/* Chevron points back toward the board (the direction the panel
@@ -272,7 +272,7 @@ export function StackDisplay() {
             </button>
           )}
 
-          <div className="pointer-events-auto relative h-full overflow-hidden rounded-2xl border border-white/10 bg-gray-950/88 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-md">
+          <div className="pointer-events-auto relative h-full overflow-hidden rounded-[10px] border border-white/10 bg-gray-950/96 shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
             <div className="flex h-9 items-center justify-between border-b border-white/10 px-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">

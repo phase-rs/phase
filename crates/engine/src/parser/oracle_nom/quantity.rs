@@ -607,7 +607,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_greatest_commander_mana_value_ref,
             parse_commander_mana_value_ref,
         )),
-        parse_distinct_card_types_in_zone,
+        alt((
+            parse_distinct_card_types_in_zone,
+            parse_distinct_permanent_types_in_zone,
+        )),
         // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
         // precede the generic `among <objects>` arm so the chain-tracked-set,
         // cause-filtered count wins on the "card type among cards" prefix. Nested
@@ -1081,7 +1084,10 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
 fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_exiled_with_source,
-        parse_distinct_card_types_in_zone,
+        alt((
+            parse_distinct_card_types_in_zone,
+            parse_distinct_permanent_types_in_zone,
+        )),
         // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
         // precede the generic `among <objects>` arm (same ordering as
         // `parse_quantity_ref`). Nested with `parse_distinct_card_types_among_objects`
@@ -1133,6 +1139,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
             parse_number_of_sacrificed_this_turn,
+            parse_number_of_descended_this_turn,
         )),
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
@@ -1708,6 +1715,44 @@ fn parse_distinct_card_types_in_zone(input: &str) -> OracleResult<'_, QuantityRe
         rest,
         QuantityRef::DistinctCardTypes {
             source: CardTypeSetSource::Zone { zone, scope },
+        },
+    ))
+}
+
+fn zone_ref_to_zone(zone: ZoneRef) -> Zone {
+    match zone {
+        ZoneRef::Graveyard => Zone::Graveyard,
+        ZoneRef::Exile => Zone::Exile,
+        ZoneRef::Library => Zone::Library,
+        ZoneRef::Hand => Zone::Hand,
+    }
+}
+
+fn scoped_zone_card_filter(zone: ZoneRef, scope: CountScope) -> TargetFilter {
+    let mut filter = TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::InZone {
+        zone: zone_ref_to_zone(zone),
+    }]);
+    filter.controller = match scope {
+        CountScope::Controller | CountScope::Owner => Some(ControllerRef::You),
+        CountScope::Opponents => Some(ControllerRef::Opponent),
+        CountScope::All => None,
+        CountScope::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
+        CountScope::SourceChosenPlayer => None,
+    };
+    TargetFilter::Typed(filter)
+}
+
+fn parse_distinct_permanent_types_in_zone(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("permanent type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among cards in ").parse(rest)?;
+    let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+    Ok((
+        rest,
+        // CR 110.4: permanent types are the six battlefield-capable card types.
+        QuantityRef::ObjectCountDistinct {
+            filter: scoped_zone_card_filter(zone, scope),
+            qualities: vec![SharedQuality::PermanentType],
         },
     ))
 }
@@ -3978,6 +4023,23 @@ fn parse_number_of_sacrificed_this_turn(input: &str) -> OracleResult<'_, Quantit
         QuantityRef::SacrificedThisTurn {
             player: PlayerScope::Controller,
             filter,
+        },
+    ))
+}
+
+fn parse_number_of_descended_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("times you descended this turn").parse(input)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: None,
+            to: Some(Zone::Graveyard),
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::NonToken,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+            ])),
         },
     ))
 }
@@ -7041,6 +7103,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_distinct_permanent_types_in_your_graveyard() {
+        let (rest, q) =
+            parse_quantity_ref("the number of permanent types among cards in your graveyard")
+                .unwrap();
+        let QuantityRef::ObjectCountDistinct {
+            filter: TargetFilter::Typed(filter),
+            qualities,
+        } = q
+        else {
+            panic!("expected permanent-type ObjectCountDistinct, got {q:?}");
+        };
+        assert_eq!(rest, "");
+        assert_eq!(qualities, vec![SharedQuality::PermanentType]);
+        assert_eq!(filter.type_filters, vec![TypeFilter::Card]);
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+    }
+
+    #[test]
     fn test_parse_distinct_card_types_exiled_with_source() {
         let (rest, q) =
             parse_quantity_ref("the number of card types among cards exiled with ~").unwrap();
@@ -7949,6 +8032,26 @@ mod tests {
                 assert_eq!(tf.controller, None, "{phrase:?} must not scope controller");
             }
         }
+    }
+
+    #[test]
+    fn parse_number_of_times_you_descended_this_turn() {
+        let (rest, q) = parse_quantity_ref("the number of times you descended this turn").unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::ZoneChangeCountThisTurn { from, to, filter } = q else {
+            panic!("expected ZoneChangeCountThisTurn, got {q:?}");
+        };
+        assert_eq!(from, None);
+        assert_eq!(to, Some(Zone::Graveyard));
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed permanent filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert_eq!(tf.controller, None);
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+        assert!(tf.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::You,
+        }));
     }
 
     #[test]

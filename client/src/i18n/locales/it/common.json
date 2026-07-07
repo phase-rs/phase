@@ -35,6 +35,11 @@
     "off": "Disattivato"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Vista",
+      "tools": "Strumenti",
+      "game": "Partita"
+    },
     "reportCard": "Segnala una carta",
     "menu": "Menu di gioco",
     "sandboxTools": "Strumenti Sandbox",

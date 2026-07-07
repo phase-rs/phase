@@ -44,7 +44,7 @@ export function ModalPanelShell({
         >
           <button
             type="button"
-            className="absolute inset-0 bg-black/68 backdrop-blur-[2px]"
+            className="absolute inset-0 bg-black/68"
             onClick={onClose}
             aria-label={t("actions.closeNamed", { name: title })}
           />
@@ -53,7 +53,7 @@ export function ModalPanelShell({
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className={`card-scale-reset relative z-10 flex h-full w-full flex-col overflow-hidden border-white/10 bg-[#0b1020]/96 pt-[env(safe-area-inset-top)] shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md lg:h-auto lg:max-h-[calc(100vh_-_3rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] lg:rounded-[24px] lg:border lg:pt-0 ${maxWidthClassName}`}
+            className={`card-scale-reset relative z-10 flex h-full w-full flex-col overflow-hidden border-white/10 bg-[#0b1020] pt-[env(safe-area-inset-top)] shadow-[0_18px_48px_rgba(0,0,0,0.48)] lg:h-auto lg:max-h-[calc(100vh_-_3rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] lg:rounded-[12px] lg:border lg:pt-0 ${maxWidthClassName}`}
             initial={{ scale: 0.97, opacity: 0, y: 10 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.97, opacity: 0, y: 10 }}
@@ -76,7 +76,7 @@ export function ModalPanelShell({
               </div>
               <button
                 onClick={onClose}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border border-white/10 bg-black/18 text-slate-400 transition hover:bg-white/6 hover:text-white lg:h-11 lg:w-11 lg:rounded-[16px]"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] border border-white/10 bg-slate-950/80 text-slate-400 transition hover:bg-slate-900 hover:text-white lg:h-11 lg:w-11"
                 aria-label={t("actions.closeNamed", { name: title })}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 lg:h-5 lg:w-5">

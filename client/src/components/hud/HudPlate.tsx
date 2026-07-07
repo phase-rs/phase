@@ -1,5 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
@@ -15,17 +14,13 @@ interface HudPlateProps {
   onClick?: () => void;
   children: ReactNode;
   trailing?: ReactNode;
-  /** When true, apply the active-turn treatment: heavy tinted ring plus a
-   *  pulsing glow (suppressed under prefers-reduced-motion, but the heavy
-   *  ring always applies so the signal is still legible). */
+  cornerBadge?: ReactNode;
+  /** When true, apply the active-turn treatment. */
   active?: boolean;
   /** Per-seat identity color. Rendered as a small dot adjacent to the label
    *  — orthogonal to `tone` (which encodes game-state: turn, target). */
   seatColor?: string;
-  /** Passive imposed state: one or more creatures are attacking this player.
-   *  Renders a red ring + pulse overlay layered atop the tone treatment, so
-   *  "it's my turn AND I'm under attack" stays legible. Motion suppressed
-   *  under prefers-reduced-motion. */
+  /** Passive imposed state: one or more creatures are attacking this player. */
   underAttack?: boolean;
   /** Planeswalker art crop URL for the player avatar. */
   avatarUrl?: string | null;
@@ -34,39 +29,23 @@ interface HudPlateProps {
    *  by both `PlayerHud` and `OpponentHud`; absence means the plate never
    *  participates in debug highlighting. */
   playerId?: PlayerId;
-  /** Decision authority (orthogonal to `active`/turn): this seat is the one the
-   *  game is currently waiting on to make a choice. Renders a small pulsing
-   *  corner marker so "we're waiting on this player" is legible independently
-   *  of whose turn it is. Decorative — narration lives in `TurnStatusLine`. */
-  hasPendingDecision?: boolean;
   density?: "default" | "compact";
 }
 
 const TONE_CLASSES: Record<HudTone, string> = {
-  neutral: "border-white/12 bg-slate-950/72 text-slate-100 shadow-[0_16px_48px_rgba(15,23,42,0.45)]",
-  emerald: "border-emerald-400/30 bg-emerald-950/40 text-emerald-50 shadow-[0_16px_48px_rgba(16,185,129,0.18)]",
-  rose: "border-rose-400/30 bg-rose-950/38 text-rose-50 shadow-[0_16px_48px_rgba(244,63,94,0.18)]",
-  cyan: "border-cyan-400/40 bg-cyan-950/42 text-cyan-50 shadow-[0_16px_48px_rgba(34,211,238,0.2)]",
-  amber: "border-amber-400/30 bg-amber-950/38 text-amber-50 shadow-[0_16px_48px_rgba(245,158,11,0.18)]",
+  neutral: "border-white/12 bg-slate-950/90 text-slate-100 shadow-[0_1px_0_rgba(255,255,255,0.05)]",
+  emerald: "border-emerald-400/28 bg-emerald-950/72 text-emerald-50 shadow-[0_1px_0_rgba(255,255,255,0.05)]",
+  rose: "border-rose-400/28 bg-rose-950/72 text-rose-50 shadow-[0_1px_0_rgba(255,255,255,0.05)]",
+  cyan: "border-cyan-400/32 bg-cyan-950/72 text-cyan-50 shadow-[0_1px_0_rgba(255,255,255,0.05)]",
+  amber: "border-amber-400/28 bg-amber-950/72 text-amber-50 shadow-[0_1px_0_rgba(255,255,255,0.05)]",
 };
 
-/** Active-turn rings — heavier than the default tone border. Drives both
- *  the static outline and the pulse color. Kept in one place so the ring
- *  and the animated box-shadow stay chromatically in sync. */
-const ACTIVE_RING_CLASSES: Record<HudTone, string> = {
-  neutral: "ring-2 ring-white/45",
-  emerald: "ring-2 ring-emerald-300/70",
-  rose: "ring-2 ring-rose-300/70",
-  cyan: "ring-2 ring-cyan-300/70",
-  amber: "ring-2 ring-amber-300/70",
-};
-
-const ACTIVE_PULSE_RGBA: Record<HudTone, [string, string]> = {
-  neutral: ["rgba(255, 255, 255, 0.35)", "rgba(255, 255, 255, 0.6)"],
-  emerald: ["rgba(52, 211, 153, 0.35)", "rgba(52, 211, 153, 0.65)"],
-  rose: ["rgba(251, 113, 133, 0.35)", "rgba(251, 113, 133, 0.65)"],
-  cyan: ["rgba(34, 211, 238, 0.35)", "rgba(34, 211, 238, 0.65)"],
-  amber: ["rgba(251, 191, 36, 0.35)", "rgba(251, 191, 36, 0.65)"],
+const ACTIVE_TURN_CLASSES: Record<HudTone, string> = {
+  neutral: "border-white/35 ring-1 ring-white/40 shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_0_24px_rgba(226,232,240,0.22)]",
+  emerald: "border-emerald-300/60 ring-1 ring-emerald-300/60 shadow-[0_0_0_1px_rgba(110,231,183,0.18),0_0_26px_rgba(16,185,129,0.34)]",
+  rose: "border-rose-300/62 ring-1 ring-rose-300/60 shadow-[0_0_0_1px_rgba(253,164,175,0.18),0_0_26px_rgba(244,63,94,0.34)]",
+  cyan: "border-cyan-300/62 ring-1 ring-cyan-300/60 shadow-[0_0_0_1px_rgba(103,232,249,0.18),0_0_26px_rgba(34,211,238,0.34)]",
+  amber: "border-amber-300/62 ring-1 ring-amber-300/60 shadow-[0_0_0_1px_rgba(252,211,77,0.18),0_0_26px_rgba(245,158,11,0.34)]",
 };
 
 export function HudPlate({
@@ -75,26 +54,24 @@ export function HudPlate({
   onClick,
   children,
   trailing,
+  cornerBadge,
   active = false,
   seatColor,
   underAttack = false,
   avatarUrl,
   playerId,
-  hasPendingDecision = false,
   density = "default",
 }: HudPlateProps) {
   const { t } = useTranslation("game");
   const Component = onClick ? "button" : "div";
-  const shouldReduceMotion = useReducedMotion();
-  const activeRing = active ? ` ${ACTIVE_RING_CLASSES[tone]} ring-offset-2 ring-offset-black/40` : "";
-  const [pulseLo, pulseHi] = ACTIVE_PULSE_RGBA[tone];
+  const activeChrome = active ? ` ${ACTIVE_TURN_CLASSES[tone]}` : "";
   const isDebugHighlighted = useUiStore(
     (s) => playerId != null && s.debugHighlightedPlayerId === playerId,
   );
   const compact = density === "compact";
   const plateChrome = compact
     ? "gap-1 rounded-lg px-1 py-0.5"
-    : "gap-2 rounded-xl px-1.5 py-1 lg:gap-2.5 lg:rounded-[18px] lg:px-2.5 lg:py-1.5";
+    : "gap-2 rounded-[10px] px-1.5 py-1 lg:gap-2.5 lg:px-2.5 lg:py-1.5";
   const labelClass = compact
     ? "truncate text-[8px] font-semibold uppercase tracking-[0.12em]"
     : "truncate text-[9px] font-semibold uppercase tracking-[0.18em]";
@@ -109,28 +86,10 @@ export function HudPlate({
       type={onClick ? "button" : undefined}
       onClick={onClick}
       data-hud-plate=""
-      className={`group relative inline-flex max-w-full items-center border backdrop-blur-xl transition-all duration-200 ${plateChrome} ${TONE_CLASSES[tone]}${activeRing} ${
-        onClick ? "cursor-pointer hover:-translate-y-0.5 hover:border-white/30" : ""
+      className={`group relative inline-flex max-w-full items-center border transition-[border-color,background-color,box-shadow] duration-150 ${plateChrome} ${TONE_CLASSES[tone]}${activeChrome} ${
+        onClick ? "cursor-pointer hover:border-white/30 hover:bg-slate-900/92" : ""
       }`}
     >
-      {active && !shouldReduceMotion && (
-        <motion.div
-          aria-hidden
-          className="pointer-events-none absolute -inset-0.5 rounded-[20px]"
-          animate={{
-            boxShadow: [
-              `0 0 0 0 ${pulseLo}, 0 0 14px 2px ${pulseLo}`,
-              `0 0 0 2px ${pulseHi}, 0 0 26px 6px ${pulseHi}`,
-            ],
-          }}
-          transition={{
-            duration: 1.2,
-            repeat: Infinity,
-            repeatType: "reverse",
-            ease: "easeInOut",
-          }}
-        />
-      )}
       {underAttack && (
         <>
           <UnderAttackOverlay />
@@ -140,16 +99,13 @@ export function HudPlate({
       {isDebugHighlighted && (
         <div
           aria-hidden
-          className="pointer-events-none absolute -inset-1 z-30 rounded-2xl ring-4 ring-fuchsia-400 shadow-[0_0_22px_6px_rgba(232,121,249,0.7),inset_0_0_18px_4px_rgba(232,121,249,0.45)] animate-pulse"
+          className="pointer-events-none absolute inset-0 z-30 rounded-[10px] outline-2 outline-fuchsia-300"
         />
       )}
-      {hasPendingDecision && (
-        <span
-          aria-hidden
-          className="pointer-events-none absolute -right-1 -top-1 z-30 h-2.5 w-2.5 rounded-full bg-amber-300 ring-2 ring-amber-200/50 shadow-[0_0_8px_2px_rgba(251,191,36,0.7)] animate-pulse"
-        />
-      )}
-      <div className="absolute inset-[1px] rounded-[16px] bg-gradient-to-b from-white/8 via-transparent to-black/10" />
+      {cornerBadge ? (
+        <div className="absolute -top-0.5 left-1/2 z-40 -translate-x-1/2 -translate-y-1/2">{cornerBadge}</div>
+      ) : null}
+      <div className="absolute inset-[1px] rounded-[9px] border-t border-white/8" />
       {avatarUrl ? (
         <HudAvatar
           label={label}
@@ -163,8 +119,8 @@ export function HudPlate({
           {!avatarUrl && seatColor && (
             <span
               aria-hidden
-              className={`${compact ? "h-2 w-2" : "h-2.5 w-2.5"} shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]`}
-              style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
+              className={`${compact ? "h-2 w-2" : "h-2.5 w-2.5"} shrink-0 rounded-full ring-1 ring-black/30`}
+              style={{ backgroundColor: seatColor }}
             />
           )}
           <span
@@ -205,10 +161,11 @@ function HudAvatar({
       avatarUrl={avatarUrl}
       label={label}
       seatColor={seatColor}
+      title={label}
       className={`relative shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.35)] ${compact ? "h-8 w-7" : "h-12 w-10 lg:h-14 lg:w-12"}`}
       style={seatColor ? {
         borderColor: `${seatColor}cc`,
-        boxShadow: `0 0 0 1px ${seatColor}55, 0 10px 24px rgba(0,0,0,0.35), 0 0 18px ${seatColor}33`,
+        boxShadow: `0 0 0 1px ${seatColor}55, 0 10px 24px rgba(0,0,0,0.35)`,
       } : undefined}
     >
       <img

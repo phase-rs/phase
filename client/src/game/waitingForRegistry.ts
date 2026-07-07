@@ -169,7 +169,6 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Game lifecycle
     "GameOver",
     "MulliganDecision",
-    "MulliganBottomCards",
     "OpeningHandBottomCards",
     "BetweenGamesSideboard",
     "BetweenGamesChoosePlayDraw",
@@ -234,7 +233,6 @@ export function waitingForReason(
     case "UnlessPayment":
       return { key: "status.reason.payingCost" };
     case "MulliganDecision":
-    case "MulliganBottomCards":
     case "OpeningHandBottomCards":
       return { key: "status.reason.mulligan" };
     case "DiscardToHandSize":

@@ -68,7 +68,7 @@ export function MenuPage() {
       <div className="mx-auto flex w-full max-w-[1180px] flex-col items-center gap-4 px-7 pb-12">
         <button
           onClick={() => setLoadModalOpen(true)}
-          className="flex items-center gap-2 rounded-full border border-hairline-strong bg-black/20 px-4 py-1.5 text-xs font-medium text-fg-muted backdrop-blur-sm transition-colors hover:border-hairline-hover hover:text-white"
+          className="flex items-center gap-2 rounded-[8px] border border-hairline-strong bg-slate-950/72 px-4 py-1.5 text-xs font-medium text-fg-muted transition-colors hover:border-hairline-hover hover:bg-slate-900 hover:text-white"
         >
           <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 fill-current">
             <path d="M12 3a1 1 0 0 1 1 1v8.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.42l2.3 2.3V4a1 1 0 0 1 1-1ZM5 19a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z" />
@@ -86,7 +86,7 @@ export function MenuPage() {
             onClick={() => {
               import("@tauri-apps/plugin-process").then((m) => m.exit(0));
             }}
-            className="rounded-full border border-hairline-strong bg-black/20 px-5 py-1.5 text-xs font-medium text-fg-meta backdrop-blur-sm transition-colors hover:border-red-500/30 hover:text-red-400"
+            className="rounded-[8px] border border-hairline-strong bg-slate-950/72 px-5 py-1.5 text-xs font-medium text-fg-meta transition-colors hover:border-red-500/30 hover:bg-slate-900 hover:text-red-400"
           >
             {t("home.exit")}
           </button>

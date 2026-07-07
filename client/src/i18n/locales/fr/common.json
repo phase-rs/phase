@@ -35,6 +35,11 @@
     "off": "Désactivé"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Vue",
+      "tools": "Outils",
+      "game": "Partie"
+    },
     "reportCard": "Signaler une carte",
     "menu": "Menu de la partie",
     "sandboxTools": "Outils bac à sable",
