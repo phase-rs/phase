@@ -776,15 +776,28 @@ fn flat_actions_have_meaningful_priority(state: &GameState, actions: &[GameActio
 /// judgement here (that belongs to the auto-pass gate, not the loop firewall).
 fn has_activatable_sacrifice_for_mana(state: &GameState) -> bool {
     matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && activatable_object_mana_actions(state).iter().any(|action| {
-            matches!(
-                action,
-                GameAction::ActivateAbility {
-                    source_id,
-                    ability_index,
-                } if activate_ability_is_meaningful_priority(state, *source_id, *ability_index)
-            )
-        })
+        && mana_actions_include_meaningful_sacrifice(state, &activatable_object_mana_actions(state))
+}
+
+/// Slice-taking core of [`has_activatable_sacrifice_for_mana`]: given a
+/// precomputed activatable mana-action sweep, true iff any action is a
+/// meaningful (sacrifice-for-mana) mana activation. Extracted so
+/// `auto_pass_recommended` can compute the sweep ONCE and share it between the
+/// G1 beneficial-mana-tap hold (rung 5) and this rung-9 sac check, avoiding the
+/// PR #5229 double-evaluation of the mana-action sweep.
+fn mana_actions_include_meaningful_sacrifice(
+    state: &GameState,
+    object_mana_actions: &[GameAction],
+) -> bool {
+    object_mana_actions.iter().any(|action| {
+        matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            } if activate_ability_is_meaningful_priority(state, *source_id, *ability_index)
+        )
+    })
 }
 
 /// True when `actions` contains a priority action that materially changes the
@@ -809,10 +822,16 @@ fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
 /// accepts via manual mana-ability payment even though the simulation oracle
 /// (`SimulationFilter`) rejects the Auto-mode `CastSpell` candidate (issue #562,
 /// #583). Frontends surface these via `spell_costs` + manual cast dispatch.
-fn has_feasibly_castable_spell(state: &GameState, player: PlayerId) -> bool {
+fn has_feasibly_castable_spell(
+    state: &GameState,
+    player: PlayerId,
+    probe: Option<&crate::game::casting::PriorityCastProbe>,
+) -> bool {
     crate::game::casting::spell_objects_available_to_cast(state, player)
         .iter()
-        .any(|&object_id| crate::game::casting::can_cast_object_now(state, player, object_id))
+        .any(|&object_id| {
+            crate::game::casting::can_cast_object_now_with_probe(state, player, object_id, probe)
+        })
 }
 
 /// CR 605.3a + CR 603.6 + CR 117.1d: A sacrifice-for-mana activation blocks
@@ -887,6 +906,98 @@ fn trigger_fires_on_leaving_battlefield(trigger: &TriggerDefinition) -> bool {
     }
 }
 
+/// G1 — stage 2 of the beneficial mana-tap trigger hold (CR 605.1b window).
+///
+/// The caller has already confirmed the cheap stage-1 gate (own-turn,
+/// empty-stack main phase) and that `beneficial_sources` — the player's
+/// permanents carrying a *beneficial* non-mana `TapsForMana` / `ManaAdded`
+/// trigger — is non-empty. This stage sweeps the (already-computed, §C.3-shared)
+/// activatable mana-action list and returns `true` iff tapping one of the
+/// player's own currently-activatable mana sources would actually FIRE such a
+/// trigger (CR 106.12a). Post-filter this is hold-on-presence again: a single
+/// firing beneficial trigger justifies holding priority.
+///
+/// Self-quiescing: once the source is tapped it drops out of the mana-action
+/// sweep, so the hold releases on the next call (no infinite hold).
+fn beneficial_mana_tap_trigger_hold(
+    state: &GameState,
+    player: PlayerId,
+    object_mana_actions: &[GameAction],
+    beneficial_sources: &[ObjectId],
+) -> bool {
+    object_mana_actions.iter().any(|action| {
+        // CR 106.12a: only a mana ability whose activation cost includes {T}
+        // emits the `TappedForMana` event these triggers key off. The
+        // `TapLandForMana` shortcut is always a single {T} option (its tap
+        // component is trivially satisfied); an `ActivateAbility` may be a
+        // non-tap mana ability, so consult the ability's cost.
+        let mana_source = match action {
+            GameAction::TapLandForMana { object_id } => *object_id,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            } => {
+                let has_tap = state
+                    .objects
+                    .get(source_id)
+                    .and_then(|obj| obj.abilities.get(*ability_index))
+                    .is_some_and(|ability| mana_sources::has_tap_component(&ability.cost));
+                if !has_tap {
+                    return false;
+                }
+                *source_id
+            }
+            _ => return false,
+        };
+
+        beneficial_sources.iter().any(|&trigger_source| {
+            let Some(obj) = state.objects.get(&trigger_source) else {
+                return false;
+            };
+            obj.trigger_definitions.iter_all().any(|trigger| {
+                if !mana_sources::is_non_mana_tap_trigger(trigger)
+                    || !mana_sources::trigger_chain_benefits_controller(trigger)
+                {
+                    return false;
+                }
+                match trigger.mode {
+                    // CR 106.12a: the card-identity + tapping-player authority is
+                    // `taps_for_mana_card_matches` + `valid_player_matches`, the
+                    // same predicates the trigger resolver uses. `taps_for_mana_card_matches`
+                    // ignores `taps_for_mana_produced`, so a produced-mana filter is
+                    // treated as matching (over-approx, err-to-hold).
+                    crate::types::triggers::TriggerMode::TapsForMana => {
+                        crate::game::trigger_matchers::taps_for_mana_card_matches(
+                            trigger,
+                            state,
+                            mana_source,
+                            trigger_source,
+                        ) && crate::game::trigger_matchers::valid_player_matches(
+                            trigger,
+                            state,
+                            player,
+                            trigger_source,
+                        )
+                    }
+                    // CR 605.1b: a `ManaAdded` trigger has no card filter
+                    // (`match_mana_added` matches any mana-added event), so it fires
+                    // on any own mana activation — over-approximate to firing
+                    // (err-to-hold; zero such beneficial cards printed today).
+                    crate::types::triggers::TriggerMode::ManaAdded => {
+                        crate::game::trigger_matchers::valid_player_matches(
+                            trigger,
+                            state,
+                            player,
+                            trigger_source,
+                        )
+                    }
+                    _ => false,
+                }
+            })
+        })
+    })
+}
+
 /// Determines whether the frontend should auto-pass the current priority window.
 ///
 /// Returns `true` when auto-passing is recommended:
@@ -914,6 +1025,17 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         WaitingFor::Priority { player } => *player,
         _ => return false,
     };
+
+    // Lazy, compute-once locals shared across rungs (§C):
+    //  - `cast_probe`: one `PriorityCastProbe` built when the first castability
+    //    rung is reached (rungs 7/8 are mutually exclusive on `active_player`,
+    //    so it is built at most once), reused so the auto-tap source cache and
+    //    layer flush are not rebuilt per candidate spell.
+    //  - `object_mana_actions`: one activatable mana-action sweep shared by the
+    //    G1 beneficial-tap hold (rung 5) and the rung-9 sac-for-mana check,
+    //    avoiding the PR #5229 double-evaluation.
+    let mut cast_probe: Option<crate::game::casting::PriorityCastProbe> = None;
+    let mut object_mana_actions: Option<Vec<GameAction>> = None;
 
     // A phase stop on the current phase (empty stack = initial priority window)
     // means the player asked to pause here — never recommend auto-pass. Moved
@@ -945,6 +1067,35 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         return true;
     }
 
+    // Rung 5 — G1 (CR 605.1b + CR 603.3): hold priority when tapping one of the
+    // player's own currently-activatable mana sources would fire a *beneficial*
+    // non-mana tap trigger (opponent-scoped damage/life-loss or controller-scoped
+    // life gain — Zhur-Taa Druid's "deals 1 damage to each opponent"). Such a
+    // trigger USES THE STACK (it fails CR 605.1b's mana-ability test), so a real
+    // priority window exists to hold in. Scoped to own-turn, empty-stack MAIN
+    // phases (the deliberate residual instant-speed windows delegate to phase
+    // stops). Stage 1 is a clone-free AST gate (§C.2); the mana-action sweep is
+    // computed lazily only past the gate and shared with the rung-9 sac check.
+    if state.stack.is_empty()
+        && state.active_player == player
+        && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+    {
+        let beneficial_sources =
+            mana_sources::beneficial_non_mana_tap_trigger_sources(state, player);
+        if !beneficial_sources.is_empty() {
+            let sweep =
+                object_mana_actions.get_or_insert_with(|| activatable_object_mana_actions(state));
+            if beneficial_mana_tap_trigger_hold(
+                state,
+                player,
+                sweep.as_slice(),
+                &beneficial_sources,
+            ) {
+                return false;
+            }
+        }
+    }
+
     // CR 117.1d (issue #4388): On an opponent's turn the priority player may
     // hold to cast an instant/flash spell paid for with their own mana
     // abilities (Gaea's Cradle, Itlimoc, basic lands). Hold ONLY when they
@@ -958,8 +1109,13 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // opponent's turn are still held below by `has_meaningful_priority_action`;
     // a dedicated `has_feasibly_activatable_ability` opponent-turn seam
     // (the ability analogue of this predicate) is deferred as future work.
-    if state.active_player != player && has_feasibly_castable_spell(state, player) {
-        return false;
+    if state.active_player != player {
+        let probe: &_ = cast_probe.get_or_insert_with(|| {
+            crate::game::casting::PriorityCastProbe::from_flushed_state(state.clone(), player)
+        });
+        if has_feasibly_castable_spell(probe.state(), player, Some(probe)) {
+            return false;
+        }
     }
 
     // Own-turn upkeep/draw fast path. This MUST stay above the own-turn
@@ -973,8 +1129,13 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         return true;
     }
 
-    if state.active_player == player && has_feasibly_castable_spell(state, player) {
-        return false;
+    if state.active_player == player {
+        let probe: &_ = cast_probe.get_or_insert_with(|| {
+            crate::game::casting::PriorityCastProbe::from_flushed_state(state.clone(), player)
+        });
+        if has_feasibly_castable_spell(probe.state(), player, Some(probe)) {
+            return false;
+        }
     }
 
     // A genuinely meaningful non-mana priority action always holds. A
@@ -986,9 +1147,14 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // no downstream use is not a meaningful priority window — let auto-pass fire.
     // Short-circuit order preserves perf: the followup scan runs only when the
     // flat list is not already meaningful AND a sac-for-mana source is present.
-    let holds = flat_actions_have_meaningful_priority(state, actions)
-        || (has_activatable_sacrifice_for_mana(state)
-            && sacrifice_for_mana_enables_followup(state, player));
+    let holds = flat_actions_have_meaningful_priority(state, actions) || {
+        // Short-circuit: only sweep (or reuse the rung-5 sweep) when the flat
+        // list is not already meaningful AND a sac-for-mana source is present.
+        let sweep =
+            object_mana_actions.get_or_insert_with(|| activatable_object_mana_actions(state));
+        mana_actions_include_meaningful_sacrifice(state, sweep.as_slice())
+            && sacrifice_for_mana_enables_followup(state, player)
+    };
     if !holds {
         return true;
     }
@@ -1413,13 +1579,14 @@ mod tests {
         legal_actions_full, stuck_decision_diagnostic, validated_candidate_actions,
     };
     use crate::game::engine::apply_as_current;
+    use crate::game::mana_sources;
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification,
         ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
         ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-        TargetRef, TypedFilter,
+        TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -2804,7 +2971,7 @@ mod tests {
         // Positive reach-guard: prove the {G} instant is feasibly castable so
         // the HOLD assertion below cannot pass vacuously.
         assert!(
-            super::has_feasibly_castable_spell(runner.state(), P0),
+            super::has_feasibly_castable_spell(runner.state(), P0, None),
             "precondition: the {{G}} instant is feasibly castable"
         );
         assert!(
@@ -3020,7 +3187,7 @@ mod tests {
         );
         // Nothing castable — the produced mana would feed no spell (case 1 false).
         assert!(
-            !super::has_feasibly_castable_spell(&state, PlayerId(0)),
+            !super::has_feasibly_castable_spell(&state, PlayerId(0), None),
             "precondition: empty hand, nothing feasibly castable"
         );
 
@@ -3060,7 +3227,7 @@ mod tests {
         // Positive reach-guard: the {G} instant is genuinely castable, so the HOLD
         // cannot pass vacuously.
         assert!(
-            super::has_feasibly_castable_spell(runner.state(), P0),
+            super::has_feasibly_castable_spell(runner.state(), P0, None),
             "precondition: the {{G}} instant is feasibly castable"
         );
         assert!(
@@ -3085,7 +3252,7 @@ mod tests {
             state.waiting_for = WaitingFor::Priority { player: P0 };
         }
         assert!(
-            !super::has_feasibly_castable_spell(bare_runner.state(), P0),
+            !super::has_feasibly_castable_spell(bare_runner.state(), P0, None),
             "precondition (negative): no castable spell on the bare board"
         );
         assert!(
@@ -3200,7 +3367,6 @@ mod tests {
     /// lives on a different permanent, proving the scan sweeps all permanents.
     #[test]
     fn sac_for_mana_holds_with_beneficial_death_trigger() {
-        use crate::types::ability::TriggerDefinition;
         use crate::types::triggers::TriggerMode;
 
         let mut state = GameState::new_two_player(42);
@@ -3262,7 +3428,7 @@ mod tests {
     /// invariant for disjunctive dies/leaves triggers.
     #[test]
     fn sac_for_mana_holds_with_disjunctive_leaves_battlefield_clause_trigger() {
-        use crate::types::ability::{OriginConstraint, TriggerDefinition, ZoneChangeClause};
+        use crate::types::ability::{OriginConstraint, ZoneChangeClause};
         use crate::types::triggers::TriggerMode;
 
         let mut state = GameState::new_two_player(42);
@@ -3322,7 +3488,6 @@ mod tests {
     /// `SpellCast` must NOT match `trigger_fires_on_leaving_battlefield`.
     #[test]
     fn sac_for_mana_auto_passes_with_only_non_leaving_trigger() {
-        use crate::types::ability::TriggerDefinition;
         use crate::types::triggers::TriggerMode;
 
         let mut state = GameState::new_two_player(42);
@@ -3371,12 +3536,298 @@ mod tests {
         );
     }
 
+    // ── G1: beneficial mana-tap trigger hold (CR 605.1b) ────────────────────
+
+    /// A `{T}: Add {G}` mana creature (Zhur-Taa Druid shape). `trigger`, when
+    /// given, is attached as the TapsForMana beneficial trigger. The creature is
+    /// not summoning-sick so its tap ability is genuinely activatable and appears
+    /// in `activatable_object_mana_actions`.
+    fn add_mana_tap_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        trigger: Option<TriggerDefinition>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(810),
+            controller,
+            "Mana Dork".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.summoning_sick = false;
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        if let Some(trigger) = trigger {
+            obj.trigger_definitions.push(trigger);
+        }
+        id
+    }
+
+    /// Zhur-Taa Druid's live trigger: `Whenever you tap ~ for mana, it deals 1
+    /// damage to each opponent.` (`valid_card: SelfRef`, `valid_target:
+    /// Controller`, execute `DamageEachPlayer { Opponent }`).
+    fn zhur_taa_trigger() -> TriggerDefinition {
+        use crate::types::ability::PlayerFilter;
+        use crate::types::triggers::TriggerMode;
+        TriggerDefinition::new(TriggerMode::TapsForMana)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DamageEachPlayer {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player_filter: PlayerFilter::Opponent,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .valid_target(TargetFilter::Controller)
+    }
+
+    fn own_main_priority() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state
+    }
+
+    /// False-pass POSITIVE (revert-failing): Zhur-Taa Druid on own PreCombatMain,
+    /// empty stack, nothing else to do → HOLD. If the G1 rung is reverted, rung 9
+    /// finds no meaningful action (a bare mana ability) and auto-passes, so the
+    /// `!auto_pass_recommended` assertion flips.
+    #[test]
+    fn g1_holds_for_beneficial_mana_tap_trigger_own_main() {
+        let mut state = own_main_priority();
+        add_mana_tap_creature(&mut state, PlayerId(0), Some(zhur_taa_trigger()));
+        let flat = super::flat_priority_actions(&state);
+
+        // Reach-guards (non-vacuous): stage-1 finds the beneficial source AND the
+        // tap ability is genuinely activatable (so stage-2 is reached), yet the
+        // flat list is NOT meaningful (a bare mana ability), so a HOLD here can
+        // only come from the G1 rung.
+        assert!(
+            !mana_sources::beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0)).is_empty(),
+            "precondition: stage-1 AST gate finds the beneficial trigger source"
+        );
+        assert!(
+            !super::activatable_object_mana_actions(&state).is_empty(),
+            "precondition: the {{T}} mana ability is activatable (stage-2 reached)"
+        );
+        assert!(
+            !super::flat_actions_have_meaningful_priority(&state, &flat),
+            "precondition: the flat list is not meaningful (hold is not from rung 9)"
+        );
+
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "beneficial mana-tap trigger on own main → HOLD (G1 rung)"
+        );
+    }
+
+    /// NEGATIVE — Manabarbs shape (`DealDamage { TriggeringPlayer }`): the effect
+    /// harms the tapper, not an opponent, so the sign classifier rejects it and
+    /// auto-pass fires. Reach-guard: the tap ability is still activatable (so the
+    /// pass is due to the sign classifier, not an unreachable stage 2).
+    #[test]
+    fn g1_auto_passes_for_manabarbs_shape() {
+        use crate::types::triggers::TriggerMode;
+        let mut state = own_main_priority();
+        let manabarbs = TriggerDefinition::new(TriggerMode::TapsForMana)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::TriggeringPlayer,
+                    damage_source: None,
+                    excess: None,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(TypedFilter::land()));
+        add_mana_tap_creature(&mut state, PlayerId(0), Some(manabarbs));
+        let flat = super::flat_priority_actions(&state);
+
+        assert!(
+            !super::activatable_object_mana_actions(&state).is_empty(),
+            "reach-guard: the tap ability is activatable; only the sign rejects it"
+        );
+        assert!(
+            mana_sources::beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0)).is_empty(),
+            "the harm-the-tapper effect is not classified beneficial"
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "Manabarbs-shaped self-harm trigger → auto-pass"
+        );
+    }
+
+    /// NEGATIVE — Forbidden Orchard token (`Effect::Token` owner Opponent): a
+    /// fully-parsed effect that is not a CR 119/120 life/damage swing, so the
+    /// sign classifier's documented default arm rejects it → auto-pass.
+    /// Reach-guard: the tap ability is activatable (only the sign rejects it).
+    #[test]
+    fn g1_auto_passes_for_forbidden_orchard_token() {
+        use crate::types::ability::PtValue;
+        use crate::types::triggers::TriggerMode;
+        let mut state = own_main_priority();
+        // Forbidden Orchard's live shape: "target opponent creates a 1/1 Spirit".
+        let orchard = TriggerDefinition::new(TriggerMode::TapsForMana)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Token {
+                    name: "Spirit".to_string(),
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    types: vec!["Creature".to_string(), "Spirit".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: Some(ControllerRef::Opponent),
+                        properties: vec![],
+                    }),
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef);
+        add_mana_tap_creature(&mut state, PlayerId(0), Some(orchard));
+        let flat = super::flat_priority_actions(&state);
+
+        assert!(
+            !super::activatable_object_mana_actions(&state).is_empty(),
+            "reach-guard: the tap ability is activatable; only the sign rejects it"
+        );
+        assert!(
+            mana_sources::beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0)).is_empty(),
+            "a token-creation rider is not a CR 119/120 benefit"
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "Forbidden-Orchard token rider → auto-pass"
+        );
+    }
+
+    /// NEGATIVE — opponent-controlled trigger source (also covers "trigger on the
+    /// opponent's battlefield"): the beneficial dork is P1's, so on P0's turn
+    /// `beneficial_non_mana_tap_trigger_sources(P0)` is empty and P1's source is
+    /// absent from P0's mana sweep → auto-pass. Reach-guard: the SAME dork
+    /// controlled by P0 would hold (verified by the positive test).
+    #[test]
+    fn g1_auto_passes_for_opponent_controlled_source() {
+        let mut state = own_main_priority();
+        add_mana_tap_creature(&mut state, PlayerId(1), Some(zhur_taa_trigger()));
+        let flat = super::flat_priority_actions(&state);
+
+        assert!(
+            mana_sources::beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0)).is_empty(),
+            "an opponent-controlled beneficial source is not P0's"
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "opponent-controlled beneficial trigger source → auto-pass"
+        );
+    }
+
+    /// NEGATIVE — the beneficial dork is already tapped, so its tap ability is
+    /// absent from the mana sweep: stage 1 still finds the source, but stage 2
+    /// finds no activatable matching mana action → auto-pass. Reach-guard:
+    /// stage-1 non-empty (so the pass is a stage-2 miss, not a stage-1 miss).
+    #[test]
+    fn g1_auto_passes_when_source_already_tapped() {
+        let mut state = own_main_priority();
+        let dork = add_mana_tap_creature(&mut state, PlayerId(0), Some(zhur_taa_trigger()));
+        state.objects.get_mut(&dork).unwrap().tapped = true;
+        let flat = super::flat_priority_actions(&state);
+
+        assert!(
+            !mana_sources::beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0)).is_empty(),
+            "reach-guard: stage-1 still finds the beneficial source"
+        );
+        assert!(
+            super::activatable_object_mana_actions(&state).is_empty(),
+            "the tapped source has no activatable mana action (stage-2 miss)"
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "tapped beneficial source → auto-pass (self-quiescing)"
+        );
+    }
+
+    /// NEGATIVE — wrong window (own Upkeep, not a main phase): the G1 window gate
+    /// requires PreCombatMain/PostCombatMain, so on own Upkeep the beneficial hold
+    /// does not apply. Reach-guard: on the SAME board at PreCombatMain the hold
+    /// fires (asserted first), proving only the phase axis flips the result.
+    #[test]
+    fn g1_auto_passes_on_own_upkeep_wrong_phase() {
+        let mut state = own_main_priority();
+        add_mana_tap_creature(&mut state, PlayerId(0), Some(zhur_taa_trigger()));
+        let flat = super::flat_priority_actions(&state);
+
+        // Reach-guard: at a main phase this exact board HOLDS.
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "reach-guard: the same board holds at PreCombatMain"
+        );
+
+        // Flip only the phase to Upkeep — G1's window no longer applies.
+        state.phase = Phase::Upkeep;
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "own Upkeep is outside G1's mains-only window → auto-pass"
+        );
+    }
+
+    /// NEGATIVE — wrong window (opponent's turn): G1 requires `active_player ==
+    /// player`. On the opponent's turn the beneficial hold does not apply; the
+    /// opponent-turn castability rung (rung 7) governs instead, and with nothing
+    /// castable auto-pass fires. Reach-guard: the same board on P0's turn holds.
+    #[test]
+    fn g1_auto_passes_on_opponents_turn_wrong_window() {
+        let mut state = own_main_priority();
+        add_mana_tap_creature(&mut state, PlayerId(0), Some(zhur_taa_trigger()));
+        let flat = super::flat_priority_actions(&state);
+
+        assert!(
+            !super::auto_pass_recommended(&state, &flat),
+            "reach-guard: on P0's own turn the board holds"
+        );
+
+        // Flip only the turn — it is now the opponent's (P1's) turn.
+        state.active_player = PlayerId(1);
+        assert!(
+            super::auto_pass_recommended(&state, &flat),
+            "opponent's turn is outside G1's own-turn window → auto-pass"
+        );
+    }
+
     /// V6b (predicate boundary): direct unit coverage of
     /// `trigger_fires_on_leaving_battlefield`, pinning the `OriginConstraint`
     /// semantics for the disjunctive-clause arm (CR 603.6c).
     #[test]
     fn trigger_fires_on_leaving_battlefield_predicate_boundary() {
-        use crate::types::ability::{OriginConstraint, TriggerDefinition, ZoneChangeClause};
+        use crate::types::ability::{OriginConstraint, ZoneChangeClause};
         use crate::types::triggers::TriggerMode;
 
         // Direct battlefield-exit modes always fire.

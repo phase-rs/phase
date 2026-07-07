@@ -15,7 +15,8 @@
 
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
+    PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, ProductionOverride};
@@ -454,6 +455,116 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
         return ManaSourcePenalty::HasIrreversibleContinuation;
     }
     ManaSourcePenalty::None
+}
+
+/// CR 119.3 (life) / CR 120.3 (damage → life loss): The benefit twin of
+/// [`effect_controller_harm_amount`]. Returns `true` iff a single `Effect`
+/// favors the player who caused the trigger (the tapper): opponent-scoped
+/// damage / life loss, or controller-scoped life gain. Presence-only (no amount)
+/// — a mana-tap hold is a hold-on-presence decision, not a value sum.
+///
+/// Exact AST shapes (verified against `types/ability.rs`): opponent scope is
+/// `TargetFilter::Typed(TypedFilter { controller: Some(ControllerRef::Opponent),
+/// .. })` — there is NO bare `TargetFilter::Opponent` variant (cf.
+/// `player_matches_filter`). `DamageEachPlayer { player_filter: Opponent }` is
+/// Zhur-Taa Druid's live shape. `GainLife.player` is a `TargetFilter` that
+/// serde-defaults to `Controller` (never `None` in the AST). Everything else —
+/// self / triggering-player scope, `Unimplemented`, `GenericEffect`, and every
+/// unmodeled shape — falls through the documented default arm to `false`
+/// (default-pass). Broadening beyond CR 119 / CR 120 is a deliberate follow-up.
+fn effect_benefits_trigger_controller(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DamageEachPlayer {
+            player_filter: PlayerFilter::Opponent,
+            ..
+        } | Effect::DealDamage {
+            target: TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }),
+            ..
+        } | Effect::LoseLife {
+            target: Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            })),
+            ..
+        } | Effect::GainLife {
+            player: TargetFilter::Controller,
+            ..
+        }
+    )
+}
+
+/// CR 603.2: Walk a trigger's `execute` continuation graph (top effect plus the
+/// `sub_ability` / `else_ability` links, mirroring `chain_harms_controller_amount`)
+/// and return `true` iff any link's effect benefits the trigger's controller. A
+/// trigger with no `execute` chain benefits no one.
+pub(crate) fn trigger_chain_benefits_controller(trigger: &TriggerDefinition) -> bool {
+    fn walk(ability: &AbilityDefinition) -> bool {
+        if effect_benefits_trigger_controller(&ability.effect) {
+            return true;
+        }
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            if walk(sub) {
+                return true;
+            }
+        }
+        if let Some(other) = ability.else_ability.as_deref() {
+            if walk(other) {
+                return true;
+            }
+        }
+        false
+    }
+    trigger.execute.as_deref().is_some_and(walk)
+}
+
+/// CR 605.1b (+ CR 603.3): True when `trigger` is a *non-mana* tap-triggered
+/// ability — mode `TapsForMana` or `ManaAdded` whose `execute` chain contains
+/// any effect other than mana production.
+///
+/// Such a trigger FAILS CR 605.1b's mana-ability criteria (it does not "add mana
+/// to a player's mana pool when it resolves"), so it goes on the stack and uses
+/// a priority window (CR 603.3) — unlike a pure-mana tap trigger, which is a
+/// mana ability that resolves inline without the stack (CR 605.4a). That stack
+/// use is exactly why a beneficial one is worth holding for. A whole-`Effect::Mana`
+/// chain (the aura mana-fixing case: Utopia Sprawl, Fertile Ground) is excluded —
+/// mirrors `chain_has_non_mana_effect`, but here the top-level `execute.effect`
+/// is also inspected (it carries the trigger's own effect, not mana production).
+pub(crate) fn is_non_mana_tap_trigger(trigger: &TriggerDefinition) -> bool {
+    matches!(
+        trigger.mode,
+        TriggerMode::TapsForMana | TriggerMode::ManaAdded
+    ) && trigger.execute.as_deref().is_some_and(|execute| {
+        !matches!(*execute.effect, Effect::Mana { .. }) || chain_has_non_mana_effect(execute)
+    })
+}
+
+/// CR 605.1b: Battlefield permanents controlled by `player` that carry a
+/// *beneficial* non-mana tap trigger — one that both [`is_non_mana_tap_trigger`]
+/// (uses the stack) and [`trigger_chain_benefits_controller`] (favors the
+/// tapper). This is the clone-free stage-1 AST gate for the G1 beneficial
+/// mana-tap hold: a linear battlefield walk with early-out, no state clones.
+pub(crate) fn beneficial_non_mana_tap_trigger_sources(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|obj| {
+                obj.controller == player
+                    && obj.trigger_definitions.iter_all().any(|trigger| {
+                        is_non_mana_tap_trigger(trigger)
+                            && trigger_chain_benefits_controller(trigger)
+                    })
+            })
+        })
+        .collect()
 }
 
 /// Return all currently activatable tap-mana options for a land.
@@ -4027,5 +4138,220 @@ mod tests {
             matches!(&pips[1], ManaPip::OneOfColors(colors) if colors.len() == 5),
             "second pip must be OneOfColors with 5 options, got: {pips:?}"
         );
+    }
+
+    // ── G1: beneficial mana-tap trigger classifier ──────────────────────────
+
+    fn fixed(value: i32) -> QuantityExpr {
+        QuantityExpr::Fixed { value }
+    }
+
+    fn opponent_scope() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        })
+    }
+
+    #[test]
+    fn effect_benefits_classifier_covers_every_arm() {
+        // Zhur-Taa Druid's live shape: opponent-scoped each-player damage → benefit.
+        assert!(effect_benefits_trigger_controller(
+            &Effect::DamageEachPlayer {
+                amount: fixed(1),
+                player_filter: PlayerFilter::Opponent,
+            }
+        ));
+        // Self-scoped each-player damage (would hit the tapper) → pass.
+        assert!(!effect_benefits_trigger_controller(
+            &Effect::DamageEachPlayer {
+                amount: fixed(1),
+                player_filter: PlayerFilter::Controller,
+            }
+        ));
+        // "Deals damage to target opponent" (opponent player scope) → benefit.
+        assert!(effect_benefits_trigger_controller(&Effect::DealDamage {
+            amount: fixed(1),
+            target: opponent_scope(),
+            damage_source: None,
+            excess: None,
+        }));
+        // Manabarbs: damage to the TRIGGERING player (the tapper) → pass.
+        assert!(!effect_benefits_trigger_controller(&Effect::DealDamage {
+            amount: fixed(1),
+            target: TargetFilter::TriggeringPlayer,
+            damage_source: None,
+            excess: None,
+        }));
+        // Controller-scoped damage (the tapper harms themselves) → pass.
+        assert!(!effect_benefits_trigger_controller(&Effect::DealDamage {
+            amount: fixed(1),
+            target: TargetFilter::Controller,
+            damage_source: None,
+            excess: None,
+        }));
+        // Opponent-scoped life loss → benefit.
+        assert!(effect_benefits_trigger_controller(&Effect::LoseLife {
+            amount: fixed(1),
+            target: Some(opponent_scope()),
+        }));
+        // Untargeted life loss (defaults to the resolving player) → pass.
+        assert!(!effect_benefits_trigger_controller(&Effect::LoseLife {
+            amount: fixed(1),
+            target: None,
+        }));
+        // Controller life gain → benefit.
+        assert!(effect_benefits_trigger_controller(&Effect::GainLife {
+            amount: fixed(1),
+            player: TargetFilter::Controller,
+        }));
+        // Opponent life gain → pass (helps the opponent, not the tapper).
+        assert!(!effect_benefits_trigger_controller(&Effect::GainLife {
+            amount: fixed(1),
+            player: opponent_scope(),
+        }));
+        // Unknown / unmodeled shapes default-pass (documented catch-all).
+        assert!(!effect_benefits_trigger_controller(
+            &Effect::Unimplemented {
+                name: "runaway growth".to_string(),
+                description: None,
+            }
+        ));
+        assert!(!effect_benefits_trigger_controller(
+            &Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
+            }
+        ));
+    }
+
+    fn taps_for_mana_trigger_with(effect: Effect) -> TriggerDefinition {
+        TriggerDefinition::new(TriggerMode::TapsForMana)
+            .execute(AbilityDefinition::new(AbilityKind::Database, effect))
+            .valid_card(TargetFilter::SelfRef)
+    }
+
+    #[test]
+    fn trigger_chain_benefits_walks_sub_ability_and_requires_execute() {
+        // No execute chain → benefits no one.
+        assert!(!trigger_chain_benefits_controller(&TriggerDefinition::new(
+            TriggerMode::TapsForMana
+        )));
+        // Top-level beneficial effect.
+        assert!(trigger_chain_benefits_controller(
+            &taps_for_mana_trigger_with(Effect::DamageEachPlayer {
+                amount: fixed(1),
+                player_filter: PlayerFilter::Opponent,
+            })
+        ));
+        // Beneficial effect nested in a sub_ability link is still found.
+        let mut nested = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Unimplemented {
+                name: "noop".to_string(),
+                description: None,
+            },
+        );
+        nested.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainLife {
+                amount: fixed(2),
+                player: TargetFilter::Controller,
+            },
+        )));
+        assert!(trigger_chain_benefits_controller(
+            &TriggerDefinition::new(TriggerMode::TapsForMana).execute(nested)
+        ));
+    }
+
+    #[test]
+    fn is_non_mana_tap_trigger_excludes_pure_mana_and_wrong_mode() {
+        // Non-mana TapsForMana (Zhur-Taa) → true.
+        assert!(is_non_mana_tap_trigger(&taps_for_mana_trigger_with(
+            Effect::DamageEachPlayer {
+                amount: fixed(1),
+                player_filter: PlayerFilter::Opponent,
+            }
+        )));
+        // Pure-mana TapsForMana (Wild Growth aura) → false (it IS a mana ability).
+        let pure_mana =
+            TriggerDefinition::new(TriggerMode::TapsForMana).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Additional,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            ));
+        assert!(!is_non_mana_tap_trigger(&pure_mana));
+        // ManaAdded with a non-mana effect → true.
+        let mana_added =
+            TriggerDefinition::new(TriggerMode::ManaAdded).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: fixed(1),
+                    player: TargetFilter::Controller,
+                },
+            ));
+        assert!(is_non_mana_tap_trigger(&mana_added));
+        // Wrong mode (a beneficial effect on a non-tap trigger) → false.
+        let wrong_mode =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DamageEachPlayer {
+                    amount: fixed(1),
+                    player_filter: PlayerFilter::Opponent,
+                },
+            ));
+        assert!(!is_non_mana_tap_trigger(&wrong_mode));
+    }
+
+    #[test]
+    fn beneficial_sources_scan_scopes_to_controller() {
+        let mut state = GameState::new_two_player(42);
+        // P0's Zhur-Taa-shaped dork.
+        let dork = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Beneficial Dork".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&dork)
+            .unwrap()
+            .trigger_definitions
+            .push(taps_for_mana_trigger_with(Effect::DamageEachPlayer {
+                amount: fixed(1),
+                player_filter: PlayerFilter::Opponent,
+            }));
+        // An opponent-controlled copy of the same shape must NOT appear for P0.
+        let opp_dork = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(1),
+            "Opponent Dork".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_dork)
+            .unwrap()
+            .trigger_definitions
+            .push(taps_for_mana_trigger_with(Effect::DamageEachPlayer {
+                amount: fixed(1),
+                player_filter: PlayerFilter::Opponent,
+            }));
+
+        let sources = beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0));
+        assert_eq!(sources, vec![dork], "only P0's controlled source is listed");
     }
 }

@@ -615,7 +615,7 @@ fn valid_source_controller_matches(
     }
 }
 
-pub(super) fn valid_player_matches(
+pub(crate) fn valid_player_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
     player_id: PlayerId,
@@ -2830,7 +2830,7 @@ pub(super) fn match_revealed(
 /// Extracted as a standalone authority so the aura mana-refund probe
 /// (`mana_sources::aura_taps_for_mana_sources_for_land`) can ask the same
 /// question without synthesizing a `GameEvent`.
-pub(super) fn taps_for_mana_card_matches(
+pub(crate) fn taps_for_mana_card_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
     mana_source: ObjectId,
