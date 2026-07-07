@@ -14864,82 +14864,59 @@ fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
         .contains(&ContinuousModification::SetColor { colors: vec![] }));
 }
 
-// Issue #5213: Arixmethes, Slumbering Isle — "As long as Arixmethes has a slumber
-// counter on it, it's a land." A self-referential "it's a <core type>" static is a
-// type-SETTING effect (CR 205.1a): it must REPLACE the card types (making it a Land
-// only, so Creature is removed → "Legendary Land — Kraken"), not additively AddType
-// Land (which left it a "Legendary Creature Land — Kraken", an impossible land
-// creature). The condition side (slumber counter) already parsed; only the type
-// effect was wrong. Revert-failing: the pre-fix path emits AddType(Land) and this
-// asserts SetCardTypes([Land]) with no AddType.
+// CR 205.1a / CR 205.1b (issue #5213 follow-up): distinct from #5231's land-only
+// coverage — the "it's a <type>" REPLACEMENT and its "in addition to" retention
+// exception are not land-specific. A bare non-land, non-creature type-set
+// ("~ is an artifact") must REPLACE the card types (SetCardTypes), while the same
+// type-set with the retention marker ("~ is an artifact in addition to its other
+// types") must stay ADDITIVE (AddType). Guards against a future change narrowing
+// `maybe_replace_card_types` back to the land case while leaving other
+// "it's a <type>" statics additive (or over-replacing the retention form).
 #[test]
-fn arixmethes_conditional_is_a_land_replaces_card_types() {
-    let def = parse_static_line("As long as ~ has a slumber counter on it, it's a land.")
-        .expect("Arixmethes' conditional type-change static should parse");
-    assert_eq!(def.mode, StaticMode::Continuous);
-    assert_eq!(
-        def.affected,
-        Some(TargetFilter::SelfRef),
-        "the static affects the source permanent itself"
-    );
-    // CR 205.1a: replacing SetCardTypes([Land]) — Creature is dropped.
+fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
+    // CR 205.1a: a non-land single non-creature type-set REPLACES.
+    let replace =
+        parse_static_line("~ is an artifact.").expect("\"~ is an artifact\" should parse");
     assert!(
-        def.modifications
+        replace
+            .modifications
             .contains(&ContinuousModification::SetCardTypes {
-                core_types: vec![crate::types::card_type::CoreType::Land],
+                core_types: vec![crate::types::card_type::CoreType::Artifact],
             }),
-        "\"it's a land\" must REPLACE card types via SetCardTypes([Land]), not additively \
-         add Land: {:?}",
-        def.modifications
+        "non-land \"is an artifact\" must REPLACE via SetCardTypes([Artifact]): {:?}",
+        replace.modifications
     );
     assert!(
-        !def.modifications
+        !replace
+            .modifications
             .iter()
             .any(|m| matches!(m, ContinuousModification::AddType { .. })),
-        "the additive AddType(Land) is the bug — it left a land creature"
+        "non-land replacement must not stay additive: {:?}",
+        replace.modifications
     );
-    // The "as long as it has a slumber counter" gate must survive as a condition.
-    assert!(
-        def.condition.is_some(),
-        "the slumber-counter condition must be attached: {:?}",
-        def.condition
-    );
-}
 
-// CR 205.1b (issue #5213): animating a permanent INTO a creature ("~ is an
-// artifact creature") is the retention exception — it GAINS the creature type
-// while keeping its other card types, so it must stay ADDITIVE (AddType), NOT
-// collapse to a replacing SetCardTypes like the Arixmethes "it's a land" path.
-// Guards the parse-diff class (Grond, the Gatebreaker; Midnight Mangler; Phoenix
-// Fleet Airship) whose printed forms carry a leading "during …" timing prefix.
-#[test]
-fn is_an_artifact_creature_stays_additive() {
-    for text in [
-        "During your turn, ~ is an artifact creature.",
-        "During turns other than yours, ~ is an artifact creature.",
-    ] {
-        let def = parse_static_line(text).unwrap_or_else(|| panic!("{text:?} should parse"));
-        assert!(
-            def.modifications
-                .contains(&ContinuousModification::AddType {
-                    core_type: crate::types::card_type::CoreType::Artifact,
-                })
-                && def
-                    .modifications
-                    .contains(&ContinuousModification::AddType {
-                        core_type: crate::types::card_type::CoreType::Creature,
-                    }),
-            "{text:?}: artifact-creature animation must stay additive (AddType): {:?}",
-            def.modifications
-        );
-        assert!(
-            !def.modifications
-                .iter()
-                .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
-            "{text:?}: must NOT replace card types (CR 205.1b retention): {:?}",
-            def.modifications
-        );
-    }
+    // CR 205.1b: the "in addition to its other types" retention marker keeps the
+    // same non-land type-set additive (the non-land sibling of #5231's land
+    // retention case).
+    let retain = parse_static_line("~ is an artifact in addition to its other types.")
+        .expect("retention form should parse");
+    assert!(
+        retain
+            .modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            }),
+        "\"in addition to\" must stay additive (AddType(Artifact)): {:?}",
+        retain.modifications
+    );
+    assert!(
+        !retain
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "retention form must NOT replace card types: {:?}",
+        retain.modifications
+    );
 }
 
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land
