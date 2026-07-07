@@ -5848,6 +5848,20 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             }
             return attach_unless_slots(clause, None, unless_pay_deferred);
         }
+        // CR 614.1d + CR 514.2: "Permanents enter tapped this turn." / "Lands you
+        // control enter tapped this turn." — a turn-bound floating enters-tapped
+        // replacement (Due Respect, Nahiri's Lithoforming).
+        if let Some(effect) = try_parse_enter_tapped_set_this_turn(
+            TextPair::new(text, &original_lower),
+            ctx.card_name.as_deref().unwrap_or(""),
+        ) {
+            let mut clause = parsed_clause(effect);
+            peel_ctx.apply_optional(&mut clause.optional);
+            if clause.condition.is_none() {
+                clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
+            }
+            return attach_unless_slots(clause, None, unless_pay_deferred);
+        }
     }
     let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
     // Trial-parse fallback: peeling may have removed disambiguation signal
@@ -11041,6 +11055,57 @@ fn try_parse_additional_land_this_turn(tp: TextPair) -> Option<ParsedEffectClaus
     // later; it is not an optional choice to apply this continuous effect now.
     clause.optional = false;
     Some(clause)
+}
+
+/// CR 614.1d + CR 514.2 + CR 611.2a: Lift a turn-duration "enter tapped this
+/// turn" clause into a floating end-of-turn replacement. Covers Due Respect
+/// ("Permanents enter tapped this turn.") and Nahiri's Lithoforming ("Lands you
+/// control enter tapped this turn."), whose enter-tapped clause otherwise lands
+/// in `Effect::Unimplemented`.
+///
+/// The trailing "this turn" (CR 514.2) is stripped first to bind the effect's
+/// lifetime, and the bare body is handed to the replacement parser — the parser
+/// IS the detector, no string dispatch. Only the unconditional external
+/// "[type] enter tapped" class (Authority of the Consuls shape: `event ==
+/// ChangeZone`, `execute == SetTapState{Tap|Untap}` on SelfRef, CR 614.1d) is
+/// lifted; any other replacement shape returns `None` so the body falls through
+/// to the existing dispatch. The def is emitted as an
+/// `AddTargetReplacement { target: None }` (CR 611.2a: a resolution-fixed
+/// continuous effect) so the resolver installs it globally and anchors
+/// `source_controller` to `ability.controller` — required for Nahiri's
+/// controller-relative "Lands you control" `valid_card` filter.
+fn try_parse_enter_tapped_set_this_turn(tp: TextPair<'_>, card_name: &str) -> Option<Effect> {
+    // CR 514.2: the trailing "this turn" is the effect duration, not part of the
+    // replacement body. Fail closed on any other (or absent) trailing duration.
+    let (body, dur) = strip_trailing_duration(tp.original);
+    if dur != Some(Duration::UntilEndOfTurn) {
+        return None;
+    }
+    // The replacement parser is the detector: it recognizes "[type] enter
+    // tapped" and yields the ChangeZone def with a SelfRef tap execute.
+    let mut def = super::oracle_replacement::parse_replacement_line(body, card_name)?;
+    // Shape guard (CR 614.1d): only the enters-tapped external-replacement class
+    // is a valid turn-bound lift. Match through the `Option<Box<AbilityDefinition>>`
+    // wrapper to the execute's effect; a SelfRef tap/untap is exactly that class,
+    // and any other shape (zone redirects, counter riders, …) is out of scope.
+    let is_enter_tapped = def.event == ReplacementEvent::ChangeZone
+        && matches!(
+            def.execute.as_ref().map(|ability| &*ability.effect),
+            Some(Effect::SetTapState {
+                state: TapStateChange::Tap | TapStateChange::Untap,
+                ..
+            })
+        );
+    if !is_enter_tapped {
+        return None;
+    }
+    // CR 514.2: expire at this turn's cleanup. `source_controller` is left `None`
+    // here — the resolver anchors it to `ability.controller` at install time.
+    def.expiry = Some(RestrictionExpiry::EndOfTurn);
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(def),
+        target: TargetFilter::None,
+    })
 }
 
 fn clause_is_additional_land_permission(clause: &ParsedEffectClause) -> bool {

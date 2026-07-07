@@ -33,6 +33,99 @@ use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+/// CR 303.4f: Parse the host of "put it onto the battlefield attached to X"
+/// inside a library-search compound.
+fn parse_search_attach_host_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(
+            TargetFilter::SelfRef,
+            alt((
+                tag("~"),
+                tag("this creature"),
+                tag("this permanent"),
+                tag("this artifact"),
+            )),
+        ),
+        value(
+            TargetFilter::ParentTarget,
+            alt((
+                tag("that enchanted creature"),
+                tag("that enchanted permanent"),
+                tag("enchanted player"),
+                tag("that player"),
+                tag("that creature"),
+                tag("that permanent"),
+                tag("that token"),
+                tag("that card"),
+                tag("the creature"),
+                tag("the permanent"),
+                tag("the token"),
+            )),
+        ),
+        parse_search_attach_host_target,
+    ))
+    .parse(input)
+}
+
+fn parse_search_attach_host_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (filter, remainder) = parse_target(input);
+    if remainder.trim().is_empty() {
+        Ok((remainder, filter))
+    } else {
+        Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )))
+    }
+}
+
+fn parse_search_attach_host_phrase_comma(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, phrase) = take_until(",")(input)?;
+    let (rest, _) = tag(",")(rest)?;
+    let (_, filter) = parse_search_attach_host_ref(phrase.trim())?;
+    Ok((rest, filter))
+}
+
+fn parse_search_attach_host_phrase_then(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, phrase) = take_until(" then ")(input)?;
+    let (rest, _) = tag(" then ")(rest)?;
+    let (_, filter) = parse_search_attach_host_ref(phrase.trim())?;
+    Ok((rest, filter))
+}
+
+fn parse_search_attach_host_phrase_period(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, phrase) = take_until(".")(input)?;
+    let (rest, _) = tag(".")(rest)?;
+    let (_, filter) = parse_search_attach_host_ref(phrase.trim())?;
+    Ok((rest, filter))
+}
+
+fn parse_search_attach_host_phrase_eof(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (_, filter) = all_consuming(parse_search_attach_host_ref).parse(input)?;
+    Ok(("", filter))
+}
+
+fn parse_search_attach_host_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        parse_search_attach_host_phrase_comma,
+        parse_search_attach_host_phrase_then,
+        parse_search_attach_host_phrase_period,
+        parse_search_attach_host_phrase_eof,
+    ))
+    .parse(input)
+}
+
+fn parse_search_attach_host(text: &str) -> Option<TargetFilter> {
+    let lower = text.to_ascii_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = take_until("attached to").parse(input)?;
+        let (input, _) = tag("attached to ").parse(input)?;
+        let (input, filter) = parse_search_attach_host_phrase(input)?;
+        Ok((input, filter))
+    })
+    .map(|(filter, _)| filter)
+}
+
 /// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
 /// continuation chunk so the absorption matcher sees the bare verb form. Used
 /// by the SearchDestination follow-up absorber to handle iterated-search
@@ -3170,7 +3263,7 @@ pub(super) fn apply_clause_continuation(
             enter_tapped,
             enters_under,
             reveal,
-            attach_to_source,
+            attach_host,
         } => {
             // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
             // finds the card in any searched zone, so the put-step must move it
@@ -3218,14 +3311,13 @@ pub(super) fn apply_clause_continuation(
                     enters_modified_if: None,
                 },
             );
-            // CR 303.4f: "attached to [source]" — forward the moved card to an Attach sub_ability
-            if attach_to_source {
+            if let Some(host) = attach_host {
                 change_zone.forward_result = true;
                 change_zone.sub_ability = Some(Box::new(AbilityDefinition::new(
                     kind,
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
-                        target: TargetFilter::Any,
+                        target: host,
                     },
                 )));
             }
@@ -4392,8 +4484,13 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 return None;
             }
             let lower = text.to_lowercase();
-            let attach_to_source = nom_primitives::scan_contains(&full_lower, "attached to")
-                || nom_primitives::scan_contains(&lower, "attached to");
+            let attach_host = if nom_primitives::scan_contains(&full_lower, "attached to")
+                || nom_primitives::scan_contains(&lower, "attached to")
+            {
+                parse_search_attach_host(&full_lower).or(Some(TargetFilter::Any))
+            } else {
+                None
+            };
             // CR 701.23a + CR 701.18a: Scan "onto the battlefield tapped" across
             // the whole sentence (full_lower) so the destination compound's
             // "enters tapped" modifier is detected even when the put-step is
@@ -4439,7 +4536,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 enters_under: nom_primitives::scan_contains(&full_lower, "under your control")
                     .then_some(ControllerRef::You),
                 reveal,
-                attach_to_source,
+                attach_host,
             })
         }
         _ => None,
@@ -10971,6 +11068,35 @@ mod tests {
                 })
             ),
             "expected bare of-them DigFromAmong, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn search_attach_host_that_creature_is_parent_target() {
+        use crate::types::ability::TypedFilter;
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put it onto the battlefield attached to that creature, then shuffle"
+            ),
+            Some(TargetFilter::ParentTarget)
+        );
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put it onto the battlefield attached to target creature. if you search your library this way, shuffle"
+            ),
+            Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put it onto the battlefield attached to target player, then shuffle"
+            ),
+            Some(TargetFilter::Player)
+        );
+        assert_eq!(
+            super::parse_search_attach_host(
+                "put that card onto the battlefield attached to ~, then shuffle"
+            ),
+            Some(TargetFilter::SelfRef)
         );
     }
 

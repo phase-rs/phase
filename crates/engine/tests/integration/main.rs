@@ -412,6 +412,7 @@ mod issue_4566_jocasta;
 mod issue_4663_chosen_x_ptcomparison_targets;
 mod issue_4786_wrenn_realmbreaker;
 mod issue_4792_isochron_scepter;
+mod issue_4824_light_paws_aura_attach;
 mod issue_4829_zenith_chronicler;
 mod issue_4830_orvar_land_copy;
 mod issue_4831_bloodthorn_flail_equip;
