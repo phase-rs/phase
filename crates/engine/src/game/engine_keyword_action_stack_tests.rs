@@ -987,7 +987,7 @@ fn granted_equip_keyword_offers_functional_equip_ability() {
         "granted Equipment subtype missing"
     );
     assert!(
-        obj.keywords.iter().any(|k| matches!(k, Keyword::Equip(_))),
+        crate::game::keywords::has_keyword_kind(obj, crate::types::keywords::KeywordKind::Equip),
         "granted Equip keyword missing"
     );
 
