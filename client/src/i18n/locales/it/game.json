@@ -11,13 +11,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
-  "turnOrder": {
-    "now": "ORA",
-    "next": "PROSS.",
-    "future": "+{{count}}",
-    "nowTooltip": "Turno attuale",
-    "nextTooltip": "Prossimo turno",
-    "futureTooltip": "Tra {{count}} turni"
+  "nextUp": {
+    "label": "Prossimo",
+    "tooltip": "Il turno di questo giocatore è il prossimo."
   },
   "card": {
     "faceDownName": "Carta coperta",

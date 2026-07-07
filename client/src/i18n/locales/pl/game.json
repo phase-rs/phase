@@ -11,13 +11,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
-  "turnOrder": {
-    "now": "TERAZ",
-    "next": "NAST.",
-    "future": "+{{count}}",
-    "nowTooltip": "Obecna tura",
-    "nextTooltip": "Następna tura",
-    "futureTooltip": "Za {{count}} tury"
+  "nextUp": {
+    "label": "Następny",
+    "tooltip": "Tura tego gracza jest następna."
   },
   "card": {
     "faceDownName": "Karta zakryta",

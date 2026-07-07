@@ -11,13 +11,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
-  "turnOrder": {
-    "now": "ACT.",
-    "next": "SUIV.",
-    "future": "+{{count}}",
-    "nowTooltip": "Tour actuel",
-    "nextTooltip": "Prochain tour",
-    "futureTooltip": "Dans {{count}} tours"
+  "nextUp": {
+    "label": "Suivant",
+    "tooltip": "Ce joueur joue le prochain tour."
   },
   "card": {
     "faceDownName": "Carte face cachée",

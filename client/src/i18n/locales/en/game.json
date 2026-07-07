@@ -11,13 +11,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
-  "turnOrder": {
-    "now": "NOW",
-    "next": "NEXT",
-    "future": "+{{count}}",
-    "nowTooltip": "Current turn",
-    "nextTooltip": "Next turn",
-    "futureTooltip": "{{count}} turns from now"
+  "nextUp": {
+    "label": "Next Up",
+    "tooltip": "This player's turn is next."
   },
   "card": {
     "faceDownName": "Face-down card",

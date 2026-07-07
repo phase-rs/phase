@@ -43,14 +43,14 @@ describe("PlayerHud", () => {
     expect(screen.queryByText(/Poison counters:/)).toBeNull();
   });
 
-  it("renders duplicate local NOW and NEXT turn-order chips", () => {
+  it("renders local Next Up badge only for the next actual turn", () => {
     act(() => {
       useGameStore.setState({
         gameState: buildGameState({
           derived: {
             turn_order: [
-              { player: 0, slot_index: 0, turns_from_now: 0 },
               { player: 0, slot_index: 1, turns_from_now: 1 },
+              { player: 0, slot_index: 2, turns_from_now: 2 },
             ],
           },
         }),
@@ -59,7 +59,6 @@ describe("PlayerHud", () => {
 
     render(<PlayerHud />);
 
-    expect(screen.getByTitle("Current turn")).toHaveTextContent("NOW");
-    expect(screen.getByTitle("Next turn")).toHaveTextContent("NEXT");
+    expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
   });
 });

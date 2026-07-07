@@ -315,6 +315,103 @@ describe("fetchCardImageUrl", () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("falls back to a real local printing when canonical image data is Scryfall's soon placeholder", async () => {
+    const oracleId = "war-room-oracle";
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            [oracleId]: {
+              oracle_id: oracleId,
+              face_names: ["war room"],
+              faces: [
+                {
+                  normal: "https://errors.scryfall.com/soon.jpg",
+                  art_crop: "https://errors.scryfall.com/soon.jpg",
+                },
+              ],
+              layout: "normal",
+              name: "War Room",
+              mana_cost: "",
+              cmc: 0,
+              type_line: "Land",
+              colors: [],
+              color_identity: [],
+              keywords: [],
+            },
+            "war room": {
+              oracle_id: oracleId,
+              face_names: ["war room"],
+              faces: [
+                {
+                  normal: "https://errors.scryfall.com/soon.jpg",
+                  art_crop: "https://errors.scryfall.com/soon.jpg",
+                },
+              ],
+              layout: "normal",
+              name: "War Room",
+              mana_cost: "",
+              cmc: 0,
+              type_line: "Land",
+              colors: [],
+              color_identity: [],
+              keywords: [],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            [oracleId]: [
+              {
+                id: "future-placeholder",
+                set: "soc",
+                set_name: "Secrets of Strixhaven Commander",
+                collector_number: "422",
+                released_at: "2026-04-24",
+                border_color: "black",
+                frame_effects: [],
+                full_art: false,
+                faces: [
+                  {
+                    normal: "https://errors.scryfall.com/soon.jpg",
+                    art_crop: "https://errors.scryfall.com/soon.jpg",
+                  },
+                ],
+              },
+              {
+                id: "real-printing",
+                set: "cmm",
+                set_name: "Commander Masters",
+                collector_number: "1054",
+                released_at: "2023-08-04",
+                border_color: "black",
+                frame_effects: [],
+                full_art: false,
+                faces: [
+                  {
+                    normal: "https://cards.scryfall.io/normal/front/w/r/war-room.jpg",
+                    art_crop: "https://cards.scryfall.io/art_crop/front/w/r/war-room.jpg",
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+    const { fetchCardImageAssetByOracleId, fetchCardImageUrl } = await loadScryfallModule();
+    const url = await fetchCardImageUrl("War Room", 0, "normal");
+    const oracleAsset = await fetchCardImageAssetByOracleId(oracleId, "War Room", "normal");
+
+    expect(url).toBe("https://cards.scryfall.io/normal/front/w/r/war-room.jpg");
+    expect(oracleAsset.src).toBe("https://cards.scryfall.io/normal/front/w/r/war-room.jpg");
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("throws when card image is not in local data (no API fallback)", async () => {
     global.fetch = vi.fn().mockResolvedValueOnce(makeEmptyCardDataMap());
 

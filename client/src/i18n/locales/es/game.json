@@ -11,13 +11,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
-  "turnOrder": {
-    "now": "AHORA",
-    "next": "SIG.",
-    "future": "+{{count}}",
-    "nowTooltip": "Turno actual",
-    "nextTooltip": "Turno siguiente",
-    "futureTooltip": "Dentro de {{count}} turnos"
+  "nextUp": {
+    "label": "Sigue",
+    "tooltip": "El turno de este jugador es el siguiente."
   },
   "card": {
     "faceDownName": "Carta boca abajo",

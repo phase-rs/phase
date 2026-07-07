@@ -86,13 +86,13 @@ describe("OpponentSeatHeader", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it("renders future turn-order chip with tooltip text", () => {
+  it("renders Next Up badge with tooltip text", () => {
     const waitingFor = targetSelectionWaitingFor([]);
     useGameStore.setState({
       gameState: {
         ...createGameState(waitingFor),
         derived: {
-          turn_order: [{ player: 1, slot_index: 2, turns_from_now: 2 }],
+          turn_order: [{ player: 1, slot_index: 1, turns_from_now: 1 }],
         },
       },
       waitingFor,
@@ -100,6 +100,6 @@ describe("OpponentSeatHeader", () => {
 
     render(<OpponentSeatHeader playerId={1} />);
 
-    expect(screen.getByTitle("2 turns from now")).toHaveTextContent("+2");
+    expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
   });
 });
