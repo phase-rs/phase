@@ -4,13 +4,15 @@
 //! All parser branches import from this single location (Phase 50, D-01).
 
 use super::diagnostic::OracleDiagnostic;
-use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TargetSelectionMode};
+use crate::types::ability::{
+    ControllerRef, PtValue, QuantityRef, TargetFilter, TargetSelectionMode,
+};
 use crate::types::zones::Zone;
 
 /// Parser-only lookahead for token body clauses split across adjacent sentences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TokenPtFollowup {
-    SourcePowerToughness,
+    PowerToughness { power: PtValue, toughness: PtValue },
 }
 
 /// Unified parsing context — threaded through all parser branches for

@@ -373,7 +373,7 @@ pub(crate) enum ContinuationAst {
     /// its toughness is equal to this creature's toughness" after a token
     /// creation clause — source-defined token P/T printed as a separate
     /// sentence.
-    TokenSourcePowerToughness,
+    TokenSourcePowerToughness { power: PtValue, toughness: PtValue },
     /// "After that turn, that player takes an extra turn." after a controlled-turn effect.
     GrantExtraTurnAfterControlledTurn,
     /// CR 701.20a: "Put that card [onto the battlefield / into your hand]" after RevealUntil —

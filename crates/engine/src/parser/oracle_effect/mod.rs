@@ -25011,7 +25011,7 @@ pub(crate) fn parse_effect_chain_ir(
                 let next_text = strip_leading_sequence_connector(&next.text).trim();
                 sequence::parse_token_source_power_toughness_followup(next_text)
             })
-            .map(|()| TokenPtFollowup::SourcePowerToughness);
+            .map(|(power, toughness)| TokenPtFollowup::PowerToughness { power, toughness });
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),

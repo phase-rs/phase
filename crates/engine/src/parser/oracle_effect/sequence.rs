@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, opt, value};
+use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -16,7 +16,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
 use crate::parser::oracle_quantity::{
-    parse_cda_quantity, parse_for_each_object_filter_clause, parse_quantity_ref,
+    parse_cda_quantity, parse_event_context_quantity, parse_for_each_object_filter_clause,
+    parse_quantity_ref,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
@@ -4016,7 +4017,10 @@ pub(super) fn apply_clause_continuation(
                 enter_with_counters.push((counter_type, count));
             }
         }
-        ContinuationAst::TokenSourcePowerToughness => {
+        ContinuationAst::TokenSourcePowerToughness {
+            power: followup_power,
+            toughness: followup_toughness,
+        } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -4027,8 +4031,8 @@ pub(super) fn apply_clause_continuation(
                 power, toughness, ..
             } = &mut *previous.effect
             {
-                *power = source_token_power_value();
-                *toughness = source_token_toughness_value();
+                *power = followup_power;
+                *toughness = followup_toughness;
             }
         }
         ContinuationAst::RevealUntilKept {
@@ -4335,7 +4339,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking { .. } => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
-        ContinuationAst::TokenSourcePowerToughness => true,
+        ContinuationAst::TokenSourcePowerToughness { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::FaceDownProfileSpec { .. } => true,
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
@@ -6369,7 +6373,10 @@ pub(super) fn parse_followup_continuation_ast(
         // rather than as a post-ETB PutCounter effect that would mistakenly
         // target the source ability via `SelfRef`/`ParentTarget`.
         Effect::Token { .. } => parse_token_source_power_toughness_followup(&lower)
-            .map(|()| ContinuationAst::TokenSourcePowerToughness)
+            .map(|(power, toughness)| ContinuationAst::TokenSourcePowerToughness {
+                power,
+                toughness,
+            })
             .or_else(|| try_parse_token_enters_with_counters(&lower))
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
         _ => None,
@@ -6501,34 +6508,79 @@ pub(super) fn source_token_toughness_value() -> PtValue {
     })
 }
 
-pub(super) fn parse_token_source_power_toughness_followup(text: &str) -> Option<()> {
+pub(super) fn parse_token_source_power_toughness_followup(
+    text: &str,
+) -> Option<(PtValue, PtValue)> {
     let lower = text.trim().to_ascii_lowercase();
     let mut parser = all_consuming(terminated(
         parse_token_source_power_toughness_clause,
         opt(tag(".")),
     ));
-    parser.parse(lower.as_str()).is_ok().then_some(())
+    parser.parse(lower.as_str()).ok().map(|(_, values)| values)
 }
 
 fn parse_token_source_power_toughness_clause(
     input: &str,
-) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+) -> Result<(&str, (PtValue, PtValue)), nom::Err<OracleError<'_>>> {
     let (input, _) = tag::<_, _, OracleError<'_>>("its power is equal to ").parse(input)?;
-    let (input, _) = parse_source_power_ref(input)?;
+    let (input, power_text) = take_until(" and its toughness is equal to ").parse(input)?;
+    let power = parse_token_followup_pt_value(power_text, TokenFollowupStat::Power)
+        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
     let (input, _) = tag(" and its toughness is equal to ").parse(input)?;
-    let (input, _) = parse_source_toughness_ref(input)?;
-    Ok((input, ()))
+    let (input, toughness_text) = alt((take_until("."), rest)).parse(input)?;
+    let toughness = parse_token_followup_pt_value(toughness_text, TokenFollowupStat::Toughness)
+        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
+    Ok((input, (power, toughness)))
 }
 
-fn parse_source_power_ref(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-    let (input, _) = parse_source_possessive(input)?;
-    let (input, _) = tag("power").parse(input)?;
-    Ok((input, ()))
+#[derive(Clone, Copy)]
+enum TokenFollowupStat {
+    Power,
+    Toughness,
 }
 
-fn parse_source_toughness_ref(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+fn parse_token_followup_pt_value(input: &str, stat: TokenFollowupStat) -> Option<PtValue> {
+    let input = input.trim();
+    if all_consuming(|i| parse_source_pt_ref(i, stat))
+        .parse(input)
+        .is_ok()
+    {
+        return Some(match stat {
+            TokenFollowupStat::Power => source_token_power_value(),
+            TokenFollowupStat::Toughness => source_token_toughness_value(),
+        });
+    }
+    let expr = parse_event_context_quantity(input).or_else(|| parse_cda_quantity(input))?;
+    token_followup_pt_expr_is_allowed(&expr, stat).then_some(PtValue::Quantity(expr))
+}
+
+fn token_followup_pt_expr_is_allowed(expr: &QuantityExpr, stat: TokenFollowupStat) -> bool {
+    let QuantityExpr::Ref { qty } = expr else {
+        return false;
+    };
+    let scope = match (qty, stat) {
+        (QuantityRef::Power { scope }, TokenFollowupStat::Power)
+        | (QuantityRef::Toughness { scope }, TokenFollowupStat::Toughness) => scope,
+        _ => return false,
+    };
+    matches!(
+        scope,
+        ObjectScope::Source
+            | ObjectScope::Demonstrative
+            | ObjectScope::CostPaidObject
+            | ObjectScope::EventSource
+    )
+}
+
+fn parse_source_pt_ref(
+    input: &str,
+    stat: TokenFollowupStat,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (input, _) = parse_source_possessive(input)?;
-    let (input, _) = tag("toughness").parse(input)?;
+    let (input, _) = match stat {
+        TokenFollowupStat::Power => tag("power").parse(input)?,
+        TokenFollowupStat::Toughness => tag("toughness").parse(input)?,
+    };
     Ok((input, ()))
 }
 
@@ -10174,17 +10226,40 @@ mod tests {
             parse_token_source_power_toughness_followup(
                 "Its power is equal to this creature's power and its toughness is equal to this creature's toughness."
             ),
-            Some(())
+            Some((source_token_power_value(), source_token_toughness_value()))
         );
         assert_eq!(
             parse_token_source_power_toughness_followup(
                 "its power is equal to ~'s power and its toughness is equal to ~'s toughness"
             ),
-            Some(())
+            Some((source_token_power_value(), source_token_toughness_value()))
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to that card's power and its toughness is equal to that card's toughness"
+            ),
+            Some((
+                PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                }),
+                PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                }),
+            ))
         );
         assert_eq!(
             parse_token_source_power_toughness_followup(
                 "its power is equal to target creature's power and its toughness is equal to target creature's toughness"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_token_source_power_toughness_followup(
+                "its power is equal to this creature's power and its toughness is equal to this creature's toughness and it has flying"
             ),
             None
         );
@@ -10262,6 +10337,52 @@ mod tests {
             ),
             "expected delayed sacrifice to target LastCreated, got {:?}",
             effect.effect
+        );
+    }
+
+    #[test]
+    fn ritual_of_the_returned_zombie_uses_demonstrative_card_power_toughness_followup() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{
+            AbilityKind, Effect, ObjectScope, PtValue, QuantityExpr, QuantityRef,
+        };
+
+        let def = parse_effect_chain(
+            "exile target creature card from your graveyard. create a black Zombie creature token. \
+             Its power is equal to that card's power and its toughness is equal to that card's toughness.",
+            AbilityKind::Spell,
+        );
+
+        let Some(sub) = def.sub_ability.as_ref() else {
+            panic!("expected token sub-ability after exile, got {def:?}");
+        };
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("expected Zombie token effect, got {:?}", sub.effect);
+        };
+        assert_eq!(name, "Zombie");
+        assert!(types.iter().any(|ty| ty == "Zombie"));
+        assert_eq!(
+            power,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+        assert_eq!(
+            toughness,
+            &PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
         );
     }
 

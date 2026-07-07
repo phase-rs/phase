@@ -671,12 +671,13 @@ fn parse_token_description_with_context(
 
     let is_creature = types.iter().any(|token_type| token_type == "Creature");
     if is_creature && (power.is_none() || toughness.is_none()) {
-        if matches!(
-            ctx.token_pt_followup,
-            Some(TokenPtFollowup::SourcePowerToughness)
-        ) {
-            power = Some(super::sequence::source_token_power_value());
-            toughness = Some(super::sequence::source_token_toughness_value());
+        if let Some(TokenPtFollowup::PowerToughness {
+            power: followup_power,
+            toughness: followup_toughness,
+        }) = &ctx.token_pt_followup
+        {
+            power = Some(followup_power.clone());
+            toughness = Some(followup_toughness.clone());
         } else {
             return None;
         }

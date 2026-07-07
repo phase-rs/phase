@@ -9911,7 +9911,7 @@ mod where_x_tests {
     use super::parse_where_x_quantity_expression;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
-        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, QuantityExpr,
+        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::triggers::TriggerMode;
