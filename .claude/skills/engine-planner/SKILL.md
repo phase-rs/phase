@@ -21,7 +21,7 @@ Complete every step. Do not skip any.
 
 ### Step 0: Verify the premise — confirm the card's actual Oracle text
 
-**Hard gate, before any other step.** If the task references a specific card's abilities, fetch that card's real, current Oracle text from an authoritative source (Scryfall API: `https://api.scryfall.com/cards/named?exact=<name>`, or MTGJSON) and compare it verbatim against what the task description claims. Do not proceed on memory, on assumed similarity to other cards, or on a task brief's paraphrase of the card's abilities without this independent check.
+**Hard gate, before any other step.** If the task references a specific card's abilities, fetch that card's real, current Oracle text from an authoritative source (Scryfall API: `https://api.scryfall.com/cards/named?exact=<URL_ENCODED_NAME>`, or MTGJSON) and compare it verbatim against what the task description claims. Do not proceed on memory, on assumed similarity to other cards, or on a task brief's paraphrase of the card's abilities without this independent check.
 
 A downloaded game-state's stored ability `description` field is a second, usually-reliable source, but it is not a substitute for checking Scryfall — a game state only reflects abilities the parser already produced (correctly or not), and can be silent about clauses that don't exist at all.
 
