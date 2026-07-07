@@ -15,7 +15,7 @@ use crate::types::ability::{
     DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
     ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
     SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -2420,13 +2420,26 @@ fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
         // itself the ActivePlayer coerce. Rebind the dangling `TrackedSet(0)`
         // (no producer — MustAttack publishes nothing) to the concrete
         // active-player non-Wall creature filter with the didn't-attack clause.
-        if ability_has_active_player_coerce(ability) {
+        if let Some(mut punisher_target) = coerce_affected_filter(ability) {
+            // CR 608.2c: "those creatures" = the population the coerce clause
+            // named. Derive the punisher filter from the coerce's own `affected`
+            // filter — carrying the card's ACTUAL subtype restriction (non-Wall
+            // for Maddening Imp; whatever a future coerce card specifies) — plus
+            // the "didn't attack this turn" clause, rather than hardcoding a
+            // subtype. This keeps the class composable (build for the class, not
+            // the card).
+            add_filter_prop_to_typed(
+                &mut punisher_target,
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
+                },
+            );
             let mut sub = ability.sub_ability.as_deref_mut();
             while let Some(node) = sub {
                 if let Effect::CreateDelayedTrigger { effect, .. } = node.effect.as_mut() {
                     if let Effect::DestroyAll { target, .. } = effect.effect.as_mut() {
                         if matches!(target, TargetFilter::TrackedSet { .. }) {
-                            *target = maddening_active_player_non_wall_filter();
+                            *target = punisher_target.clone();
                         }
                     }
                 }
@@ -2436,14 +2449,19 @@ fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
     }
 }
 
-/// CR 608.2c: The concrete filter that "those creatures" (Maddening Imp) names —
-/// the non-Wall creatures the mass-attack clause coerced, that didn't attack this
-/// turn. Live-refiltered at end step (DOCUMENTED DEVIATION from the CR 608.2c
-/// frozen-population semantics — there is no forced-attack snapshot producer, so
-/// `TrackedSet(0)` would be empty and destroy nothing). Three divergence
-/// directions from a frozen "those creatures" set (see Identity/Provenance
-/// Route 3):
-///   1. Late-arrival over-inclusion: a non-Wall creature that entered the active
+/// The coerce clause's affected population — the `MustAttack` static's `affected`
+/// filter over the `ActivePlayer` subject. This is exactly the population that
+/// "those creatures" (Maddening Imp) names (CR 608.2c), carrying the card's own
+/// subtype restriction (non-Wall for Maddening Imp, whatever a future coerce card
+/// specifies) rather than a hardcoded one. Returned owned so the caller can add
+/// the "didn't attack this turn" clause and rebind the dangling `TrackedSet(0)`.
+///
+/// The rebound punisher filter is live-refiltered at end step — a DOCUMENTED
+/// DEVIATION from CR 608.2c frozen-population semantics (there is no forced-attack
+/// snapshot producer, so `TrackedSet(0)` would be empty and destroy nothing).
+/// Three divergence directions from a frozen "those creatures" set (see
+/// Identity/Provenance Route 3):
+///   1. Late-arrival over-inclusion: a matching creature that entered the active
 ///      player's control AFTER the `{T}` ability resolved is destroyed here but
 ///      was never in "those creatures".
 ///   2. Control-change-out under-inclusion: a creature that WAS the active
@@ -2454,18 +2472,25 @@ fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
 ///      this live filter re-captures it if it currently matches.
 ///
 /// If a `MustAttack`-population snapshot producer is later built for the class,
-/// this construction is the single swap site.
-fn maddening_active_player_non_wall_filter() -> TargetFilter {
-    TargetFilter::Typed(
-        TypedFilter::creature()
-            .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                "Wall".into(),
-            ))))
-            .controller(ControllerRef::ActivePlayer)
-            .properties(vec![FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
-            }]),
-    )
+/// the caller's rebind is the single swap site.
+fn coerce_affected_filter(ability: &AbilityDefinition) -> Option<TargetFilter> {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = ability.effect.as_ref()
+    else {
+        return None;
+    };
+    static_abilities
+        .iter()
+        .find(|st| {
+            matches!(st.mode, StaticMode::MustAttack)
+                && st
+                    .affected
+                    .as_ref()
+                    .and_then(crate::parser::oracle_effect::target_filter_controller_ref)
+                    == Some(ControllerRef::ActivePlayer)
+        })
+        .and_then(|st| st.affected.clone())
 }
 
 /// CR 302.6 + CR 508.1a: Recognize Siren's Call's continuous-control exemption

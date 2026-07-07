@@ -4094,13 +4094,12 @@ fn matches_filter_prop(
         // CR 400.7: Object entered the battlefield this turn.
         FilterProp::EnteredThisTurn => obj.entered_battlefield_turn == Some(state.turn_number),
         // CR 302.6 + CR 508.1a: controlled continuously since the controller's
-        // most recent turn began — haste-independent (reads the raw
-        // `summoning_sick` continuity flag, NOT the haste-folding
-        // `has_summoning_sickness`). Set on ETB / control change, cleared at the
-        // controller's next turn start.
-        FilterProp::ControlledContinuouslySinceTurnBegan => {
-            obj.card_types.core_types.contains(&CoreType::Creature) && !obj.summoning_sick
-        }
+        // most recent turn began — a general per-permanent property (the
+        // `summoning_sick` continuity flag is set on ETB / control change for
+        // every permanent and cleared at the controller's next turn start), not
+        // creature-restricted. Haste-independent (reads the raw flag, NOT the
+        // haste-folding `has_summoning_sickness`).
+        FilterProp::ControlledContinuouslySinceTurnBegan => !obj.summoning_sick,
         FilterProp::ZoneChangedThisTurn { from, to } => {
             state.zone_changes_this_turn.iter().any(|record| {
                 record.object_id == object_id
