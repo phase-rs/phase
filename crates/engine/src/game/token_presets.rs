@@ -93,6 +93,32 @@ pub enum PresetFidelity {
     PartialMissingAbilities,
 }
 
+/// Catalog-only provenance for token P/T values. Runtime token creation still
+/// uses concrete `TokenCharacteristics`; this field records when MTGJSON's
+/// token entry used source-defined or dynamic P/T text that cannot be widened
+/// into a fixed body without inventing rules text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TokenPtProvenance {
+    #[default]
+    FixedOrAbsent,
+    SourceDefinedOrDynamic {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness: Option<String>,
+    },
+}
+
+impl TokenPtProvenance {
+    pub fn is_fixed_or_absent(&self) -> bool {
+        matches!(self, Self::FixedOrAbsent)
+    }
+
+    fn is_source_defined_or_dynamic(&self) -> bool {
+        matches!(self, Self::SourceDefinedOrDynamic { .. })
+    }
+}
+
 /// A single debug-spawnable preset. `body` is shared with `TokenSpec`'s
 /// characteristics — single source of truth on the body shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +126,8 @@ pub struct TokenPreset {
     pub id: String,
     pub category: TokenCategory,
     pub fidelity: PresetFidelity,
+    #[serde(default, skip_serializing_if = "TokenPtProvenance::is_fixed_or_absent")]
+    pub pt_provenance: TokenPtProvenance,
     pub body: TokenCharacteristics,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_card_names: Vec<String>,
@@ -240,8 +268,11 @@ pub fn find_card_linked_copy_token_ref(
 #[derive(Clone, Copy)]
 enum TokenRefMatchMode {
     /// `CreateToken` path: a unique `source_related_token_ids` link may resolve
-    /// without a body match when the card names exactly one preset.
+    /// only with exact body matching unless the source identity is confirmed.
     Exact,
+    /// `CreateToken` path after source oracle/face identity has narrowed the
+    /// preset. Source-defined P/T presets may then match concrete runtime P/T.
+    SourceLinkedExact,
     /// `CopyTokenOf` path: always require an exact body match so copies that
     /// keep source P/T (Twinflame, Populate) do not inherit offspring presets.
     CardLinkedCopy,
@@ -276,26 +307,39 @@ fn find_token_ref_with_mode(
 
         if matches!(mode, TokenRefMatchMode::Exact) {
             if let [preset] = related_presets.as_slice() {
-                if source_oracle.is_none_or(|oracle_id| {
+                let source_matches = source_oracle.is_some_and(|oracle_id| {
                     token_preset_has_source_ref(preset, oracle_id, source_face)
-                }) {
+                });
+                let match_mode = if source_matches {
+                    TokenRefMatchMode::SourceLinkedExact
+                } else {
+                    TokenRefMatchMode::Exact
+                };
+                if (source_matches || source_oracle.is_none())
+                    && token_preset_body_matches(preset, body, match_mode)
+                {
                     return preset.token_image_ref.clone();
                 }
                 return None;
             }
         }
 
-        let related_matches: Vec<_> = related_presets
-            .into_iter()
-            .filter(|preset| token_body_matches(&preset.body, body))
-            .collect();
-        let matches = if let Some(oracle_id) = source_oracle {
-            related_matches
+        let matches: Vec<_> = if let Some(oracle_id) = source_oracle {
+            let match_mode = if matches!(mode, TokenRefMatchMode::Exact) {
+                TokenRefMatchMode::SourceLinkedExact
+            } else {
+                mode
+            };
+            related_presets
                 .into_iter()
                 .filter(|preset| token_preset_has_source_ref(preset, oracle_id, source_face))
+                .filter(|preset| token_preset_body_matches(preset, body, match_mode))
                 .collect()
         } else {
-            related_matches
+            related_presets
+                .into_iter()
+                .filter(|preset| token_body_matches(&preset.body, body))
+                .collect()
         };
         let first = matches.first()?;
         if !matches
@@ -332,9 +376,11 @@ fn find_token_ref_with_mode(
 }
 
 fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
+    token_body_identity_matches(a, b) && a.power == b.power && a.toughness == b.toughness
+}
+
+fn token_body_identity_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
     a.display_name == b.display_name
-        && a.power == b.power
-        && a.toughness == b.toughness
         && sorted_debug(&a.core_types) == sorted_debug(&b.core_types)
         && sorted_strings(&a.subtypes) == sorted_strings(&b.subtypes)
         && sorted_debug(&a.supertypes) == sorted_debug(&b.supertypes)
@@ -342,7 +388,22 @@ fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> boo
         && sorted_debug(&a.keywords) == sorted_debug(&b.keywords)
 }
 
+fn token_preset_body_matches(
+    preset: &TokenPreset,
+    body: &TokenCharacteristics,
+    mode: TokenRefMatchMode,
+) -> bool {
+    token_body_identity_matches(&preset.body, body)
+        && ((preset.body.power == body.power && preset.body.toughness == body.toughness)
+            || (matches!(mode, TokenRefMatchMode::SourceLinkedExact)
+                && preset.pt_provenance.is_source_defined_or_dynamic()))
+}
+
 fn token_preset_semantics_match(a: &TokenPreset, b: &TokenPreset) -> bool {
+    // Used only to deduplicate source-related presets that already matched the
+    // emitted runtime body/rules semantics. P/T provenance is catalog metadata,
+    // not a runtime semantic difference after body matching has selected both
+    // candidates.
     a.category == b.category
         && a.fidelity == b.fidelity
         && token_body_matches(&a.body, &b.body)
@@ -380,6 +441,56 @@ fn sorted_debug<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card::PrintedCardRef;
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaColor;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    const FIXED_OOZE_PRESET_ID: &str = "25b62fd5-b036-5c64-88fd-8f50d0675e4d";
+    const SOURCE_DEFINED_OOZE_PRESET_ID: &str = "1545ee29-d9c1-57ff-acae-431cfd6d60cf";
+    const ROT_LIKE_ORACLE_ID: &str = "8f47c236-46b6-47cb-9ea9-7adfef8fd8ce";
+    const SLIME_MOLDING_ORACLE_ID: &str = "e01c8122-9159-4f28-ac6c-338bd889650e";
+
+    fn green_ooze_body(power: Option<i32>, toughness: Option<i32>) -> TokenCharacteristics {
+        TokenCharacteristics {
+            display_name: "Ooze".to_string(),
+            power,
+            toughness,
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Ooze".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![ManaColor::Green],
+            keywords: Vec::new(),
+        }
+    }
+
+    fn state_with_source(
+        source_name: &str,
+        oracle_id: Option<&str>,
+        related_ids: &[&str],
+    ) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            source_name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        if let Some(oracle_id) = oracle_id {
+            obj.printed_ref = Some(PrintedCardRef {
+                oracle_id: oracle_id.to_string(),
+                face_name: source_name.to_string(),
+            });
+        }
+        obj.source_related_token_ids
+            .extend(related_ids.iter().map(|id| (*id).to_string()));
+        (state, source)
+    }
 
     /// Forces `LazyLock` evaluation in `cargo test -p engine` so a malformed
     /// `known-tokens.toml`, an unknown `Keyword`/`CoreType`/`ManaColor`
@@ -416,5 +527,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fixed_source_related_token_requires_exact_body_match() {
+        let (state, source) = state_with_source(
+            "Rot Like the Scum You Are",
+            Some(ROT_LIKE_ORACLE_ID),
+            &[FIXED_OOZE_PRESET_ID],
+        );
+
+        assert!(find_exact_token_ref(&state, source, &green_ooze_body(None, None)).is_none());
+        assert!(find_exact_token_ref(&state, source, &green_ooze_body(Some(3), Some(3))).is_none());
+    }
+
+    #[test]
+    fn fixed_source_related_token_matches_exact_body() {
+        let (state, source) = state_with_source(
+            "Rot Like the Scum You Are",
+            Some(ROT_LIKE_ORACLE_ID),
+            &[FIXED_OOZE_PRESET_ID],
+        );
+
+        let image = find_exact_token_ref(&state, source, &green_ooze_body(Some(2), Some(2)))
+            .expect("fixed Ooze body should match linked preset image");
+
+        assert_eq!(image.preset_id, FIXED_OOZE_PRESET_ID);
+    }
+
+    #[test]
+    fn source_defined_source_related_token_may_ignore_runtime_pt_for_create_token() {
+        let (state, source) = state_with_source(
+            "Slime Molding",
+            Some(SLIME_MOLDING_ORACLE_ID),
+            &[SOURCE_DEFINED_OOZE_PRESET_ID],
+        );
+
+        let image = find_exact_token_ref(&state, source, &green_ooze_body(Some(7), Some(7)))
+            .expect("source-defined Ooze should match after source identity is known");
+
+        assert_eq!(image.preset_id, SOURCE_DEFINED_OOZE_PRESET_ID);
+    }
+
+    #[test]
+    fn source_defined_pt_mismatch_is_not_global_or_copy_match() {
+        let body = green_ooze_body(Some(7), Some(7));
+        let (global_state, global_source) =
+            state_with_source("Slime Molding", Some(SLIME_MOLDING_ORACLE_ID), &[]);
+        assert!(find_exact_token_ref(&global_state, global_source, &body).is_none());
+
+        let (ambiguous_state, ambiguous_source) =
+            state_with_source("Slime Molding", None, &[SOURCE_DEFINED_OOZE_PRESET_ID]);
+        assert!(find_exact_token_ref(&ambiguous_state, ambiguous_source, &body).is_none());
+
+        let (copy_state, copy_source) = state_with_source(
+            "Slime Molding",
+            Some(SLIME_MOLDING_ORACLE_ID),
+            &[SOURCE_DEFINED_OOZE_PRESET_ID],
+        );
+        assert!(find_card_linked_copy_token_ref(&copy_state, copy_source, &body).is_none());
     }
 }

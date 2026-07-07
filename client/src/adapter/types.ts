@@ -628,6 +628,15 @@ export interface TokenImageRef {
   preset_id: string;
 }
 
+export type TokenPtProvenance =
+  | "FixedOrAbsent"
+  | {
+      SourceDefinedOrDynamic: {
+        power?: string | null;
+        toughness?: string | null;
+      };
+    };
+
 // ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
 
 export type CastChoice = { type: "Cast" } | { type: "Decline" };
@@ -1605,6 +1614,8 @@ export type DebugTokenRequest =
       data: {
         preset_id: string;
         owner: PlayerId;
+        power_override?: number | null;
+        toughness_override?: number | null;
         enter_with_counters?: [CounterType, number][];
       };
     }

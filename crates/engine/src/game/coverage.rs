@@ -5,7 +5,9 @@ use crate::game::effects::token::{
 };
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
-use crate::game::token_presets::{known_token_presets, PresetFidelity, TokenPreset};
+use crate::game::token_presets::{
+    known_token_presets, PresetFidelity, TokenPreset, TokenPtProvenance,
+};
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::{
     is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
@@ -4735,9 +4737,10 @@ fn unsupported_partial_token_gap_label(
     preset: &TokenPreset,
     materialized: &TokenAbilityMaterialization,
 ) -> &'static str {
-    if preset.body.core_types.contains(&CoreType::Creature)
-        && (preset.body.power.is_none() || preset.body.toughness.is_none())
-        && materialized.source == TokenAbilitySource::None
+    if matches!(
+        preset.pt_provenance,
+        TokenPtProvenance::SourceDefinedOrDynamic { .. }
+    ) && materialized.source == TokenAbilitySource::None
         && materialized.rules_text.is_none()
         && !materialized.has_functional_payload()
         && materialized.unparsed_rules_text_lines.is_empty()
@@ -4746,6 +4749,38 @@ fn unsupported_partial_token_gap_label(
     } else {
         TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL
     }
+}
+
+fn token_pt_provenance_represents_line(preset: &TokenPreset, line: &str) -> bool {
+    if !matches!(
+        preset.pt_provenance,
+        TokenPtProvenance::SourceDefinedOrDynamic { .. }
+    ) {
+        return false;
+    }
+
+    let lower = line.to_ascii_lowercase();
+    lower.contains("power") || lower.contains("toughness")
+}
+
+fn token_rules_text_unparsed_gap(
+    preset: &TokenPreset,
+    materialized: &TokenAbilityMaterialization,
+) -> bool {
+    materialized
+        .unparsed_rules_text_lines
+        .iter()
+        .any(|line| !token_pt_provenance_represents_line(preset, line))
+}
+
+fn token_pt_provenance_has_no_materialization_gap(
+    preset: &TokenPreset,
+    materialized: &TokenAbilityMaterialization,
+) -> bool {
+    matches!(
+        preset.pt_provenance,
+        TokenPtProvenance::SourceDefinedOrDynamic { .. }
+    ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
 
 fn analyze_token_coverage() -> TokenCoverageSummary {
@@ -4765,9 +4800,11 @@ fn analyze_token_coverage() -> TokenCoverageSummary {
             .rules_text
             .as_deref()
             .is_some_and(|text| !text.is_empty());
-        let supported = materialized.unparsed_rules_text_lines.is_empty()
+        let has_unparsed_gap = token_rules_text_unparsed_gap(preset, &materialized);
+        let supported = !has_unparsed_gap
             && (matches!(preset.fidelity, PresetFidelity::Full)
-                || (has_rules_text && materialized.has_functional_payload()));
+                || (has_rules_text && materialized.has_functional_payload())
+                || token_pt_provenance_has_no_materialization_gap(preset, &materialized));
 
         summary.total_tokens += 1;
         summary.source_card_refs += source_refs;
@@ -4798,11 +4835,14 @@ fn analyze_token_coverage() -> TokenCoverageSummary {
         }
         if has_rules_text {
             summary.rules_text_tokens += 1;
-            if materialized.unparsed_rules_text_lines.is_empty() {
+            if !has_unparsed_gap {
                 summary.parsed_rules_text_tokens += 1;
             } else {
                 summary.unparsed_rules_text_tokens += 1;
                 for line in &materialized.unparsed_rules_text_lines {
+                    if token_pt_provenance_represents_line(preset, line) {
+                        continue;
+                    }
                     let handler = format!("TokenRulesText:{}", normalize_oracle_pattern(line));
                     push_token_gap(
                         &mut gap_accumulators,
@@ -10159,6 +10199,7 @@ mod tests {
         core_types: Vec<CoreType>,
         power: Option<i32>,
         toughness: Option<i32>,
+        pt_provenance: TokenPtProvenance,
     ) -> TokenPreset {
         let category = if core_types.contains(&CoreType::Creature) {
             crate::game::token_presets::TokenCategory::Creature
@@ -10170,6 +10211,7 @@ mod tests {
             id: "test-token".to_string(),
             category,
             fidelity: PresetFidelity::PartialMissingAbilities,
+            pt_provenance,
             body: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Test Token".to_string(),
                 power,
@@ -10207,8 +10249,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_partial_token_gap_label_marks_missing_pt_creature_without_payload() {
-        let preset = token_preset_with_body(vec![CoreType::Creature], None, Some(1));
+    fn unsupported_partial_token_gap_label_marks_source_defined_pt_without_payload() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            Some(1),
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("1".to_string()),
+            },
+        );
         let materialized = token_materialization_none();
 
         assert_eq!(
@@ -10219,7 +10269,12 @@ mod tests {
 
     #[test]
     fn unsupported_partial_token_gap_label_keeps_fixed_pt_creature_as_partial_fidelity() {
-        let preset = token_preset_with_body(vec![CoreType::Creature], Some(1), Some(1));
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            Some(1),
+            Some(1),
+            TokenPtProvenance::FixedOrAbsent,
+        );
         let materialized = token_materialization_none();
 
         assert_eq!(
@@ -10229,8 +10284,14 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_partial_token_gap_label_keeps_missing_pt_noncreature_as_partial_fidelity() {
-        let preset = token_preset_with_body(vec![CoreType::Artifact], None, None);
+    fn unsupported_partial_token_gap_label_keeps_missing_pt_without_provenance_as_partial_fidelity()
+    {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            None,
+            TokenPtProvenance::FixedOrAbsent,
+        );
         let materialized = token_materialization_none();
 
         assert_eq!(
@@ -10241,7 +10302,15 @@ mod tests {
 
     #[test]
     fn unsupported_partial_token_gap_label_keeps_functional_payload_as_partial_fidelity() {
-        let preset = token_preset_with_body(vec![CoreType::Creature], None, Some(1));
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            Some(1),
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("1".to_string()),
+            },
+        );
         let mut materialized = token_materialization_none();
         materialized.keywords.push(Keyword::Flying);
 
@@ -10252,8 +10321,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_partial_token_gap_label_keeps_rules_text_as_partial_fidelity() {
-        let preset = token_preset_with_body(vec![CoreType::Creature], None, Some(1));
+    fn unsupported_partial_token_gap_label_keeps_unrelated_rules_text_as_partial_fidelity() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            Some(1),
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("1".to_string()),
+            },
+        );
         let mut materialized = token_materialization_none();
         materialized.rules_text = Some("Flying".to_string());
 
@@ -10265,7 +10342,7 @@ mod tests {
         let mut materialized = token_materialization_none();
         materialized
             .unparsed_rules_text_lines
-            .push("unparsed text".to_string());
+            .push("This creature has ward {2}.".to_string());
 
         assert_eq!(
             unsupported_partial_token_gap_label(&preset, &materialized),
@@ -10274,31 +10351,64 @@ mod tests {
     }
 
     #[test]
-    fn analyze_token_coverage_reports_dynamic_pt_body_gap_as_top_gap() {
+    fn source_defined_pt_rules_text_does_not_count_as_unparsed_token_rules_gap() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            None,
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("*".to_string()),
+            },
+        );
+        let mut materialized = token_materialization_none();
+        materialized.unparsed_rules_text_lines.push(
+            "This creature's power and toughness are each equal to the number of lands you control."
+                .to_string(),
+        );
+
+        assert!(!token_rules_text_unparsed_gap(&preset, &materialized));
+        assert!(token_pt_provenance_has_no_materialization_gap(
+            &preset,
+            &materialized
+        ));
+    }
+
+    #[test]
+    fn unrelated_unparsed_token_rules_still_count_as_gap_with_source_defined_pt() {
+        let preset = token_preset_with_body(
+            vec![CoreType::Creature],
+            None,
+            None,
+            TokenPtProvenance::SourceDefinedOrDynamic {
+                power: Some("*".to_string()),
+                toughness: Some("*".to_string()),
+            },
+        );
+        let mut materialized = token_materialization_none();
+        materialized
+            .unparsed_rules_text_lines
+            .push("This creature has ward {2}.".to_string());
+
+        assert!(token_rules_text_unparsed_gap(&preset, &materialized));
+        assert!(!token_pt_provenance_has_no_materialization_gap(
+            &preset,
+            &materialized
+        ));
+    }
+
+    #[test]
+    fn analyze_token_coverage_treats_source_defined_pt_as_represented() {
         let summary = analyze_token_coverage();
 
-        assert_eq!(summary.supported_tokens, 2776);
+        assert_eq!(summary.total_tokens, 2844);
+        assert_eq!(summary.supported_tokens, 2844);
         assert_eq!(summary.rules_text_tokens, 1479);
         assert_eq!(summary.parsed_rules_text_tokens, 1479);
-        let top_gap = summary.top_gaps.first().unwrap();
-        assert_eq!(
-            top_gap.handler,
-            TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
-        );
-        assert_eq!(top_gap.total_count, 68);
-        assert_eq!(top_gap.source_card_refs, 126);
-        let top_makeup = summary.top_gap_token_makeup.first().unwrap();
-        assert_eq!(
-            top_makeup.handler,
-            TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
-        );
-        assert_eq!(top_makeup.token_name, "Ooze");
-        assert_eq!(top_makeup.total_count, 9);
-        assert_eq!(top_makeup.source_card_refs, 17);
-        assert!(top_makeup
-            .example_source_cards
-            .iter()
-            .any(|name| name == "Mystic Genesis"));
+        assert_eq!(summary.total_tokens - summary.supported_tokens, 0);
+        assert!(!summary.top_gaps.iter().any(|gap| {
+            gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
+        }));
     }
 
     #[test]
