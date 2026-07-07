@@ -187,7 +187,6 @@ function aiActorFromWaitingFor(
 ): PlayerId | null {
   if (
     waitingFor.type === "MulliganDecision" ||
-    waitingFor.type === "MulliganBottomCards" ||
     waitingFor.type === "OpeningHandBottomCards"
   ) {
     return (

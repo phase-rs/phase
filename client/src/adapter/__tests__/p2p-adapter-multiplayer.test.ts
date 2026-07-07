@@ -527,8 +527,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
           type: "MulliganDecision",
           data: {
             pending: [
-              { player: 0, mulligan_count: 0 },
-              { player: 1, mulligan_count: 0 },
+              { player: 0, mulligan_count: 0, phase: { type: "Declare" } },
+              { player: 1, mulligan_count: 0, phase: { type: "Declare" } },
             ],
             free_first_mulligan: false,
           },

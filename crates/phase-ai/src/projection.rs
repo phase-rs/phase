@@ -287,7 +287,6 @@ fn resolve_choice(
     // Impossible-mid-game gates.
     match &state.waiting_for {
         WaitingFor::MulliganDecision { .. }
-        | WaitingFor::MulliganBottomCards { .. }
         | WaitingFor::OpeningHandBottomCards { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. } => {

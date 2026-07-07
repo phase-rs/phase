@@ -14,7 +14,9 @@ use crate::game::mana_sources;
 use crate::types::ability::{AbilityKind, CounterCostSelection, TriggerDefinition};
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
+use crate::types::game_state::{
+    CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -381,8 +383,24 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         // count doesn't match the pending entry's owed bottom count. Because
         // the actor identity is carried via authorization upstream, this filter
         // only validates the count against any pending entry whose hand fits.
-        (WaitingFor::MulliganBottomCards { pending }, GameAction::SelectCards { cards })
-        | (WaitingFor::OpeningHandBottomCards { pending, .. }, GameAction::SelectCards { cards }) => {
+        (WaitingFor::MulliganDecision { pending, .. }, GameAction::SelectCards { cards }) => {
+            pending.iter().all(|entry| match &entry.phase {
+                MulliganDecisionPhase::Declare => true,
+                MulliganDecisionPhase::BottomCards { count, then } => {
+                    let excluded_hit = matches!(
+                        then,
+                        PendingMulliganAction::UseSerumPowder { object_id } if cards.contains(object_id)
+                    );
+                    excluded_hit
+                        || selection_mismatch(
+                            cards,
+                            &state.players[entry.player.0 as usize].hand,
+                            Some((*count).into()),
+                        )
+                }
+            })
+        }
+        (WaitingFor::OpeningHandBottomCards { pending, .. }, GameAction::SelectCards { cards }) => {
             pending.iter().all(|entry| {
                 selection_mismatch(
                     cards,
@@ -1192,7 +1210,7 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 /// per guest; only the acting guest needs a populated legal-actions map.
 pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsFull {
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
-    // MulliganBottomCards, OpeningHandBottomCards), every pending player has a
+    // OpeningHandBottomCards), every pending player has a
     // legal action set, so guests in a multiplayer mulligan can see and submit
     // their own decisions concurrently.
     //
@@ -1407,7 +1425,8 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
         CastingVariant, ConvokeMode, DistributionUnit, GameState, MulliganDecisionEntry,
-        PendingCast, StackEntry, StackEntryKind, WaitingFor,
+        MulliganDecisionPhase, PendingCast, PendingMulliganAction, StackEntry, StackEntryKind,
+        WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -3903,6 +3922,7 @@ mod tests {
             pending: vec![MulliganDecisionEntry {
                 player: PlayerId(0),
                 mulligan_count: 0,
+                phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
         };
@@ -4121,22 +4141,25 @@ mod tests {
     }
 
     /// False-positive sweep (CR 103.5 / TL:R 906.6a): the simultaneous
-    /// bottom-cards classes (`MulliganBottomCards`, `OpeningHandBottomCards`)
-    /// always offer each pending player a `SelectCards` action, so the detector
-    /// must not fire. Both share the `MulliganBottomEntry` shape and the
-    /// `bottom_card_actions` generator, so one representative of each is covered
-    /// here. The pending player is given enough hand cards to satisfy the owed
-    /// bottom `count`.
+    /// bottom-cards flows (a `MulliganDecision` entry mid-`BottomCards`, and
+    /// `OpeningHandBottomCards`) always offer each pending player a
+    /// `SelectCards` action, so the detector must not fire. The pending player
+    /// is given enough hand cards to satisfy the owed bottom `count`.
     #[test]
     fn stuck_diagnostic_none_on_normal_bottom_cards() {
         use crate::types::game_state::{MulliganBottomEntry, OpeningHandBottomReason};
 
         for waiting_for in [
-            WaitingFor::MulliganBottomCards {
-                pending: vec![MulliganBottomEntry {
+            WaitingFor::MulliganDecision {
+                pending: vec![MulliganDecisionEntry {
                     player: PlayerId(0),
-                    count: 1,
+                    mulligan_count: 1,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 1,
+                        then: PendingMulliganAction::Keep,
+                    },
                 }],
+                free_first_mulligan: false,
             },
             WaitingFor::OpeningHandBottomCards {
                 pending: vec![MulliganBottomEntry {

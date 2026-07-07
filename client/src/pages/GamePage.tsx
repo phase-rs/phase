@@ -1810,6 +1810,19 @@ function GamePageContent({
             (e) => e.player === playerId,
           );
           if (!entry) return null;
+          // CR 103.5b: bottoming is folded into the MulliganDecision variant as
+          // a per-entry BottomCards sub-phase resolved at this player's own
+          // declare point.
+          if (entry.phase.type === "BottomCards") {
+            return (
+              <MulliganBottomCardsPrompt
+                playerId={entry.player}
+                count={entry.phase.count}
+                openingHandBottom={false}
+                onChoose={handleBottomCards}
+              />
+            );
+          }
           return (
             <MulliganDecisionPrompt
               playerId={entry.player}
@@ -1833,8 +1846,7 @@ function GamePageContent({
           </div>
         )}
 
-      {(waitingFor?.type === "MulliganBottomCards" ||
-        waitingFor?.type === "OpeningHandBottomCards") &&
+      {waitingFor?.type === "OpeningHandBottomCards" &&
         (() => {
           const entry = waitingFor.data.pending.find(
             (e) => e.player === playerId,
@@ -1844,7 +1856,7 @@ function GamePageContent({
             <MulliganBottomCardsPrompt
               playerId={entry.player}
               count={entry.count}
-              openingHandBottom={waitingFor.type === "OpeningHandBottomCards"}
+              openingHandBottom
               onChoose={handleBottomCards}
             />
           );

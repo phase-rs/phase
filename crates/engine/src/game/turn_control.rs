@@ -73,7 +73,7 @@ pub fn authorized_submitter(state: &GameState) -> Option<PlayerId> {
 /// CR 103.5: Set-aware authorization. Returns every PlayerId who is currently
 /// allowed to submit an action for `state.waiting_for`. For single-player
 /// states this is a one-element Vec; for simultaneous-decision states
-/// (`MulliganDecision`, `MulliganBottomCards`, `OpeningHandBottomCards`) it is the full pending set.
+/// (`MulliganDecision`, `OpeningHandBottomCards`) it is the full pending set.
 /// Each entry is mapped through `authorized_submitter_for_player` so that
 /// turn-decision-controller effects (e.g., Mindslaver) still re-route the
 /// submitter correctly.

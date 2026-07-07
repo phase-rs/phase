@@ -462,7 +462,7 @@ fn check_actor_authorization(
         return Ok(());
     }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
-    // MulliganBottomCards, OpeningHandBottomCards), authorize against the full pending set so any
+    // OpeningHandBottomCards), authorize against the full pending set so any
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
@@ -3339,16 +3339,16 @@ fn apply_action(
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
             // CR 103.5 + 103.5b: `actor` is already authorized as a member of
             // `pending` by `check_actor_authorization`. The mulligan module
-            // resolves the per-player state update and either re-emits
-            // MulliganDecision (with the actor removed if they kept, retained
-            // with bumped count if they mulliganed, or retained with the
-            // same count if they used Serum Powder) or advances to the next
-            // phase when the pending set is empty.
+            // resolves the per-player state update, transitioning the actor's
+            // entry into `BottomCards` when a declare-point action still owes
+            // bottoms, or advancing the flow when the pending set is empty.
             mulligan::handle_mulligan_decision(state, actor, choice, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
-        (WaitingFor::MulliganBottomCards { .. }, GameAction::SelectCards { cards }) => {
+        (WaitingFor::MulliganDecision { .. }, GameAction::SelectCards { cards }) => {
             // CR 103.5: `actor` is already authorized as a member of `pending`.
+            // A `SelectCards` submission resolves that player's owed
+            // `BottomCards` sub-phase (rejected if their entry is in `Declare`).
             mulligan::handle_mulligan_bottom(state, actor, cards, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
