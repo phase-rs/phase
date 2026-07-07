@@ -16680,6 +16680,26 @@ fn lower_subject_predicate_ast(
                     clause.effect,
                     Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
                 ) {
+                    // CR 109.4 (issue #1077): "target player exiles a card
+                    // from their graveyard" (Relic of Progenitus, Scrabbling
+                    // Claws, Merrow Bonegnawer, Graveyard Shovel, Grave
+                    // Birthing, Gravestorm) and "target player[s] ... their
+                    // [zone]" (Memory's Journey, above). The moved-object
+                    // filter's possessive "their" parses as
+                    // `Owned { controller: ScopedPlayer }` because the
+                    // zone-suffix parser is scope-agnostic — but this branch
+                    // only runs for an explicit "target player" (not an
+                    // anaphoric "that player"), so the filter must be rebound
+                    // to the real declared target before it's cloned into the
+                    // sub-ability, or it stays scoped to the acting player
+                    // (the activator) instead of the player just targeted.
+                    match &mut clause.effect {
+                        Effect::ChangeZone { target, .. }
+                        | Effect::ChangeZoneAll { target, .. } => {
+                            rebind_owned_scope(target, ControllerRef::TargetPlayer);
+                        }
+                        _ => {}
+                    }
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
                     sub_ability.sub_ability = clause.sub_ability;

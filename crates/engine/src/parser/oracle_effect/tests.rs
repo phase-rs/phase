@@ -6641,25 +6641,45 @@ fn relic_of_progenitus_target_player_exiles_from_their_graveyard() {
     // GitHub phase-rs/phase#1077: "target player [verb]s ... from their
     // [zone]" is a different grammatical shape than Suffer the Past's direct
     // "target player's graveyard" possessive above — here "target player" is
-    // the sentence's subject and "their" is an anaphoric backreference to it,
-    // routed through `inject_subject_target`'s `Effect::ChangeZone` arm
-    // rather than parsed inline. The zone-suffix parser treats "their" as
-    // scope-agnostic (`Owned { controller: ScopedPlayer }`); this test pins
-    // that the subject-injection rebind resolves it to the actual targeted
+    // an explicit target declaration, so the ability lowers to a
+    // `TargetOnly { target: Player }` wrapper around a `sub_ability` holding
+    // the actual `ChangeZone` (mirrors Memory's Journey's "shuffles ... from
+    // their graveyard" wrapping just above in `lower_subject_predicate_ast`).
+    // The zone-suffix parser treats "their" as scope-agnostic
+    // (`Owned { controller: ScopedPlayer }`); this test pins that the
+    // rebind at that wrapping site resolves it to the actual targeted
     // player, not the activator. Same class also covers Scrabbling Claws,
     // Merrow Bonegnawer, Graveyard Shovel, Grave Birthing, and Gravestorm.
     let def = parse_effect_chain(
         "Target player exiles a card from their graveyard.",
         AbilityKind::Activated,
     );
+    let Effect::TargetOnly {
+        target: player_target,
+    } = &*def.effect
+    else {
+        panic!("expected TargetOnly player wrapper, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *player_target,
+        TargetFilter::Player,
+        "the wrapper's declared target must be the player, got {player_target:?}"
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("exile effect should be in sub-ability after the player target");
     let Effect::ChangeZone {
         origin,
         destination,
         target,
         ..
-    } = &*def.effect
+    } = sub.effect.as_ref()
     else {
-        panic!("expected ChangeZone exile, got {:?}", def.effect);
+        panic!(
+            "expected ChangeZone exile in sub-ability, got {:?}",
+            sub.effect
+        );
     };
     assert_eq!(
         *origin,
