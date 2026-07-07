@@ -1079,3 +1079,53 @@ fn granted_equip_anthem_self_mana_value_reads_equipment_mana_value() {
         "+X/+0 must leave toughness unchanged"
     );
 }
+
+/// CR 702.6a: A permanent may have more than one equip ability, each independently
+/// activatable. An object that PRINTS `Equip {1}` (already synthesized into
+/// `obj.abilities` at card load) and is ALSO granted an identical `Equip {1}` at
+/// runtime must expose BOTH — the granted instance is subtracted by occurrence,
+/// not by value-wide membership.
+#[test]
+fn identical_printed_and_granted_equip_both_offered() {
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+
+    let equip_one = Keyword::Equip(ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    });
+    let mut state = setup_main_phase();
+    let gear = create_object(
+        &mut state,
+        CardId(1700),
+        PlayerId(0),
+        "Twin Equip".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        // Printed Equip {1}: lives in base_keywords AND (via card-load synthesis)
+        // as an activated ability.
+        obj.base_keywords.push(equip_one.clone());
+        std::sync::Arc::make_mut(&mut obj.abilities)
+            .push(crate::database::synthesis::equip_ability_for_keyword(&equip_one).unwrap());
+        // Post-layer keyword set carries BOTH the printed and a granted copy.
+        obj.keywords.push(equip_one.clone());
+        obj.keywords.push(equip_one.clone());
+    }
+
+    // Both equip abilities are offered: the printed one from obj.abilities and the
+    // granted one from the runtime appender.
+    let equip_count = crate::game::casting::activated_ability_definitions(&state, gear)
+        .iter()
+        .filter(|(_, ability)| {
+            ability.ability_tag == Some(crate::types::ability::AbilityTag::Equip)
+        })
+        .count();
+    assert_eq!(
+        equip_count, 2,
+        "printed + identical granted Equip must both be offered"
+    );
+}

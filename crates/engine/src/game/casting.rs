@@ -93,13 +93,34 @@ fn runtime_granted_equip_abilities(
     if obj.zone != Zone::Battlefield {
         return Vec::new();
     }
+    // CR 702.6a: a permanent may have more than one equip ability, and each is
+    // independently activatable. Card-load synthesis already turned every PRINTED
+    // Equip keyword into an `obj.abilities` entry, so subtract printed equips by
+    // OCCURRENCE (not value-wide membership): consume one printed instance per
+    // matching live keyword, and synthesize the rest. This keeps a granted
+    // Equip {1} offered even when the object also prints an identical Equip {1}.
+    let mut unconsumed_printed: Vec<&Keyword> = obj
+        .base_keywords
+        .iter()
+        .filter(|keyword| matches!(keyword, Keyword::Equip(_)))
+        .collect();
     obj.keywords
         .iter()
-        .filter(|keyword| {
-            matches!(keyword, Keyword::Equip(_))
-                && !obj.base_keywords.iter().any(|printed| printed == *keyword)
+        .filter_map(|keyword| {
+            if !matches!(keyword, Keyword::Equip(_)) {
+                return None;
+            }
+            if let Some(index) = unconsumed_printed
+                .iter()
+                .position(|printed| *printed == keyword)
+            {
+                // A printed equip already lives in `obj.abilities`; consume it so
+                // any additionally granted copies are still synthesized below.
+                unconsumed_printed.remove(index);
+                return None;
+            }
+            crate::database::synthesis::equip_ability_for_keyword(keyword)
         })
-        .filter_map(|keyword| crate::database::synthesis::equip_ability_for_keyword(keyword))
         .collect()
 }
 
