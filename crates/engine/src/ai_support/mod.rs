@@ -770,6 +770,34 @@ fn flat_actions_have_meaningful_priority(state: &GameState, actions: &[GameActio
     })
 }
 
+/// G2 upkeep/draw gate: like [`flat_actions_have_meaningful_priority`] but a
+/// merely-castable spell (`CastSpell`) does NOT count. Per the locked design
+/// decision, a castable instant at your own upkeep/draw keeps auto-passing
+/// (MTGA parity — see the existing
+/// `auto_passes_initial_upkeep_and_draw_priority_with_instant_speed_actions`
+/// regression); only a genuine non-cast action (a meaningful activated ability,
+/// morph flip, and other non-cast special actions) holds the initial
+/// upkeep/draw window open. Kept SEPARATE from
+/// `flat_actions_have_meaningful_priority` because that primitive is wired into
+/// the CR 732.5 loop-detection firewall (`has_meaningful_priority_action`) and
+/// must stay byte-identical. Delegates to the same
+/// `activate_ability_is_meaningful_priority` classifier — the only added logic
+/// is the explicit `CastSpell => false` arm.
+fn flat_actions_have_meaningful_noncast_priority(
+    state: &GameState,
+    actions: &[GameAction],
+) -> bool {
+    actions.iter().any(|action| match action {
+        GameAction::PassPriority => false,
+        GameAction::CastSpell { .. } => false,
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => activate_ability_is_meaningful_priority(state, *source_id, *ability_index),
+        _ => true,
+    })
+}
+
 /// Issue #544: sacrifice-for-mana abilities (KCI, Phyrexian Altar, etc.) are
 /// grouped-only (absent from the flat `legal_actions` list) but remain a real
 /// board-changing action. Structural, state-driven scan — no downstream-use
@@ -1067,6 +1095,21 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         return true;
     }
 
+    // Rung 4 — MTGA-style: auto-pass when the player's own spell/ability is on
+    // top of the stack. The player almost never wants to respond to their own
+    // spell — let it resolve. Hoisted above the castability holds (G3): accepted
+    // MTGA parity means an own object on top outranks "you could still cast
+    // something", including the case where the top object is your own triggered
+    // ability (own triggers lose their implicit stop). Kept BELOW the CR 117.3d
+    // yield rung so an explicit yield still wins, and disjoint from the G1 rung
+    // below (that requires an empty stack; this requires a non-empty one).
+    // Full control mode (checked by the frontend) overrides this.
+    if let Some(top) = state.stack.back() {
+        if top.controller == player {
+            return true;
+        }
+    }
+
     // Rung 5 — G1 (CR 605.1b + CR 603.3): hold priority when tapping one of the
     // player's own currently-activatable mana sources would fire a *beneficial*
     // non-mana tap trigger (opponent-scoped damage/life-loss or controller-scoped
@@ -1118,14 +1161,31 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         }
     }
 
-    // Own-turn upkeep/draw fast path. This MUST stay above the own-turn
-    // castability rung so a routine own upkeep/draw window short-circuits here
-    // BEFORE any hand sweep (perf; preserves today's behavior). The rung above
-    // is gated on `active_player != player` and the rung below on
-    // `active_player == player`, so the two are mutually exclusive:
-    // `has_feasibly_castable_spell` runs at most once per call, and zero times
-    // on your own upkeep/draw.
-    if auto_passes_initial_priority_by_default(state) {
+    // Own-turn upkeep/draw fast path (G2, gated). This MUST stay above the
+    // own-turn castability rung so a routine own upkeep/draw window
+    // short-circuits here BEFORE any hand sweep (perf; preserves today's
+    // behavior). The rung above is gated on `active_player != player` and the
+    // rung below on `active_player == player`, so the two are mutually
+    // exclusive: `has_feasibly_castable_spell` runs at most once per call, and
+    // zero times on your own upkeep/draw.
+    //
+    // Gated (G2) so it fast-passes ONLY a genuinely empty window:
+    //  - `active_player == player`: the "own upkeep/draw" intent this rung
+    //    claims. On an OPPONENT's upkeep/draw the meaningful-action holds below
+    //    must still apply, so this fast path must not fire there.
+    //  - `!flat_actions_have_meaningful_noncast_priority`: a meaningful NON-cast
+    //    flat action (a meaningful activated ability, morph flip, other special
+    //    actions) at your own upkeep/draw is a real decision — hold for it. A
+    //    merely-castable instant (`CastSpell`) deliberately does NOT hold here
+    //    (MTGA parity — see the noncast predicate's doc and the
+    //    `auto_passes_initial_upkeep_and_draw_priority_with_instant_speed_actions`
+    //    regression). The distinct noncast predicate is used (not
+    //    `flat_actions_have_meaningful_priority`) precisely so casts pass while
+    //    the CR 732.5 loop-firewall primitive stays byte-identical.
+    if state.active_player == player
+        && auto_passes_initial_priority_by_default(state)
+        && !flat_actions_have_meaningful_noncast_priority(state, actions)
+    {
         return true;
     }
 
@@ -1157,15 +1217,6 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     };
     if !holds {
         return true;
-    }
-
-    // MTGA-style: auto-pass when own spell/ability is on top of the stack.
-    // The player almost never wants to respond to their own spell — let it resolve.
-    // Full control mode (checked by the frontend) overrides this.
-    if let Some(top) = state.stack.back() {
-        if top.controller == player {
-            return true;
-        }
     }
 
     false
@@ -4838,6 +4889,408 @@ mod tests {
         assert!(
             super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
             "player 1's phase stop must not gate player 0's auto-pass"
+        );
+    }
+
+    /// Creates a battlefield permanent controlled by P0 carrying a single
+    /// non-mana activated ability, so `ActivateAbility { source_id, 0 }` is a
+    /// meaningful flat priority action for the auto-pass classifier.
+    fn create_nonmana_activated_source(state: &mut GameState) -> ObjectId {
+        let src = create_object(
+            state,
+            CardId(2),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&src).unwrap();
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        src
+    }
+
+    /// G3 (hoist): on your own turn, with your own spell on top of the stack AND
+    /// a feasibly castable instant in hand, auto-pass fires — the hoisted own-top
+    /// rung now outranks the own-turn castability HOLD. Before the hoist the
+    /// rung-9 castability check returned `false` (HOLD); reverting the hoist flips
+    /// this assertion back to `false`.
+    #[test]
+    fn auto_pass_true_for_own_spell_on_top_despite_castable_instant() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Bolt", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+            state.stack.push_back(StackEntry {
+                id: ObjectId(900),
+                source_id: ObjectId(901),
+                controller: P0,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        // Reach-guard: the {G} instant is genuinely castable, so absent the hoist
+        // the own-turn castability rung would HOLD (return false). This is exactly
+        // the false-HOLD the hoist fixes — the assertion below cannot pass
+        // vacuously.
+        assert!(
+            super::has_feasibly_castable_spell(runner.state(), P0, None),
+            "precondition: the {{G}} instant is feasibly castable — the castability rung would otherwise hold"
+        );
+        assert!(
+            super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "G3 hoist: own spell on top outranks the castability hold → auto-pass fires"
+        );
+    }
+
+    /// G3 (MTGA parity): on an OPPONENT's turn, your own instant just cast and on
+    /// top of the stack auto-passes even though you still hold another castable
+    /// instant — the hoisted own-top rung outranks the opponent-turn castability
+    /// HOLD. Reverting the hoist flips this to `false` (rung-7 castability holds).
+    #[test]
+    fn auto_pass_true_for_own_instant_on_top_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Bolt", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+            // Your own instant already on the stack (controller P0).
+            state.stack.push_back(StackEntry {
+                id: ObjectId(900),
+                source_id: ObjectId(901),
+                controller: P0,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        // Reach-guard: another castable instant remains in hand, so rung-7
+        // opponent-turn castability WOULD hold absent the hoist.
+        assert!(
+            super::has_feasibly_castable_spell(runner.state(), P0, None),
+            "precondition: a second {{G}} instant is feasibly castable"
+        );
+        assert!(
+            super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "G3 hoist (MTGA parity): own instant on top auto-passes even on the opponent's turn"
+        );
+    }
+
+    /// G3 negative (reach-guarded): an OPPONENT's spell on top of the stack must
+    /// still HOLD when you have a castable instant — the hoisted own-top rung only
+    /// fires for objects YOU control, never for an opponent's. The castable-spell
+    /// precondition proves the hold routes through the castability rung.
+    #[test]
+    fn auto_pass_false_for_opponent_spell_on_top_with_castable_instant() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Bolt", true, "Draw a card.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            });
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+            // OPPONENT's spell on top (controller P1).
+            state.stack.push_back(StackEntry {
+                id: ObjectId(900),
+                source_id: ObjectId(901),
+                controller: P1,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        // Reach-guard: the instant is feasibly castable, so the `false` below is
+        // the castability HOLD firing — proving the hoisted own-top rung did NOT
+        // fire for an opponent-controlled top-of-stack object.
+        assert!(
+            super::has_feasibly_castable_spell(runner.state(), P0, None),
+            "precondition: the {{G}} instant is feasibly castable"
+        );
+        assert!(
+            !super::auto_pass_recommended(
+                runner.state(),
+                &super::flat_priority_actions(runner.state())
+            ),
+            "opponent spell on top → still hold to respond (own-top rung must not fire for opponent objects)"
+        );
+    }
+
+    /// G3 negative (reach-guarded): an opponent's spell on top plus a meaningful
+    /// flat action HOLDS. The reach-guard proves that, absent the meaningful
+    /// action, the same state auto-passes — so the hold is the meaningful action,
+    /// and the hoisted own-top rung correctly did not fire for the opponent spell.
+    #[test]
+    fn auto_pass_false_for_opponent_spell_on_top_with_meaningful_action() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: ObjectId(601),
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let src = create_nonmana_activated_source(&mut state);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        ];
+
+        // Reach-guard: with only PassPriority the window auto-passes (the own-top
+        // rung does not fire for the opponent's spell), so the hold below is
+        // attributable to the meaningful action, not an upstream short-circuit.
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "reach-guard: opponent spell on top with no meaningful action → auto-pass"
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "opponent spell on top + meaningful action → hold"
+        );
+    }
+
+    /// G3 (hoist, meaningful-ability variant): on your own turn with your own
+    /// spell on top of the stack AND a meaningful non-mana activated ability
+    /// available, auto-pass fires — the hoisted own-top rung (Rung 4) outranks
+    /// the meaningful-action hold below (accepted MTGA parity). The reach-guard
+    /// (same state/actions, EMPTY stack) proves the ability genuinely HOLDS the
+    /// window absent an own-top entry, so the flip is non-vacuous: it is the
+    /// presence of the own object on top that turns the hold into a pass. This
+    /// covers the own-top rung for the meaningful-activated-ability input class
+    /// (the existing `..._despite_castable_instant` / `..._own_instant_on_top_*`
+    /// tests cover the rung-order-vs-castability delta); deleting or making the
+    /// own-top rung unreachable for this input flips the main assertion to false.
+    #[test]
+    fn auto_pass_true_for_own_spell_on_top_despite_meaningful_ability() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let src = create_nonmana_activated_source(&mut state);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        ];
+
+        // Reach-guard: with an EMPTY stack the meaningful activated ability
+        // genuinely HOLDS the window (the meaningful-action hold) — auto-pass does
+        // NOT fire. This proves the flip below is caused by the own-top entry, not
+        // an upstream short-circuit.
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "reach-guard: own turn + meaningful activated ability, empty stack → hold"
+        );
+
+        // Own spell on top of the stack: the hoisted own-top rung (Rung 4) flips
+        // that hold to a PASS, outranking the meaningful-action hold below.
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: ObjectId(901),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "G3 hoist: own spell on top outranks the meaningful-action hold → auto-pass fires"
+        );
+    }
+
+    /// G2 (gate): a meaningful NON-cast flat action at your OWN upkeep now HOLDS
+    /// instead of fast-passing, while a merely-castable instant keeps auto-passing
+    /// (MTGA parity). Before the gate the bare
+    /// `auto_passes_initial_priority_by_default` fast path returned `true`
+    /// unconditionally; the `!flat_actions_have_meaningful_noncast_priority` gate
+    /// flips the activated-ability case to `false`. The `CastSpell` control
+    /// assertion proves the noncast predicate's `CastSpell => false` arm — it
+    /// flips to `false` if the gate is (wrongly) switched to the broad
+    /// `flat_actions_have_meaningful_priority` primitive.
+    #[test]
+    fn auto_pass_false_for_meaningful_noncast_action_on_own_upkeep() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        let src = create_nonmana_activated_source(&mut state);
+        let hold_actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        ];
+        let cast_actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: ObjectId(10),
+                card_id: CardId(10),
+                targets: Vec::new(),
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        // Reach-guard: absent any meaningful action this own-upkeep window
+        // fast-passes through the gated rung — proving the window really is the
+        // gated fast path and the meaningful action is what now holds it.
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "reach-guard: empty own-upkeep window fast-passes via the gated rung"
+        );
+        // Control: a merely-castable instant does NOT hold the upkeep window
+        // (MTGA parity) — the noncast predicate excludes `CastSpell`.
+        assert!(
+            super::auto_pass_recommended(&state, &cast_actions),
+            "G2: a merely-castable instant at own upkeep keeps auto-passing (CastSpell excluded)"
+        );
+        // Gap fix: a meaningful non-mana activated ability HOLDS.
+        assert!(
+            !super::auto_pass_recommended(&state, &hold_actions),
+            "G2: a meaningful non-cast action at own upkeep now HOLDS instead of fast-passing"
+        );
+    }
+
+    /// G2 (gate, negative route-guard, REV3): a bare own upkeep whose only flat
+    /// action is Pass — with a standalone (grouped-only) mana source on the
+    /// battlefield — still fast-passes, and does so THROUGH the gated fast path.
+    /// The route-guards prove both gate predicates hold and no meaningful non-cast
+    /// action is present, so the `true` is the gate's.
+    #[test]
+    fn auto_pass_true_for_bare_own_upkeep_via_gated_fast_path() {
+        let mut state = setup_priority();
+        state.phase = Phase::Upkeep;
+        // A standalone mana source: activatable mana, but grouped-only (NOT in the
+        // flat priority list) — mirrors production.
+        let land = create_land(&mut state, "Forest", &["Forest"]);
+        add_fixed_mana_ability(&mut state, land, ManaColor::Green);
+        let actions = vec![GameAction::PassPriority];
+
+        // Route-guards: the gate window is live, the flat list carries no
+        // meaningful non-cast action, and a standalone mana source IS activatable
+        // (grouped-only). Together these prove the gated fast path is the rung
+        // that returns true.
+        assert!(
+            super::auto_passes_initial_priority_by_default(&state),
+            "route-guard: empty-stack own upkeep is the fast-path window"
+        );
+        assert!(
+            !super::flat_actions_have_meaningful_noncast_priority(&state, &actions),
+            "route-guard: the flat list carries no meaningful non-cast action"
+        );
+        assert!(
+            !super::activatable_object_mana_actions(&state).is_empty(),
+            "route-guard: a standalone mana source IS activatable (grouped-only)"
+        );
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "G2: bare own upkeep with only a standalone mana source fast-passes via the gate"
+        );
+    }
+
+    /// G2 (active_player gate, REV2): a meaningful non-cast flat action on the
+    /// OPPONENT's upkeep now HOLDS. The pre-Stage-2 bare fast path fast-passed any
+    /// upkeep/draw window regardless of whose turn it was; gating on
+    /// `active_player == player` flips this to `false`. The reach-guard proves the
+    /// meaningful action is the discriminator.
+    #[test]
+    fn auto_pass_false_for_meaningful_action_on_opponents_upkeep() {
+        let mut state = setup_priority();
+        state.active_player = PlayerId(1);
+        state.phase = Phase::Upkeep;
+        let src = create_nonmana_activated_source(&mut state);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        ];
+
+        // Reach-guard: with only PassPriority the opponent's upkeep window still
+        // auto-passes, proving the meaningful action is what holds below.
+        assert!(
+            super::auto_pass_recommended(&state, &[GameAction::PassPriority]),
+            "reach-guard: opponent's upkeep with no meaningful action → auto-pass"
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "G2 active_player: a meaningful action on the OPPONENT's upkeep now HOLDS"
         );
     }
 }
