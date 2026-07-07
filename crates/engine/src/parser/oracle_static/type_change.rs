@@ -1805,6 +1805,52 @@ pub(crate) fn parse_subject_is_supertype(
     )
 }
 
+/// CR 305.7: Decompose the predicate of a land type-changing static into layer-4
+/// modifications — replacement (`SetBasicLandType`), additive (`AddSubtype`), or
+/// all-basic-types (`AddAllBasicLandTypes`). Shared by the single-subject and
+/// compound-subject land type-change handlers.
+fn parse_land_type_change_modifications(rest: &str) -> Option<Vec<ContinuousModification>> {
+    let lower_rest = rest.to_lowercase();
+
+    // "every basic land type in addition to their other types"
+    if nom_tag_lower(&lower_rest, &lower_rest, "every basic land type").is_some()
+        && nom_primitives::scan_contains(&lower_rest, "in addition to")
+    {
+        return Some(vec![ContinuousModification::AddAllBasicLandTypes]);
+    }
+
+    // "[Type] in addition to {its/their} other {land }types" → AddSubtype (additive)
+    if let Some(type_part) = strip_in_addition_suffix(&lower_rest) {
+        let basic_type = parse_basic_land_type_plural(type_part.trim())?;
+        return Some(vec![ContinuousModification::AddSubtype {
+            subtype: basic_type.as_subtype_str().to_string(),
+        }]);
+    }
+
+    // CR 305.7: Replacement semantics — "[Type]" or "[Types]" → SetBasicLandType
+    // Try multi-type list first: "Mountain, Forest, and Plains"
+    if let Some(types) = parse_basic_land_type_list(rest.trim()) {
+        if types.len() == 1 {
+            return Some(vec![ContinuousModification::SetBasicLandType {
+                land_type: types[0],
+            }]);
+        }
+        // CR 305.7: Multiple types — first SetBasicLandType clears old subtypes,
+        // subsequent AddSubtype entries add the remaining types.
+        let mut mods = vec![ContinuousModification::SetBasicLandType {
+            land_type: types[0],
+        }];
+        for &lt in &types[1..] {
+            mods.push(ContinuousModification::AddSubtype {
+                subtype: lt.as_subtype_str().to_string(),
+            });
+        }
+        return Some(mods);
+    }
+
+    None
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
@@ -1820,65 +1866,13 @@ pub(crate) fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<St
 
     // Only proceed if subject is a land-type-change subject (avoids matching non-land patterns).
     let affected = parse_land_type_change_subject(subject)?;
-    let lower_rest = rest.to_lowercase();
-
-    // "every basic land type in addition to their other types"
-    if nom_tag_lower(&lower_rest, &lower_rest, "every basic land type").is_some()
-        && nom_primitives::scan_contains(&lower_rest, "in addition to")
-    {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddAllBasicLandTypes])
-                .description(text.to_string()),
-        );
-    }
-
-    // "[Type] in addition to {its/their} other {land }types" → AddSubtype (additive)
-    if let Some(type_part) = strip_in_addition_suffix(&lower_rest) {
-        let basic_type = parse_basic_land_type_plural(type_part.trim())?;
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddSubtype {
-                    subtype: basic_type.as_subtype_str().to_string(),
-                }])
-                .description(text.to_string()),
-        );
-    }
-
-    // CR 305.7: Replacement semantics — "[Type]" or "[Types]" → SetBasicLandType
-    // Try multi-type list first: "Mountain, Forest, and Plains"
-    if let Some(types) = parse_basic_land_type_list(rest.trim()) {
-        if types.len() == 1 {
-            return Some(
-                StaticDefinition::continuous()
-                    .affected(affected)
-                    .modifications(vec![ContinuousModification::SetBasicLandType {
-                        land_type: types[0],
-                    }])
-                    .description(text.to_string()),
-            );
-        }
-        // CR 305.7: Multiple types — first SetBasicLandType clears old subtypes,
-        // subsequent AddSubtype entries add the remaining types.
-        let mut mods = vec![ContinuousModification::SetBasicLandType {
-            land_type: types[0],
-        }];
-        for &lt in &types[1..] {
-            mods.push(ContinuousModification::AddSubtype {
-                subtype: lt.as_subtype_str().to_string(),
-            });
-        }
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(mods)
-                .description(text.to_string()),
-        );
-    }
-
-    None
+    let modifications = parse_land_type_change_modifications(rest)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
 }
 
 /// CR 613.1d (Layer 4) + CR 613.4b (Layer 7b) + CR 205.1b: Parse a continuous
@@ -1970,8 +1964,9 @@ pub(crate) fn parse_compound_all_subjects_type_change(
 
     let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
     let predicate_lower = predicate.to_lowercase();
-    // Claim only creature-animation predicates; a bare additive type line
-    // ("All Forests and all Saprolings are Plains") is owned elsewhere.
+    // Claim only creature-animation predicates; bare land type-change compounds
+    // ("All Mountains and all Forests are Plains") are owned by
+    // `parse_compound_all_subjects_land_type_change`.
     if !nom_primitives::scan_contains(&predicate_lower, "creature") {
         return None;
     }
@@ -2060,6 +2055,38 @@ pub(crate) fn parse_compound_all_subjects_type_replacement(
         return None;
     }
 
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 611.3 + CR 305.7 + CR 205.1b: "All `<X>` and all `<Y>` are `<land-type
+/// predicate>`" — a compound-subject land type-change where one predicate applies
+/// uniformly to every object matching either basic-land-subject conjunct.
+///
+/// Sibling of the compound animation handlers: `parse_land_type_change` only
+/// resolves single-subject land filters, so a line like "All Mountains and all
+/// Forests are Plains" would otherwise strict-fail. Subjects distribute into an
+/// `Or` filter via [`parse_compound_all_subjects_filter`]; the predicate is
+/// parsed once through [`parse_land_type_change_modifications`]. The `"creature"`
+/// guard keeps animation compounds on the animation dispatch path.
+pub(crate) fn parse_compound_all_subjects_land_type_change(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
+
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+    let predicate_lower = predicate.to_lowercase();
+    if nom_primitives::scan_contains(&predicate_lower, "creature") {
+        return None;
+    }
+
+    let modifications = parse_land_type_change_modifications(predicate)?;
     Some(
         StaticDefinition::continuous()
             .affected(affected)

@@ -14076,6 +14076,70 @@ fn all_mountains_are_plains_conversion() {
     }
 }
 
+// CR 611.3 + CR 305.7: compound-subject land type-change — same structural class
+// as Life and Limb's compound animation handler, but the predicate is a basic
+// land type grant/replacement rather than creature animation.
+#[test]
+fn compound_subject_land_type_change_replacement_predicate() {
+    let line = "All Mountains and all Forests are Plains.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "one compound static: {defs:?}");
+    let def = &defs[0];
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or of both subjects: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Mountain")))),
+        "Mountain conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
+        "Forest conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    assert!(matches!(
+        def.modifications.as_slice(),
+        [ContinuousModification::SetBasicLandType { land_type }]
+        if *land_type == BasicLandType::Plains
+    ));
+
+    // Single-subject sibling still routes through parse_land_type_change.
+    assert!(parse_static_line("All Mountains are Plains.").is_some());
+
+    // Animation compounds stay on the animation handler, not land type-change.
+    assert_eq!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are 1/1 green Saproling creatures and \
+             Forest lands in addition to their other types."
+        )
+        .len(),
+        1,
+        "animation compound must not be land-type-claimed"
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_additive_predicate() {
+    let def = parse_static_line(
+        "All Mountains and all Islands are Swamps in addition to their other land types.",
+    )
+    .unwrap();
+    assert!(matches!(def.affected, Some(TargetFilter::Or { .. })));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Swamp".to_string(),
+        }]
+    );
+}
+
 #[test]
 fn each_land_is_a_swamp_in_addition_urborg() {
     let def =

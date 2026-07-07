@@ -1534,6 +1534,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 611.3 + CR 305.7: "All <X> and all <Y> are <basic land type>" — compound-
+    // subject land type replacement/addition. Must follow the animation compound
+    // handlers (creature-gated) and precede parse_land_animation /
+    // parse_land_type_change, which only resolve single-subject land filters.
+    if let Some(def) = parse_compound_all_subjects_land_type_change(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
     // lands" — continuous land animation (Living Plane, Nature's Revolt). Must
     // come before parse_land_type_change: both split on "are", but the land
