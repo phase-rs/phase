@@ -1388,8 +1388,8 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         && modifications
             .iter()
             .all(|m| matches!(m, ContinuousModification::AddType { .. }))
-        && !body_lower.contains("in addition")
-        && !body_lower.contains("still");
+        && !nom_primitives::scan_contains(&body_lower, "in addition")
+        && !nom_primitives::scan_contains(&body_lower, "still");
     let modifications = if pure_core_type_replacement {
         let core_types = modifications
             .iter()

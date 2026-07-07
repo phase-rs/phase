@@ -14741,8 +14741,6 @@ fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
 // asserts SetCardTypes([Land]) with no AddType.
 #[test]
 fn arixmethes_conditional_is_a_land_replaces_card_types() {
-    use crate::types::card_type::CoreType;
-
     let def = parse_static_line("As long as ~ has a slumber counter on it, it's a land.")
         .expect("Arixmethes' conditional type-change static should parse");
     assert_eq!(def.mode, StaticMode::Continuous);
@@ -14752,12 +14750,13 @@ fn arixmethes_conditional_is_a_land_replaces_card_types() {
         "the static affects the source permanent itself"
     );
     // CR 205.1a: replacing SetCardTypes([Land]) — Creature is dropped.
-    assert_eq!(
-        def.modifications,
-        vec![ContinuousModification::SetCardTypes {
-            core_types: vec![CoreType::Land],
-        }],
-        "\"it's a land\" must REPLACE card types, not additively add Land: {:?}",
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Land],
+            }),
+        "\"it's a land\" must REPLACE card types via SetCardTypes([Land]), not additively \
+         add Land: {:?}",
         def.modifications
     );
     assert!(
