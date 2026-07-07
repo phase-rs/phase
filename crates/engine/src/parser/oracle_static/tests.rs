@@ -14133,9 +14133,9 @@ fn darksteel_mutation_full_modification_set() {
 /// CR 205.1a + CR 613.4b + CR 613.1f (issue #5300): Lignify-class subtype-only
 /// type-change auras — "Enchanted creature is a <creature subtype> with base
 /// power and toughness N/N and loses all abilities." The copula names only a
-/// creature SUBTYPE (no core card-type word), but a creature subtype makes the
-/// object a creature, so the Creature core type is implied and the full type
-/// replacement is emitted. Before the fix the "is a Treefolk" subtype was
+/// creature SUBTYPE (no core card-type word), Setting a creature subtype replaces
+/// the object's creature subtypes but does NOT set or overwrite its card types
+/// (CR 205.1a), so `SetCardTypes` must NOT be emitted. Before the fix the "is a Treefolk" subtype was
 /// silently dropped (only P/T + loses-abilities survived).
 #[test]
 fn lignify_subtype_only_with_base_pt_type_change() {
@@ -14146,11 +14146,14 @@ fn lignify_subtype_only_with_base_pt_type_change() {
     .unwrap();
     assert_eq!(def.mode, StaticMode::Continuous);
     let mods = &def.modifications;
+    // CR 205.1a: a subtype change does not affect card types — no SetCardTypes,
+    // so an enchanted Artifact/Land creature keeps Artifact/Land.
     assert!(
-        mods.contains(&ContinuousModification::SetCardTypes {
-            core_types: vec![CoreType::Creature],
-        }),
-        "creature subtype must imply SetCardTypes[Creature]: {mods:?}"
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "Lignify sets only the subtype; it must NOT emit SetCardTypes (which would \
+         strip other card types like Artifact/Land): {mods:?}"
     );
     assert!(
         mods.contains(&ContinuousModification::AddSubtype {
