@@ -1369,7 +1369,9 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         return None;
     }
 
-    // CR 205.1a + CR 613.1d (Layer 4): A pure "it's a <core type(s)>" static —
+    // CR 205.1a: Type-setting effects replace card types.
+    // CR 613.1d: Layer 4 (Type-changing effects).
+    // A pure "it's a <core type(s)>" static —
     // whose body is nothing but card types (no retained P/T, keywords, color, or
     // subtype change) and carries no "in addition to its other types" / "that's
     // still a <type>" retention clause — is a type-SETTING effect that REPLACES the
