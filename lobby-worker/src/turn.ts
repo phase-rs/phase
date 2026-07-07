@@ -69,11 +69,9 @@ function clientContext(request: Request): {
 }
 
 function clientIp(request: Request): string {
-  return (
-    request.headers.get("CF-Connecting-IP") ??
-    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ??
-    "unknown"
-  );
+  // Rate-limit keys must come from Cloudflare edge metadata only; X-Forwarded-For
+  // is client-controlled and would let callers rotate spoofed IPs to bypass limits.
+  return request.headers.get("CF-Connecting-IP") ?? "unknown";
 }
 
 /**
