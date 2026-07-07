@@ -710,6 +710,15 @@ pub(crate) fn parse_becomes_equipment_with_ability(
     let dynamic_self_mana_value = nom_primitives::scan_contains(tail_lower, "where x is ")
         && nom_primitives::scan_contains(tail_lower, "artifact's mana value");
 
+    // Fail closed on an unrecognized trailing rider: the only text this handler
+    // models after the quoted ability is the CR 202.3 "where X is that
+    // artifact's mana value" binding. Any other rules-bearing tail must NOT be
+    // silently dropped — decline so the line is reported unsupported rather than
+    // exported with missing behavior.
+    if !tail_lower.is_empty() && !dynamic_self_mana_value {
+        return None;
+    }
+
     // Equip cost: a bare `{X}` bound to the source's mana value lowers to
     // `ManaCost::SelfManaValue` (concretized at activation like a graveyard-grant
     // "encore {X}, where X is its mana value"); otherwise a fixed mana cost.
