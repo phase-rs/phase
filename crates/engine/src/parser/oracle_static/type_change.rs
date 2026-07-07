@@ -1046,7 +1046,21 @@ pub(crate) fn parse_enchanted_is_type(
         // core type and is a basic-land-type change — defer to the dedicated
         // SetBasicLandType parser by returning None here.
         if granted_core_types.is_empty() {
-            return None;
+            // CR 205.1a + CR 613.4b (issue #5300): the Lignify class names only a
+            // creature SUBTYPE in the copula — "Enchanted creature is a Treefolk
+            // with base power and toughness 0/4 and loses all abilities." No core
+            // card-type word appears, but a creature subtype makes the object a
+            // creature, so imply the Creature core type and let the emission below
+            // produce the full replacement (SetCardTypes + RemoveAllSubtypes +
+            // AddSubtype) instead of silently dropping the subtype. Gated on a base
+            // P/T (only creatures have one) so the basic-land subtype change
+            // ("Enchanted land is a Mountain", no P/T) still returns None here and
+            // defers to the SetBasicLandType handler.
+            if base_pt.is_some() && !granted_subtypes.is_empty() {
+                granted_core_types.push(CoreType::Creature);
+            } else {
+                return None;
+            }
         }
 
         // Parse the trailing "and has <kw> ... and it loses all other ..."

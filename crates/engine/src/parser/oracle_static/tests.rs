@@ -14130,6 +14130,53 @@ fn darksteel_mutation_full_modification_set() {
     );
 }
 
+/// CR 205.1a + CR 613.4b + CR 613.1f (issue #5300): Lignify-class subtype-only
+/// type-change auras — "Enchanted creature is a <creature subtype> with base
+/// power and toughness N/N and loses all abilities." The copula names only a
+/// creature SUBTYPE (no core card-type word), but a creature subtype makes the
+/// object a creature, so the Creature core type is implied and the full type
+/// replacement is emitted. Before the fix the "is a Treefolk" subtype was
+/// silently dropped (only P/T + loses-abilities survived).
+#[test]
+fn lignify_subtype_only_with_base_pt_type_change() {
+    use crate::types::card_type::SubtypeSet;
+    let def = parse_static_line(
+        "Enchanted creature is a Treefolk with base power and toughness 0/4 and loses all abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature],
+        }),
+        "creature subtype must imply SetCardTypes[Creature]: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Treefolk".to_string(),
+        }),
+        "the 'is a Treefolk' subtype must not be dropped: {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+    // CR 613.7 written-order: RemoveAllSubtypes must precede AddSubtype so the
+    // granted creature type survives the subtype wipe.
+    let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+    assert!(
+        pos(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }) < pos(&ContinuousModification::AddSubtype {
+            subtype: "Treefolk".to_string(),
+        }),
+        "RemoveAllSubtypes must precede AddSubtype(Treefolk): {mods:?}"
+    );
+}
+
 #[test]
 fn enchanted_is_type_with_base_pt_preserves_trailing_keyword_clause() {
     // Building-block check: the trailing "and has <kw> ... loses all
