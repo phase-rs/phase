@@ -3440,6 +3440,32 @@ fn life_and_limb_real_text_dual_subject_animation() {
     }
 }
 
+// CR 205.1a vs CR 205.1b: the compound-subject animation handler applies strictly
+// ADDITIVE type semantics, so it must decline a compound predicate that lacks the
+// "in addition to their/its other types" marker — a bare "are <P/T> <type>
+// creatures" compound is a type REPLACEMENT and must not be reinterpreted as
+// additive (which would keep the objects' other types instead of replacing them).
+#[test]
+fn compound_subject_animation_declines_non_additive_replacement_predicate() {
+    // No "in addition to their other types" marker → replacement semantics →
+    // this additive handler must not claim it.
+    assert!(
+        parse_static_line_multi("All Elves and all Goblins are 2/2 Zombie creatures.").is_empty(),
+        "non-additive compound animation must not be additive-claimed"
+    );
+    // The additive form (Life and Limb) is still claimed — guards against the
+    // gate being over-broad.
+    assert_eq!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are 1/1 green Saproling creatures and \
+             Forest lands in addition to their other types."
+        )
+        .len(),
+        1,
+        "additive compound animation must still parse"
+    );
+}
+
 #[test]
 fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     let def = parse_static_line(

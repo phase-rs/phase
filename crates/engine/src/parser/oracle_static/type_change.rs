@@ -1920,9 +1920,21 @@ pub(crate) fn parse_compound_all_subjects_type_change(
     let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
 
     let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+    let predicate_lower = predicate.to_lowercase();
     // Claim only creature-animation predicates; a bare additive type line
     // ("All Forests and all Saprolings are Plains") is owned elsewhere.
-    if !nom_primitives::scan_contains(&predicate.to_lowercase(), "creature") {
+    if !nom_primitives::scan_contains(&predicate_lower, "creature") {
+        return None;
+    }
+    // CR 205.1b: this handler applies strictly ADDITIVE type/subtype semantics
+    // (`AddType` / `AddSubtype`), so it must only claim predicates that carry the
+    // "in addition to {their|its} other types" marker. A compound predicate
+    // without it ("All X and all Y are Zombies") is a type REPLACEMENT (CR 205.1a
+    // `SetCardTypes`) that must fall through to a replacement-semantics handler
+    // rather than be silently reinterpreted as additive.
+    if !nom_primitives::scan_contains(&predicate_lower, "in addition to their other")
+        && !nom_primitives::scan_contains(&predicate_lower, "in addition to its other")
+    {
         return None;
     }
     let spec = super::oracle_effect::animation::parse_animation_spec(
