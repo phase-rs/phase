@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerDraftAdapter } from "../server-draft-adapter";
+import { PROTOCOL_VERSION } from "../ws-adapter";
 import type { DraftPlayerView } from "../draft-adapter";
 import type { GameLogEntry, GameState } from "../types";
 
@@ -38,7 +39,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 12,
+    protocol_version: PROTOCOL_VERSION,
     mode: "Full",
   },
 });

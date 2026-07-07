@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { WebSocketAdapter } from "../ws-adapter";
+import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 import type { GameState } from "../types";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
@@ -43,7 +43,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 12,
+    protocol_version: PROTOCOL_VERSION,
     mode: "Full",
   },
 });
