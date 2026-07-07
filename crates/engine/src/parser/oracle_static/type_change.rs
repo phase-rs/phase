@@ -565,8 +565,6 @@ pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    use crate::types::card_type::{CoreType, SubtypeSet};
-
     let (before_pt, after_pt) = tp.split_around(" with base power and toughness ")?;
 
     let before_rest = nom_tag_tp(&before_pt, "enchanted ")?;
@@ -607,15 +605,9 @@ pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
         return None;
     }
 
-    let after_pt_trimmed = after_pt.original.trim().trim_end_matches('.');
-    let (p, t) = parse_pt_mod(after_pt_trimmed)?;
-    let pt_part_lower = after_pt.lower.trim().trim_end_matches('.');
-    let slash_pos = pt_part_lower.find('/')?;
-    let after_slash = &pt_part_lower[slash_pos + 1..];
-    let t_end = after_slash
-        .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-        .unwrap_or(after_slash.len());
-    let remainder = after_slash[t_end..].trim();
+    let pt_tail = after_pt.lower.trim().trim_end_matches('.');
+    let (remainder, (p, t)) = parse_pt_mod_with_remainder(pt_tail).ok()?;
+    let remainder = remainder.trim().trim_end_matches('.').trim();
     let clause_mods = if remainder.is_empty() {
         Vec::new()
     } else {

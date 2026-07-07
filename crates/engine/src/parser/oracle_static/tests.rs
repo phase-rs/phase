@@ -15212,6 +15212,26 @@ fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
 // the base-P/T seam; must become a creature (SetCardTypes), wipe/replace the
 // creature subtype set, set base P/T, and strip abilities.
 #[test]
+fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
+    let (rest, (p, t)) = super::grammar::parse_pt_mod_with_remainder(
+        "0/4 and loses all abilities",
+    )
+    .expect("unsigned base P/T + trailing clause");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), "and loses all abilities");
+
+    let (rest, (p, t)) =
+        super::grammar::parse_pt_mod_with_remainder("0/4.").expect("trailing period only");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), ".");
+
+    let (rest, (p, t)) = super::grammar::parse_pt_mod_with_remainder("0/4")
+        .expect("bare base P/T with no tail");
+    assert_eq!((p, t), (0, 4));
+    assert!(rest.trim().is_empty());
+}
+
+#[test]
 fn lignify_creature_subtype_with_base_pt_and_loses_abilities() {
     let def = parse_static_line(
         "Enchanted creature is a Treefolk with base power and toughness 0/4 and loses all abilities.",
