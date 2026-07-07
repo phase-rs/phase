@@ -27,6 +27,7 @@ import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
+import { TurnOrderChips } from "./TurnOrderChips.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
 
 import type { ObjectId } from "../../adapter/types.ts";
@@ -304,6 +305,7 @@ export function OpponentHud({
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={
             <>
+              <TurnOrderChips playerId={opponentId} compact={compact} />
               <EnchantmentsBadge playerId={opponentId} />
               {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
               {opponentDesignations.isMonarch ? <MonarchBadge /> : null}
@@ -755,6 +757,7 @@ function OpponentTab({
 
   const statusCluster = (
     <div className="flex shrink-0 items-center gap-1">
+      <TurnOrderChips playerId={playerId} compact={compact} />
       {waitingReasonText && (
         <span
           title={waitingReasonText}

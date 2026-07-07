@@ -2102,6 +2102,13 @@ export interface UnboundedResourceView {
   axis: ResourceAxis;
 }
 
+/** Mirrors `engine::game::derived_views::TurnOrderSlotView`. */
+export interface TurnOrderSlotView {
+  player: PlayerId;
+  slot_index: number;
+  turns_from_now: number;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -2161,6 +2168,11 @@ export interface DerivedViews {
   planechase?: PlanechaseView | null;
   /** Engine-authored Archenemy state. */
   archenemy?: ArchenemyView | null;
+  /**
+   * Engine-authored multiplayer turn-order rows. Duplicate players are
+   * intentional when extra turns put the same player in multiple slots.
+   */
+  turn_order?: TurnOrderSlotView[];
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The

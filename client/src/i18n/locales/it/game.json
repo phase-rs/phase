@@ -11,6 +11,14 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "turnOrder": {
+    "now": "ORA",
+    "next": "PROSS.",
+    "future": "+{{count}}",
+    "nowTooltip": "Turno attuale",
+    "nextTooltip": "Prossimo turno",
+    "futureTooltip": "Tra {{count}} turni"
+  },
   "card": {
     "faceDownName": "Carta coperta",
     "loading": "Caricamento {{name}}",

@@ -85,4 +85,21 @@ describe("OpponentSeatHeader", () => {
     expect(screen.queryByRole("button", { name: "Target Opp 2" })).not.toBeInTheDocument();
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  it("renders future turn-order chip with tooltip text", () => {
+    const waitingFor = targetSelectionWaitingFor([]);
+    useGameStore.setState({
+      gameState: {
+        ...createGameState(waitingFor),
+        derived: {
+          turn_order: [{ player: 1, slot_index: 2, turns_from_now: 2 }],
+        },
+      },
+      waitingFor,
+    });
+
+    render(<OpponentSeatHeader playerId={1} />);
+
+    expect(screen.getByTitle("2 turns from now")).toHaveTextContent("+2");
+  });
 });

@@ -587,6 +587,117 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     }
 }
 
+/// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
+/// projection. Slot 0 is the current live turn representative; later slots are
+/// the next turns that would actually begin after extra turns, skipped turns,
+/// shared-team turns, and controlled-turn cleanup are considered.
+pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId> {
+    if max_slots == 0 {
+        return Vec::new();
+    }
+
+    let mut scratch = state.clone();
+    let mut slots = vec![super::topology::normalize_shared_turn_recipient(
+        &scratch,
+        scratch.active_player,
+    )];
+    let skip_budget: usize = scratch
+        .turns_to_skip
+        .iter()
+        .map(|&count| count as usize)
+        .sum();
+    let attempt_cap = max_slots
+        .saturating_add(skip_budget)
+        .saturating_add(scratch.extra_turns.len())
+        .saturating_add(scratch.scheduled_turn_controls.len().saturating_mul(2))
+        .saturating_add(16);
+    let mut attempts = 0usize;
+
+    while slots.len() < max_slots && attempts < attempt_cap {
+        attempts += 1;
+
+        let completed_player = scratch.active_player;
+        let completed_turn_key =
+            super::topology::normalize_shared_turn_recipient(&scratch, completed_player);
+        if scratch.turn_decision_controller.is_some() {
+            let completed_controller = scratch.turn_decision_controller;
+            let mut grant_extra_turn_after = false;
+            // CR 614.10a + CR 723.1: "next turn" control releases when that
+            // controlled turn is complete; any granted follow-up extra turn is
+            // scheduled before the next turn is selected.
+            while let Some(idx) = scratch
+                .scheduled_turn_controls
+                .iter()
+                .position(|scheduled| {
+                    scheduled.window == ControlWindow::NextTurn
+                        && scheduled.target_player == completed_turn_key
+                })
+            {
+                let entry = scratch.scheduled_turn_controls.remove(idx);
+                if Some(entry.controller) == completed_controller {
+                    grant_extra_turn_after |= entry.grant_extra_turn_after;
+                }
+            }
+            if grant_extra_turn_after {
+                scratch.extra_turns.push(completed_player);
+            }
+            scratch.turn_decision_controller = None;
+        }
+
+        scratch.turn_number += 1;
+
+        // CR 500.7: extra turns are LIFO; otherwise walk current turn order.
+        let is_extra_turn = if let Some(extra_turn_player) = scratch.extra_turns.pop() {
+            scratch.active_player =
+                super::topology::normalize_shared_turn_recipient(&scratch, extra_turn_player);
+            true
+        } else {
+            scratch.active_player =
+                super::topology::next_turn_representative(&scratch, scratch.active_player);
+            false
+        };
+
+        // CR 614.10: a skipped turn never emits a display slot. Leave the
+        // cursor on the skipped would-be active player so the next attempt
+        // mirrors `start_next_turn` recursion.
+        let skip_player =
+            super::topology::normalize_shared_turn_recipient(&scratch, scratch.active_player);
+        let idx = skip_player.0 as usize;
+        if idx < scratch.turns_to_skip.len() && scratch.turns_to_skip[idx] > 0 {
+            scratch.turns_to_skip[idx] -= 1;
+            continue;
+        }
+
+        // CR 614.1b + CR 614.10: condition-gated skip replacements can prevent
+        // the turn before it starts. This is a read-only probe; no replacement
+        // state or event log is mutated for the source state.
+        if replacement::begin_turn_would_be_prevented(
+            &scratch,
+            scratch.active_player,
+            is_extra_turn,
+        ) {
+            continue;
+        }
+
+        slots.push(scratch.active_player);
+
+        // CR 723.1: activate a full-turn control only after a non-skipped turn
+        // actually begins. Newest matching scheduled control wins.
+        let active_turn_key =
+            super::topology::normalize_shared_turn_recipient(&scratch, scratch.active_player);
+        scratch.turn_decision_controller = scratch
+            .scheduled_turn_controls
+            .iter()
+            .rfind(|scheduled| {
+                scheduled.window == ControlWindow::NextTurn
+                    && scheduled.target_player == active_turn_key
+            })
+            .map(|scheduled| scheduled.controller);
+    }
+
+    slots
+}
+
 /// Begin the next player's turn (CR 500.1 / CR 101.4 seat order).
 pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 805.4b: defensively drop any stale draw-step queue entries. The
@@ -7321,6 +7432,127 @@ mod tests {
         assert_eq!(state.turn_decision_controller, None);
         assert_eq!(state.priority_player, PlayerId(1));
         assert!(state.scheduled_turn_controls.is_empty());
+    }
+
+    #[test]
+    fn projected_turn_order_tracks_normal_and_reversed_multiplayer_order() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+
+        assert_eq!(
+            projected_turn_order(&state, 4),
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)]
+        );
+
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+
+        assert_eq!(
+            projected_turn_order(&state, 4),
+            vec![PlayerId(0), PlayerId(3), PlayerId(2), PlayerId(1)]
+        );
+    }
+
+    #[test]
+    fn projected_turn_order_skips_turn_counter_without_mutating_original() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.turns_to_skip[1] = 1;
+
+        let projected = projected_turn_order(&state, 3);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(0), PlayerId(2), PlayerId(3)],
+            "P1's skipped turn must not emit a display slot"
+        );
+        assert_eq!(
+            state.turns_to_skip[1], 1,
+            "projection must not consume the source state's skip counter"
+        );
+    }
+
+    #[test]
+    fn projected_turn_order_begin_turn_replacement_skips_extra_turn_cursor() {
+        use crate::types::ability::ReplacementCondition;
+        use crate::types::identifiers::ObjectId;
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.extra_turns.push(PlayerId(2));
+        install_begin_turn_skip_permanent(
+            &mut state,
+            ObjectId(100),
+            PlayerId(1),
+            Some(ReplacementCondition::OnlyExtraTurn),
+        );
+
+        let projected = projected_turn_order(&state, 2);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(0), PlayerId(3)],
+            "P2's prevented extra turn leaves the cursor on P2, so the next natural slot is P3"
+        );
+        assert_eq!(
+            state.extra_turns,
+            vec![PlayerId(2)],
+            "projection must not pop the source state's queued extra turn"
+        );
+        assert!(
+            state.pending_replacement.is_none(),
+            "read-only projection must not park a replacement choice"
+        );
+    }
+
+    #[test]
+    fn projected_turn_order_controlled_turn_completion_enqueues_extra_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: PlayerId(1),
+                controller: PlayerId(2),
+                grant_extra_turn_after: true,
+                window: ControlWindow::NextTurn,
+            });
+
+        let projected = projected_turn_order(&state, 2);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(1), PlayerId(1)],
+            "the controller's promised extra turn for P1 appears before natural order resumes"
+        );
+        assert!(state.extra_turns.is_empty());
+        assert_eq!(state.scheduled_turn_controls.len(), 1);
+        assert_eq!(state.turn_decision_controller, Some(PlayerId(2)));
+    }
+
+    #[test]
+    fn projected_turn_order_activates_scheduled_control_then_releases_it() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: PlayerId(1),
+                controller: PlayerId(2),
+                grant_extra_turn_after: true,
+                window: ControlWindow::NextTurn,
+            });
+
+        let projected = projected_turn_order(&state, 3);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(0), PlayerId(1), PlayerId(1)],
+            "scheduled control must bind to P1's natural turn, then grant P1 the follow-up extra turn"
+        );
+        assert!(state.extra_turns.is_empty());
+        assert_eq!(state.scheduled_turn_controls.len(), 1);
+        assert_eq!(state.turn_decision_controller, None);
     }
 
     #[test]

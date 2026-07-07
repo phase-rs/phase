@@ -11,6 +11,14 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "turnOrder": {
+    "now": "JETZT",
+    "next": "NÄCHST",
+    "future": "+{{count}}",
+    "nowTooltip": "Aktueller Zug",
+    "nextTooltip": "Nächster Zug",
+    "futureTooltip": "In {{count}} Zügen"
+  },
   "card": {
     "faceDownName": "Verdeckte Karte",
     "loading": "{{name}} wird geladen",

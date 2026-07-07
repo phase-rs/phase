@@ -11,6 +11,14 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "turnOrder": {
+    "now": "ACT.",
+    "next": "SUIV.",
+    "future": "+{{count}}",
+    "nowTooltip": "Tour actuel",
+    "nextTooltip": "Prochain tour",
+    "futureTooltip": "Dans {{count}} tours"
+  },
   "card": {
     "faceDownName": "Carte face cachée",
     "loading": "Chargement de {{name}}",

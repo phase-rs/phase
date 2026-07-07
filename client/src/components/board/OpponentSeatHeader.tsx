@@ -22,6 +22,7 @@ import {
   UnboundedBadge,
 } from "../hud/HudBadges.tsx";
 import { KickConfirmDialog } from "../hud/KickConfirmDialog.tsx";
+import { TurnOrderChips } from "../hud/TurnOrderChips.tsx";
 
 interface OpponentSeatHeaderProps {
   playerId: PlayerId;
@@ -151,6 +152,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
           )}
           <LifeTotal playerId={playerId} size="sm" hideLabel />
           <div className={`flex min-w-0 max-w-[9rem] shrink items-center justify-end gap-0.5 overflow-hidden ${badgeScale} [&>*]:origin-right`}>
+            <TurnOrderChips playerId={playerId} compact={compact} />
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
             {designations.hasCityBlessing ? <CityBlessingBadge /> : null}

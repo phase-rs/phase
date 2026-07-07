@@ -64,6 +64,20 @@ describe("OpponentHud", () => {
     cleanup();
   });
 
+  it("renders future turn-order chips on multiplayer opponent tabs", () => {
+    useGameStore.setState({
+      gameState: createGameState({
+        derived: {
+          turn_order: [{ player: 2, slot_index: 2, turns_from_now: 2 }],
+        },
+      }),
+    });
+
+    render(<OpponentHud />);
+
+    expect(screen.getByTitle("2 turns from now")).toHaveTextContent("+2");
+  });
+
   it("auto-selects the active opponent when Follow is enabled", async () => {
     render(<OpponentHud />);
 

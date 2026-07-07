@@ -42,4 +42,24 @@ describe("PlayerHud", () => {
 
     expect(screen.queryByText(/Poison counters:/)).toBeNull();
   });
+
+  it("renders duplicate local NOW and NEXT turn-order chips", () => {
+    act(() => {
+      useGameStore.setState({
+        gameState: buildGameState({
+          derived: {
+            turn_order: [
+              { player: 0, slot_index: 0, turns_from_now: 0 },
+              { player: 0, slot_index: 1, turns_from_now: 1 },
+            ],
+          },
+        }),
+      });
+    });
+
+    render(<PlayerHud />);
+
+    expect(screen.getByTitle("Current turn")).toHaveTextContent("NOW");
+    expect(screen.getByTitle("Next turn")).toHaveTextContent("NEXT");
+  });
 });

@@ -5356,6 +5356,21 @@ pub fn find_applicable_replacements(
     candidates
 }
 
+/// CR 614.1b + CR 614.10: Read-only probe for whether a turn-start skip
+/// replacement would replace the proposed turn with nothing. This deliberately
+/// does not call `replace_event`, so projection code can answer display-only
+/// questions without marking replacements applied, rebuilding indexes, or
+/// emitting events.
+pub(crate) fn begin_turn_would_be_prevented(
+    state: &GameState,
+    player: PlayerId,
+    is_extra_turn: bool,
+) -> bool {
+    let proposed = ProposedEvent::begin_turn(player, is_extra_turn);
+    let registry = replacement_registry();
+    !find_applicable_replacements(state, &proposed, registry).is_empty()
+}
+
 const MAX_REPLACEMENT_DEPTH: u16 = 16;
 
 /// Identifies which ability branch of a `ReplacementDefinition` is being applied.

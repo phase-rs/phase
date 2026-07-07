@@ -11,6 +11,14 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "turnOrder": {
+    "now": "AHORA",
+    "next": "SIG.",
+    "future": "+{{count}}",
+    "nowTooltip": "Turno actual",
+    "nextTooltip": "Turno siguiente",
+    "futureTooltip": "Dentro de {{count}} turnos"
+  },
   "card": {
     "faceDownName": "Carta boca abajo",
     "loading": "Cargando {{name}}",
