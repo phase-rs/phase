@@ -1112,3 +1112,42 @@ fn neutral_plural_pronoun_they_becomes_creature_static() {
         "expected AddKeyword(Vigilance) in {mods:?}"
     );
 }
+
+/// SHAPE — CR 205.1a (issue #5213): Arixmethes, Slumbering Isle —
+/// "As long as ~ has a slumber counter on it, it's a land." While it has a
+/// slumber counter it is JUST a land, NOT a land creature. The parser must emit
+/// a core-type *replacement* (`SetCardTypes { core_types: [Land] }`, which
+/// removes Creature at runtime), NOT an additive `AddType { Land }` (which would
+/// keep Creature and yield a land creature). Parsed through the real entry point
+/// (`parse_static_line` → `parse_conditional_static` peels the "as long as"
+/// condition → `parse_pronoun_becomes_type_static`), matching production.
+#[test]
+fn arixmethes_it_is_a_land_replaces_core_types() {
+    let text = "As long as ~ has a slumber counter on it, it's a land.";
+    let def = parse_static_line(text)
+        .unwrap_or_else(|| panic!("Arixmethes land static must parse; text = {text:?}"));
+    let mods = &def.modifications;
+
+    // Reach-guard: the static parsed to a non-empty modification set.
+    assert!(!mods.is_empty(), "expected a non-empty modification set");
+    // The fix: replacement, not additive.
+    assert_eq!(
+        mods,
+        &vec![ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Land],
+        }],
+        "expected SetCardTypes([Land]) (replacement, removes Creature), got {mods:?}"
+    );
+    // Discriminator vs. the pre-fix behavior: no additive AddType survives.
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddType { .. })),
+        "must NOT emit additive AddType for 'it's a land'; got {mods:?}"
+    );
+    assert!(
+        matches!(def.affected, Some(TargetFilter::SelfRef)),
+        "affected must be SelfRef, got {:?}",
+        def.affected
+    );
+}

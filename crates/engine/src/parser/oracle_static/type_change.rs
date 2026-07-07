@@ -1342,10 +1342,11 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // fixed P/T (CR 613.4b), dynamic P/T-by-mana-value, types (CR 613.1d),
     // subtypes (CR 205.3), and keyword tails (CR 613.1g) in one composable pass.
     let body_text = body.original.trim().trim_end_matches('.');
-    let modifications = if let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
-        body_text,
-        &mut ParseContext::default(),
-    ) {
+    let mut modifications = if let Some(spec) =
+        super::oracle_effect::animation::parse_animation_spec(
+            body_text,
+            &mut ParseContext::default(),
+        ) {
         super::oracle_effect::animation::animation_modifications(&spec)
     } else {
         // Fallback: type-token parse + mana-value dynamic P/T. Handles edge
@@ -1364,6 +1365,14 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         }
         mods
     };
+
+    // STEP C.1 — CR 205.1a: "it's a land" replaces the card's core types
+    // (removes Creature). Scoped to Land here; the general planeswalker/creature
+    // replace is deferred (removing Planeswalker exposes the loyalty-gate at
+    // game/planeswalker.rs, a separate fix). Runs on the MERGED modifications so
+    // the bare-"land" FALLBACK branch (which yields `AddType(Land)`) is covered
+    // as well as the spec branch. Any non-[Land] type-change is left additive.
+    convert_bare_land_animation_to_set_card_types(&body, &mut modifications);
 
     if modifications.is_empty() {
         return None;
@@ -1401,6 +1410,69 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         def = def.condition(condition);
     }
     Some(def)
+}
+
+/// CR 205.1a: convert the bare "[pronoun]'s a land" animation to a core-type
+/// *replacement* (`SetCardTypes { core_types: [Land] }`) instead of an additive
+/// `AddType { Land }`. Setting the card type replaces the previous card types
+/// (removing Creature), so an "it's a land" object is JUST a land — never a land
+/// creature (Arixmethes, Slumbering Isle, issue #5213). The runtime layer at
+/// `game/layers.rs` (`SetCardTypes`) already replaces rather than adds.
+///
+/// NARROW BY DESIGN — fires ONLY when the sole type modification is a single
+/// `AddType { Land }` and the descriptor carries no retention / "in addition to"
+/// marker:
+///   - Retention ("... that's still a creature") and additive "in addition to
+///     its other types" (Awakened Skyclave) forms are CR 205.1b — they RETAIN
+///     prior types and must stay additive. Excluded via `split_type_retention_clause`
+///     and the `" in addition to"` guard (mirroring the bare replacement path).
+///   - Any creature/artifact/planeswalker/subtype type-change is left additive
+///     and untouched, so Grand Master of Flowers / Kaito / Gideon / Animate
+///     Artifact keep `AddType` (converting them would remove Planeswalker and
+///     break the loyalty-gate at `game/planeswalker.rs` — a separate follow-up).
+///   - Non-type modifications (P/T, keywords) are preserved.
+fn convert_bare_land_animation_to_set_card_types(
+    body: &TextPair<'_>,
+    modifications: &mut [ContinuousModification],
+) {
+    let descriptor = body.lower.trim().trim_end_matches('.').trim();
+
+    // CR 205.1b retention — "... that's still a [type]" keeps prior types: additive.
+    if split_type_retention_clause(descriptor).is_some() {
+        return;
+    }
+    // CR 205.1b "in addition to its other types" (Awakened Skyclave): additive.
+    if take_until::<_, _, OracleError<'_>>(" in addition to")
+        .parse(descriptor)
+        .is_ok()
+    {
+        return;
+    }
+
+    // The ONLY type modification must be a single `AddType { Land }`. Any other
+    // AddType core type, or any AddSubtype/AddSupertype, disqualifies the shape.
+    let mut land_index = None;
+    for (index, modification) in modifications.iter().enumerate() {
+        match modification {
+            ContinuousModification::AddType {
+                core_type: CoreType::Land,
+            } if land_index.is_none() => land_index = Some(index),
+            ContinuousModification::AddType { .. }
+            | ContinuousModification::AddSubtype { .. }
+            | ContinuousModification::AddSupertype { .. } => return,
+            // Non-type modifications (SetPower/SetToughness, keywords, ...) are
+            // preserved untouched.
+            _ => {}
+        }
+    }
+    let Some(index) = land_index else {
+        return;
+    };
+
+    // CR 205.1a: replace the core card-type set with just Land (removes Creature).
+    modifications[index] = ContinuousModification::SetCardTypes {
+        core_types: vec![CoreType::Land],
+    };
 }
 
 /// CR 205.2 + CR 613.1d + CR 613.4b + CR 611.3a: "Each noncreature <T> [you control]
