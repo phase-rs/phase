@@ -8947,8 +8947,9 @@ fn spell_temporal_whenever_line_builds_delayed_trigger() {
 
 #[test]
 fn enchanted_player_cast_trigger_scopes_caster_to_enchanted_player() {
-    // CR 702.5a + CR 603.2: Maddening Hex — "Whenever enchanted player casts a
-    // noncreature spell, ..." must fire ONLY for the enchanted player's casts.
+    // CR 303.4m + CR 702.5a: Maddening Hex — "Whenever enchanted player casts a
+    // noncreature spell, ..." must fire ONLY for the enchanted player's casts
+    // ("enchanted player" = the Aura's attached player, CR 303.4m).
     // Before the fix the caster filter stayed unset (any player), so the trigger
     // over-fired on every player's noncreature spell (issue #5288). The enchanted
     // player is the Aura's attached player, so the caster scopes to `AttachedTo`.
