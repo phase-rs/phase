@@ -1698,8 +1698,17 @@ export type DebugAction =
 export type YieldScope = "ThisObject" | "AllCopies";
 
 export type YieldTarget =
-  | { ThisObject: { source_id: ObjectId; incarnation: number } }
-  | { AllCopies: { card_id: CardId } };
+  | {
+      ThisObject: {
+        source_id: ObjectId;
+        // `null` for synthetic/delayed triggers that never latched an incarnation.
+        incarnation: number | null;
+        // Absent/`null` = source-level wildcard (legacy/coarse yields); a value
+        // scopes the yield to one of a source's distinct triggers.
+        trigger_description?: string | null;
+      };
+    }
+  | { AllCopies: { card_id: CardId; trigger_description?: string | null } };
 
 export type PriorityYieldOp =
   | { type: "Add"; data: { source_id: ObjectId; scope: YieldScope } }

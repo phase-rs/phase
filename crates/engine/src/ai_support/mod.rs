@@ -4784,6 +4784,7 @@ mod tests {
             PlayerId(0),
             crate::types::game_state::YieldTarget::AllCopies {
                 card_id: CardId(77),
+                trigger_description: None,
             },
         );
         assert!(
