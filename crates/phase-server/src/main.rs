@@ -7299,7 +7299,7 @@ mod p2p_backup_delete_tests {
     use std::sync::Arc;
 
     use axum::http::StatusCode;
-    use axum::routing::{delete, get, post};
+    use axum::routing::{get, post};
     use axum::Router;
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
