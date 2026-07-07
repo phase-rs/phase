@@ -2096,10 +2096,14 @@ mod tests {
         };
 
         assert_eq!(
-            map[&oracle_key("tome-oracle", "Tome Test")].spellbook, spellbook,
+            map[&oracle_key("tome-oracle", "Tome Test")].spellbook,
+            spellbook,
             "12-name spellbook must be harvested from AtomicCards even with no set files"
         );
-        assert_eq!(map[&oracle_key("tome-oracle", "Tome Test")].spellbook.len(), 12);
+        assert_eq!(
+            map[&oracle_key("tome-oracle", "Tome Test")].spellbook.len(),
+            12
+        );
         assert_eq!(
             map[&oracle_key("second-oracle", "Second Source")].spellbook,
             vec!["A".to_string(), "B".to_string()],
