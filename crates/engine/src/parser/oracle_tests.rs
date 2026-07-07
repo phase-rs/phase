@@ -9007,6 +9007,65 @@ fn opponent_cast_trigger_still_scopes_to_opponent_not_attached_to() {
 }
 
 #[test]
+fn super_intelligence_upkeep_scoped_to_enchanted_creature_controller() {
+    // CR 303.4e + CR 109.4 + CR 503.1: Super Intelligence — "At the beginning of
+    // the upkeep of enchanted creature's controller, that player draws a card."
+    // must fire ONLY on the enchanted creature's controller's upkeep, not every
+    // player's. Before the fix the phase trigger had no player scope and behaved
+    // like a Howling Mine for all players (issue #5275).
+    let r = parse(
+        "Enchant creature\n\
+         At the beginning of the upkeep of enchanted creature's controller, that player draws a card.",
+        "Super Intelligence",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    let trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("expected a Phase trigger");
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::ParentTargetController),
+        "upkeep trigger must scope to the enchanted creature's controller: {:?}",
+        trigger.valid_target
+    );
+    // The card's draw effect must still parse (no Unimplemented fallback).
+    let dbg = format!("{:?}", r.triggers);
+    assert!(
+        !dbg.contains("Unimplemented"),
+        "Super Intelligence trigger must fully parse: {dbg}"
+    );
+}
+
+#[test]
+fn each_player_upkeep_phase_trigger_stays_unscoped() {
+    // Regression: a genuine "each player's upkeep" Howling-Mine trigger must keep
+    // firing on every player's upkeep (no valid_target), unaffected by the
+    // enchanted-creature's-controller scoping.
+    let r = parse(
+        "At the beginning of each player's upkeep, that player draws a card.",
+        "Howling Mine Test",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("expected a Phase trigger");
+    assert_eq!(
+        trigger.valid_target, None,
+        "each-player's-upkeep must remain unscoped: {:?}",
+        trigger.valid_target
+    );
+}
+
+#[test]
 fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
     let r = parse(
             "After this main phase, there are two additional combat phases.\nAt the beginning of each combat this turn, untap all creatures that attacked this turn.",
