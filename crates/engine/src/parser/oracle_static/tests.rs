@@ -14731,6 +14731,49 @@ fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
         .contains(&ContinuousModification::SetColor { colors: vec![] }));
 }
 
+// Issue #5213: Arixmethes, Slumbering Isle — "As long as Arixmethes has a slumber
+// counter on it, it's a land." A self-referential "it's a <core type>" static is a
+// type-SETTING effect (CR 205.1a): it must REPLACE the card types (making it a Land
+// only, so Creature is removed → "Legendary Land — Kraken"), not additively AddType
+// Land (which left it a "Legendary Creature Land — Kraken", an impossible land
+// creature). The condition side (slumber counter) already parsed; only the type
+// effect was wrong. Revert-failing: the pre-fix path emits AddType(Land) and this
+// asserts SetCardTypes([Land]) with no AddType.
+#[test]
+fn arixmethes_conditional_is_a_land_replaces_card_types() {
+    use crate::types::card_type::CoreType;
+
+    let def = parse_static_line("As long as ~ has a slumber counter on it, it's a land.")
+        .expect("Arixmethes' conditional type-change static should parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::SelfRef),
+        "the static affects the source permanent itself"
+    );
+    // CR 205.1a: replacing SetCardTypes([Land]) — Creature is dropped.
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Land],
+        }],
+        "\"it's a land\" must REPLACE card types, not additively add Land: {:?}",
+        def.modifications
+    );
+    assert!(
+        !def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddType { .. })),
+        "the additive AddType(Land) is the bug — it left a land creature"
+    );
+    // The "as long as it has a slumber counter" gate must survive as a condition.
+    assert!(
+        def.condition.is_some(),
+        "the slumber-counter condition must be attached: {:?}",
+        def.condition
+    );
+}
+
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land
 // with "{T}: Add {C}" and loses all other card types and abilities." Must become
 // a colorless land (SetCardTypes + SetColor), lose its own abilities

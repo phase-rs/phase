@@ -1369,6 +1369,37 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         return None;
     }
 
+    // CR 205.1a + CR 613.1d (Layer 4): A pure "it's a <core type(s)>" static —
+    // whose body is nothing but card types (no retained P/T, keywords, color, or
+    // subtype change) and carries no "in addition to its other types" / "that's
+    // still a <type>" retention clause — is a type-SETTING effect that REPLACES the
+    // permanent's card types, not an additive animation. Arixmethes, Slumbering
+    // Isle's "it's a land" makes it a LAND (Creature removed → "Legendary Land —
+    // Kraken"), not a land creature. Collapse the additive `AddType` list into one
+    // replacing `SetCardTypes`, mirroring the aura type-change path
+    // (`parse_type_change_static`'s `needs_set_card_types`). The additive animations
+    // (Gideon Blackblade, manlands) are excluded because they carry a P/T, keywords,
+    // or an explicit retention clause — so `modifications` is not all `AddType`, or
+    // the body names a retention clause.
+    let body_lower = body_text.to_lowercase();
+    let pure_core_type_replacement = modifications
+        .iter()
+        .all(|m| matches!(m, ContinuousModification::AddType { .. }))
+        && !body_lower.contains("in addition")
+        && !body_lower.contains("still");
+    let modifications = if pure_core_type_replacement {
+        let core_types = modifications
+            .iter()
+            .filter_map(|m| match m {
+                ContinuousModification::AddType { core_type } => Some(*core_type),
+                _ => None,
+            })
+            .collect();
+        vec![ContinuousModification::SetCardTypes { core_types }]
+    } else {
+        modifications
+    };
+
     // STEP D — attach the condition(s). The leading "during your turn, " timing
     // peel (STEP A.0) and the trailing " as long as <cond>" peel (STEP A) are
     // independent; either, both, or neither may be present.
