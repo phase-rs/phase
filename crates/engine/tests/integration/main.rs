@@ -1,5 +1,6 @@
 mod abigale_integration;
 mod abundance_optional_draw_replacement;
+mod ad_nauseam_repeat;
 mod adapter_contract_fixtures;
 mod advanced_reconstruction_regression;
 mod ajani_nacatl_pariah_transform;
