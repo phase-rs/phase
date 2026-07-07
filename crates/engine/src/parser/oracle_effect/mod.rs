@@ -20519,6 +20519,7 @@ fn is_exile_effect(effect: &Effect) -> bool {
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
     is_exile_effect(effect)
         || is_token_creating_effect(effect)
+        || is_mass_coerce_static(effect)
         || matches!(
             effect,
             Effect::PutCounter { .. }
@@ -20526,6 +20527,49 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
                 | Effect::MultiplyCounter { .. }
                 | Effect::MoveCounters { .. }
         )
+}
+
+/// CR 508.1a + CR 508.1d + CR 608.2c: A mass "attack this turn if able" coercion —
+/// a `GenericEffect` carrying a `MustAttack` (CR 508.1a, attack-if-able) or
+/// `MustAttackPlayer` (CR 508.1d, directed attack) static over a BROADCAST
+/// population (not `SelfRef` and not an inherited-target reference) — identifies
+/// "those creatures" at resolution. When a following "those creatures" clause
+/// reads that frozen population (Maddening Imp), the coerce is the producer that
+/// snapshots it (CR 608.2c: "those creatures" is a frozen reference to the objects
+/// identified when the ability resolved). A `SelfRef`/inherited-target coerce
+/// names a single specific object, not a population, so it does not publish a set.
+fn is_mass_coerce_static(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|static_def| {
+        matches!(
+            static_def.mode,
+            StaticMode::MustAttack | StaticMode::MustAttackPlayer { .. }
+        ) && target
+            .as_ref()
+            .or(static_def.affected.as_ref())
+            .is_some_and(is_broadcast_population_filter)
+    })
+}
+
+/// CR 608.2c: A "broadcast" filter names a population to enumerate at resolution,
+/// as opposed to an inherited-reference filter (`TriggeringSource` / `ParentTarget`
+/// / `CostPaidObject`) or a self-reference (`SelfRef`), which name a single
+/// specific object. Only a broadcast population is snapshotted as "those creatures".
+fn is_broadcast_population_filter(filter: &TargetFilter) -> bool {
+    !matches!(
+        filter,
+        TargetFilter::TriggeringSource
+            | TargetFilter::ParentTarget
+            | TargetFilter::CostPaidObject
+            | TargetFilter::SelfRef
+    )
 }
 
 /// CR 603.7: Detect explicit cross-clause pronouns ("those cards", "the exiled card").

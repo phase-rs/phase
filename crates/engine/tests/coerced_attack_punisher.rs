@@ -231,82 +231,323 @@ fn test5_frame_local_rewrite() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 6 — Maddening Imp "those creatures" is rebound to a concrete
-// ActivePlayer non-Wall filter (not an empty TrackedSet).
-// ---------------------------------------------------------------------------
-#[test]
-fn test6_maddening_those_creatures_concrete() {
-    let p = parse("Maddening Imp", MADDENING_IMP, &["Creature"], &["Imp"]);
-    // Find the activated ability's delayed DestroyAll (inside the sub_ability chain).
+/// Extract the Maddening Imp delayed `DestroyAll` target and the enclosing
+/// `CreateDelayedTrigger.uses_tracked_set` flag from the `{T}` sub_ability chain.
+fn maddening_delayed_destroy(p: &ParsedAbilities) -> (TargetFilter, bool) {
     let activated = p
         .abilities
         .iter()
         .find(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. }))
         .expect("activated ability present");
     let mut node = activated.sub_ability.as_deref();
-    let mut destroy_target = None;
     while let Some(n) = node {
-        if let Effect::CreateDelayedTrigger { effect, .. } = n.effect.as_ref() {
+        if let Effect::CreateDelayedTrigger {
+            effect,
+            uses_tracked_set,
+            ..
+        } = n.effect.as_ref()
+        {
             if let Effect::DestroyAll { target, .. } = effect.effect.as_ref() {
-                destroy_target = Some(target.clone());
+                return (target.clone(), *uses_tracked_set);
             }
         }
         node = n.sub_ability.as_deref();
     }
-    let target = destroy_target.expect("delayed DestroyAll present");
-    // Revert-failing: without Step 6 the target is an empty TrackedSet (destroys nothing).
-    assert!(
-        !matches!(target, TargetFilter::TrackedSet { .. }),
-        "must be rebound from TrackedSet to a concrete filter"
-    );
-    let mut ctrls = Vec::new();
-    typed_controllers(&target, &mut ctrls);
-    assert_eq!(ctrls, vec![Some(ControllerRef::ActivePlayer)]);
-    let props = typed_props(&target);
-    assert!(props.iter().any(|p| matches!(
-        p,
-        FilterProp::Not { prop } if matches!(prop.as_ref(), FilterProp::AttackedThisTurn { defender: None })
-    )));
-    // Non-Wall constraint present.
-    let is_non_wall = match &target {
-        TargetFilter::Typed(tf) => tf.type_filters.iter().any(|t| {
-            matches!(t, TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Wall"))
-        }),
-        _ => false,
-    };
-    assert!(is_non_wall, "non-Wall constraint must be present");
+    panic!("delayed DestroyAll present");
 }
 
 // ---------------------------------------------------------------------------
-// Test 6b — Documented deviation (direction 1, late-arrival over-inclusion): a
-// creature entering the active player's control AFTER the ability would resolve
-// is STILL matched by the live refilter (proves it is live, not a frozen set).
+// Test 6 — Maddening Imp "each of those creatures that didn't attack this turn"
+// parses to a FROZEN tracked-set consumer: DestroyAll{TrackedSetFiltered{id:0,
+// Not(AttackedThisTurn)}} with uses_tracked_set == true. The sentinel is still
+// `TrackedSetId(0)` at parse time (it is pinned to a concrete id only at
+// delayed-trigger CREATION, Step 0), so this asserts the id-0 sentinel here.
 // ---------------------------------------------------------------------------
 #[test]
-fn test6b_live_refilter_late_arrival() {
-    let mut sc = GameScenario::new_n_player(3, 3);
-    // A late-arriving non-Wall creature under the active player's control that
-    // did not attack — the frozen "those creatures" set would NOT include it.
-    let late = sc.add_creature(PlayerId(1), "Late Bear", 2, 2).id();
-    let mut runner = sc.build();
-    runner.state_mut().active_player = PlayerId(1);
-    let state = runner.state();
-    // The concrete filter Step 6 produces.
-    let filter = TargetFilter::Typed(
-        TypedFilter::creature()
-            .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                "Wall".into(),
-            ))))
-            .controller(ControllerRef::ActivePlayer)
-            .properties(vec![FilterProp::Not {
-                prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
-            }]),
+fn test6_maddening_those_creatures_tracked_set() {
+    use engine::types::identifiers::TrackedSetId;
+    let p = parse("Maddening Imp", MADDENING_IMP, &["Creature"], &["Imp"]);
+    let (target, uses_tracked_set) = maddening_delayed_destroy(&p);
+
+    // Revert-failing (Step 1): without the mass-coerce publisher gate the
+    // CreateDelayedTrigger is not marked uses_tracked_set.
+    assert!(
+        uses_tracked_set,
+        "the delayed trigger must consume the frozen tracked set (uses_tracked_set)"
     );
-    let ctx = FilterContext::from_source_with_controller(ObjectId(999), PlayerId(0));
-    // Live refilter DOES match the late arrival (documented over-inclusion,
-    // CR 608.2c deviation direction 1).
-    assert!(matches_target_filter(state, late, &filter, &ctx));
+
+    // Revert-failing (Step 2): the target must be a TrackedSetFiltered over the
+    // frozen population, NOT a bare TrackedSet (which would drop the predicate)
+    // and NOT a concrete live-refilter Typed.
+    let TargetFilter::TrackedSetFiltered { id, filter, .. } = &target else {
+        panic!("expected TrackedSetFiltered, got {target:?}");
+    };
+    assert_eq!(
+        *id,
+        TrackedSetId(0),
+        "parse-time sentinel is id 0; the concrete id is pinned at creation (Step 0)"
+    );
+    // The inner filter carries the did-not-attack predicate.
+    let props = typed_props(filter);
+    assert!(
+        props.iter().any(|p| matches!(
+            p,
+            FilterProp::Not { prop } if matches!(prop.as_ref(), FilterProp::AttackedThisTurn { defender: None })
+        )),
+        "inner filter must carry Not(AttackedThisTurn), got {props:?}"
+    );
+}
+
+/// Resolve Maddening Imp's `{T}` coerce + delayed-punisher chain through the
+/// production resolver, controlled by the non-active caster P1 with a source Imp
+/// on P1's board. Publishes the frozen "those creatures" set (the mass-MustAttack
+/// coerce over P0's board) and creates the delayed `DestroyAll{TrackedSetFiltered}`
+/// whose sentinel is pinned to that set's concrete id at creation (Step 0). The
+/// coerce's continuous MustAttack static is then evaluated into layers. Returns
+/// the source ObjectId.
+fn resolve_maddening_coerce(runner: &mut engine::game::scenario::GameRunner) -> ObjectId {
+    use engine::game::ability_utils::build_resolved_from_def;
+    use engine::game::effects::resolve_ability_chain;
+
+    let source = {
+        // A source object on the non-active caster P1's board.
+        let src = engine::game::zones::create_object(
+            runner.state_mut(),
+            engine::types::identifiers::CardId(4242),
+            P1,
+            "Maddening Imp (source)".to_string(),
+            Zone::Battlefield,
+        );
+        src
+    };
+
+    let parsed = parse("Maddening Imp", MADDENING_IMP, &["Creature"], &["Imp"]);
+    let coerce = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. }))
+        .expect("Maddening coerce ability present");
+    let resolved = build_resolved_from_def(coerce, source, P1);
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
+        .expect("Maddening coerce chain must resolve");
+    // The coerce is a continuous MustAttack static; evaluate layers so combat and
+    // the "attacked this turn" tracking read it live.
+    runner.state_mut().layers_dirty.mark_full();
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    source
+}
+
+// ---------------------------------------------------------------------------
+// Test 6b — FROZEN snapshot (CR 608.2c direction 1, late-arrival): a non-Wall
+// creature entering the active player's control AFTER the {T} coerce resolved is
+// NOT in the frozen "those creatures" set and must survive the end-step punisher,
+// while a frozen member that did not attack IS destroyed (positive reach-guard).
+// Revert-failing: the old live refilter would destroy the late arrival too.
+// ---------------------------------------------------------------------------
+#[test]
+fn test6b_frozen_late_arrival_survives() {
+    let mut sc = GameScenario::new_n_player(3, 3);
+    // P0 (active) old non-Wall non-attacker Y (controlled since turn began → in
+    // the frozen set, not spared by any continuity exemption in Maddening).
+    let y = sc.add_creature(P0, "P0 Idler Y", 2, 2).id();
+    sc.at_phase(Phase::PreCombatMain);
+    let mut runner = sc.build();
+    assert_eq!(runner.state().active_player, P0);
+
+    // Resolve the {T} coerce → publish frozen set {Y} + create the delayed
+    // DestroyAll (sentinel pinned to that set's id).
+    let _source = resolve_maddening_coerce(&mut runner);
+
+    // AFTER {T} resolves, a NEW non-Wall creature Late enters P0's control and
+    // will not attack — never a member of the frozen set. It must be a real
+    // Creature so the inner `Not(AttackedThisTurn)` ∧ Creature filter genuinely
+    // matches it — otherwise its survival would be a vacuous type mismatch, not a
+    // frozen-membership result.
+    let late = {
+        let id = engine::game::zones::create_object(
+            runner.state_mut(),
+            engine::types::identifiers::CardId(7777),
+            P0,
+            "Late Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+        obj.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.summoning_sick = false;
+        id
+    };
+
+    // Both are non-Wall creatures the active player controls, so the continuous
+    // MustAttack forces both. Tap them so they are legally UNABLE to attack
+    // (CR 508.1a "if able"): with no creature able to attack, the declare-attackers
+    // step auto-resolves and the turn advances to the end step where the delayed
+    // punisher fires. Neither creature attacked this turn.
+    runner.state_mut().objects.get_mut(&y).unwrap().tapped = true;
+    runner.state_mut().objects.get_mut(&late).unwrap().tapped = true;
+
+    runner.advance_to_phase(Phase::End);
+    runner.advance_until_stack_empty();
+
+    // Positive reach-guard: the frozen member Y (did not attack) is destroyed.
+    assert_eq!(
+        runner.state().objects[&y].zone,
+        Zone::Graveyard,
+        "frozen member Y that did not attack must be destroyed"
+    );
+    // Frozen semantics: the late arrival was never in the set → spared.
+    assert_eq!(
+        runner.state().objects[&late].zone,
+        Zone::Battlefield,
+        "a creature that entered after the coerce resolved is NOT in the frozen set"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 6c — FROZEN snapshot (CR 608.2c direction 2, control-change-out): a member
+// of the frozen set that changed controller (but kept its ObjectId, i.e. did not
+// leave the battlefield) is STILL destroyed if it did not attack — it is still
+// "those creatures". Paired positive: a frozen member that DID attack survives.
+// Revert-failing: the old controller:ActivePlayer live filter spared W.
+// ---------------------------------------------------------------------------
+#[test]
+fn test6c_frozen_control_change_out_still_destroyed() {
+    let mut sc = GameScenario::new_n_player(3, 4);
+    // P0 (active) frozen members: W (will change controller, did not attack) and
+    // A (will attack, spared).
+    let w = sc.add_creature(P0, "P0 W", 2, 2).id();
+    let a = sc.add_creature(P0, "P0 Attacker A", 2, 2).id();
+    sc.at_phase(Phase::PreCombatMain);
+    let mut runner = sc.build();
+
+    resolve_maddening_coerce(&mut runner);
+
+    // W sits out: tap it so it is legally UNABLE to attack (CR 508.1a). A attacks.
+    runner.state_mut().objects.get_mut(&w).unwrap().tapped = true;
+    runner.advance_to_combat();
+    assert_eq!(runner.state().phase, Phase::DeclareAttackers);
+    runner
+        .declare_attackers(&[(a, AttackTarget::Player(P1))])
+        .expect("declaring A as an attacker must be accepted");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ) {
+        let _ = runner.declare_blockers(&[]);
+    }
+    let _ = runner.combat_damage();
+
+    // AFTER combat, W changes controller to P2 but stays on the battlefield with
+    // the SAME ObjectId — it is still a member of the frozen set (CR 603.7c).
+    runner.state_mut().objects.get_mut(&w).unwrap().controller = P1;
+
+    runner.advance_to_phase(Phase::End);
+    runner.advance_until_stack_empty();
+
+    // The control-change-out member W (did not attack) is STILL destroyed.
+    assert_eq!(
+        runner.state().objects[&w].zone,
+        Zone::Graveyard,
+        "a frozen member that changed controller but kept its ObjectId is still destroyed"
+    );
+    // Paired positive: the frozen member that attacked survives.
+    assert_eq!(
+        runner.state().objects[&a].zone,
+        Zone::Battlefield,
+        "a frozen member that attacked is spared"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 6d — BLOCKER 1: cross-resolution second-set collision. A SECOND, higher-id
+// tracked set is published between the {T} resolution and the end step. Because
+// Step 0 pins the delayed DestroyAll's sentinel to the coerce set's concrete id
+// at CREATION, the punisher destroys its OWN frozen population — not the members
+// of the later, higher-id set. Revert-failing on Step 0: without the pin, the
+// end-step `matches_target_filter` self-resolves sentinel 0 via `max_by_key` and
+// picks the SECOND set, so Q (in the second set) is destroyed and Y is spared.
+// ---------------------------------------------------------------------------
+#[test]
+fn test6d_frozen_survives_second_tracked_set() {
+    use engine::types::identifiers::TrackedSetId;
+
+    let mut sc = GameScenario::new_n_player(3, 5);
+    // P0 (active) frozen members: Y (did not attack → destroyed) + X (attacks →
+    // spared).
+    let y = sc.add_creature(P0, "P0 Idler Y", 2, 2).id();
+    let x = sc.add_creature(P0, "P0 Attacker X", 2, 2).id();
+    // P2 bystander Q — will be the SOLE member of a later, unrelated tracked set.
+    // Non-Wall and did NOT attack, so if the wrong (second) set were consumed it
+    // would be destroyed.
+    let q = sc.add_creature(PlayerId(2), "P2 Bystander Q", 2, 2).id();
+    sc.at_phase(Phase::PreCombatMain);
+    let mut runner = sc.build();
+
+    resolve_maddening_coerce(&mut runner);
+
+    // AFTER {T} resolves, publish a SECOND, higher-id tracked set whose only
+    // member is Q. `publish_fresh_tracked_set` is pub(crate) (not reachable from
+    // this integration crate), so use the documented direct-insert escape hatch:
+    // allocate an id strictly higher than any existing set so `latest_tracked_set_id`'s
+    // `max_by_key` would return it if the sentinel were self-resolved live.
+    {
+        let st = runner.state_mut();
+        let high = st.next_tracked_set_id.max(
+            st.tracked_object_sets
+                .keys()
+                .map(|id| id.0)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        st.tracked_object_sets.insert(TrackedSetId(high), vec![q]);
+        st.next_tracked_set_id = high + 1;
+    }
+
+    // X attacks (satisfies coerce, spared); Y sits out — tap it so it is legally
+    // unable to attack (CR 508.1a), letting declare-attackers pass with only X.
+    runner.state_mut().objects.get_mut(&y).unwrap().tapped = true;
+    runner.advance_to_combat();
+    assert_eq!(runner.state().phase, Phase::DeclareAttackers);
+    runner
+        .declare_attackers(&[(x, AttackTarget::Player(P1))])
+        .expect("declaring X as an attacker must be accepted");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ) {
+        let _ = runner.declare_blockers(&[]);
+    }
+    let _ = runner.combat_damage();
+
+    runner.advance_to_phase(Phase::End);
+    runner.advance_until_stack_empty();
+
+    // Positive reach-guard: Maddening's OWN frozen non-attacker Y is destroyed
+    // (the pinned set k is consumed — proves the punisher fired against the right
+    // population, so the Q-survives assertion below cannot pass vacuously).
+    assert_eq!(
+        runner.state().objects[&y].zone,
+        Zone::Graveyard,
+        "the pinned coerce set's non-attacker Y must be destroyed"
+    );
+    // X attacked → spared.
+    assert_eq!(
+        runner.state().objects[&x].zone,
+        Zone::Battlefield,
+        "the frozen member that attacked is spared"
+    );
+    // The collision guard: Q belongs only to the SECOND set, not Maddening's
+    // frozen population → NOT destroyed. Reverting Step 0 flips this (max_by_key
+    // picks the second set → Q destroyed, Y spared).
+    assert_eq!(
+        runner.state().objects[&q].zone,
+        Zone::Battlefield,
+        "a member of a later, unrelated tracked set must NOT be swept by the pinned punisher"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -563,30 +804,20 @@ fn test_past_tense_active_player_controlled_parses() {
 
 // ===========================================================================
 // TEST A — Siren's Call mass-MustAttack + delayed-DestroyAll driven through the
-// REAL resolution + combat + end-step pipeline, 3-player (multiplayer
+// REAL `GameRunner::cast(..).resolve()` front door, 3-player (multiplayer
 // discrimination).
 //
-// This drives the coerce and the delayed punisher through the production
-// resolver (`resolve_ability_chain`) and then advances real combat + the end
-// step, rather than a parse-shape or hand-built-filter check. Both parsed
-// abilities come from the FULL-card `parse_oracle_text` (so they carry the
-// Step-3/5/7 rewrites: coerce → ActivePlayer, DestroyAll → ActivePlayer, and the
-// consumed continuity exemption). The spell's *controller* is the non-active
-// caster P1 (owner of the resolving instant), while the ACTIVE player is P0 — so
-// an `ActivePlayer` binding resolves to P0's board and a `You` binding would
-// wrongly resolve to P1's (empty) board. That asymmetry is the multiplayer
-// discriminator.
-//
-// NOTE on why this uses the resolver rather than `cast().resolve()`: Siren's Call
-// parses to casting restrictions [DuringOpponentsTurn, BeforeAttackersDeclared].
-// `DuringOpponentsTurn` requires the caster != active player; `BeforeAttackers
-// Declared` (via `is_before_attackers_declared`) requires the priority *seat* ==
-// active player. In the current engine model these are mutually exclusive for any
-// correctly-attributed non-active cast, so the front-door `cast()` is not
-// reachable for this card class. The coerce-application + delayed-DestroyAll
-// runtime — the behavior the review flagged as uncovered — is exercised here
-// through the same production resolver a real cast would invoke on resolution.
-// (See the stop-and-return note in the fix-round report.)
+// PR1 (merged) made `is_before_attackers_declared` a pure PHASE check
+// (restrictions.rs — `PreCombatMain | BeginCombat`, NOT priority-gated), so a
+// non-active caster holding priority during the active player's PreCombatMain
+// satisfies BOTH `Not(IsYourTurn)` (caster P1 != active P0) and
+// `BeforeAttackersDeclared`. The former mutual-exclusion NOTE was stale and is
+// deleted; this test now casts through the production cast pipeline. The card
+// comes from `add_spell_to_hand_from_oracle` (real parsed abilities, carrying the
+// coerce → ActivePlayer + DestroyAll continuity-exemption rewrites). The caster
+// is the non-active P1; the ACTIVE player is P0 — so an `ActivePlayer` binding
+// resolves to P0's board and a `You` binding would wrongly resolve to P1's
+// (empty) board. That asymmetry is the multiplayer discriminator.
 //
 // Revert-failing:
 //   * If the coerce controller binding reverts from ActivePlayer to You, the mass
@@ -599,10 +830,7 @@ fn test_past_tense_active_player_controlled_parses() {
 //     Y-destroyed / Z-survives assertions fail.
 // ===========================================================================
 #[test]
-fn test_a_sirens_call_runtime_pipeline_multiplayer_discrimination() {
-    use engine::game::ability_utils::build_resolved_from_def;
-    use engine::game::effects::resolve_ability_chain;
-
+fn test_a_sirens_call_cast_pipeline_multiplayer_discrimination() {
     let mut sc = GameScenario::new_n_player(3, 7);
 
     // P0 (the active player) controls two non-Wall creatures, both present since
@@ -615,43 +843,39 @@ fn test_a_sirens_call_runtime_pipeline_multiplayer_discrimination() {
     // player's board is punished, so Z must survive.
     let z = sc.add_creature(PlayerId(2), "P2 Bystander Z", 2, 2).id();
 
-    // The resolving spell is owned/controlled by the non-active caster P1. Its
-    // ObjectId is the resolution source; the coerce/punisher's ActivePlayer
-    // binding must ignore this controller and resolve to P0.
-    let source = sc.add_creature(P1, "Siren's Call (source)", 0, 0).id();
+    // Siren's Call in the non-active caster P1's hand, with real parsed abilities.
+    // Untargeted instant, no explicit mana cost from the builder → free to cast.
+    let sirens_call = sc
+        .add_spell_to_hand_from_oracle(P1, "Siren's Call", true, SIRENS_CALL)
+        .id();
 
-    // P0's turn, pre-combat (default active_player is P0). `at_phase` sets phase +
-    // priority + turn_number consistently so `advance_to_phase` drives cleanly.
+    // P0's turn, pre-combat main. `at_phase` seats priority with the active player;
+    // move priority to the non-active caster P1 (the realistic instant-speed
+    // window before attackers are declared).
     sc.at_phase(Phase::PreCombatMain);
     let mut runner = sc.build();
     assert_eq!(runner.state().active_player, P0);
-
-    // Parse the FULL card (carries the Step-3/5/7 rewrites) and resolve BOTH of
-    // its abilities through the production resolver, controlled by P1.
-    let parsed = parse("Siren's Call", SIRENS_CALL, &["Instant"], &[]);
-    assert_eq!(
-        parsed.abilities.len(),
-        2,
-        "Siren's Call resolves as the coerce ability + the delayed-punisher ability"
-    );
-    let mut events = Vec::new();
-    for ability_def in &parsed.abilities {
-        let resolved = build_resolved_from_def(ability_def, source, P1);
-        resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
-            .expect("Siren's Call ability must resolve");
+    {
+        let st = runner.state_mut();
+        st.priority_player = P1;
+        st.waiting_for = WaitingFor::Priority { player: P1 };
     }
-    // The coerce is a continuous MustAttack static; evaluate layers so the
-    // transient effect is live before combat reads it.
+
+    // Cast + resolve Siren's Call through the real front door.
+    runner.cast(sirens_call).resolve();
+
+    // The coerce is a continuous MustAttack static; evaluate layers so combat reads
+    // it live before declare-attackers.
     runner.state_mut().layers_dirty.mark_full();
     engine::game::layers::evaluate_layers(runner.state_mut());
 
     // Reach-guard (revert-failing on the ActivePlayer binding): the active
     // player's creature IS forced to attack. If the coerce bound `You`, this
-    // would be false because the controller P1 controls no creatures here.
+    // would be false because the caster P1 controls no creatures here.
     assert!(
         creature_must_attack(runner.state(), x),
         "the active player's creature must be forced to attack (mass MustAttack \
-         bound to ActivePlayer, not the controller You)"
+         bound to ActivePlayer, not the caster You)"
     );
     assert!(
         creature_must_attack(runner.state(), y),

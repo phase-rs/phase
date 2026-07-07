@@ -2414,83 +2414,16 @@ fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
             }
         }
 
-        // Maddening Imp route: the coerce (`effect`) and the delayed
-        // DestroyAll{TrackedSet(0)} punisher (in the `{T}` sub_ability chain) are
-        // in the SAME activated ability. Frame-local: only when THIS ability is
-        // itself the ActivePlayer coerce. Rebind the dangling `TrackedSet(0)`
-        // (no producer — MustAttack publishes nothing) to the concrete
-        // active-player non-Wall creature filter with the didn't-attack clause.
-        if let Some(mut punisher_target) = coerce_affected_filter(ability) {
-            // CR 608.2c: "those creatures" = the population the coerce clause
-            // named. Derive the punisher filter from the coerce's own `affected`
-            // filter — carrying the card's ACTUAL subtype restriction (non-Wall
-            // for Maddening Imp; whatever a future coerce card specifies) — plus
-            // the "didn't attack this turn" clause, rather than hardcoding a
-            // subtype. This keeps the class composable (build for the class, not
-            // the card).
-            add_filter_prop_to_typed(
-                &mut punisher_target,
-                FilterProp::Not {
-                    prop: Box::new(FilterProp::AttackedThisTurn { defender: None }),
-                },
-            );
-            let mut sub = ability.sub_ability.as_deref_mut();
-            while let Some(node) = sub {
-                if let Effect::CreateDelayedTrigger { effect, .. } = node.effect.as_mut() {
-                    if let Effect::DestroyAll { target, .. } = effect.effect.as_mut() {
-                        if matches!(target, TargetFilter::TrackedSet { .. }) {
-                            *target = punisher_target.clone();
-                        }
-                    }
-                }
-                sub = node.sub_ability.as_deref_mut();
-            }
-        }
+        // CR 608.2c: Maddening Imp's "each of those creatures that didn't attack
+        // this turn" is now a FROZEN tracked-set snapshot — the mass-MustAttack
+        // coerce publishes the population it named at resolution
+        // (`is_mass_coerce_static` → `publish_tracked_set_with_causes`) and the
+        // delayed `DestroyAll{TrackedSetFiltered{0, Not(AttackedThisTurn)}}`
+        // consumes it (sentinel pinned to the concrete id at delayed-trigger
+        // creation by `bind_tracked_set_to_effect`). No card-assembly rewrite is
+        // needed here for Maddening Imp; the former live-refilter route (and its
+        // `coerce_affected_filter` helper) was superseded and removed.
     }
-}
-
-/// The coerce clause's affected population — the `MustAttack` static's `affected`
-/// filter over the `ActivePlayer` subject. This is exactly the population that
-/// "those creatures" (Maddening Imp) names (CR 608.2c), carrying the card's own
-/// subtype restriction (non-Wall for Maddening Imp, whatever a future coerce card
-/// specifies) rather than a hardcoded one. Returned owned so the caller can add
-/// the "didn't attack this turn" clause and rebind the dangling `TrackedSet(0)`.
-///
-/// The rebound punisher filter is live-refiltered at end step — a DOCUMENTED
-/// DEVIATION from CR 608.2c frozen-population semantics (there is no forced-attack
-/// snapshot producer, so `TrackedSet(0)` would be empty and destroy nothing).
-/// Three divergence directions from a frozen "those creatures" set (see
-/// Identity/Provenance Route 3):
-///   1. Late-arrival over-inclusion: a matching creature that entered the active
-///      player's control AFTER the `{T}` ability resolved is destroyed here but
-///      was never in "those creatures".
-///   2. Control-change-out under-inclusion: a creature that WAS the active
-///      player's when `{T}` resolved but changed controller before end step is in
-///      the frozen set but spared by this `controller:ActivePlayer` filter.
-///   3. Left-and-re-entered re-capture (CR 400.7 / 603.7c): a creature that left
-///      and re-entered is a new object; the frozen set would not affect it, but
-///      this live filter re-captures it if it currently matches.
-///
-/// If a `MustAttack`-population snapshot producer is later built for the class,
-/// the caller's rebind is the single swap site.
-fn coerce_affected_filter(ability: &AbilityDefinition) -> Option<TargetFilter> {
-    let Effect::GenericEffect {
-        static_abilities, ..
-    } = ability.effect.as_ref()
-    else {
-        return None;
-    };
-    static_abilities
-        .iter()
-        .find(|st| {
-            matches!(st.mode, StaticMode::MustAttack)
-                && st
-                    .affected
-                    .as_ref()
-                    .and_then(crate::parser::oracle_effect::target_filter_controller_ref)
-                    == Some(ControllerRef::ActivePlayer)
-        })
-        .and_then(|st| st.affected.clone())
 }
 
 /// CR 302.6 + CR 508.1a: Recognize Siren's Call's continuous-control exemption
