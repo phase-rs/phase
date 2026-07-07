@@ -6637,6 +6637,60 @@ fn suffer_the_past_exiles_from_target_player_graveyard() {
 }
 
 #[test]
+fn relic_of_progenitus_target_player_exiles_from_their_graveyard() {
+    // GitHub phase-rs/phase#1077: "target player [verb]s ... from their
+    // [zone]" is a different grammatical shape than Suffer the Past's direct
+    // "target player's graveyard" possessive above — here "target player" is
+    // the sentence's subject and "their" is an anaphoric backreference to it,
+    // routed through `inject_subject_target`'s `Effect::ChangeZone` arm
+    // rather than parsed inline. The zone-suffix parser treats "their" as
+    // scope-agnostic (`Owned { controller: ScopedPlayer }`); this test pins
+    // that the subject-injection rebind resolves it to the actual targeted
+    // player, not the activator. Same class also covers Scrabbling Claws,
+    // Merrow Bonegnawer, Graveyard Shovel, Grave Birthing, and Gravestorm.
+    let def = parse_effect_chain(
+        "Target player exiles a card from their graveyard.",
+        AbilityKind::Activated,
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected ChangeZone exile, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *origin,
+        Some(Zone::Graveyard),
+        "must exile from graveyard, not an open-zone pick"
+    );
+    assert_eq!(*destination, Zone::Exile);
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected typed card target, got {target:?}");
+    };
+    assert!(
+        typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "target must be constrained to graveyard, got {typed:?}"
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::TargetPlayer
+        }),
+        "target must be constrained to the TARGETED player's graveyard, not the activator's — got {typed:?}"
+    );
+    assert!(
+        !typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::ScopedPlayer
+        }),
+        "must not retain the stale scope-agnostic ScopedPlayer binding, got {typed:?}"
+    );
+}
+
+#[test]
 fn effect_exile_target_opponent_graveyard_is_change_zone_all() {
     // CR 400.12: "exile target opponent's graveyard" — same class.
     let e = parse_effect("exile target opponent's graveyard");

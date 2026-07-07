@@ -6668,7 +6668,9 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
         // emits one) from `ScopedPlayer` to `ChosenPlayer { index }` so the
         // chosen opponent's graveyard is enumerated at resolution time
         // (CR 608.2d — the chosen opponent announces which card returns).
-        Effect::Bounce { target, .. } => rebind_owned_scope(target, index),
+        Effect::Bounce { target, .. } => {
+            rebind_owned_scope(target, ControllerRef::ChosenPlayer { index })
+        }
         _ => {}
     }
 }
@@ -6681,27 +6683,27 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
 /// `parse_subject_application`'s caller, because graveyard ownership lives
 /// in a filter property, not a top-level player slot (cards in non-stack /
 /// non-battlefield zones are owned, not controlled).
-fn rebind_owned_scope(filter: &mut TargetFilter, index: u8) {
+fn rebind_owned_scope(filter: &mut TargetFilter, to: ControllerRef) {
     use crate::types::ability::FilterProp;
     match filter {
         TargetFilter::Typed(tf) => {
             if matches!(tf.controller, Some(ControllerRef::ScopedPlayer)) {
-                tf.controller = Some(ControllerRef::ChosenPlayer { index });
+                tf.controller = Some(to.clone());
             }
             for prop in tf.properties.iter_mut() {
                 if let FilterProp::Owned { controller } = prop {
                     if matches!(controller, ControllerRef::ScopedPlayer) {
-                        *controller = ControllerRef::ChosenPlayer { index };
+                        *controller = to.clone();
                     }
                 }
             }
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             for f in filters.iter_mut() {
-                rebind_owned_scope(f, index);
+                rebind_owned_scope(f, to.clone());
             }
         }
-        TargetFilter::Not { filter } => rebind_owned_scope(filter, index),
+        TargetFilter::Not { filter } => rebind_owned_scope(filter, to),
         _ => {}
     }
 }
@@ -16765,7 +16767,7 @@ fn lower_subject_predicate_ast(
             if let TargetFilter::Typed(tf) = &subject.affected {
                 if let Some(ControllerRef::ChosenPlayer { index }) = tf.controller {
                     if let Effect::Bounce { target, .. } = &mut clause.effect {
-                        rebind_owned_scope(target, index);
+                        rebind_owned_scope(target, ControllerRef::ChosenPlayer { index });
                     }
                 }
             }
@@ -17834,6 +17836,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // mis-routed to the controller. Stamp the subject's controller onto the
         // filter (mirroring the `Sacrifice` arm) so the card is taken from, and
         // the choice presented to, the acting (per-iteration) player.
+        //
+        // CR 109.4 + CR 608.2c (issue #1077): "target player exiles a card
+        // from their graveyard" (Relic of Progenitus, Scrabbling Claws, Merrow
+        // Bonegnawer, Graveyard Shovel, Grave Birthing, Gravestorm). The
+        // possessive "their" in the predicate parses as `FilterProp::Owned {
+        // controller: ScopedPlayer }` because the zone-suffix parser is
+        // scope-agnostic (see `rebind_owned_scope`'s doc comment above). For a
+        // genuinely *targeted* subject that stale `ScopedPlayer` property
+        // survives `force_controller` untouched (it only rewrites
+        // `tf.controller`, not nested `properties`), leaving two contradictory
+        // ownership constraints — `controller: TargetPlayer` vs. `Owned:
+        // ScopedPlayer` (which falls back to the activator) — so the filter is
+        // only ever satisfiable when the activator targets themself. Rebind
+        // the nested `ScopedPlayer` refs the same way the `Bounce`/Skullwinder
+        // call site already does; this is a no-op when `effective_ctrl` is
+        // itself `ScopedPlayer` (the untargeted "each player"/Braids case),
+        // so that already-correct path is unaffected.
         Effect::ChangeZone { target, .. }
             if player_filter_as_controller_ref(&subject_filter).is_some() =>
         {
@@ -17843,7 +17862,8 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                 } else {
                     ctrl
                 };
-                force_controller(target, effective_ctrl);
+                force_controller(target, effective_ctrl.clone());
+                rebind_owned_scope(target, effective_ctrl);
             }
         }
         // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "<player> gains
