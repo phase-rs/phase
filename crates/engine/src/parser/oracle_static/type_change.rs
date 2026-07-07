@@ -1387,7 +1387,7 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // other than yours, ~ is an artifact creature") GAINS the creature type while
     // retaining its other card types — it must stay additive (`AddType`). So the
     // replacement is restricted to type-sets that do NOT add Creature; only a
-    // non-creature type-set like "it's a land" (CR 205.1a / CR 305.7) replaces.
+    // non-creature type-set like "it's a land" (CR 205.1a) replaces.
     // The additive animations (Gideon Blackblade, manlands) are also excluded
     // because they carry a P/T, keywords, or an explicit retention clause — so
     // `modifications` is not all `AddType`, or the body names a retention clause.
