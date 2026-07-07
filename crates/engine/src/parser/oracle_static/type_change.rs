@@ -2036,14 +2036,8 @@ pub(crate) fn parse_compound_all_subjects_type_replacement(
     let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
 
     let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
-    let predicate_lower = predicate.to_lowercase();
-    if !nom_primitives::scan_contains(&predicate_lower, "creature") {
-        return None;
-    }
     // CR 205.1b: additive predicates are owned by the additive compound handler.
-    if nom_primitives::scan_contains(&predicate_lower, "in addition to their other")
-        || nom_primitives::scan_contains(&predicate_lower, "in addition to its other")
-    {
+    if super::oracle_effect::animation::has_in_addition_to_other_types(predicate) {
         return None;
     }
 
@@ -2053,7 +2047,16 @@ pub(crate) fn parse_compound_all_subjects_type_replacement(
     )?;
     let modifications =
         super::oracle_effect::animation::animation_modifications_with_replacement(&spec, false);
-    if modifications.is_empty() {
+    if modifications.is_empty()
+        || !modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )
+        })
+    {
         return None;
     }
 
