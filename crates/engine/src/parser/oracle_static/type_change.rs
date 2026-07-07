@@ -825,6 +825,100 @@ fn core_type_subtype_set(
     }
 }
 
+/// Typed result of [`parse_lignify_sentence`] — the decomposed grammar axes of a
+/// Lignify-class aura line, before they are mapped to `ContinuousModification`s.
+struct LignifyParse<'a> {
+    /// The enchanted permanent's type (the affected object). Always a creature in
+    /// practice (base P/T only applies to creatures), but carried generically.
+    perm_tf: TypeFilter,
+    /// `true` when the copula was preceded by "loses all abilities and" (the
+    /// prefix-order ability wipe, CR 613.1f).
+    loses_abilities_prefix: bool,
+    /// Optional leading color word (Frogify's "blue"), CR 613.1e.
+    color: Option<crate::types::mana::ManaColor>,
+    /// The granted creature subtype word(s) (`Treefolk`, `Wall`, …), canonicalized.
+    subtypes: Vec<String>,
+    /// Base power / toughness (CR 613.4b).
+    power: i32,
+    toughness: i32,
+    /// Everything after the "N/N" token — the free-form trailing clause (e.g.
+    /// "and loses all abilities" / "in addition to its other types"), handed to
+    /// `parse_continuous_modifications` and scanned for the additive marker.
+    trailing: &'a str,
+}
+
+/// nom combinator: one creature subtype word. Delegates to the shared
+/// `parse_type_filter_word` and accepts ONLY a `TypeFilter::Subtype` — a core
+/// card-type word (creature/artifact/enchantment/land/planeswalker) fails here,
+/// which is what makes the Lignify handler decline "Insect artifact creature"
+/// phrases and leave them to `parse_enchanted_is_type`.
+fn parse_creature_subtype_word(input: &str) -> OracleResult<'_, String> {
+    let (rest, tf) = nom_target::parse_type_filter_word(input)?;
+    match tf {
+        TypeFilter::Subtype(sub) => Ok((rest, sub)),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
+}
+
+/// nom combinator: an unsigned base power/toughness pair, e.g. "0/4" (CR 613.4b).
+/// Uses `parse_number_or_x` (X→0 per the P/T convention) rather than
+/// `parse_pt_modifier`, which requires a signed `+`/`-` and would reject a base
+/// value.
+fn parse_base_pt(input: &str) -> OracleResult<'_, (i32, i32)> {
+    let (input, power) = nom_primitives::parse_number_or_x(input)?;
+    let (input, _) = nom::character::complete::char('/').parse(input)?;
+    let (input, toughness) = nom_primitives::parse_number_or_x(input)?;
+    Ok((input, (power as i32, toughness as i32)))
+}
+
+/// nom sentence combinator for the Lignify class. Operates on the already
+/// lowercased line and composes existing atomic combinators along independent
+/// axes:
+///
+/// ```text
+/// "enchanted " <subject type> ("loses all abilities and ")? ("is a "|"is an ")
+///     <color>? <creature subtype>+ "with base power and toughness " <P>/<T> <rest>
+/// ```
+///
+/// It declines (nom error) the moment a core card-type word appears where a
+/// creature subtype is expected — see [`parse_creature_subtype_word`].
+fn parse_lignify_sentence(input: &str) -> OracleResult<'_, LignifyParse<'_>> {
+    use nom::character::complete::{multispace0, multispace1};
+
+    let (input, _) = tag("enchanted ").parse(input)?;
+    let (input, perm_tf) = nom_target::parse_type_filter_word(input)?;
+    let (input, _) = multispace0.parse(input)?;
+    // CR 613.1f (Layer 6): optional prefix-order ability wipe.
+    let (input, loses_prefix) = opt(tag("loses all abilities and ")).parse(input)?;
+    let (input, _) = alt((tag("is a "), tag("is an "))).parse(input)?;
+    // CR 613.1e (Layer 5): optional leading color.
+    let (input, color) = opt(terminated(nom_primitives::parse_color, multispace1)).parse(input)?;
+    // CR 205.1a (Layer 4): one or more granted creature subtypes (core types decline).
+    let (input, subtypes) =
+        nom::multi::many1(terminated(parse_creature_subtype_word, multispace0)).parse(input)?;
+    // The base-P/T seam is what distinguishes this class from a bare
+    // color/subtype-only "is a [subtype]" aura owned elsewhere.
+    let (input, _) = tag("with base power and toughness ").parse(input)?;
+    let (input, (power, toughness)) = parse_base_pt.parse(input)?;
+    let (trailing, _) = multispace0.parse(input)?;
+
+    Ok((
+        "",
+        LignifyParse {
+            perm_tf,
+            loses_abilities_prefix: loses_prefix.is_some(),
+            color,
+            subtypes,
+            power,
+            toughness,
+            trailing,
+        },
+    ))
+}
+
 /// CR 205.1a + CR 613.1d (Layer 4) + CR 613.4b (Layer 7b): Parse a Lignify-class
 /// type-changing aura whose granted phrase names ONLY a creature subtype (no core
 /// card-type word) followed by a base-P/T seam:
@@ -837,7 +931,9 @@ fn core_type_subtype_set(
 /// grammar names only a creature subtype (`Treefolk`, `Wall`, `Frog`, …) its
 /// `granted_core_types` list stays empty and it returns `None`, so this shape
 /// strict-fails to `Unimplemented` even though the runtime already supports every
-/// emitted modification. This handler owns that uncovered sibling.
+/// emitted modification. This handler owns that uncovered sibling. The grammar is
+/// parsed entirely by [`parse_lignify_sentence`]; this wrapper only maps the typed
+/// axes to `ContinuousModification`s in written (mod-index) order.
 ///
 /// CR 205.1a is the load-bearing distinction from the general handler: "when an
 /// effect sets one or more of an object's subtypes, the new subtype(s) replaces
@@ -853,118 +949,47 @@ fn core_type_subtype_set(
 /// the Oracle text. This is the intentional deviation from issue #5300's proposed
 /// `SetCardTypes{Creature}`.
 ///
-/// A core-type word anywhere in the granted phrase (`Insect artifact creature`)
-/// makes this decline so `parse_enchanted_is_type` keeps ownership. Optional
-/// leading color (`blue Frog`) maps to Layer-5 `SetColor` (CR 613.1e); "loses all
-/// abilities" in either written position maps to Layer-6 `RemoveAllAbilities`
-/// (CR 613.1f). Must dispatch before `parse_enchanted_is_type`.
+/// Must dispatch before `parse_enchanted_is_type`.
 pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
     use crate::types::card_type::SubtypeSet;
 
-    type VE<'a> = OracleError<'a>;
-
-    // "enchanted <subject-type> " — the enchanted permanent is the affected object.
-    let rest_tp = nom_tag_tp(tp, "enchanted ")?;
-    let (after_type, perm_tf) = nom_target::parse_type_filter_word(rest_tp.lower).ok()?;
-    let after_type_lower = after_type.trim_start();
-
-    let mut modifications: Vec<ContinuousModification> = Vec::new();
-
-    // Leading "loses all abilities and is a[n]" (prefix order) or plain "is a[n]".
-    // CR 613.1f (Layer 6): the prefix "loses all abilities" is ability removal.
-    let is_rest_lower = if let Ok((r, _)) = alt((
-        tag::<_, _, VE>("loses all abilities and is a "),
-        tag::<_, _, VE>("loses all abilities and is an "),
-    ))
-    .parse(after_type_lower)
-    {
-        modifications.push(ContinuousModification::RemoveAllAbilities);
-        r
-    } else if let Ok((r, _)) =
-        alt((tag::<_, _, VE>("is a "), tag::<_, _, VE>("is an "))).parse(after_type_lower)
-    {
-        r
-    } else {
-        return None;
-    };
-
-    let is_rest_lower = is_rest_lower.trim_end_matches('.').trim();
+    let (_, parsed) = parse_lignify_sentence(tp.lower).ok()?;
+    let LignifyParse {
+        perm_tf,
+        loses_abilities_prefix,
+        color,
+        subtypes,
+        power,
+        toughness,
+        trailing,
+    } = parsed;
 
     // CR 205.1b: "in addition to its other types" retains prior subtypes (additive);
     // its absence means CR 205.1a applies and the new creature subtype replaces the
-    // existing ones.
-    let (type_part, is_additive) =
-        match is_rest_lower.strip_suffix(" in addition to its other types") {
-            Some(before) => (before.trim(), true),
-            None => (is_rest_lower, false),
-        };
+    // existing ones. The marker rides the trailing clause, after the base P/T.
+    let is_additive = nom_primitives::scan_contains(trailing, "in addition to its other types");
 
-    // The base-P/T seam is REQUIRED for this class — it is what distinguishes a
-    // Lignify aura from a bare color/subtype-only "is a [subtype]" aura owned
-    // elsewhere. Its absence declines.
-    let (type_part, pt_part) = type_part.split_once(" with base power and toughness ")?;
-    let pt_part = pt_part.trim_start();
-    let (base_p, base_t) = parse_pt_mod(pt_part)?;
+    let mut modifications: Vec<ContinuousModification> = Vec::new();
 
-    // Capture any trailing clause after the "N/N" token (e.g. "and loses all
-    // abilities") so it is not dropped — fed to `parse_continuous_modifications`
-    // below, exactly as `parse_enchanted_is_type` treats its own remainder.
-    let slash_pos = pt_part.find('/')?;
-    let after_slash = &pt_part[slash_pos + 1..];
-    let t_end = after_slash
-        .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-        .unwrap_or(after_slash.len());
-    let trailing_clause = after_slash[t_end..].trim().trim_end_matches('.').trim();
-
-    let mut type_part = type_part.trim();
-
-    // Optional leading color (Frogify: "is a blue Frog …").
-    // CR 613.1e (Layer 5): a set color replaces prior colors (non-additive);
-    // "in addition" makes it additive.
-    let opt_color = match nom_primitives::parse_color(type_part) {
-        Ok((rest, color)) => {
-            type_part = rest.trim();
-            Some(color)
-        }
-        Err(_) => None,
-    };
-
-    // The remaining phrase must be creature subtype(s) ONLY. A core card-type word
-    // (creature/artifact/enchantment/land/planeswalker) disqualifies this class so
-    // `parse_enchanted_is_type` keeps ownership of "Insect artifact creature"-style
-    // phrases. Any unrecognized leftover also declines (never over-claim).
-    let mut granted_subtypes: Vec<String> = Vec::new();
-    let mut scan = type_part;
-    while !scan.is_empty() {
-        let (rest, tf) = nom_target::parse_type_filter_word(scan).ok()?;
-        match tf {
-            TypeFilter::Subtype(sub) => granted_subtypes.push(sub),
-            _ => return None,
-        }
-        scan = rest.trim_start();
-    }
-    if granted_subtypes.is_empty() {
-        return None;
+    // CR 613.1f (Layer 6): prefix-order "loses all abilities".
+    if loses_abilities_prefix {
+        modifications.push(ContinuousModification::RemoveAllAbilities);
     }
 
     // Trailing-clause modifications (e.g. "and loses all abilities" → Layer-6
-    // RemoveAllAbilities). Dedup against mods already emitted from the prefix so a
-    // card can't yield two RemoveAllAbilities.
-    let clause_mods: Vec<ContinuousModification> = if trailing_clause.is_empty() {
-        Vec::new()
-    } else {
-        parse_continuous_modifications(trailing_clause)
-            .into_iter()
-            .filter(|m| !modifications.contains(m))
-            .collect()
-    };
+    // RemoveAllAbilities, "and has flying" → AddKeyword). Dedup against mods
+    // already emitted from the prefix so a card can't yield two RemoveAllAbilities.
+    let clause_mods: Vec<ContinuousModification> = parse_continuous_modifications(trailing)
+        .into_iter()
+        .filter(|m| !modifications.contains(m))
+        .collect();
 
     // --- Assemble modifications in written (mod_index) order ---
     // CR 613.1e (Layer 5): color replacement / additive grant.
-    if let Some(color) = opt_color {
+    if let Some(color) = color {
         if is_additive {
             modifications.push(ContinuousModification::AddColor { color });
         } else {
@@ -975,8 +1000,8 @@ pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
     }
 
     // CR 613.4b (Layer 7b): base power and toughness.
-    modifications.push(ContinuousModification::SetPower { value: base_p });
-    modifications.push(ContinuousModification::SetToughness { value: base_t });
+    modifications.push(ContinuousModification::SetPower { value: power });
+    modifications.push(ContinuousModification::SetToughness { value: toughness });
 
     // CR 205.1a (Layer 4): setting a creature subtype replaces the object's
     // existing creature subtypes. Inject the wipe only when non-additive, and only
@@ -998,7 +1023,7 @@ pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
     modifications.extend(clause_mods);
 
     // CR 205.1a (Layer 4): grant the new creature subtype(s) after the wipe.
-    for sub in granted_subtypes {
+    for sub in subtypes {
         modifications.push(ContinuousModification::AddSubtype { subtype: sub });
     }
 
