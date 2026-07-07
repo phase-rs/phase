@@ -1609,6 +1609,41 @@ mod tests {
     }
 
     #[test]
+    fn where_x_token_pt_covers_cards_exiled_this_way_aggregate() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty, TrackedAnaphorSource};
+
+        let txt = "Create an X/X blue Zombie creature token, where X is the total power of the cards exiled this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Stitcher Geralf token effect");
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: TrackedAnaphorSource::ChainSet,
+            },
+        });
+        assert_eq!(name, "Zombie");
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Zombie"),
+            "types must include Creature and Zombie, got {types:?}"
+        );
+        assert_eq!(colors, vec![ManaColor::Blue]);
+        assert_eq!(power, expected_pt.clone());
+        assert_eq!(toughness, expected_pt);
+    }
+
+    #[test]
     fn occult_epiphany_token_counts_distinct_types_of_discarded() {
         // Occult Epiphany #3307: the token count must be DISTINCT CARD TYPES
         // among the DISCARDED chain members (cause-filtered), NOT TrackedSetSize.

@@ -1040,6 +1040,10 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
     if let Ok((anaphor_rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("those exiled cards"),
         tag("the exiled cards"),
+        tag("the cards exiled this way"),
+        tag("cards exiled this way"),
+        tag("the card exiled this way"),
+        tag("card exiled this way"),
     ))
     .parse(rest)
     {
@@ -4742,6 +4746,34 @@ mod tests {
                 filter,
             } => assert_eq!(filter, linked_exile_owned_filter()),
             other => panic!("expected craft-material power aggregate, got {other:?}"),
+        }
+    }
+
+    /// CR 609.3 + CR 208.1: "the total power of the cards exiled this way"
+    /// reads the most recent chain tracked set (Stitcher Geralf), not the
+    /// linked-exile craft pool.
+    #[test]
+    fn parse_total_power_of_cards_exiled_this_way_is_tracked_set_aggregate() {
+        use crate::types::ability::TrackedAnaphorSource;
+
+        for phrase in [
+            "the total power of the cards exiled this way",
+            "the total power of cards exiled this way",
+            "the total power of the card exiled this way",
+            "the total power of card exiled this way",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|e| panic!("tracked-set phrase {phrase:?} should parse: {e:?}"));
+            assert_eq!(rest, "", "tracked-set phrase {phrase:?} must fully consume");
+            assert_eq!(
+                q,
+                QuantityRef::TrackedSetAggregate {
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                    source: TrackedAnaphorSource::ChainSet,
+                },
+                "phrase {phrase:?}"
+            );
         }
     }
 
