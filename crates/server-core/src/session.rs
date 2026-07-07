@@ -595,6 +595,7 @@ impl GameSession {
         PersistedSession {
             game_code: self.game_code.clone(),
             state: self.state.clone(),
+            pending_cast_sacrifice_rollbacks: self.state.pending_cast_sacrifice_rollbacks.clone(),
             player_tokens: self.player_tokens.clone(),
             display_names: self.display_names.clone(),
             timer_seconds: self.timer_seconds,
@@ -619,6 +620,7 @@ impl GameSession {
         let mut state = ps.state;
 
         // Restore #[serde(skip)] fields
+        state.pending_cast_sacrifice_rollbacks = ps.pending_cast_sacrifice_rollbacks;
         state.all_card_names = db.card_names().into();
         state.log_player_names = ps.display_names.clone();
         rehydrate_game_from_card_db(&mut state, db);

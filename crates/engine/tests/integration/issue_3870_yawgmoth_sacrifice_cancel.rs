@@ -3,6 +3,7 @@
 //!
 //! https://github.com/phase-rs/phase/issues/3870
 
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, StaticDefinition, TargetFilter,
@@ -491,5 +492,114 @@ fn yawgmoth_cancel_after_prevented_sacrifice_does_not_duplicate_battlefield() {
     assert_eq!(
         battlefield_dupes, 1,
         "cancel rollback must not duplicate battlefield zone-list entries for same-zone snapshots"
+    );
+}
+
+#[test]
+fn yawgmoth_cancel_restores_attached_equipment_host_graph() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let yawgmoth = scenario
+        .add_creature_from_oracle(P0, "Yawgmoth, Thran Physician", 2, 4, YAWGMOTH_ORACLE)
+        .id();
+    let host = scenario.add_creature(P0, "Equipped Host", 2, 2).id();
+    let equipment = scenario
+        .add_creature(P0, "Test Equipment", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let host_obj = runner.state_mut().objects.get_mut(&host).unwrap();
+        host_obj.attachments.push(equipment);
+        let equip_obj = runner.state_mut().objects.get_mut(&equipment).unwrap();
+        equip_obj.attached_to = Some(AttachTarget::Object(host));
+    }
+
+    let ability_index = yawgmoth_sacrifice_ability_index(&runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: yawgmoth,
+            ability_index,
+        })
+        .expect("begin Yawgmoth activation");
+    runner
+        .act(GameAction::SelectCards { cards: vec![host] })
+        .expect("sacrifice equipped host creature for cost");
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancel after sacrificing equipped host");
+
+    let host_obj = &runner.state().objects[&host];
+    let equip_obj = &runner.state().objects[&equipment];
+    assert_eq!(host_obj.zone, Zone::Battlefield, "host must be restored");
+    assert_eq!(
+        equip_obj.zone,
+        Zone::Battlefield,
+        "equipment must stay on battlefield"
+    );
+    assert_eq!(
+        equip_obj.attached_to,
+        Some(AttachTarget::Object(host)),
+        "cancel must restore the equipment's attached_to pointer"
+    );
+    assert!(
+        host_obj.attachments.contains(&equipment),
+        "cancel must restore the host's attachments list"
+    );
+}
+
+#[test]
+fn yawgmoth_cancel_restore_survives_persisted_session_roundtrip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let yawgmoth = scenario
+        .add_creature_from_oracle(P0, "Yawgmoth, Thran Physician", 2, 4, YAWGMOTH_ORACLE)
+        .id();
+    let fodder = scenario.add_creature(P0, "Persist Fodder", 1, 1).id();
+
+    let mut runner = scenario.build();
+    let ability_index = yawgmoth_sacrifice_ability_index(&runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: yawgmoth,
+            ability_index,
+        })
+        .expect("begin Yawgmoth activation");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .expect("sacrifice fodder for cost");
+
+    let rollbacks = runner.state().pending_cast_sacrifice_rollbacks.clone();
+    let pending_cast = runner.state().pending_cast.clone();
+    assert!(
+        rollbacks.contains_key(&yawgmoth),
+        "precondition: sacrifice rollback must be recorded before cancel"
+    );
+
+    // Simulate `PersistedSession` serde: `GameState` drops skipped rollbacks, the
+    // server sidecar restores them on resume.
+    let json = serde_json::to_string(runner.state()).expect("serialize paused state");
+    let mut restored: engine::types::game_state::GameState =
+        serde_json::from_str(&json).expect("deserialize paused state");
+    assert!(
+        restored.pending_cast_sacrifice_rollbacks.is_empty(),
+        "GameState serde must not expose rollback snapshots to clients"
+    );
+    restored.pending_cast_sacrifice_rollbacks = rollbacks;
+    restored.pending_cast = pending_cast;
+    *runner.state_mut() = restored;
+
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancel after persist boundary");
+
+    assert_eq!(
+        runner.state().objects[&fodder].zone,
+        Zone::Battlefield,
+        "cancel must restore sacrificed permanent after persist round-trip"
     );
 }

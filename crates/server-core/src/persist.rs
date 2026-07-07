@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, PendingCastSacrificeRollback};
+use engine::types::identifiers::ObjectId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,11 @@ use crate::protocol::DraftLobbyMetadata;
 pub struct PersistedSession {
     pub game_code: String,
     pub state: GameState,
+    /// CR 601.2i + CR 733.1: Server-authoritative sacrifice rollback snapshots
+    /// for in-flight casts. Kept outside `GameState` serde so hidden permanent
+    /// identity cannot leak through client-facing state views (CR 400.2).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub pending_cast_sacrifice_rollbacks: HashMap<ObjectId, PendingCastSacrificeRollback>,
     pub player_tokens: Vec<String>,
     pub display_names: Vec<String>,
     pub timer_seconds: Option<u32>,

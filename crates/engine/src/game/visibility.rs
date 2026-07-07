@@ -851,6 +851,16 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // (object_id, card_id, ability, cost) — the card's identity is already visible via
     // the stack object.
 
+    // CR 400.2: Pre-payment sacrifice rollback snapshots carry hidden permanent
+    // identity and must not leak to non-controllers through filtered state.
+    if state
+        .pending_cast
+        .as_ref()
+        .is_none_or(|pending| pending.ability.controller != viewer)
+    {
+        filtered.pending_cast_sacrifice_rollbacks.clear();
+    }
+
     for pool in &mut filtered.deck_pools {
         if pool.player != viewer {
             // Per-seat redaction: replace the Arc'd decks with fresh empties.

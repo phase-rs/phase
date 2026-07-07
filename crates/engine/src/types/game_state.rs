@@ -1953,8 +1953,8 @@ impl ActivationResidual {
 /// CR 601.2i + CR 733.1: In-flight sacrifice rollback for a pending cast.
 /// Stored on `GameState` rather than inside serializable `PendingCast` so
 /// pre-payment snapshots of face-down permanents are not exposed to non-controllers
-/// (CR 400.2).
-#[derive(Debug, Clone)]
+/// (CR 400.2). Persisted server-side via `PersistedSession::pending_cast_sacrifice_rollbacks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingCastSacrificeRollback {
     pub snapshots: Vec<GameObject>,
     pub deferred_trigger_floor: usize,

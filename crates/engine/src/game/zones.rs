@@ -527,6 +527,8 @@ pub fn restore_object_for_cancel(state: &mut GameState, snapshot: GameObject) {
     let object_id = snapshot.id;
     let owner = snapshot.owner;
     let target_zone = snapshot.zone;
+    let attached_to = snapshot.attached_to;
+    let child_attachments = snapshot.attachments.clone();
 
     if let Some(current) = state.objects.get(&object_id) {
         remove_from_zone(state, object_id, current.zone, owner);
@@ -534,6 +536,50 @@ pub fn restore_object_for_cancel(state: &mut GameState, snapshot: GameObject) {
 
     state.objects.insert(object_id, snapshot);
     add_to_zone(state, object_id, target_zone, owner);
+    restore_attachment_graph_edges(state, object_id, attached_to, &child_attachments);
+}
+
+/// CR 303.4: Replay attachment graph edges severed during the sacrificed
+/// permanent's zone exit so cancel rollback restores host `attachments` lists
+/// and attachment `attached_to` pointers consistently.
+fn restore_attachment_graph_edges(
+    state: &mut GameState,
+    object_id: ObjectId,
+    attached_to: Option<crate::game::game_object::AttachTarget>,
+    child_attachments: &[ObjectId],
+) {
+    let mut graph_changed = false;
+
+    if let Some(host_id) = attached_to.and_then(|target| target.as_object()) {
+        if let Some(host) = state.objects.get_mut(&host_id) {
+            if host.zone == Zone::Battlefield && !host.attachments.contains(&object_id) {
+                host.attachments.push(object_id);
+                graph_changed = true;
+            }
+        }
+    }
+
+    for &child_id in child_attachments {
+        if let Some(child) = state.objects.get_mut(&child_id) {
+            if child.zone == Zone::Battlefield
+                && child.attached_to
+                    != Some(crate::game::game_object::AttachTarget::Object(object_id))
+            {
+                child.attached_to = Some(crate::game::game_object::AttachTarget::Object(object_id));
+                graph_changed = true;
+            }
+        }
+        if let Some(host) = state.objects.get_mut(&object_id) {
+            if !host.attachments.contains(&child_id) {
+                host.attachments.push(child_id);
+                graph_changed = true;
+            }
+        }
+    }
+
+    if graph_changed {
+        crate::game::layers::mark_layers_full(state);
+    }
 }
 
 /// CR 700.11: A player has "descended this turn" when a permanent card has
