@@ -1011,3 +1011,71 @@ fn granted_equip_keyword_offers_functional_equip_ability() {
         equip.1.cost
     );
 }
+
+/// CR 202.3: Bludgeon Brawl's granted anthem "Equipped creature gets +X/+0, where
+/// X is that artifact's mana value" binds X to the *Equipment's* mana value, not
+/// the equipped creature's. The parser lowers this to `AddDynamicPower {
+/// SelfManaValue }`; this test proves the layer system resolves `SelfManaValue`
+/// against the granting Equipment (the static's source), so a mana-value-3
+/// Equipment boosts a 2/2 to 5/2.
+#[test]
+fn granted_equip_anthem_self_mana_value_reads_equipment_mana_value() {
+    use crate::types::ability::{
+        ContinuousModification, FilterProp, QuantityExpr, QuantityRef, StaticDefinition,
+        TargetFilter, TypedFilter,
+    };
+    use crate::types::mana::ManaCost;
+
+    let mut state = setup_main_phase();
+    // An Equipment with mana value 3.
+    let gear = create_object(
+        &mut state,
+        CardId(1600),
+        PlayerId(0),
+        "Test Gear".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        };
+    }
+    // A 2/2 creature, with the Equipment attached to it.
+    let bear = make_creature(&mut state, "Bear", 2);
+    state.objects.get_mut(&gear).unwrap().attached_to = Some(bear.into());
+
+    // Granted anthem on the Equipment: "Equipped creature gets +X/+0" where X is
+    // the Equipment's own mana value.
+    let anthem = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+        ))
+        .modifications(vec![ContinuousModification::AddDynamicPower {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::SelfManaValue,
+            },
+        }]);
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.static_definitions.push(anthem.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(anthem);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // Power boosted by the EQUIPMENT's mana value (3): 2 + 3 = 5; +X/+0 leaves T.
+    let creature = state.objects.get(&bear).unwrap();
+    assert_eq!(
+        creature.power,
+        Some(5),
+        "granted anthem X must read the Equipment's mana value (2 + 3)"
+    );
+    assert_eq!(
+        creature.toughness,
+        Some(2),
+        "+X/+0 must leave toughness unchanged"
+    );
+}
