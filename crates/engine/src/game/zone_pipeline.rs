@@ -806,6 +806,7 @@ pub(crate) fn move_object(
         req.mods.face_down_profile.as_ref(),
         track_exiled_by_source,
         None,
+        None,
         events,
     )
 }
@@ -1963,6 +1964,7 @@ pub(crate) fn execute_zone_move(
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
@@ -2017,6 +2019,16 @@ pub(crate) fn execute_zone_move(
         } = proposed
         {
             *fdp = Some(Box::new(profile.clone()));
+        }
+    }
+
+    if let Some(attach_to) = enter_attached_to {
+        if let ProposedEvent::ZoneChange {
+            attach_to: ref mut at,
+            ..
+        } = proposed
+        {
+            *at = Some(attach_to);
         }
     }
 

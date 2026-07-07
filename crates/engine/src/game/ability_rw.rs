@@ -2165,6 +2165,9 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
+        // CR 102.1: the active player is a game-defined role read live, not a
+        // frozen event-context tag.
+        | ControllerRef::ActivePlayer
         | ControllerRef::EnchantedPlayer => false,
     }
 }
@@ -2328,6 +2331,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -2476,6 +2480,9 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         // no-ordering-input target gate (the target player is a declared target,
         // member-invariant under uniformity, not per-source storage).
         | ControllerRef::TargetOpponent
+        // CR 102.1: the active player is a game-defined role read live from
+        // `state.active_player`, not per-source member-bound storage.
+        | ControllerRef::ActivePlayer
         | ControllerRef::DefendingPlayer => false,
     }
 }
@@ -2569,6 +2576,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -6170,6 +6178,9 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
         // no sibling-mutable state).
         | ControllerRef::TargetOpponent
         | ControllerRef::DefendingPlayer
+        // CR 102.1: a live read of `state.active_player` — no sibling-mutable
+        // state, empty RW profile (mirrors `DefendingPlayer`).
+        | ControllerRef::ActivePlayer
         // resolution-local (ResolvedAbility.chosen_players)
         | ControllerRef::ChosenPlayer { .. } => RwProfile::empty(),
     }

@@ -1516,6 +1516,16 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 611.3 + CR 613.1 + CR 613.4b: "All <X> and all <Y> are <predicate>" —
+    // a compound-subject animation where one predicate applies to every object
+    // matching either subject (Life and Limb). Must precede parse_land_animation
+    // (which splits on "are" and would claim only the first subject with an
+    // incomplete predicate); the " and all " conjunction + Or-subject guard keep
+    // single-subject animation lines falling through to parse_land_animation.
+    if let Some(def) = parse_compound_all_subjects_type_change(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
     // lands" — continuous land animation (Living Plane, Nature's Revolt). Must
     // come before parse_land_type_change: both split on "are", but the land

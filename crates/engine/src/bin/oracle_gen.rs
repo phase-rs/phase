@@ -5,7 +5,9 @@ use std::process;
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
-use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
+use engine::database::mtgjson::{
+    load_atomic_cards, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
+};
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
 use engine::database::synthesis::{
@@ -446,16 +448,65 @@ struct TokenSourceMetadata {
     spellbook: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TokenSourceMetadataKey {
+    Oracle {
+        oracle_id: String,
+        face_name: String,
+    },
+    Name {
+        card_name: String,
+        face_name: String,
+    },
+}
+
+impl TokenSourceMetadataKey {
+    fn from_set_card(card: &SetCard) -> Self {
+        let face_name = normalized_source_face_name(&card.name, card.face_name.as_deref());
+        if let Some(oracle_id) = card.identifiers.scryfall_oracle_id.as_deref() {
+            Self::Oracle {
+                oracle_id: oracle_id.to_string(),
+                face_name,
+            }
+        } else {
+            Self::Name {
+                card_name: card.name.to_lowercase(),
+                face_name,
+            }
+        }
+    }
+
+    fn candidates_for_atomic(source: &AtomicCard) -> Vec<Self> {
+        let face_name = normalized_source_face_name(&source.name, source.face_name.as_deref());
+        let mut candidates = Vec::new();
+        if let Some(oracle_id) = source.identifiers.scryfall_oracle_id.as_deref() {
+            candidates.push(Self::Oracle {
+                oracle_id: oracle_id.to_string(),
+                face_name: face_name.clone(),
+            });
+        }
+        candidates.push(Self::Name {
+            card_name: source.name.to_lowercase(),
+            face_name,
+        });
+        candidates
+    }
+}
+
+fn normalized_source_face_name(card_name: &str, face_name: Option<&str>) -> String {
+    face_name.unwrap_or(card_name).to_lowercase()
+}
+
 fn build_token_source_metadata(
     mtgjson_path: &std::path::Path,
     atomic: &engine::database::mtgjson::AtomicCardsFile,
-) -> HashMap<String, TokenSourceMetadata> {
+) -> HashMap<TokenSourceMetadataKey, TokenSourceMetadata> {
     let sets_dir = mtgjson_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("sets");
 
-    let mut map: HashMap<String, TokenSourceMetadata> = HashMap::new();
+    let mut map: HashMap<TokenSourceMetadataKey, TokenSourceMetadata> = HashMap::new();
 
     // Per-set token/spellbook metadata requires local set files, so guard the
     // set loop on the directory. It must NOT early-return the whole function —
@@ -476,7 +527,7 @@ fn build_token_source_metadata(
 
 fn merge_set_token_metadata(
     sets_dir: &std::path::Path,
-    map: &mut HashMap<String, TokenSourceMetadata>,
+    map: &mut HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
 ) {
     let entries = match std::fs::read_dir(sets_dir) {
         Ok(entries) => entries,
@@ -501,11 +552,7 @@ fn merge_set_token_metadata(
             {
                 continue;
             }
-            let key = card
-                .face_name
-                .as_deref()
-                .unwrap_or(&card.name)
-                .to_lowercase();
+            let key = TokenSourceMetadataKey::from_set_card(&card);
             let entry = map.entry(key).or_default();
             entry.related_token_ids.extend(card.related_cards.tokens);
             // Alchemy spellbook: keep the first non-empty list seen for the face.
@@ -534,7 +581,7 @@ fn merge_set_token_metadata(
 /// list wins" guard matches the set-file loop so a set-file spellbook, if any,
 /// is not clobbered.
 fn merge_atomic_spellbooks(
-    map: &mut HashMap<String, TokenSourceMetadata>,
+    map: &mut HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
     atomic: &engine::database::mtgjson::AtomicCardsFile,
 ) {
     for faces in atomic.data.values() {
@@ -542,11 +589,13 @@ fn merge_atomic_spellbooks(
             if card.related_cards.spellbook.is_empty() {
                 continue;
             }
-            let key = card
-                .face_name
-                .as_deref()
-                .unwrap_or(&card.name)
-                .to_lowercase();
+            // Mirror the set-file loop's key derivation (oracle id when present,
+            // else card name; qualified by face name) so an atomic-sourced spellbook
+            // merges into the same entry a set file would populate.
+            let key = TokenSourceMetadataKey::candidates_for_atomic(card)
+                .into_iter()
+                .next()
+                .expect("candidates_for_atomic always yields at least the Name key");
             let entry = map.entry(key).or_default();
             if entry.spellbook.is_empty() {
                 entry.spellbook = card.related_cards.spellbook.clone();
@@ -555,8 +604,15 @@ fn merge_atomic_spellbooks(
     }
 }
 
-fn stamp_token_source_metadata(face: &mut CardFace, map: &HashMap<String, TokenSourceMetadata>) {
-    if let Some(metadata) = map.get(&face.name.to_lowercase()) {
+fn stamp_token_source_metadata(
+    face: &mut CardFace,
+    source: &AtomicCard,
+    map: &HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
+) {
+    if let Some(metadata) = TokenSourceMetadataKey::candidates_for_atomic(source)
+        .iter()
+        .find_map(|key| map.get(key))
+    {
         face.metadata.related_token_ids = metadata.related_token_ids.iter().cloned().collect();
         face.metadata.source_printing_ids = metadata.source_printing_ids.iter().cloned().collect();
         face.metadata.spellbook = metadata.spellbook.clone();
@@ -827,7 +883,7 @@ fn main() {
                 if let Some(ref fi) = forge_index {
                     engine::database::forge::apply_forge_fallback(&mut face, fi);
                 }
-                stamp_token_source_metadata(&mut face, &token_source_metadata);
+                stamp_token_source_metadata(&mut face, source, &token_source_metadata);
                 let key = face.name.to_lowercase();
                 let legalities =
                     legalities_to_export_map(&normalize_legalities(&source.legalities));
@@ -890,7 +946,7 @@ fn main() {
                 if let Some(ref fi) = forge_index {
                     engine::database::forge::apply_forge_fallback(&mut face, fi);
                 }
-                stamp_token_source_metadata(&mut face, &token_source_metadata);
+                stamp_token_source_metadata(&mut face, source, &token_source_metadata);
                 let layout_str = match layout_kind {
                     LayoutKind::Single => None,
                     _ => Some(faces[0].layout.clone()),
@@ -932,7 +988,7 @@ fn main() {
             if let Some(ref fi) = forge_index {
                 engine::database::forge::apply_forge_fallback(&mut face, fi);
             }
-            stamp_token_source_metadata(&mut face, &token_source_metadata);
+            stamp_token_source_metadata(&mut face, &faces[0], &token_source_metadata);
             let key = face.name.to_lowercase();
             let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 
@@ -1581,7 +1637,8 @@ mod tests {
     use std::sync::OnceLock;
 
     use engine::database::mtgjson::{
-        load_atomic_cards, AtomicCard, AtomicCardsFile, AtomicIdentifiers, SetRelatedCards,
+        load_atomic_cards, AtomicCard, AtomicCardsFile, AtomicIdentifiers, SetIdentifiers,
+        SetRelatedCards,
     };
     use engine::types::ability::TargetFilter;
     use engine::types::card::CardFace;
@@ -1650,6 +1707,31 @@ mod tests {
         }
     }
 
+    fn set_card_with_metadata(
+        name: &str,
+        face_name: Option<&str>,
+        oracle_id: Option<&str>,
+        printing_id: Option<&str>,
+        tokens: &[&str],
+        spellbook: &[&str],
+    ) -> SetCard {
+        SetCard {
+            uuid: format!("{name}-uuid"),
+            name: name.to_string(),
+            face_name: face_name.map(str::to_string),
+            rarity: "rare".to_string(),
+            identifiers: SetIdentifiers {
+                scryfall_id: printing_id.map(str::to_string),
+                scryfall_oracle_id: oracle_id.map(str::to_string),
+            },
+            related_cards: SetRelatedCards {
+                tokens: tokens.iter().map(|token| token.to_string()).collect(),
+                reverse_related: Vec::new(),
+                spellbook: spellbook.iter().map(|card| card.to_string()).collect(),
+            },
+        }
+    }
+
     #[test]
     fn is_homonym_atomic_group_detects_distinct_single_faced_oracle_ids() {
         let faces = vec![
@@ -1691,6 +1773,94 @@ mod tests {
             atomic_single("Shared Name", Some("same-oracle")),
         ];
         assert!(!is_homonym_atomic_group(&faces));
+    }
+
+    #[test]
+    fn token_source_metadata_preserves_spellbook_and_printing_ids() {
+        let set_card = set_card_with_metadata(
+            "Spellbook Source",
+            None,
+            Some("spellbook-oracle"),
+            Some("spellbook-printing"),
+            &["token-id"],
+            &["Draft Pick"],
+        );
+        let mut map = HashMap::new();
+        let mut metadata = TokenSourceMetadata::default();
+        metadata
+            .related_token_ids
+            .extend(set_card.related_cards.tokens.clone());
+        metadata
+            .source_printing_ids
+            .insert(set_card.identifiers.scryfall_id.clone().unwrap());
+        metadata.spellbook = set_card.related_cards.spellbook.clone();
+        map.insert(TokenSourceMetadataKey::from_set_card(&set_card), metadata);
+
+        let source = atomic_single("Spellbook Source", Some("spellbook-oracle"));
+        let mut face = CardFace {
+            name: "Spellbook Source".to_string(),
+            scryfall_oracle_id: Some("spellbook-oracle".to_string()),
+            ..Default::default()
+        };
+        stamp_token_source_metadata(&mut face, &source, &map);
+
+        assert_eq!(
+            face.metadata.related_token_ids,
+            vec!["token-id".to_string()]
+        );
+        assert_eq!(
+            face.metadata.source_printing_ids,
+            vec!["spellbook-printing".to_string()]
+        );
+        assert_eq!(face.metadata.spellbook, vec!["Draft Pick".to_string()]);
+    }
+
+    #[test]
+    fn token_source_metadata_disambiguates_homonymous_oracle_ids() {
+        let first = set_card_with_metadata(
+            "Shared Name",
+            None,
+            Some("first-oracle"),
+            Some("first-printing"),
+            &["first-token"],
+            &[],
+        );
+        let second = set_card_with_metadata(
+            "Shared Name",
+            None,
+            Some("second-oracle"),
+            Some("second-printing"),
+            &["second-token"],
+            &[],
+        );
+        let mut map = HashMap::new();
+        for set_card in [&first, &second] {
+            let mut metadata = TokenSourceMetadata::default();
+            metadata
+                .related_token_ids
+                .extend(set_card.related_cards.tokens.clone());
+            metadata
+                .source_printing_ids
+                .insert(set_card.identifiers.scryfall_id.clone().unwrap());
+            map.insert(TokenSourceMetadataKey::from_set_card(set_card), metadata);
+        }
+
+        let source = atomic_single("Shared Name", Some("second-oracle"));
+        let mut face = CardFace {
+            name: "Shared Name".to_string(),
+            scryfall_oracle_id: Some("second-oracle".to_string()),
+            ..Default::default()
+        };
+        stamp_token_source_metadata(&mut face, &source, &map);
+
+        assert_eq!(
+            face.metadata.related_token_ids,
+            vec!["second-token".to_string()]
+        );
+        assert_eq!(
+            face.metadata.source_printing_ids,
+            vec!["second-printing".to_string()]
+        );
     }
 
     #[test]
@@ -1918,18 +2088,29 @@ mod tests {
 
         let map = build_token_source_metadata(&mtgjson_path, &atomic);
 
+        // Atomic spellbooks key the same way the set-file loop does: oracle id when
+        // present, face name (here == lowercased name, as face_name is None) as qualifier.
+        let oracle_key = |oracle: &str, name: &str| TokenSourceMetadataKey::Oracle {
+            oracle_id: oracle.to_string(),
+            face_name: name.to_lowercase(),
+        };
+
         assert_eq!(
-            map["tome test"].spellbook, spellbook,
+            map[&oracle_key("tome-oracle", "Tome Test")].spellbook,
+            spellbook,
             "12-name spellbook must be harvested from AtomicCards even with no set files"
         );
-        assert_eq!(map["tome test"].spellbook.len(), 12);
         assert_eq!(
-            map["second source"].spellbook,
+            map[&oracle_key("tome-oracle", "Tome Test")].spellbook.len(),
+            12
+        );
+        assert_eq!(
+            map[&oracle_key("second-oracle", "Second Source")].spellbook,
             vec!["A".to_string(), "B".to_string()],
             "a second spellbook source must yield its own populated entry"
         );
         assert!(
-            !map.contains_key("no spellbook"),
+            !map.contains_key(&oracle_key("none-oracle", "No Spellbook")),
             "a card with an empty spellbook must not create a map entry"
         );
 

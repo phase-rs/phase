@@ -3350,42 +3350,119 @@ fn static_bare_compound_tribal_subject_verdeloth() {
         .contains(&ContinuousModification::AddToughness { value: 1 }));
 }
 
-// #5147 regression on Life and Limb's ACTUAL static text. Its subject "All
-// Forests and all Saprolings" has "Forests" as a LAND subtype; the ungated bare
-// tribal-compound helper reinterpreted it as `Or{creature Forest, creature
-// Saproling}`, silently adding wrong out-of-scope support. With the
-// creature-term gate the helper declines this non-creature subject, so the
-// unsupported compound type-change strict-fails (no static) — the same shape as
-// baseline main — rather than over-claiming. Assert BOTH: Forest is never
-// reinterpreted as a creature-anthem branch, AND the line strict-fails.
+// Life and Limb — dual-subject reciprocal animation on its ACTUAL static text.
+// The subject "All Forests and all Saprolings" mixes a LAND subtype (Forest)
+// with a CREATURE subtype (Saproling); the predicate "1/1 green Saproling
+// creatures and Forest lands in addition to their other types" animates every
+// object in either subject into a 1/1 green creature that is also a land while
+// keeping its other types (CR 611.3 + CR 613.4b + CR 205.1b).
+//
+// Supersedes the earlier #5147 strict-fail guard: that test asserted the line
+// produced NO static, because the only handler that touched it was the ungated
+// bare tribal-compound helper, which mis-read Forest as `creature Forest`.
+// `parse_compound_all_subjects_type_change` now supports the line correctly, so
+// the assertions flip to the positive parse — while still guarding the original
+// intent that the Forest conjunct is a LAND subtype, never a creature subject.
 #[test]
-fn life_and_limb_real_text_not_over_claimed_as_creature_forest() {
+fn life_and_limb_real_text_dual_subject_animation() {
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaColor;
+
     let line = "All Forests and all Saprolings are 1/1 green Saproling creatures \
                 and Forest lands in addition to their other types.";
-    // No produced static may treat the land subtype Forest as a creature subject.
-    for def in parse_static_line_multi(line) {
-        if let Some(TargetFilter::Or { ref filters }) = def.affected {
-            assert!(
-                !filters.iter().any(|f| matches!(
-                    f,
-                    TargetFilter::Typed(tf)
-                        if tf.type_filters.iter().any(|t| matches!(
-                            t, TypeFilter::Subtype(s) if s == "Forest"
-                        ))
-                )),
-                "Life and Limb must not reinterpret land subtype Forest as a \
-                 creature-anthem branch: {def:?}"
-            );
-        }
-    }
-    // The bare-compound creature helper must decline this non-creature subject,
-    // so the unsupported compound type-change produces no bogus static (strict
-    // failure) — matching baseline main. This is the discriminating check: the
-    // ungated helper produced a spurious `creature Forest` static here.
+    let defs = parse_static_line_multi(line);
+    assert_eq!(
+        defs.len(),
+        1,
+        "Life and Limb is one compound static: {defs:?}"
+    );
+    let def = &defs[0];
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be an Or of the two subjects: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+    // Forest conjunct: a LAND with subtype Forest.
     assert!(
-        parse_static_line_multi(line).is_empty(),
-        "unsupported compound type-change must strict-fail, not over-claim: {:?}",
-        parse_static_line_multi(line)
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
+        "Forest conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    // Original #5147 intent preserved: Forest is NEVER a creature subject.
+    assert!(
+        !filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
+        "Forest must never be reinterpreted as a creature subject: {:?}",
+        def.affected
+    );
+    // Saproling conjunct: a CREATURE with subtype Saproling.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Saproling")))),
+        "Saproling conjunct must be a creature subtype: {:?}",
+        def.affected
+    );
+
+    // Uniform modification set shared by both subjects: base 1/1 (layer 7b), set
+    // green (layer 5), additive Creature+Saproling and Land+Forest (layer 4).
+    use ContinuousModification as CM;
+    for expected in [
+        CM::SetPower { value: 1 },
+        CM::SetToughness { value: 1 },
+        CM::SetColor {
+            colors: vec![ManaColor::Green],
+        },
+        CM::AddType {
+            core_type: CoreType::Creature,
+        },
+        CM::AddSubtype {
+            subtype: "Saproling".to_string(),
+        },
+        CM::AddType {
+            core_type: CoreType::Land,
+        },
+        CM::AddSubtype {
+            subtype: "Forest".to_string(),
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+}
+
+// CR 205.1a vs CR 205.1b: the compound-subject animation handler applies strictly
+// ADDITIVE type semantics, so it must decline a compound predicate that lacks the
+// "in addition to their/its other types" marker — a bare "are <P/T> <type>
+// creatures" compound is a type REPLACEMENT and must not be reinterpreted as
+// additive (which would keep the objects' other types instead of replacing them).
+#[test]
+fn compound_subject_animation_declines_non_additive_replacement_predicate() {
+    // No "in addition to their other types" marker → replacement semantics →
+    // this additive handler must not claim it.
+    assert!(
+        parse_static_line_multi("All Elves and all Goblins are 2/2 Zombie creatures.").is_empty(),
+        "non-additive compound animation must not be additive-claimed"
+    );
+    // The additive form (Life and Limb) is still claimed — guards against the
+    // gate being over-broad.
+    assert_eq!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are 1/1 green Saproling creatures and \
+             Forest lands in addition to their other types."
+        )
+        .len(),
+        1,
+        "additive compound animation must still parse"
     );
 }
 

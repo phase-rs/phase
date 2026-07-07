@@ -4,8 +4,16 @@
 //! All parser branches import from this single location (Phase 50, D-01).
 
 use super::diagnostic::OracleDiagnostic;
-use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TargetSelectionMode};
+use crate::types::ability::{
+    ControllerRef, PtValue, QuantityRef, TargetFilter, TargetSelectionMode,
+};
 use crate::types::zones::Zone;
+
+/// Parser-only lookahead for token body clauses split across adjacent sentences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TokenPtFollowup {
+    PowerToughness { power: PtValue, toughness: PtValue },
+}
 
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
@@ -168,6 +176,12 @@ pub(crate) struct ParseContext {
     /// token-count override in `oracle_effect::token`. `None` for triggers
     /// without a colored-pip qualifier.
     pub pending_mana_symbol_count_color: Option<crate::types::mana::ManaColor>,
+    /// CR 608.2c + CR 608.2h + CR 111.3: Immediate next-clause lookahead for
+    /// token body characteristics printed in a separate sentence ("Its power
+    /// is equal to this creature's power ..."). This is parser-local and
+    /// one-shot per chunk; standalone token parsing keeps rejecting creature
+    /// tokens whose P/T is not specified by the current clause or this marker.
+    pub token_pt_followup: Option<TokenPtFollowup>,
     /// CR 116.2b + CR 708.7: True while parsing the body of an explicit granted
     /// activated ability (a quoted `"{cost}: ..."` granted to another object).
     /// In that context, a head clause of "turn this/~ creature face up" is the

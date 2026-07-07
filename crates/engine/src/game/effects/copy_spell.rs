@@ -427,7 +427,10 @@ fn resolve_copier_player(
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
         // CR 303.4b: Enchanted-player scope cannot resolve a copier. Fail closed.
-        | ControllerRef::EnchantedPlayer => None,
+        | ControllerRef::EnchantedPlayer
+        // CR 102.1: no card scopes "the active player copies this spell";
+        // fail closed (mirrors DefendingPlayer / EnchantedPlayer).
+        | ControllerRef::ActivePlayer => None,
     }
 }
 
@@ -3121,6 +3124,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrifice".to_string(),
+                token_image_ref: None,
                 power: Some(4),
                 toughness: Some(4),
                 base_power: Some(4),

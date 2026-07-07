@@ -109,6 +109,8 @@ fn resolve_sacrifice_scope(
         )
         .map(|pid| vec![pid])
         .unwrap_or_default(),
+        // CR 102.1: the active player, read live.
+        Some(ControllerRef::ActivePlayer) => vec![state.active_player],
     }
 }
 

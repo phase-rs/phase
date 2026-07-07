@@ -210,9 +210,9 @@ pub(crate) enum ContinuationAst {
         enters_under: Option<ControllerRef>,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
-        /// When true, the found card enters "attached to" the search source.
-        /// Adds forward_result on the ChangeZone and chains an Attach sub_ability.
-        attach_to_source: bool,
+        /// When `Some`, the found card enters attached to this host filter.
+        /// Adds `forward_result` on the ChangeZone and chains an Attach sub_ability.
+        attach_host: Option<TargetFilter>,
     },
     RevealHandFilter {
         card_filter: Option<TargetFilter>,
@@ -369,6 +369,11 @@ pub(crate) enum ContinuationAst {
         counter_type: CounterType,
         count: QuantityExpr,
     },
+    /// CR 608.2h + CR 111.3: "Its power is equal to this creature's power and
+    /// its toughness is equal to this creature's toughness" after a token
+    /// creation clause — source-defined token P/T printed as a separate
+    /// sentence.
+    TokenSourcePowerToughness { power: PtValue, toughness: PtValue },
     /// "After that turn, that player takes an extra turn." after a controlled-turn effect.
     GrantExtraTurnAfterControlledTurn,
     /// CR 701.20a: "Put that card [onto the battlefield / into your hand]" after RevealUntil —

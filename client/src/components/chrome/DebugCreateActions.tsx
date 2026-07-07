@@ -1,4 +1,6 @@
+/* eslint-disable react-refresh/only-export-components */
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type {
   AttachTarget,
@@ -130,6 +132,8 @@ function buildEnterCounters(
 interface Props {
   onDispatch: (action: DebugAction) => void;
 }
+
+type CreateTokenDebugAction = Extract<DebugAction, { type: "CreateToken" }>;
 
 // `CardFaceShape` — minimal slice of the engine's `CardFace` returned by
 // `getCardFaceData`. Only the fields the spawn-attached form reads are typed;
@@ -352,11 +356,69 @@ function presetSourceSummary(p: TokenPreset): string {
   return [setText, sourceText].filter(Boolean).join(" · ");
 }
 
+export function tokenPresetHasSourceDefinedPt(p: TokenPreset): boolean {
+  return (
+    typeof p.pt_provenance === "object" &&
+    p.pt_provenance !== null &&
+    "SourceDefinedOrDynamic" in p.pt_provenance
+  );
+}
+
+function parseExplicitInteger(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) return null;
+  return Number(trimmed);
+}
+
+export function buildCatalogTokenDebugAction({
+  preset,
+  owner,
+  counterType,
+  counterCount,
+  runEtb,
+  powerOverride,
+  toughnessOverride,
+}: {
+  preset: TokenPreset;
+  owner: PlayerId;
+  counterType: CounterType;
+  counterCount: number;
+  runEtb: boolean;
+  powerOverride?: number | null;
+  toughnessOverride?: number | null;
+}): CreateTokenDebugAction | null {
+  const sourceDefined = tokenPresetHasSourceDefinedPt(preset);
+  if (sourceDefined && (powerOverride == null || toughnessOverride == null)) {
+    return null;
+  }
+
+  return {
+    type: "CreateToken",
+    data: {
+      request: {
+        type: "Preset",
+        data: {
+          preset_id: preset.id,
+          owner,
+          ...(sourceDefined
+            ? { power_override: powerOverride, toughness_override: toughnessOverride }
+            : {}),
+          enter_with_counters: buildEnterCounters(counterType, counterCount),
+        },
+      },
+      run_etb: runEtb,
+    },
+  };
+}
+
 function CatalogTokenForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [presets, setPresets] = useState<TokenPreset[] | null>(null);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [powerOverrideText, setPowerOverrideText] = useState("");
+  const [toughnessOverrideText, setToughnessOverrideText] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [counterCount, setCounterCount] = useState(0);
@@ -376,6 +438,8 @@ function CatalogTokenForm({ onDispatch }: Props) {
   // per-preset choice.
   useEffect(() => {
     setCounterCount(0);
+    setPowerOverrideText("");
+    setToughnessOverrideText("");
   }, [selectedId]);
 
   const filtered = useMemo(() => {
@@ -419,6 +483,11 @@ function CatalogTokenForm({ onDispatch }: Props) {
   }, [grouped]);
 
   const selectedPreset = presets?.find((p) => p.id === selectedId) ?? null;
+  const sourceDefinedPt = selectedPreset ? tokenPresetHasSourceDefinedPt(selectedPreset) : false;
+  const powerOverride = parseExplicitInteger(powerOverrideText);
+  const toughnessOverride = parseExplicitInteger(toughnessOverrideText);
+  const hasRequiredPt =
+    !sourceDefinedPt || (powerOverride !== null && toughnessOverride !== null);
   // CR 704.5f hint: cite the rule that explains why this token would die.
   // FE string formatting over engine-provided fields — no game-state inference.
   // Only `+1/+1` (P1P1) counters raise toughness and prevent the SBA kill;
@@ -428,28 +497,23 @@ function CatalogTokenForm({ onDispatch }: Props) {
   const survivalHint =
     selectedPreset &&
     selectedPreset.body.core_types.includes("Creature") &&
-    selectedPreset.body.power === 0 &&
-    selectedPreset.body.toughness === 0 &&
+    (sourceDefinedPt ? powerOverride === 0 && toughnessOverride === 0 : selectedPreset.body.power === 0 && selectedPreset.body.toughness === 0) &&
     !counterRescues
       ? "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
       : undefined;
 
   const handleSubmit = () => {
     if (!selectedPreset) return;
-    onDispatch({
-      type: "CreateToken",
-      data: {
-        request: {
-          type: "Preset",
-          data: {
-            preset_id: selectedPreset.id,
-            owner,
-            enter_with_counters: buildEnterCounters(counterType, counterCount),
-          },
-        },
-        run_etb: runEtb,
-      },
+    const action = buildCatalogTokenDebugAction({
+      preset: selectedPreset,
+      owner,
+      counterType,
+      counterCount,
+      runEtb,
+      powerOverride,
+      toughnessOverride,
     });
+    if (action) onDispatch(action);
   };
 
   if (loadError) {
@@ -519,10 +583,37 @@ function CatalogTokenForm({ onDispatch }: Props) {
         setCount={setCounterCount}
         hint={survivalHint}
       />
+      {sourceDefinedPt && (
+        <>
+          <FieldRow label={t("debugCreate.tokenPower")}>
+            <input
+              type="number"
+              value={powerOverrideText}
+              onChange={(e) => setPowerOverrideText(e.target.value)}
+              placeholder={t("debugCreate.tokenPowerPlaceholder")}
+              className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 font-mono text-xs text-gray-300 focus:border-blue-500 focus:outline-none"
+            />
+          </FieldRow>
+          <FieldRow label={t("debugCreate.tokenToughness")}>
+            <input
+              type="number"
+              value={toughnessOverrideText}
+              onChange={(e) => setToughnessOverrideText(e.target.value)}
+              placeholder={t("debugCreate.tokenToughnessPlaceholder")}
+              className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 font-mono text-xs text-gray-300 focus:border-blue-500 focus:outline-none"
+            />
+          </FieldRow>
+          {!hasRequiredPt && (
+            <div className="mb-2 px-2 text-[10px] text-amber-300">
+              {t("debugCreate.sourceDefinedPtRequired")}
+            </div>
+          )}
+        </>
+      )}
       <FieldRow label="">
         <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
       </FieldRow>
-      <SubmitButton onClick={handleSubmit} disabled={!selectedId}>
+      <SubmitButton onClick={handleSubmit} disabled={!selectedId || !hasRequiredPt}>
         Create Selected Token
       </SubmitButton>
     </>

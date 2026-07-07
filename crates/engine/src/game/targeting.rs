@@ -236,6 +236,10 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::TriggeringPlayer) => false,
                     // CR 303.4b: Enchanted-player scope is not enumerated as a target candidate. Fail closed.
                     Some(ControllerRef::EnchantedPlayer) => false,
+                    // CR 102.1: the active player is a single, well-defined
+                    // player and is a valid candidate for an active-player-scoped
+                    // target filter (read live).
+                    Some(ControllerRef::ActivePlayer) => player.id == state.active_player,
                     None => true,
                 };
                 if include {

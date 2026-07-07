@@ -13,7 +13,8 @@ use std::str::FromStr;
 
 use engine::database::mtgjson::{SetFile, SetToken};
 use engine::game::token_presets::{
-    PredefinedTokenKind, PresetFidelity, TokenCategory, TokenPreset, TokenSourceRef,
+    PredefinedTokenKind, PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance,
+    TokenSourceRef,
 };
 use engine::types::card::TokenImageRef;
 use engine::types::card_type::{CoreType, Supertype};
@@ -184,6 +185,7 @@ fn build_preset(
         return Ok(None);
     }
     let category = classify_token(&body)?;
+    let pt_provenance = classify_pt_provenance(token, &body);
     let source_card_names: Vec<String> = source_index
         .names_by_token_id
         .get(&token.uuid)
@@ -225,6 +227,7 @@ fn build_preset(
         id: token.uuid.clone(),
         category,
         fidelity,
+        pt_provenance,
         body,
         source_card_names,
         source_card_refs,
@@ -249,6 +252,27 @@ fn is_catalog_token_body(body: &TokenCharacteristics) -> bool {
 
 fn parse_pt(value: Option<&str>) -> Option<i32> {
     value.and_then(|s| s.parse::<i32>().ok())
+}
+
+fn classify_pt_provenance(token: &SetToken, body: &TokenCharacteristics) -> TokenPtProvenance {
+    let has_dynamic_power = token
+        .power
+        .as_deref()
+        .is_some_and(|value| parse_pt(Some(value)).is_none());
+    let has_dynamic_toughness = token
+        .toughness
+        .as_deref()
+        .is_some_and(|value| parse_pt(Some(value)).is_none());
+
+    if body.core_types.contains(&CoreType::Creature) && (has_dynamic_power || has_dynamic_toughness)
+    {
+        TokenPtProvenance::SourceDefinedOrDynamic {
+            power: token.power.clone(),
+            toughness: token.toughness.clone(),
+        }
+    } else {
+        TokenPtProvenance::FixedOrAbsent
+    }
 }
 
 fn parse_color(value: &str) -> Option<ManaColor> {
@@ -376,15 +400,7 @@ fn classify_fidelity(
     let unsupported_keyword = applicable_keyword_names
         .iter()
         .any(|s| supported_token_keyword(s).is_none());
-    let unsupported_pt = token
-        .power
-        .as_deref()
-        .is_some_and(|s| parse_pt(Some(s)).is_none())
-        || token
-            .toughness
-            .as_deref()
-            .is_some_and(|s| parse_pt(Some(s)).is_none());
-    if unsupported_keyword || unsupported_pt {
+    if unsupported_keyword {
         return PresetFidelity::PartialMissingAbilities;
     }
 
