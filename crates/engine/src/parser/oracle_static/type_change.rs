@@ -1382,9 +1382,10 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // or an explicit retention clause — so `modifications` is not all `AddType`, or
     // the body names a retention clause.
     let body_lower = body_text.to_lowercase();
-    let pure_core_type_replacement = modifications
-        .iter()
-        .all(|m| matches!(m, ContinuousModification::AddType { .. }))
+    let pure_core_type_replacement = !modifications.is_empty()
+        && modifications
+            .iter()
+            .all(|m| matches!(m, ContinuousModification::AddType { .. }))
         && !body_lower.contains("in addition")
         && !body_lower.contains("still");
     let modifications = if pure_core_type_replacement {
