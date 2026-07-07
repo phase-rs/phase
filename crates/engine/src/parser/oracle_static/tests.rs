@@ -14973,6 +14973,15 @@ fn becomes_equipment_rejects_unrecognized_trailing_rider() {
         .is_empty(),
         "an unrecognized trailing rider must fail closed, not be silently dropped"
     );
+    // A rider AFTER the recognized mana-value binding must also fail closed — the
+    // binding is matched exactly (full consumption), not by substring.
+    assert!(
+        parse_static_line_multi(
+            "Each noncreature artifact is an Equipment with equip {X} and \"Equipped creature gets +X/+0,\" where X is that artifact's mana value, and it gains flying."
+        )
+        .is_empty(),
+        "extra rules text after the mana-value binding must fail closed"
+    );
 }
 
 // Issue #4770 sibling — Sugar Coat: "Enchanted permanent is a colorless Food

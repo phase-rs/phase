@@ -701,21 +701,28 @@ pub(crate) fn parse_becomes_equipment_with_ability(
     // quote, and any trailing `, where X is …` binding follows it.
     let (cost_tp, ability_tp) = rest_tp.split_around(" and \"")?;
     let (quoted_body_tp, tail_tp) = ability_tp.split_around("\"")?;
-    let tail_lower = tail_tp.lower.trim().trim_start_matches([',', '.']).trim();
+    // Punctuation cleanup on the post-quote chunk (a leading comma from the
+    // split, a trailing period) before matching the binding.
+    let tail_core = tail_tp.lower.trim().trim_matches([',', '.']).trim();
 
     // CR 202.3: Bludgeon Brawl binds X to "that artifact's mana value" — the
     // Equipment's own mana value — used for BOTH the equip cost ({X}) and the
-    // granted anthem ("gets +X/+0"). Match only the unambiguous "artifact's mana
-    // value" (the source): a bare "its" could refer to the equipped creature.
-    let dynamic_self_mana_value = nom_primitives::scan_contains(tail_lower, "where x is ")
-        && nom_primitives::scan_contains(tail_lower, "artifact's mana value");
+    // granted anthem ("gets +X/+0"). Match the binding EXACTLY with full
+    // consumption ("that artifact's mana value" — the unambiguous source; a bare
+    // "its" could refer to the equipped creature), so extra rules text after the
+    // binding is not accepted.
+    let dynamic_self_mana_value = all_consuming(tag::<_, _, OracleError<'_>>(
+        "where x is that artifact's mana value",
+    ))
+    .parse(tail_core)
+    .is_ok();
 
-    // Fail closed on an unrecognized trailing rider: the only text this handler
-    // models after the quoted ability is the CR 202.3 "where X is that
-    // artifact's mana value" binding. Any other rules-bearing tail must NOT be
-    // silently dropped — decline so the line is reported unsupported rather than
-    // exported with missing behavior.
-    if !tail_lower.is_empty() && !dynamic_self_mana_value {
+    // Fail closed on any unrecognized tail: the only text this handler models
+    // after the quoted ability is that exact binding. A non-empty tail that is
+    // not exactly the binding — whether the binding is absent OR followed by an
+    // extra rider ("…artifact's mana value, and it gains flying") — carries
+    // unmodeled rules text and must NOT be silently dropped.
+    if !tail_core.is_empty() && !dynamic_self_mana_value {
         return None;
     }
 
