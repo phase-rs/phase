@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use server_core::{
     guard_p2p_backup, guard_p2p_backup_overwrite, redact_p2p_backup_snapshot_secrets,
+    validate_p2p_backup_host_peer_id,
 };
 
 use crate::AppState;
@@ -161,14 +162,45 @@ pub async fn p2p_backup_get(
     }
 }
 
+/// Query params for `DELETE /p2p-draft-backup/:code`.
+#[derive(Deserialize)]
+pub struct P2pBackupDeleteQuery {
+    pub host_peer_id: String,
+}
+
 /// DELETE /p2p-draft-backup/:code — Remove a P2P draft backup.
+///
+/// Requires `host_peer_id` to match the row owner (same contract as POST
+/// overwrite) so knowing the 6-char draft code alone cannot grief-delete a
+/// recovery snapshot.
 pub async fn p2p_backup_delete(
     State(app_state): State<AppState>,
     Path(code): Path<String>,
+    Query(query): Query<P2pBackupDeleteQuery>,
 ) -> impl IntoResponse {
     if !is_valid_draft_code(&code) {
         return (StatusCode::BAD_REQUEST, "Invalid draft code").into_response();
     }
-    let _ = app_state.game_db.delete_p2p_backup(&code);
-    (StatusCode::OK, "Deleted").into_response()
+    if let Err(reason) = validate_p2p_backup_host_peer_id(&query.host_peer_id) {
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
+    match app_state.game_db.load_p2p_backup(&code) {
+        Ok(Some((existing_peer, _, _))) => {
+            if let Err(reason) = guard_p2p_backup_overwrite(&existing_peer, &query.host_peer_id) {
+                return (StatusCode::FORBIDDEN, reason).into_response();
+            }
+            match app_state.game_db.delete_p2p_backup(&code) {
+                Ok(()) => (StatusCode::OK, "Deleted").into_response(),
+                Err(e) => {
+                    warn!(error = %e, "P2P backup delete failed");
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Delete failed").into_response()
+                }
+            }
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "No backup found").into_response(),
+        Err(e) => {
+            warn!(error = %e, "P2P backup load failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Load failed").into_response()
+        }
+    }
 }

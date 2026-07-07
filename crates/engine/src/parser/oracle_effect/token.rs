@@ -2831,6 +2831,68 @@ mod tests {
         assert_eq!(colors, vec![ManaColor::White]);
     }
 
+    #[test]
+    fn source_defined_named_creature_token_lookup_does_not_invent_fixed_pt() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create a 7/7 Ooze token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Slime Molding".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("source-defined named Ooze token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(name, "Ooze");
+        assert!(types.contains(&"Creature".to_string()));
+        assert!(types.contains(&"Ooze".to_string()));
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(power, PtValue::Fixed(7));
+        assert_eq!(toughness, PtValue::Fixed(7));
+    }
+
+    #[test]
+    fn fixed_source_scoped_named_creature_token_still_fills_omitted_pt() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create an Ooze token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Rot Like the Scum You Are".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("fixed source-scoped Ooze token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(name, "Ooze");
+        assert!(types.contains(&"Creature".to_string()));
+        assert!(types.contains(&"Ooze".to_string()));
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(power, PtValue::Fixed(2));
+        assert_eq!(toughness, PtValue::Fixed(2));
+    }
+
     /// CR 111.1 + CR 111.4 + CR 208.1: ordinary subtype display names are not
     /// token identities when the registry has multiple distinct bodies for the
     /// same name. The Oracle text must supply the missing body characteristics

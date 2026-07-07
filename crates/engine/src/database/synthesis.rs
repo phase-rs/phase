@@ -476,32 +476,39 @@ pub fn synthesize_basic_land_mana(face: &mut CardFace) {
 /// authority that sets both the display flag and pushes
 /// `ActivationRestriction::AsSorcery` so the runtime legality gate enforces
 /// timing at activation time.
+/// CR 702.6: Build the equip activated ability for a single `Keyword::Equip(cost)`
+/// — `{cost}: Attach this permanent to target creature you control`, activatable
+/// only as a sorcery. Returns `None` for any other keyword. Shared by card-load
+/// synthesis (`synthesize_equip`) and the battlefield runtime granted-keyword
+/// appender (`runtime_granted_equip_abilities`), so a printed and a statically
+/// granted equip keyword (Bram, Bludgeon Brawl) produce the identical ability.
+pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinition> {
+    let Keyword::Equip(cost) = keyword else {
+        return None;
+    };
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+    )
+    .cost(AbilityCost::Mana { cost: cost.clone() })
+    // CR 702.6a: "Activate only as a sorcery."
+    .sorcery_speed();
+    // CR 702.6a: tag the synthesized ability as the Equip action so cost
+    // reductions and Equipment-source mana restrictions recognize it (matching
+    // the parser's `try_parse_equip` path).
+    def.ability_tag = Some(AbilityTag::Equip);
+    Some(def)
+}
+
 pub fn synthesize_equip(face: &mut CardFace) {
     let equip_abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
-        .filter_map(|kw| {
-            if let Keyword::Equip(cost) = kw {
-                Some(
-                    AbilityDefinition::new(
-                        AbilityKind::Activated,
-                        Effect::Attach {
-                            attachment: TargetFilter::SelfRef,
-                            target: TargetFilter::Typed(
-                                TypedFilter::creature().controller(ControllerRef::You),
-                            ),
-                        },
-                    )
-                    .cost(AbilityCost::Mana { cost: cost.clone() })
-                    // CR 702.6a: "Activate only as a sorcery."
-                    .sorcery_speed(),
-                )
-            } else {
-                None
-            }
-        })
+        .filter_map(equip_ability_for_keyword)
         .collect();
-
     face.abilities.extend(equip_abilities);
 }
 

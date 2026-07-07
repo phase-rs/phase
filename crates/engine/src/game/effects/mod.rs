@@ -3705,11 +3705,12 @@ fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bo
 ///     name a "<verb>ed this way" set; they carry no cause and are consumed only
 ///     by `caused_by: None` (selection-set) downstream references.
 fn affected_objects_with_causes(
+    state: &GameState,
+    ability: &ResolvedAbility,
     effect: &Effect,
     events: &[GameEvent],
-    fallback_targets: &[TargetRef],
 ) -> Vec<(ObjectId, Option<ThisWayCause>)> {
-    let ids = affected_objects_from_events(effect, events, fallback_targets);
+    let ids = affected_objects_from_events(state, ability, effect, events);
     // CR 608.2c: the cause is a property of the EFFECT being resolved, not of any
     // individual member's event — so every member of this publish shares one
     // cause. `None` for producers that do not name a "this way" verb (reveals,
@@ -3746,6 +3747,10 @@ fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
         // CR 611.2c: mass-bounce destination defaults to Hand.
         Effect::BounceAll { destination, .. } => cause_for_zone(destination.unwrap_or(Zone::Hand)),
         Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => Some(ThisWayCause::Exiled),
+        // CR 608.2c: a coercion (mass MustAttack) names no "<verb>ed this way" set —
+        // "those creatures" is a bare frozen population, so its members carry no
+        // cause and are matched only by the punisher's `caused_by: None`.
+        Effect::GenericEffect { .. } => None,
         // Reveals, taps, counter producers, the RevealUntil kept card, and any
         // other producer do not name a "<verb>ed this way" set — leave them
         // unstamped (matched only by `caused_by: None`).
@@ -3754,11 +3759,60 @@ fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
 }
 
 fn affected_objects_from_events(
+    state: &GameState,
+    ability: &ResolvedAbility,
     effect: &Effect,
     events: &[GameEvent],
-    fallback_targets: &[TargetRef],
 ) -> Vec<ObjectId> {
+    let fallback_targets = ability.targets.as_slice();
     match effect {
+        // CR 508.1a + CR 608.2c + CR 603.7c: A mass "attack this turn if able"
+        // coercion (Maddening Imp's `{T}` `GenericEffect{MustAttack}`) moves no
+        // objects and emits NO object-affecting event, so — unlike every other arm
+        // here — its affected population is FILTER-driven: re-enumerate the
+        // battlefield by the governing filter at resolution time. The publish site
+        // runs on the identical post-resolution board state, so this yields exactly
+        // the resolution-time population that "those creatures" freezes. Mirrors
+        // the broadcast-static binding in `effect.rs` (`Some(filter)` arm).
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => {
+            // Select the first coercion static (matching `is_mass_coerce_static`).
+            let Some(static_def) = static_abilities.iter().find(|sd| {
+                matches!(
+                    sd.mode,
+                    crate::types::statics::StaticMode::MustAttack
+                        | crate::types::statics::StaticMode::MustAttackPlayer { .. }
+                )
+            }) else {
+                return Vec::new();
+            };
+            let Some(governing) = effect::generic_effect_application_filter(
+                target.as_ref(),
+                static_def.affected.as_ref(),
+            ) else {
+                return Vec::new();
+            };
+            // CR 608.2c: an inherited-reference affected filter (ParentTarget /
+            // CostPaidObject / TriggeringSource) names a specific object, not a
+            // broadcast population — it must NOT be enumerated. Mirrors the
+            // early-return in `effect.rs`.
+            if effect::generic_effect_affected_uses_inherited_targets(governing) {
+                return Vec::new();
+            }
+            let filter = resolved_object_filter(ability, governing);
+            let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
+            // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+            let ctx = filter::FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .filter(|obj_id| filter::matches_target_filter(state, **obj_id, &filter, &ctx))
+                .copied()
+                .collect()
+        }
         Effect::GainControl { .. } => fallback_targets
             .iter()
             .filter_map(|target| match target {
@@ -6063,9 +6117,10 @@ fn resolve_chain_body(
         let affected_with_causes =
             if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile {
                 affected_objects_with_causes(
+                    state,
+                    &scoped_template,
                     &scoped_template.effect,
                     scoped_events,
-                    &scoped_template.targets,
                 )
             } else {
                 Vec::new()
@@ -6910,11 +6965,8 @@ fn resolve_chain_body(
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
     if next_sub_needs_tracked_set(ability) {
-        let affected_with_causes = affected_objects_with_causes(
-            &ability.effect,
-            &events[events_before..],
-            &ability.targets,
-        );
+        let affected_with_causes =
+            affected_objects_with_causes(state, ability, &ability.effect, &events[events_before..]);
         publish_tracked_set_with_causes(state, affected_with_causes);
     }
 
@@ -13009,9 +13061,13 @@ mod tests {
             player: TargetFilter::Controller,
             count: 2,
         };
+        // The RevealTop arm is event-driven; `state`/`ability` are ignored (only
+        // the GenericEffect arm reads them). Pass a minimal ability with no targets
+        // — the previous `&[]` fallback_targets.
+        let ability = ResolvedAbility::new(effect.clone(), vec![], ObjectId(0), PlayerId(0));
 
         assert_eq!(
-            affected_objects_from_events(&effect, &events, &[]),
+            affected_objects_from_events(&state, &ability, &effect, &events),
             vec![top, second]
         );
     }
@@ -13059,9 +13115,13 @@ mod tests {
             kept_optional_to: None,
             enters_under: None,
         };
+        // The RevealUntil arm is event-driven; `state`/`ability` are ignored (only
+        // the GenericEffect arm reads them). Minimal state + empty-target ability.
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(effect.clone(), vec![], ObjectId(0), PlayerId(0));
 
         assert_eq!(
-            affected_objects_from_events(&effect, &events, &[]),
+            affected_objects_from_events(&state, &ability, &effect, &events),
             vec![hit]
         );
     }

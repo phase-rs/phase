@@ -1370,7 +1370,13 @@ fn try_parse_subject_restriction_clause(
     // creature gets -3/-0 and its activated abilities can't be activated"), so they
     // bind to `ParentTarget`; `parse_subject_application` resolves the typed-subject
     // forms ("target creature's", "each creature you control").
-    if let Some((before, _)) = tp.split_around(" activated abilities can't be activated") {
+    // CR 605.1a: split on the predicate with either apostrophe glyph so a U+2019
+    // effect clause ("target creature's activated abilities can't be activated
+    // unless they're mana abilities") still reaches the shared exemption scan.
+    if let Some((before, _)) = tp
+        .split_around(" activated abilities can't be activated")
+        .or_else(|| tp.split_around(" activated abilities can\u{2019}t be activated"))
+    {
         let subject = before.original.trim();
         let application = subject_application_for_cant_be_activated(subject, ctx)?;
         let affected = static_affected_for_application(&application);

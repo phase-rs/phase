@@ -153,6 +153,7 @@ pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
 pub(crate) use shared::canonicalize_anchor_label;
+pub(crate) use shared::parse_activated_abilities_cant_be_activated;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_conditional_protection_grant_list;
 pub(crate) use shared::parse_dynamic_x_clause;

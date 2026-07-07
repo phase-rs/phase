@@ -5688,9 +5688,15 @@ fn unless_rider_defers_to_body_parser(text: &str) -> bool {
     let after_trimmed = after_unless.trim_end_matches('.').trim();
 
     // CR 605.1a: activation prohibition mana-ability exemption (restriction.rs).
-    if tag::<_, _, OracleError<'_>>("they're mana abilities")
-        .parse(after_trimmed)
-        .is_ok()
+    // Dual-apostrophe: MTGJSON oracle text uses the U+2019 glyph, and this guard
+    // must recognize it so the restriction parser (not the unsupported-unless
+    // fallback) handles "…can't be activated unless they're mana abilities".
+    if alt((
+        tag::<_, _, OracleError<'_>>("they're mana abilities"),
+        tag("they\u{2019}re mana abilities"),
+    ))
+    .parse(after_trimmed)
+    .is_ok()
     {
         return true;
     }
@@ -17029,7 +17035,7 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
     }
 }
 
-fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+pub(crate) fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
     match filter {
         TargetFilter::Typed(tf) => tf.controller.clone(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -17037,6 +17043,27 @@ fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> 
         }
         TargetFilter::Not { filter } => target_filter_controller_ref(filter),
         _ => None,
+    }
+}
+
+/// Mutating sibling of [`target_filter_controller_ref`]: recursively rewrite the
+/// `controller` of every `Typed` node reachable through `And`/`Or`/`Not` to
+/// `controller`. Used by the Siren's Call card-assembly pass to bind the delayed
+/// punisher's "that player controls" anaphor to the active player named by the
+/// sibling coerce clause.
+pub(crate) fn set_target_filter_controller_ref(
+    filter: &mut TargetFilter,
+    controller: ControllerRef,
+) {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller = Some(controller),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                set_target_filter_controller_ref(inner, controller.clone());
+            }
+        }
+        TargetFilter::Not { filter } => set_target_filter_controller_ref(filter, controller),
+        _ => {}
     }
 }
 
@@ -20578,6 +20605,7 @@ fn is_exile_effect(effect: &Effect) -> bool {
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
     is_exile_effect(effect)
         || is_token_creating_effect(effect)
+        || is_mass_coerce_static(effect)
         || matches!(
             effect,
             Effect::PutCounter { .. }
@@ -20585,6 +20613,49 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
                 | Effect::MultiplyCounter { .. }
                 | Effect::MoveCounters { .. }
         )
+}
+
+/// CR 508.1a + CR 508.1d + CR 608.2c: A mass "attack this turn if able" coercion —
+/// a `GenericEffect` carrying a `MustAttack` (CR 508.1a, attack-if-able) or
+/// `MustAttackPlayer` (CR 508.1d, directed attack) static over a BROADCAST
+/// population (not `SelfRef` and not an inherited-target reference) — identifies
+/// "those creatures" at resolution. When a following "those creatures" clause
+/// reads that frozen population (Maddening Imp), the coerce is the producer that
+/// snapshots it (CR 608.2c: "those creatures" is a frozen reference to the objects
+/// identified when the ability resolved). A `SelfRef`/inherited-target coerce
+/// names a single specific object, not a population, so it does not publish a set.
+fn is_mass_coerce_static(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|static_def| {
+        matches!(
+            static_def.mode,
+            StaticMode::MustAttack | StaticMode::MustAttackPlayer { .. }
+        ) && target
+            .as_ref()
+            .or(static_def.affected.as_ref())
+            .is_some_and(is_broadcast_population_filter)
+    })
+}
+
+/// CR 608.2c: A "broadcast" filter names a population to enumerate at resolution,
+/// as opposed to an inherited-reference filter (`TriggeringSource` / `ParentTarget`
+/// / `CostPaidObject`) or a self-reference (`SelfRef`), which name a single
+/// specific object. Only a broadcast population is snapshotted as "those creatures".
+fn is_broadcast_population_filter(filter: &TargetFilter) -> bool {
+    !matches!(
+        filter,
+        TargetFilter::TriggeringSource
+            | TargetFilter::ParentTarget
+            | TargetFilter::CostPaidObject
+            | TargetFilter::SelfRef
+    )
 }
 
 /// CR 603.7: Detect explicit cross-clause pronouns ("those cards", "the exiled card").

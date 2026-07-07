@@ -213,6 +213,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
@@ -436,6 +437,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
@@ -782,6 +784,8 @@ pub(crate) fn controller_ref_player(
             .get(&source_id)
             .and_then(|source| source.attached_to)
             .and_then(|host| host.as_player()),
+        // CR 102.1: the player whose turn it is — read live.
+        ControllerRef::ActivePlayer => Some(state.active_player),
     }
 }
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -998,6 +1002,8 @@ fn stack_entry_controller_matches(
             .and_then(|source| source.attached_to)
             .and_then(|host| host.as_player())
             .is_some_and(|pid| pid == entry_controller),
+        // CR 102.1: the active player, read live.
+        Some(ControllerRef::ActivePlayer) => state.active_player == entry_controller,
     }
 }
 
@@ -1658,6 +1664,13 @@ fn filter_inner_for_object(
                         {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
+                        }
+                    }
+                    // CR 102.1: "the active player controls" — match the object's
+                    // controller against the player whose turn it is (read live).
+                    ControllerRef::ActivePlayer => {
+                        if state.active_player != obj_ctrl {
+                            return false;
                         }
                     }
                 }
@@ -2415,6 +2428,10 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TriggeringPlayer => return false,
                     // CR 303.4b: Resolve enchanted player via source's attached_to.
                     ControllerRef::EnchantedPlayer => return false,
+                    // CR 102.1: an active-player scope has no meaning for a
+                    // spell-history record (a cast snapshot carries no live
+                    // turn context). Fail closed.
+                    ControllerRef::ActivePlayer => return false,
                 }
             }
 
@@ -3112,6 +3129,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
@@ -3658,6 +3676,8 @@ fn matches_filter_prop(
                     (Some(ControllerRef::TriggeringPlayer), Some(pid)) => perm.controller == pid,
                     // CR 303.4b: Resolve enchanted player via source's attached_to.
                     (Some(ControllerRef::EnchantedPlayer), Some(pid)) => perm.controller == pid,
+                    // CR 102.1: active-player-scoped name match (resolved live).
+                    (Some(ControllerRef::ActivePlayer), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -3723,6 +3743,8 @@ fn matches_filter_prop(
                 &ControllerRef::EnchantedPlayer,
             )
             .is_some_and(|pid| pid == obj.owner),
+            // CR 102.1: Ownership relative to the active player (read live).
+            ControllerRef::ActivePlayer => state.active_player == obj.owner,
         },
         // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
         // source is an Aura ("enchanted creature gets +1/+1"). When the source
@@ -4071,6 +4093,13 @@ fn matches_filter_prop(
             .any(|record| matches!(record.target, TargetRef::Object(id) if id == object_id)),
         // CR 400.7: Object entered the battlefield this turn.
         FilterProp::EnteredThisTurn => obj.entered_battlefield_turn == Some(state.turn_number),
+        // CR 302.6 + CR 508.1a: controlled continuously since the controller's
+        // most recent turn began — a general per-permanent property (the
+        // `summoning_sick` continuity flag is set on ETB / control change for
+        // every permanent and cleared at the controller's next turn start), not
+        // creature-restricted. Haste-independent (reads the raw flag, NOT the
+        // haste-folding `has_summoning_sickness`).
+        FilterProp::ControlledContinuouslySinceTurnBegan => !obj.summoning_sick,
         FilterProp::ZoneChangedThisTurn { from, to } => {
             state.zone_changes_this_turn.iter().any(|record| {
                 record.object_id == object_id
@@ -4395,6 +4424,8 @@ fn zone_change_record_matches_property(
                 controller_ref_player(state, source.id, source.controller, source.ability, &ControllerRef::EnchantedPlayer)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 102.1: Ownership relative to the active player (read live).
+            ControllerRef::ActivePlayer => state.active_player == record.owner,
         },
         // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
         // applied to the snapshot subtypes, including changeling snapshots.
@@ -4592,6 +4623,9 @@ fn zone_change_record_matches_property(
         | FilterProp::InAnyZone { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::EnteredThisTurn
+        // CR 302.6: continuity flag lives on the battlefield object, not on a
+        // zone-change snapshot record. Fail closed.
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         // CR 122.6: counters-put-this-turn is a live-history join keyed on the
         // object id; a zone-change snapshot does not carry it. Fail closed.
@@ -4683,6 +4717,8 @@ fn attachment_controller_matches(
             &ControllerRef::EnchantedPlayer,
         )
         .is_some_and(|pid| pid == attachment_controller),
+        // CR 102.1: attachment controller relative to the active player (live).
+        Some(ControllerRef::ActivePlayer) => state.active_player == attachment_controller,
     }
 }
 
@@ -5291,6 +5327,12 @@ fn player_matches_target_filter_with(
             Some(ControllerRef::TriggeringPlayer) => false,
             // CR 303.4b: Resolve enchanted player via source's attached_to.
             Some(ControllerRef::EnchantedPlayer) => false,
+            // CR 102.1: the active player requires `state.active_player`, which
+            // is not available in this stateless matcher. Fail closed (mirrors
+            // the `DefendingPlayer` / `TriggeringPlayer` arms above); the
+            // active-player resolution path runs through `controller_ref_player`
+            // where `state` is in scope.
+            Some(ControllerRef::ActivePlayer) => false,
             None => true,
         },
         // Typed filters with type_filters don't match players
