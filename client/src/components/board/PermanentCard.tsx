@@ -19,8 +19,9 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
-import { COUNTER_COLORS, computePTDisplay, formatCounterTooltip, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { KeywordStrip } from "./KeywordStrip.tsx";
 import {
@@ -809,15 +810,15 @@ export const PermanentCard = memo(function PermanentCard({
 
           {/* Counter badges (top-right to avoid overlap with P/T box) */}
           {counters.length > 0 && (
-            <div className="absolute right-1 top-1 z-20 flex flex-col gap-0.5">
+            <div className="absolute right-1 top-1 z-[60] flex flex-col gap-0.5">
               {counters.map(([type, count]) => (
-                <span
-                  key={type}
-                  title={formatCounterTooltip(type, count)}
-                  className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-                >
-                  {formatCounterType(type)} x{count}
-                </span>
+                <CounterTooltip key={type} type={type} count={count}>
+                  <span
+                    className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                  >
+                    {formatCounterType(type)} x{count}
+                  </span>
+                </CounterTooltip>
               ))}
             </div>
           )}

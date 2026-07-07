@@ -992,6 +992,10 @@ pub enum DebugTokenRequest {
     Preset {
         preset_id: String,
         owner: PlayerId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power_override: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness_override: Option<i32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
     },
@@ -1230,13 +1234,25 @@ impl DebugAction {
                         .collect();
                     format!(" with {}", parts.join(", "))
                 };
+                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let token_label = match request {
-                    DebugTokenRequest::Preset { preset_id, .. } => preset_id.as_str(),
+                    DebugTokenRequest::Preset {
+                        preset_id,
+                        power_override,
+                        toughness_override,
+                        ..
+                    } => {
+                        if let (Some(power), Some(toughness)) = (power_override, toughness_override)
+                        {
+                            format!("{preset_id} {power}/{toughness}")
+                        } else {
+                            preset_id.clone()
+                        }
+                    }
                     DebugTokenRequest::Custom {
                         characteristics, ..
-                    } => characteristics.display_name.as_str(),
+                    } => characteristics.display_name.clone(),
                 };
-                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 format!(
                     "CreateToken ({} for {}{}{})",
                     token_label,

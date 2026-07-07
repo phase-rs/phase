@@ -3317,7 +3317,11 @@ fn dagger_caster_each_opponent_chain_emits_damage_each_player() {
             ),
         }
     // Sub-ability: the second "1 damage to each creature your opponents
-    // control" segment chains as a mass-damage effect at opponents' creatures.
+    // control" segment is uniform mass damage to every matching creature, so it
+    // MUST chain as `DamageAll{Typed{Creature, Opponent}}` — NOT a single-target
+    // `DealDamage`, which would illegally require one legal target and mark
+    // damage on only one creature (CR 120.3). Fail-on-revert of the bare-damage
+    // continuation each-object mass classification.
     let sub = def
         .sub_ability
         .as_ref()
@@ -3325,23 +3329,64 @@ fn dagger_caster_each_opponent_chain_emits_damage_each_player() {
     match &*sub.effect {
         Effect::DamageAll {
             amount: QuantityExpr::Fixed { value: 1 },
-            target,
+            target: TargetFilter::Typed(tf),
+            player_filter: None,
             ..
-        } => match target {
-            TargetFilter::Typed(tf) => {
-                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
-                assert!(tf
-                    .type_filters
-                    .iter()
-                    .any(|t| matches!(t, TypeFilter::Creature)));
+        } => {
+            assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)));
+        }
+        other => {
+            panic!("expected DamageAll{{Typed{{Creature, Opponent}}}} sub_ability, got {other:?}")
+        }
+    }
+}
+
+/// CR 120.2b + CR 120.3: The bare-damage continuation classifier must treat an
+/// "each <object>" recipient as uniform mass damage (`DamageAll`), the same as
+/// the primary segment does. Seismic Wave — "deals 2 damage to any target and 1
+/// damage to each nonartifact creature target opponent controls" — chains the
+/// object half as `DamageAll` over the whole nonartifact-creature set of the
+/// targeted opponent, never a single-target `DealDamage`. Building-block guard
+/// for the whole "... and N damage to each <object>" chain class.
+#[test]
+fn bare_damage_continuation_each_object_is_mass_damage() {
+    let def = parse_effect_chain(
+        "~ deals 2 damage to any target and 1 damage to each nonartifact creature target opponent controls",
+        AbilityKind::Spell,
+    );
+    // Primary: the "any target" half stays a single-target DealDamage(2).
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
             }
-            other => panic!("expected Typed{{Creature, Opponent}} sub-target, got {other:?}"),
-        },
-        Effect::DealDamage {
+        ),
+        "primary must stay single-target DealDamage(2), got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("expected chained mass-damage sub_ability for the each-object segment");
+    match &*sub.effect {
+        Effect::DamageAll {
             amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(tf),
             ..
-        } => {}
-        other => panic!("expected DamageAll/DealDamage(1) sub_ability, got {other:?}"),
+        } => {
+            assert_eq!(tf.controller, Some(ControllerRef::TargetOpponent));
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)));
+        }
+        other => panic!("expected DamageAll over the nonartifact-creature set, got {other:?}"),
     }
 }
 
@@ -6747,6 +6792,83 @@ fn for_each_pump_self_ref() {
         ),
         "self-ref subject should produce SelfRef target"
     );
+}
+
+/// CR 109.4 + CR 702 (issue #5018): PRODUCTION-PATH proof that a real card's
+/// Oracle line flows through `parse_effect` all the way into the new
+/// controller-scoped keyword `for each` arm — not just the quantity helper in
+/// isolation. Aven Gagglemaster / Aerial Assault ("you gain N life for each
+/// creature you control with flying") must lower to a `GainLife` whose amount
+/// is the controller-scoped (`ControllerRef::You`, CR 109.4) count of creatures
+/// with the flying keyword (CR 702). Before the new arm, the bare "you control"
+/// clause stranded " with flying", the for-each clause failed full consumption,
+/// and this dynamic amount was dropped.
+#[test]
+fn for_each_gain_life_controlled_creature_with_keyword_production_path() {
+    let e = parse_effect("You gain 1 life for each creature you control with flying.");
+    match e {
+        Effect::GainLife { amount, .. } => match amount {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf),
+                    },
+            } => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "life-gain count must be scoped to the source's controller, got {tf:?}"
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::WithKeyword {
+                        value: Keyword::Flying
+                    }),
+                    "life-gain count must gate on the flying keyword, got {tf:?}"
+                );
+            }
+            other => panic!("expected controller-scoped ObjectCount amount, got {other:?}"),
+        },
+        other => panic!("expected GainLife, got {other:?}"),
+    }
+}
+
+/// CR 109.4 + CR 702 (issue #5018): PRODUCTION-PATH proof for the headline card
+/// Skycat Sovereign ("gets +1/+1 for each other creature you control with
+/// flying") — a static pump through `parse_effect`. The `other` self-exclusion
+/// (`FilterProp::Another`) AND the keyword predicate must both survive the full
+/// production lowering, and the count stays scoped to the source's controller.
+#[test]
+fn for_each_pump_other_controlled_creature_with_keyword_production_path() {
+    let e = parse_effect("~ gets +1/+1 for each other creature you control with flying");
+    match e {
+        Effect::Pump {
+            power:
+                PtValue::Quantity(QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                }),
+            ..
+        } => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "pump count must be scoped to the source's controller, got {tf:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "\"other creature\" must exclude the source via Another, got {tf:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }),
+                "pump count must gate on the flying keyword, got {tf:?}"
+            );
+        }
+        other => panic!("expected Pump with dynamic controller-scoped ObjectCount, got {other:?}"),
+    }
 }
 
 /// CR 115.1a/c + CR 701.21a + CR 608.2c: "Target opponent sacrifices a

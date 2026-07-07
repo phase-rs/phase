@@ -6,6 +6,7 @@ import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
 import {
   ACTIVE_DECK_KEY,
+  RANDOM_DECK_SELECTION,
   listSavedDeckNames,
   getDeckMeta,
   deleteDeck,
@@ -39,8 +40,13 @@ import {
 } from "../../services/deckCompatibility";
 import {
   buildDeckCatalog,
+  savedDeckCatalogId,
   type DeckCatalogCandidate,
 } from "../../services/deckCatalog";
+import {
+  pickRandomDeckCandidate,
+  type RandomDeckCandidate,
+} from "../../services/randomDeckSelection";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
 import { savePreconDeck } from "../../services/preconDecks";
@@ -70,6 +76,8 @@ const PRECON_SECTION_ID = "__precon__";
 const DECK_GRID_CLASS = "grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]";
 const DECK_SCAN_BATCH_SIZE = 1;
 const COVERAGE_SCAN_BATCH_SIZE = 6;
+
+type SelectableRandomDeckCandidate = RandomDeckCandidate & { deckName: string };
 
 type FolderPromptRequest =
   | { kind: "create" }
@@ -102,6 +110,7 @@ const COLOR_ORDER = ["W", "U", "B", "R", "G"];
 
 type DeckFilter = "all" | GameFormat;
 type DeckSort = "alpha" | "recent" | "format";
+type SelectDeckSourceFilter = "all" | "user" | "feed" | "precon";
 
 function coverageFromPct(coveragePct: number | null | undefined): DeckCompatibilityResult["coverage"] {
   if (coveragePct == null) return null;
@@ -151,6 +160,18 @@ const FORMAT_FILTERS: Array<{ key: DeckFilter; label: string; aetherhubUrl?: str
           : undefined,
   })),
 ];
+
+const PRECON_SET_ALL = "__all__";
+
+function savedPreconSetCode(deckName: string): string | null {
+  if (!deckName.startsWith(PRECON_PREFIX)) return null;
+  return deckName.slice(PRECON_PREFIX.length).match(/\(([^()]+)\)$/)?.[1] ?? null;
+}
+
+function savedPreconMatchesSetFilter(deckName: string, setFilter: string): boolean {
+  const code = savedPreconSetCode(deckName);
+  return code != null && (setFilter === PRECON_SET_ALL || code === setFilter);
+}
 
 function DeckArtTile({ cardName }: { cardName: string | null }) {
   const { src, isLoading } = useCardImage(cardName ?? "", { size: "art_crop" });
@@ -560,6 +581,7 @@ interface MyDecksProps {
   confirmAction?: ReactNode;
   onCreateDeck?: () => void;
   onEditDeck?: (deckName: string) => void;
+  randomSelectionMode?: "resolveImmediately" | "defer";
   /** When true, render without the MenuPanel wrapper and header (for embedding). */
   bare?: boolean;
   /**
@@ -585,6 +607,7 @@ export function MyDecks({
   confirmAction,
   onCreateDeck,
   onEditDeck,
+  randomSelectionMode = "resolveImmediately",
   bare = false,
   onActiveDeckCompatChange,
 }: MyDecksProps) {
@@ -597,6 +620,7 @@ export function MyDecks({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [isPickingRandomDeck, setIsPickingRandomDeck] = useState(false);
   const [compatibilityStatus, setCompatibilityStatus] = useState<string | null>(null);
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
   const pendingCompatibility = useRef(new Set<string>());
@@ -617,6 +641,8 @@ export function MyDecks({
       : null;
   }, [selectedFormat]);
   const [activeFilter, setActiveFilter] = useState<DeckFilter>(contextualFilter ?? "all");
+  const [selectSourceFilter, setSelectSourceFilter] = useState<SelectDeckSourceFilter>("all");
+  const [preconSetFilter, setPreconSetFilter] = useState(PRECON_SET_ALL);
   const selectedFormatForCompatibility = selectedFormat ?? (activeFilter === "all" ? null : activeFilter);
   const activeFilterOption = FORMAT_FILTERS.find((option) => option.key === activeFilter);
   const formatMenuItems = useMemo(
@@ -629,6 +655,18 @@ export function MyDecks({
   );
   const formatMenuLabel =
     activeFilter === "all" ? t("myDecks.filterAll") : (activeFilterOption?.label ?? t("myDecks.filterAll"));
+  const selectSourceMenuItems = useMemo(
+    () => [
+      { value: "all", label: t("myDecks.sourceFilter.all") },
+      { value: "user", label: t("myDecks.sourceFilter.user") },
+      { value: "feed", label: t("myDecks.sourceFilter.feed") },
+      { value: "precon", label: t("myDecks.sourceFilter.precon") },
+    ],
+    [t],
+  );
+  const selectSourceMenuLabel =
+    selectSourceMenuItems.find((item) => item.value === selectSourceFilter)?.label
+    ?? t("myDecks.sourceFilter.all");
   const requiresCompatibilityFilter = activeFilter !== "all";
   const [activeSort, setActiveSort] = useState<DeckSort>(
     mode === "select" ? (selectedFormat ? "format" : "recent") : "alpha",
@@ -930,6 +968,17 @@ export function MyDecks({
     return filteredDeckNames;
   }, [filteredDeckNames]);
 
+  const sourceFilteredDeckNames = useMemo(() => {
+    if (mode !== "select" || selectSourceFilter === "all") return searchFiltered;
+    return searchFiltered.filter((deckName) => {
+      const feedOrigin = getDeckFeedOrigin(deckName);
+      const savedPrecon = savedPreconSetCode(deckName) != null;
+      if (selectSourceFilter === "feed") return feedOrigin != null;
+      if (selectSourceFilter === "user") return feedOrigin == null && !savedPrecon;
+      return feedOrigin == null && savedPreconMatchesSetFilter(deckName, preconSetFilter);
+    });
+  }, [mode, preconSetFilter, searchFiltered, selectSourceFilter]);
+
   const filteredPreconCandidates = useMemo(() => {
     const saved = new Set(deckNames);
     const q = searchQuery.toLowerCase();
@@ -951,13 +1000,48 @@ export function MyDecks({
     return selectedFormatForCompatibility === "Commander" ? filteredPreconCandidates : [];
   }, [filteredPreconCandidates, selectedFormatForCompatibility]);
 
+  const preconSetMenuItems = useMemo(() => {
+    const codes = Array.from(new Set(
+      [
+        ...legalPreconCandidates.flatMap((candidate) =>
+          candidate.source.type === "precon" ? [candidate.source.code] : [],
+        ),
+        ...searchFiltered.flatMap((deckName) => savedPreconSetCode(deckName) ?? []),
+      ],
+    )).sort((a, b) => a.localeCompare(b));
+    return [
+      { value: PRECON_SET_ALL, label: t("myDecks.preconSetFilterAll") },
+      ...codes.map((code) => ({ value: code, label: code })),
+    ];
+  }, [legalPreconCandidates, searchFiltered, t]);
+
+  const preconSetMenuLabel =
+    preconSetMenuItems.find((item) => item.value === preconSetFilter)?.label
+    ?? t("myDecks.preconSetFilterAll");
+
+  useEffect(() => {
+    if (preconSetFilter === PRECON_SET_ALL) return;
+    if (preconSetMenuItems.some((item) => item.value === preconSetFilter)) return;
+    setPreconSetFilter(PRECON_SET_ALL);
+  }, [preconSetFilter, preconSetMenuItems]);
+
+  const visiblePreconCandidates = useMemo(() => {
+    if (mode === "select" && selectSourceFilter !== "all" && selectSourceFilter !== "precon") {
+      return [];
+    }
+    if (preconSetFilter === PRECON_SET_ALL) return legalPreconCandidates;
+    return legalPreconCandidates.filter((candidate) =>
+      candidate.source.type === "precon" && candidate.source.code === preconSetFilter,
+    );
+  }, [legalPreconCandidates, mode, preconSetFilter, selectSourceFilter]);
+
   const legalPreconByName = useMemo(() => {
-    const entries = legalPreconCandidates.map((candidate) => [
+    const entries = visiblePreconCandidates.map((candidate) => [
       PRECON_PREFIX + candidate.name,
       candidate,
     ] as const);
     return new Map(entries);
-  }, [legalPreconCandidates]);
+  }, [visiblePreconCandidates]);
 
   const preconDeckNames = useMemo(() => {
     return Array.from(legalPreconByName.keys());
@@ -993,7 +1077,7 @@ export function MyDecks({
 
     const user: string[] = [];
     const bundled: string[] = [];
-    for (const name of searchFiltered) {
+    for (const name of sourceFilteredDeckNames) {
       if (isBundledDeck(name)) {
         bundled.push(name);
       } else {
@@ -1004,17 +1088,43 @@ export function MyDecks({
       userDecks: sortNames(user),
       bundledDecks: sortNames(bundled),
     };
-  }, [searchFiltered, activeSort, sortAsc, compatibilities]);
+  }, [sourceFilteredDeckNames, activeSort, sortAsc, compatibilities]);
 
+  const randomDeckSelected = activeDeckName === RANDOM_DECK_SELECTION;
   const noDeckSelected = mode === "select"
-    ? !activeDeckName || (!searchFiltered.includes(activeDeckName) && !preconDeckNames.includes(activeDeckName))
+    ? !activeDeckName || (
+      !randomDeckSelected &&
+      !sourceFilteredDeckNames.includes(activeDeckName) &&
+      !preconDeckNames.includes(activeDeckName)
+    )
     : false;
   const selectedDeckLabel = mode === "select"
     && activeDeckName
-    && (searchFiltered.includes(activeDeckName) || preconDeckNames.includes(activeDeckName))
-    ? activeDeckName
+    && (randomDeckSelected || sourceFilteredDeckNames.includes(activeDeckName) || preconDeckNames.includes(activeDeckName))
+    ? (randomDeckSelected ? t("myDecks.randomDeckTile") : activeDeckName)
     : null;
-  const visibleDeckCount = searchFiltered.length + preconDeckNames.length;
+  const visibleDeckCount = sourceFilteredDeckNames.length + preconDeckNames.length;
+  const randomSelectableCandidates = useMemo<SelectableRandomDeckCandidate[]>(() => {
+    if (mode !== "select") return [];
+    return [...sourceFilteredDeckNames, ...preconDeckNames].map((deckName) => {
+      const candidate = deckCandidatesByName.get(deckName) ?? legalPreconByName.get(deckName);
+      return {
+        id: candidate?.id ?? savedDeckCatalogId(deckName),
+        name: deckName,
+        deckName,
+        source: candidate?.source ?? { type: "saved" },
+        knownFormat: candidate?.knownFormat,
+        compatibility: compatibilities[deckName] ?? null,
+      };
+    });
+  }, [
+    compatibilities,
+    deckCandidatesByName,
+    legalPreconByName,
+    mode,
+    preconDeckNames,
+    sourceFilteredDeckNames,
+  ]);
   const userDeckScanTotal = requiresCompatibilityFilter ? unknownFormatDeckNames.length : 0;
   const userDeckScanCompleted = Math.min(deckScanIndex, userDeckScanTotal);
   const isScanningUserDecks = userDeckScanCompleted < userDeckScanTotal;
@@ -1168,6 +1278,66 @@ export function MyDecks({
     materializePreconDeck(deckName);
     onSelectDeck?.(deckName);
   }, [materializePreconDeck, mode, onEditDeck, onSelectDeck]);
+
+  const handleRandomDeckClick = useCallback(async () => {
+    if (mode !== "select" || randomSelectableCandidates.length === 0 || isPickingRandomDeck) return;
+    if (randomSelectionMode === "defer") {
+      onSelectDeck?.(RANDOM_DECK_SELECTION);
+      return;
+    }
+
+    setIsPickingRandomDeck(true);
+    let nextCompatibilities = compatibilities;
+    try {
+      if (selectedFormatForCompatibility) {
+        const unknownCandidates = randomSelectableCandidates.flatMap(({ deckName }) => {
+          const candidate = deckCandidatesByName.get(deckName) ?? legalPreconByName.get(deckName);
+          if (!candidate || candidate.knownFormat != null) return [];
+          if (compatibilities[deckName]?.selected_format_compatible != null) return [];
+          return [{ name: deckName, deck: candidate.deck }];
+        });
+
+        if (unknownCandidates.length > 0) {
+          setCompatibilityStatus(t("myDecks.status.checkingRandom"));
+          const results = await evaluateDeckCompatibilityBatch(unknownCandidates, {
+            selectedFormat: selectedFormatForCompatibility,
+            selectedMatchType,
+            summaryOnly: true,
+          });
+          nextCompatibilities = { ...compatibilities, ...results };
+          setCompatibilities(nextCompatibilities);
+          setCompatibilityError(null);
+        }
+      }
+    } catch (error) {
+      setCompatibilityError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCompatibilityStatus(null);
+      setIsPickingRandomDeck(false);
+    }
+
+    const pick = pickRandomDeckCandidate(
+      randomSelectableCandidates.map((candidate) => ({
+        ...candidate,
+        compatibility: nextCompatibilities[candidate.deckName] ?? candidate.compatibility,
+      })),
+      { selectedFormat: selectedFormatForCompatibility },
+    );
+    if (pick) handleTileClick(pick.deckName);
+  }, [
+    compatibilities,
+    deckCandidatesByName,
+    handleTileClick,
+    isPickingRandomDeck,
+    legalPreconByName,
+    mode,
+    onSelectDeck,
+    randomSelectableCandidates,
+    randomSelectionMode,
+    selectedFormatForCompatibility,
+    selectedMatchType,
+    t,
+  ]);
 
   const handleImported = (name: string, names: string[]) => {
     setDeckNames(names);
@@ -1454,6 +1624,37 @@ export function MyDecks({
         </div>
         </div>
         )}
+
+        {mode === "select" && (
+          <div className="flex w-full min-w-0 flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <MenuSelect
+              ariaLabel={t("myDecks.sourceFilterLabel")}
+              label={selectSourceMenuLabel}
+              selectedValue={selectSourceFilter}
+              items={selectSourceMenuItems}
+              menuLayout="dropdown"
+              onSelect={(value) => setSelectSourceFilter(value as SelectDeckSourceFilter)}
+              wrapperClassName="min-w-0 sm:w-36"
+              className="min-h-[30px] rounded bg-black/30 px-2 py-1 text-xs text-slate-300 ring-1 ring-white/10 focus-visible:ring-white/20"
+            />
+            {(selectSourceFilter === "all" || selectSourceFilter === "precon") &&
+              preconSetMenuItems.length > 1 && (
+                <MenuSelect
+                  ariaLabel={t("myDecks.preconSetFilterLabel")}
+                  label={preconSetMenuLabel}
+                  selectedValue={preconSetFilter}
+                  items={preconSetMenuItems}
+                  menuLayout="dropdown"
+                  filterable
+                  filterPlaceholder={t("myDecks.preconSetSearchPlaceholder")}
+                  noMatchesLabel={t("myDecks.preconSetNoMatches")}
+                  onSelect={setPreconSetFilter}
+                  wrapperClassName="min-w-0 sm:w-32"
+                  className="min-h-[30px] rounded bg-black/30 px-2 py-1 text-xs text-slate-300 ring-1 ring-white/10 focus-visible:ring-white/20"
+                />
+              )}
+          </div>
+        )}
       </div>
 
       {/* Format-filter banner: in select mode, when the caller pins a format
@@ -1567,6 +1768,17 @@ export function MyDecks({
               </div>
             )}
             <div className={DECK_GRID_CLASS}>
+              {mode === "select" && (
+                <AddDeckTile
+                  label={isPickingRandomDeck ? t("myDecks.randomDeckTileBusy") : t("myDecks.randomDeckTile")}
+                  onClick={() => void handleRandomDeckClick()}
+                  disabled={randomSelectableCandidates.length === 0 || isPickingRandomDeck}
+                  active={randomDeckSelected}
+                  icon={
+                    <path d="M5.75 3.5a3.25 3.25 0 0 0-3.25 3.25.75.75 0 0 0 1.5 0A1.75 1.75 0 0 1 5.75 5h6.69l-1.22 1.22a.75.75 0 1 0 1.06 1.06l2.5-2.5a.75.75 0 0 0 0-1.06l-2.5-2.5a.75.75 0 1 0-1.06 1.06L12.44 3.5H5.75Zm8.25 9.75A1.75 1.75 0 0 1 12.25 15H5.56l1.22-1.22a.75.75 0 1 0-1.06-1.06l-2.5 2.5a.75.75 0 0 0 0 1.06l2.5 2.5a.75.75 0 0 0 1.06-1.06L5.56 16.5h6.69a3.25 3.25 0 0 0 3.25-3.25.75.75 0 0 0-1.5 0Z" />
+                  }
+                />
+              )}
               <AddDeckTile
                 label={t("myDecks.importDeckTile")}
                 onClick={() => setShowImport(true)}
@@ -1879,26 +2091,35 @@ interface AddDeckTileProps {
   label: string;
   icon: ReactNode;
   onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
 }
 
 /** Shared call-to-action tile used for "Import Deck" and "Preconstructed" in
  * the deck grid. Keeps the two entry points visually identical so the only
  * thing that differs is the icon + label. */
-function AddDeckTile({ label, icon, onClick }: AddDeckTileProps) {
+function AddDeckTile({ label, icon, onClick, disabled = false, active = false }: AddDeckTileProps) {
   return (
     <button
       onClick={onClick}
-      className="group relative flex h-full min-h-[11rem] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl border border-dashed border-white/12 transition hover:bg-white/5 hover:border-white/25"
+      disabled={disabled}
+      className={`group relative flex h-full min-h-[11rem] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl border border-dashed transition ${
+        disabled
+          ? "cursor-not-allowed opacity-50"
+          : active
+            ? "border-indigo-300/70 bg-indigo-500/10 ring-2 ring-indigo-300/45"
+            : "border-white/12 hover:bg-white/5 hover:border-white/25"
+      }`}
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"
         viewBox="0 0 20 20"
         fill="currentColor"
-        className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
+        className={`h-8 w-8 transition-colors ${active ? "text-indigo-200" : "text-gray-500"} ${disabled || active ? "" : "group-hover:text-gray-300"}`}
       >
         {icon}
       </svg>
-      <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
+      <span className={`text-xs font-medium transition-colors ${active ? "text-indigo-100" : "text-gray-500"} ${disabled || active ? "" : "group-hover:text-gray-300"}`}>
         {label}
       </span>
     </button>

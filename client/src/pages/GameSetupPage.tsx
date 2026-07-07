@@ -23,7 +23,12 @@ import {
   getDeckCardCount,
 } from "../components/menu/deckHelpers";
 import { menuButtonClass } from "../components/menu/buttonStyles";
-import { ACTIVE_DECK_KEY, loadSavedDeckBracket, touchDeckPlayed } from "../constants/storage";
+import {
+  ACTIVE_DECK_KEY,
+  isRandomDeckSelection,
+  loadSavedDeckBracket,
+  touchDeckPlayed,
+} from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
 import { BRACKET_LABEL } from "../types/bracket";
 import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
@@ -170,7 +175,7 @@ export function GameSetupPage() {
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
     if (!activeDeckName && !suppliesDeck) return;
-    if (activeDeckName) touchDeckPlayed(activeDeckName);
+    if (activeDeckName && !isRandomDeckSelection(activeDeckName)) touchDeckPlayed(activeDeckName);
     const gameId = crypto.randomUUID();
     // Snapshot the per-seat AI config from preferences into the active-game
     // record. `AiOpponentConfig`'s `ensureAiSeatCount` effect normally syncs
@@ -211,7 +216,7 @@ export function GameSetupPage() {
   const formatSupportsAi = selectedFormat !== "Planechase";
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
-    !suppliesDeck && selectedCompat?.selected_format_compatible === false;
+    !suppliesDeck && !isRandomDeckSelection(activeDeckName) && selectedCompat?.selected_format_compatible === false;
   const noLegalAiDecks = !suppliesDeck && legalAiDeckCount === 0;
   // Block start only while the card DB is actively loading — not on `error`/`idle`,
   // since initializeGame awaits ensureCardDb itself and an errored warm must not
@@ -223,17 +228,19 @@ export function GameSetupPage() {
   // cEDH warning: shown when the human deck is not bracket 5 but the table is
   // in cEDH mode (all AI play cEDH).
   const cedhMode = usePreferencesStore((s) => s.cedhMode);
-  const humanDeckBracket = activeDeckName ? loadSavedDeckBracket(activeDeckName) : null;
+  const randomDeckSelected = isRandomDeckSelection(activeDeckName);
+  const humanDeckBracket = activeDeckName && !randomDeckSelected ? loadSavedDeckBracket(activeDeckName) : null;
   const showCedhWarning =
     activeDeckName !== null &&
+    !randomDeckSelected &&
     cedhMode &&
     !isDeckCedhLegal(humanDeckBracket);
   const representativeCard = useMemo(
-    () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
+    () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],
   );
   const deckCardCount = useMemo(
-    () => (activeDeckName ? getDeckCardCount(activeDeckName) : 0),
+    () => (activeDeckName && !isRandomDeckSelection(activeDeckName) ? getDeckCardCount(activeDeckName) : 0),
     [activeDeckName],
   );
   const { src: deckArtSrc } = useCardImage(representativeCard ?? "", { size: "art_crop" });
@@ -315,6 +322,7 @@ export function GameSetupPage() {
             onSelectDeck={handleSelectDeck}
             onEditDeck={handleEditDeck}
             activeDeckName={activeDeckName}
+            randomSelectionMode="defer"
             bare
             onActiveDeckCompatChange={setSelectedCompat}
           />
@@ -322,8 +330,49 @@ export function GameSetupPage() {
           {/* Sidebar */}
           <div className="order-first md:sticky md:top-8 md:order-last md:self-start">
             <MenuPanel className="flex flex-col gap-4 px-4 py-4">
+              {/* Primary CTA — single dominant action on this page */}
+              <button
+                onClick={handleStartAI}
+                disabled={cannotStartAi}
+                className={menuButtonClass({
+                  tone: "emerald",
+                  size: "lg",
+                  disabled: cannotStartAi,
+                  // No `whitespace-nowrap`: the "Start Match (N opponents)" label
+                  // grows with player count and would overflow the fixed 280px
+                  // sidebar track, forcing page-wide horizontal scroll. Allow it
+                  // to wrap within the column instead.
+                  className: "w-full px-6 text-center",
+                })}
+              >
+                {playerCount > 2
+                  ? t("gameSetup.startMatchWithOpponents", { count: playerCount - 1 })
+                  : t("gameSetup.startMatch")}
+              </button>
+
+              {/* Separator */}
+              <div className="border-t border-white/8" />
+
               {/* Deck preview */}
-              {activeDeckName ? (
+              {randomDeckSelected ? (
+                <div>
+                  <div className="flex aspect-[5/3] items-center justify-center overflow-hidden rounded-xl border border-indigo-300/25 bg-indigo-500/10">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-full bg-black/30 text-indigo-100 ring-1 ring-indigo-200/25">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-8 w-8">
+                        <path d="M5.75 3.5a3.25 3.25 0 0 0-3.25 3.25.75.75 0 0 0 1.5 0A1.75 1.75 0 0 1 5.75 5h6.69l-1.22 1.22a.75.75 0 1 0 1.06 1.06l2.5-2.5a.75.75 0 0 0 0-1.06l-2.5-2.5a.75.75 0 1 0-1.06 1.06L12.44 3.5H5.75Zm8.25 9.75A1.75 1.75 0 0 1 12.25 15H5.56l1.22-1.22a.75.75 0 1 0-1.06-1.06l-2.5 2.5a.75.75 0 0 0 0 1.06l2.5 2.5a.75.75 0 0 0 1.06-1.06L5.56 16.5h6.69a3.25 3.25 0 0 0 3.25-3.25.75.75 0 0 0-1.5 0Z" />
+                      </svg>
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    <h3 className="text-base font-semibold text-white">
+                      {t("gameSetup.deckPreview.randomTitle")}
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-slate-400">
+                      {t("gameSetup.deckPreview.randomDescription")}
+                    </p>
+                  </div>
+                </div>
+              ) : activeDeckName ? (
                 <div>
                   <div className="aspect-[5/3] overflow-hidden rounded-xl bg-gray-800">
                     {deckArtSrc ? (
@@ -574,28 +623,6 @@ export function GameSetupPage() {
                 </div>
               )}
 
-              {/* Separator */}
-              <div className="border-t border-white/8" />
-
-              {/* Primary CTA — single dominant action on this page */}
-              <button
-                onClick={handleStartAI}
-                disabled={cannotStartAi}
-                className={menuButtonClass({
-                  tone: "emerald",
-                  size: "lg",
-                  disabled: cannotStartAi,
-                  // No `whitespace-nowrap`: the "Start Match (N opponents)" label
-                  // grows with player count and would overflow the fixed 280px
-                  // sidebar track, forcing page-wide horizontal scroll. Allow it
-                  // to wrap within the column instead.
-                  className: "w-full px-6 text-center",
-                })}
-              >
-                {playerCount > 2
-                  ? t("gameSetup.startMatchWithOpponents", { count: playerCount - 1 })
-                  : t("gameSetup.startMatch")}
-              </button>
             </MenuPanel>
           </div>
         </div>

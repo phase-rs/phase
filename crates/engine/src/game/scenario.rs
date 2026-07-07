@@ -1751,6 +1751,7 @@ pub struct SpellCast<'a> {
     discard_cards: Vec<ObjectId>,
     effect_zone_cards: Vec<ObjectId>,
     copy_target: Option<ObjectId>,
+    spellbook_pick: Option<String>,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1776,6 +1777,7 @@ impl<'a> SpellCast<'a> {
             discard_cards: Vec::new(),
             effect_zone_cards: Vec::new(),
             copy_target: None,
+            spellbook_pick: None,
         }
     }
 
@@ -1930,6 +1932,13 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Draft this card name at any `SpellbookDraft` prompt during resolution
+    /// (Alchemy `Effect::DraftFromSpellbook`). Mirrors [`choose_option`].
+    pub fn spellbook_pick(mut self, name: &str) -> Self {
+        self.spellbook_pick = Some(name.to_string());
+        self
+    }
+
     /// Tap these creatures to pay the cost via Convoke (CR 702.51a). Each is
     /// tapped during the `ManaPayment { convoke_mode }` window with mana of the
     /// creature's first declared color (falling back to colorless for the
@@ -1969,6 +1978,7 @@ impl<'a> SpellCast<'a> {
             discard_cards,
             effect_zone_cards,
             copy_target,
+            spellbook_pick,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -2227,6 +2237,7 @@ impl<'a> SpellCast<'a> {
             discard_cards,
             effect_zone_cards,
             copy_target,
+            spellbook_pick,
         })
     }
 
@@ -2264,6 +2275,7 @@ pub struct CastCommit<'a> {
     discard_cards: Vec<ObjectId>,
     effect_zone_cards: Vec<ObjectId>,
     copy_target: Option<ObjectId>,
+    spellbook_pick: Option<String>,
 }
 
 impl<'a> CastCommit<'a> {
@@ -2302,6 +2314,7 @@ impl<'a> CastCommit<'a> {
             discard_cards,
             effect_zone_cards,
             copy_target,
+            spellbook_pick,
             ..
         } = self;
 
@@ -2324,6 +2337,7 @@ impl<'a> CastCommit<'a> {
             discard_cards,
             effect_zone_cards,
             copy_target,
+            spellbook_pick,
         };
         events.extend(drive_resolution(runner, &policy)?);
 
@@ -2500,6 +2514,7 @@ pub struct AbilityActivation<'a> {
     pay_with: Vec<ObjectId>,
     search_pick: SearchPolicy,
     optional: OptionalPolicy,
+    spellbook_pick: Option<String>,
 }
 
 impl<'a> AbilityActivation<'a> {
@@ -2515,6 +2530,7 @@ impl<'a> AbilityActivation<'a> {
             pay_with: Vec::new(),
             search_pick: SearchPolicy::default(),
             optional: OptionalPolicy::default(),
+            spellbook_pick: None,
         }
     }
 
@@ -2585,6 +2601,13 @@ impl<'a> AbilityActivation<'a> {
         self
     }
 
+    /// Draft this card name at any `SpellbookDraft` prompt during resolution
+    /// (Alchemy `Effect::DraftFromSpellbook`). Mirrors [`SpellCast::spellbook_pick`].
+    pub fn spellbook_pick(mut self, name: &str) -> Self {
+        self.spellbook_pick = Some(name.to_string());
+        self
+    }
+
     /// Drive the full activation pipeline to its conclusion and return the
     /// outcome. See [`SpellCast::resolve`] for the shared contract.
     pub fn resolve(self) -> Outcome {
@@ -2599,6 +2622,7 @@ impl<'a> AbilityActivation<'a> {
             pay_with,
             search_pick,
             optional,
+            spellbook_pick,
         } = self;
 
         // CR 119.3: snapshot life totals before activation for `life_delta`.
@@ -2739,6 +2763,7 @@ impl<'a> AbilityActivation<'a> {
             discard_cards: Vec::new(),
             effect_zone_cards: Vec::new(),
             copy_target: None,
+            spellbook_pick,
         };
         events.extend(
             drive_resolution(runner, &policy).expect("ability resolution must be accepted"),
@@ -2814,6 +2839,10 @@ pub struct ResolutionPolicy {
     pub effect_zone_cards: Vec<ObjectId>,
     /// Permanent to choose at `CopyTargetChoice`.
     pub copy_target: Option<ObjectId>,
+    /// Card name to draft at a `SpellbookDraft` prompt (Alchemy
+    /// `Effect::DraftFromSpellbook`). `None` halts the driver so tests without a
+    /// pick can inspect the offered `options` via `final_waiting_for()`.
+    pub spellbook_pick: Option<String>,
 }
 
 /// Drive the engine through resolution, answering the prompts the harness knows
@@ -3000,6 +3029,24 @@ fn drive_resolution(
                     break;
                 };
                 act_collect(runner, GameAction::ChooseOption { choice }, &mut events)?;
+            }
+            // Alchemy `Effect::DraftFromSpellbook`: draft the declared card name
+            // from the drafting source's spellbook `options`. No pick declared →
+            // halt so the caller can assert the offered options and the draft
+            // boundary via `final_waiting_for()`.
+            WaitingFor::SpellbookDraft { options, .. } => {
+                let Some(card) = policy.spellbook_pick.clone() else {
+                    break;
+                };
+                debug_assert!(
+                    options.contains(&card),
+                    "spellbook_pick {card:?} is not in the drafting source's spellbook {options:?}"
+                );
+                act_collect(
+                    runner,
+                    GameAction::SubmitSpellbookDraft { card },
+                    &mut events,
+                )?;
             }
             WaitingFor::DiscardChoice {
                 cards,

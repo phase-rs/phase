@@ -3293,6 +3293,8 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
             projected: false,
         },
         ControllerRef::EnchantedPlayer => Axes::NONE,
+        // CR 102.1: a live read of `state.active_player` — no event/sibling axis.
+        ControllerRef::ActivePlayer => Axes::NONE,
     }
 }
 

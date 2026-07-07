@@ -10538,6 +10538,7 @@ mod cycling_synthesis_tests {
                 scryfall_id: Some("fractured-sanity-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -10606,6 +10607,7 @@ mod cycling_synthesis_tests {
                 scryfall_id: Some("storm-queen-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&storm, None);
@@ -10657,6 +10659,7 @@ mod cycling_synthesis_tests {
                 scryfall_id: Some("flying-men-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&men, None);
@@ -11260,6 +11263,7 @@ mod evoke_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -13662,6 +13666,7 @@ mod provoke_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -14738,6 +14743,7 @@ mod increment_synthesis_tests {
                 scryfall_id: Some("increment-dedupe-test-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         }
     }
 
@@ -21254,6 +21260,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -21317,6 +21324,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         }
     }
 
@@ -21436,6 +21444,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         }
     }
 
@@ -21567,6 +21576,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_oracle_id: None,
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
