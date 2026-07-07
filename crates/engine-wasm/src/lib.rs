@@ -1178,9 +1178,8 @@ pub fn export_game_state_json() -> Result<String, JsValue> {
 pub fn export_persisted_game_state_json() -> Result<String, JsValue> {
     with_state(|state| {
         let persisted = PersistedGameState::capture(state);
-        serde_json::to_string(&persisted).map_err(|e| {
-            JsValue::from_str(&format!("Failed to serialize PersistedGameState: {e}"))
-        })
+        serde_json::to_string(&persisted)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize PersistedGameState: {e}")))
     })?
 }
 

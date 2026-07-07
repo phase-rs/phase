@@ -627,7 +627,8 @@ fn yawgmoth_cancel_restore_survives_persisted_game_state_roundtrip() {
         })
         .expect("sacrifice fodder for cost");
 
-    let persisted = engine::types::persisted_game_state::PersistedGameState::capture(runner.state());
+    let persisted =
+        engine::types::persisted_game_state::PersistedGameState::capture(runner.state());
     assert!(
         !persisted.pending_cast_sacrifice_rollbacks.is_empty(),
         "precondition: sacrifice rollback must be captured in persisted wrapper"

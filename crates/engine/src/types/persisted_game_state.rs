@@ -30,8 +30,7 @@ impl PersistedGameState {
     pub fn into_game_state(self) -> GameState {
         let mut game_state = self.state;
         if !self.pending_cast_sacrifice_rollbacks.is_empty() {
-            game_state.pending_cast_sacrifice_rollbacks =
-                self.pending_cast_sacrifice_rollbacks;
+            game_state.pending_cast_sacrifice_rollbacks = self.pending_cast_sacrifice_rollbacks;
         }
         game_state
     }

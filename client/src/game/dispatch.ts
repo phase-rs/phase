@@ -312,8 +312,8 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       throw retryErr;
     }
   }
-  const { gameId, adapter } = useGameStore.getState();
-  if (gameId && adapter) await saveGameWithAdapter(gameId, newState, adapter);
+  const { gameId } = useGameStore.getState();
+  if (gameId) await saveGameWithAdapter(gameId, newState, adapter);
 
   // 3c. Feed the throughput tracker: count stack entries that left the stack
   //     this action (resolved, countered, or otherwise removed), id-diffed so a
@@ -870,9 +870,9 @@ export async function dispatchResolveAll(
       }
     }
 
-    const { gameId, adapter } = useGameStore.getState();
+    const { gameId } = useGameStore.getState();
     const newState = useGameStore.getState().gameState;
-    if (gameId && newState && adapter) await saveGameWithAdapter(gameId, newState, adapter);
+    if (gameId && newState) await saveGameWithAdapter(gameId, newState, adapter);
   } finally {
     batchResolveInProgress = false;
     setIsResolvingAll(false);

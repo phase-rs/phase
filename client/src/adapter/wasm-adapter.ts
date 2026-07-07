@@ -740,7 +740,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       enqueue(() => wasm.restore_game_state(stateJson)),
 
     exportPersistedState: () =>
-      enqueue(() => export_persisted_game_state_json()),
+      enqueue(() => wasm.export_persisted_game_state_json()),
 
     resumeMultiplayerHostState: (stateJson: string) => {
       enqueue(() => wasm.resume_multiplayer_host_state(stateJson));
