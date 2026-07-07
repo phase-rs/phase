@@ -1746,6 +1746,11 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TriggeringPlayer => false,
                         // CR 303.4b: Enchanted-player scope has no static context. Fail closed.
                         crate::types::ability::ControllerRef::EnchantedPlayer => false,
+                        // CR 102.1: the active player, resolvable directly from
+                        // `state.active_player`.
+                        crate::types::ability::ControllerRef::ActivePlayer => {
+                            state.active_player == player_id
+                        }
                     };
                 }
                 return true;

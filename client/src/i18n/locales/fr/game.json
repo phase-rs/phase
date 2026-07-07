@@ -4,6 +4,13 @@
     "collapse": "Réduire la progression de résolution",
     "expand": "Développer la progression de résolution"
   },
+  "debugCreate": {
+    "tokenPower": "Power",
+    "tokenToughness": "Toughness",
+    "tokenPowerPlaceholder": "Power",
+    "tokenToughnessPlaceholder": "Toughness",
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
   "card": {
     "faceDownName": "Carte face cachée",
     "loading": "Chargement de {{name}}",

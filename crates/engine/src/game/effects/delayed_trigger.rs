@@ -681,6 +681,17 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 *origin = Some(Zone::Exile);
             }
         }
+        // CR 603.7c + CR 608.2c: Pin the tracked-set sentinel `TrackedSetId(0)` to
+        // the concrete `real_id` inside the mass-destroy target filter at
+        // delayed-trigger CREATION, so end-step resolution reads THIS ability's
+        // frozen population and never falls back to `matches_target_filter`'s live
+        // `max_by_key` scan (which would pick a later, unrelated tracked set — the
+        // Maddening Imp cross-resolution collision). Reuses the existing
+        // `TargetFilter::rebind_tracked_set_sentinel` (types/ability.rs) — the
+        // single authority for rewriting `TrackedSet{0}`/`TrackedSetFiltered{0}` →
+        // concrete inside a filter (recursing And/Or/Not) — rather than open-coding
+        // the two-variant rewrite the `ChangeZoneAll` arm above does inline.
+        Effect::DestroyAll { target, .. } => target.rebind_tracked_set_sentinel(real_id),
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
         Effect::ChangeZone { destination, .. } => {

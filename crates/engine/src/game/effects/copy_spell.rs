@@ -427,7 +427,10 @@ fn resolve_copier_player(
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::TriggeringPlayer
         // CR 303.4b: Enchanted-player scope cannot resolve a copier. Fail closed.
-        | ControllerRef::EnchantedPlayer => None,
+        | ControllerRef::EnchantedPlayer
+        // CR 102.1: no card scopes "the active player copies this spell";
+        // fail closed (mirrors DefendingPlayer / EnchantedPlayer).
+        | ControllerRef::ActivePlayer => None,
     }
 }
 

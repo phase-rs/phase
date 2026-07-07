@@ -75,6 +75,68 @@ fn runtime_granted_cycling_abilities(
         .collect()
 }
 
+/// CR 702.6: An `Equip` keyword granted at runtime by a static ability (Bram,
+/// Bludgeon Brawl's "… is an Equipment with equip {N} …") does not pass through
+/// card-load synthesis, so its equip activated ability must be synthesized live
+/// from the object's post-layer keyword set. `obj.keywords` is battlefield-
+/// authoritative (AddKeyword grants land there); printed equip keywords are
+/// excluded because card-load synthesis already turned them into an
+/// `obj.abilities` entry, so re-synthesizing them would double-offer equip.
+fn runtime_granted_equip_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    // CR 702.6: Equip functions only while its source is on the battlefield.
+    if obj.zone != Zone::Battlefield {
+        return Vec::new();
+    }
+    // CR 702.6a: a permanent may have more than one equip ability, and each is
+    // independently activatable. Card-load synthesis already turned every PRINTED
+    // Equip keyword into an `obj.abilities` entry, so subtract printed equips by
+    // OCCURRENCE (not value-wide membership): consume one printed instance per
+    // matching live keyword, and synthesize the rest. This keeps a granted
+    // Equip {1} offered even when the object also prints an identical Equip {1}.
+    let mut unconsumed_printed: Vec<&Keyword> = obj
+        .base_keywords
+        .iter()
+        .filter(|keyword| matches!(keyword, Keyword::Equip(_)))
+        .collect();
+    obj.keywords
+        .iter()
+        .filter_map(|keyword| {
+            if !matches!(keyword, Keyword::Equip(_)) {
+                return None;
+            }
+            if let Some(index) = unconsumed_printed
+                .iter()
+                .position(|printed| *printed == keyword)
+            {
+                // A printed equip already lives in `obj.abilities`; consume it so
+                // any additionally granted copies are still synthesized below.
+                unconsumed_printed.remove(index);
+                return None;
+            }
+            crate::database::synthesis::equip_ability_for_keyword(keyword).map(|mut ability| {
+                // CR 202.3 + CR 118.9: Bludgeon Brawl grants `equip {X}` where X
+                // is the artifact's mana value, so the keyword carries the
+                // `ManaCost::SelfManaValue` placeholder. Concretize it to the
+                // source's actual mana value HERE — otherwise the payment path
+                // treats `SelfManaValue` as `{0}` and the equip is effectively
+                // free.
+                if let Some(cost) = ability.cost.take() {
+                    ability.cost = Some(super::keywords::resolve_self_mana_in_ability_cost(
+                        state, source_id, &cost,
+                    ));
+                }
+                ability
+            })
+        })
+        .collect()
+}
+
 /// CR 604.1 (seam 4: activated-ability-on-grant): synthesize graveyard activated
 /// abilities (Encore, Scavenge) for keywords granted to a graveyard card by a
 /// static. The `AddKeyword` layer seam installs only the keyword + triggers, so a
@@ -191,6 +253,10 @@ pub fn activated_ability_definitions(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            // CR 702.6: statically granted equip (Bram, Bludgeon Brawl) chained
+            // LAST — the identical append order is REQUIRED in
+            // `activation_ability_definition` so `ability_index` stays consistent.
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .enumerate()
             .map(|(offset, ability)| (printed_len + offset, ability)),
     );
@@ -220,6 +286,7 @@ fn activation_ability_definition(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .nth(offset)?
     };
     if let Some(ref cost) = ability.cost {

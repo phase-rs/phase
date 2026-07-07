@@ -3168,6 +3168,14 @@ pub enum ControllerRef {
     /// Curse of Clinging Webs, Curse of the Restless Dead) where the trigger
     /// watches objects controlled by the enchanted player.
     EnchantedPlayer,
+    /// CR 102.1: Filter controller is the active player — the player whose turn
+    /// it is. Exactly one player at any time (unlike `Opponent`, which matches
+    /// every opponent in multiplayer). Resolved live from `state.active_player`
+    /// via `controller_ref_player`. Powers "the active player controls" subjects
+    /// and the card-assembly-bound punisher target on cards that coerce the turn
+    /// player (Siren's Call, Maddening Imp), cast/activated only during an
+    /// opponent's turn.
+    ActivePlayer,
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -3660,6 +3668,12 @@ pub enum FilterProp {
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
+    /// CR 302.6 + CR 508.1a: the object has been under its controller's control
+    /// continuously since that player's most recent turn began (haste-INDEPENDENT
+    /// — cares only about the continuity limb, unlike attack-eligibility's
+    /// haste-OR-continuity). Reads the durable `summoning_sick` flag, set on ETB
+    /// and on any control change, cleared at the controller's next turn.
+    ControlledContinuouslySinceTurnBegan,
     /// CR 400.7 + CR 700.4: The object moved between matching zones during
     /// this turn. Parameterized for phrases like "cards in your graveyard that
     /// were put there from the battlefield this turn"; `None` on either side
