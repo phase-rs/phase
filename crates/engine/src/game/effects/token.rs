@@ -4022,9 +4022,127 @@ mod tests {
     }
 
     #[test]
+    fn catalog_pest_dies_trigger_fires_after_lethal_damage_sba() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::game::triggers::process_triggers;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        state.objects.get_mut(&obj_id).unwrap().damage_marked = 1;
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        process_triggers(&mut state, &events);
+
+        assert!(
+            !state.objects.contains_key(&obj_id),
+            "token destroyed by lethal damage must cease to exist after moving zones"
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the Pest's dies trigger must fire when lethal damage SBAs move it to the graveyard"
+        );
+        let lki_token_ref = state
+            .lki_cache
+            .get(&obj_id)
+            .and_then(|lki| lki.token_image_ref.as_ref())
+            .expect("LKI must preserve the token image ref for dead-token stack display");
+        assert_eq!(
+            Some(lki_token_ref.preset_id.as_str()),
+            preset
+                .token_image_ref
+                .as_ref()
+                .map(|image| image.preset_id.as_str())
+        );
+    }
+
+    #[test]
+    fn catalog_pest_dies_trigger_fires_after_tragic_slip_zero_toughness() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::events::GameEvent;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        let slip = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Tragic Slip",
+                true,
+                "Target creature gets -1/-1 until end of turn.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let pest = create_object(
+            runner.state_mut(),
+            CardId(0),
+            P0,
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = runner.state_mut().objects.get_mut(&pest).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        inject_catalog_token_abilities(runner.state_mut(), pest);
+
+        let outcome = runner.cast(slip).target_object(pest).resolve();
+
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == pest
+            )),
+            "Tragic Slip's -1/-1 must create a zero-toughness battlefield-to-graveyard event"
+        );
+        assert!(
+            !outcome.state().objects.contains_key(&pest),
+            "zero-toughness Pest token must cease to exist"
+        );
+        assert!(
+            outcome.state().stack.len() == 1 || outcome.life_delta(P0) == 1,
+            "the Pest dies trigger must either remain on the stack or resolve to gain 1 life"
+        );
+    }
+
+    #[test]
     fn pest_infestation_linked_create_token_grants_catalog_dies_trigger() {
         use crate::types::proposed_event::TokenCharacteristics;
-        use std::collections::HashSet;
 
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -4034,12 +4152,20 @@ mod tests {
             "Pest Infestation".to_string(),
             Zone::Battlefield,
         );
-        state
-            .objects
-            .get_mut(&source)
-            .unwrap()
-            .source_related_token_ids
-            .push("14c28cbd-1740-5c17-98ea-4aea094067f1".to_string());
+        let source_obj = state.objects.get_mut(&source).unwrap();
+        source_obj.printed_ref = Some(crate::types::card::PrintedCardRef {
+            oracle_id: "1b704798-0c69-4c18-ac7e-42933ce90028".to_string(),
+            face_name: "Pest Infestation".to_string(),
+        });
+        source_obj.source_related_token_ids.extend(
+            [
+                "5d96727f-b037-5af6-a854-b39b4bc4b5ea",
+                "be7c7de8-06e4-5ea4-8faf-18881dbcee45",
+                "fda6f4a3-6734-5347-8712-e449ed76e0a8",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
 
         let spec = TokenSpec {
             characteristics: TokenCharacteristics {
@@ -4068,7 +4194,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
-            applied: HashSet::new(),
+            applied: std::collections::HashSet::new(),
         };
         let mut events = vec![];
         apply_create_token_after_replacement(&mut state, event, &mut events);
@@ -4079,8 +4205,8 @@ mod tests {
             obj.token_image_ref
                 .as_ref()
                 .map(|image| image.preset_id.as_str()),
-            Some("14c28cbd-1740-5c17-98ea-4aea094067f1"),
-            "Pest Infestation's source-linked token id must resolve to the BLC Pest preset"
+            Some("5d96727f-b037-5af6-a854-b39b4bc4b5ea"),
+            "Pest Infestation's multiple equivalent source-linked token ids must resolve to the first matching Pest preset, not fall back to an unrelated Pest"
         );
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];

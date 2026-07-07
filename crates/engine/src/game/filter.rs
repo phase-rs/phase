@@ -5620,6 +5620,7 @@ mod tests {
             card,
             LKISnapshot {
                 name: "Forest".to_string(),
+                token_image_ref: None,
                 power: None,
                 toughness: None,
                 base_power: None,
@@ -9386,6 +9387,7 @@ mod tests {
         );
         let lki = crate::types::game_state::LKISnapshot {
             name: "Returned Creature".into(),
+            token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
             base_power: Some(2),
@@ -9430,6 +9432,7 @@ mod tests {
         );
         let mut lki = crate::types::game_state::LKISnapshot {
             name: "Destroyed Land".into(),
+            token_image_ref: None,
             power: None,
             toughness: None,
             base_power: None,
@@ -9576,6 +9579,7 @@ mod tests {
 
         let lki = |tapped: bool| LKISnapshot {
             name: "Tap Probe".to_string(),
+            token_image_ref: None,
             power: None,
             toughness: None,
             base_power: None,
@@ -10431,6 +10435,7 @@ mod tests {
 
         let creature_lki = LKISnapshot {
             name: "Test Creature".to_string(),
+            token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
             base_power: Some(2),
@@ -10450,6 +10455,7 @@ mod tests {
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
+            token_image_ref: None,
             power: None,
             toughness: None,
             base_power: None,
@@ -10592,6 +10598,7 @@ mod tests {
             stolen,
             LKISnapshot {
                 name: "Stolen Bear".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -10663,6 +10670,7 @@ mod tests {
             spell,
             LKISnapshot {
                 name: "Cast From Exile".to_string(),
+                token_image_ref: None,
                 power: None,
                 toughness: None,
                 base_power: None,

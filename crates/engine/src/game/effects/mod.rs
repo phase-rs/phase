@@ -1455,6 +1455,7 @@ fn revealed_object_context_from_events(
 fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapshot {
     LKISnapshot {
         name: record.name.clone(),
+        token_image_ref: None,
         power: record.power,
         toughness: record.toughness,
         // CR 208.4b + CR 613.4b: Carry the layer-7b base values from the
@@ -9301,6 +9302,7 @@ mod tests {
             source,
             LKISnapshot {
                 name: "Choice Source".to_string(),
+                token_image_ref: None,
                 power: None,
                 toughness: None,
                 base_power: None,
@@ -11533,6 +11535,7 @@ mod tests {
             sacrificed,
             crate::types::game_state::LKISnapshot {
                 name: "Sacrificed".to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),

@@ -17,7 +17,7 @@ use super::ability::{
     TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
-use super::card::CardFace;
+use super::card::{CardFace, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
@@ -196,6 +196,11 @@ pub struct CombatPhaseSkipState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LKISnapshot {
     pub name: String,
+    /// Display-only token catalog ref as it last existed in the public zone.
+    /// Preserved so stack entries from dead token sources can render the exact
+    /// token image without falling back to name-based lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     /// CR 208.4b + CR 613.4b: Base power as it last existed in the public zone

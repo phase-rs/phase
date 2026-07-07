@@ -22,6 +22,7 @@ use crate::types::ability::{
     GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
     TargetRef,
 };
+use crate::types::card::TokenImageRef;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -74,6 +75,8 @@ pub struct TriggerContextDisplay {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackEntryDisplay {
     pub source_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
     pub kind_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_description: Option<String>,
@@ -741,12 +744,26 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
 
     StackEntryDisplay {
         source_name,
+        token_image_ref: stack_source_token_image_ref(state, entry),
         kind_label,
         ability_description,
         targets: stack_entry_targets(state, entry),
         paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
         trigger_context: stack_trigger_context(state, entry),
     }
+}
+
+fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option<TokenImageRef> {
+    state
+        .objects
+        .get(&entry.source_id)
+        .and_then(|obj| obj.token_image_ref.clone())
+        .or_else(|| {
+            state
+                .lki_cache
+                .get(&entry.source_id)
+                .and_then(|lki| lki.token_image_ref.clone())
+        })
 }
 
 fn stack_source_name(state: &GameState, entry: &StackEntry) -> String {

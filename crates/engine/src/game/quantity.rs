@@ -5300,6 +5300,7 @@ mod tests {
 
         let creature_lki = |name: &str, controller: PlayerId| LKISnapshot {
             name: name.to_string(),
+            token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
             base_power: Some(2),
@@ -11080,6 +11081,7 @@ mod tests {
             dead_id,
             LKISnapshot {
                 name: String::new(),
+                token_image_ref: None,
                 power: Some(6),
                 toughness: Some(5),
                 base_power: Some(6),
@@ -11142,6 +11144,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Regal Force".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
                 base_power: Some(5),
@@ -11289,6 +11292,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrificed Hulk".to_string(),
+                token_image_ref: None,
                 power: Some(99),
                 toughness: Some(99),
                 base_power: Some(99),
@@ -11367,6 +11371,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Effect-Sacrificed Creature".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
                 base_power: Some(5),
@@ -11444,6 +11449,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Sacrificed Creature".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -11507,6 +11513,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -11567,6 +11574,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Revealed Card".to_string(),
+                token_image_ref: None,
                 power: Some(0),
                 toughness: Some(0),
                 base_power: Some(0),
@@ -11620,6 +11628,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -11684,6 +11693,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(power),
                 toughness: Some(power),
                 base_power: Some(power),
@@ -11725,6 +11735,7 @@ mod tests {
             ObjectId(1),
             LKISnapshot {
                 name: String::new(),
+                token_image_ref: None,
                 power: Some(3),
                 toughness: Some(3),
                 base_power: Some(3),
@@ -12345,6 +12356,7 @@ mod tests {
                 exiled,
                 crate::types::game_state::LKISnapshot {
                     name: format!("Exiled {card_id}"),
+                    token_image_ref: None,
                     power: Some(power),
                     toughness: Some(toughness),
                     base_power: Some(power),

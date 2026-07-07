@@ -1594,6 +1594,7 @@ impl GameObject {
     pub fn snapshot_public_characteristics(&self) -> LKISnapshot {
         LKISnapshot {
             name: self.name.clone(),
+            token_image_ref: self.token_image_ref.clone(),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Layer-7b base values, mirroring how

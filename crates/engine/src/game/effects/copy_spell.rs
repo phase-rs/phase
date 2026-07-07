@@ -3121,6 +3121,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrifice".to_string(),
+                token_image_ref: None,
                 power: Some(4),
                 toughness: Some(4),
                 base_power: Some(4),

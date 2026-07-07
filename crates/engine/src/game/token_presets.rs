@@ -269,22 +269,40 @@ fn find_token_ref_with_mode(
     }
 
     if !related_ids.is_empty() {
-        let mut matches = known_token_presets()
+        let related_presets: Vec<_> = related_ids
             .iter()
-            .filter(|preset| related_ids.iter().any(|id| id == &preset.id));
+            .filter_map(|id| known_token_preset_by_id(id))
+            .collect();
 
         if matches!(mode, TokenRefMatchMode::Exact) {
-            let first = matches.next()?;
-            if matches.next().is_none() {
-                return first.token_image_ref.clone();
+            if let [preset] = related_presets.as_slice() {
+                if source_oracle.is_none_or(|oracle_id| {
+                    token_preset_has_source_ref(preset, oracle_id, source_face)
+                }) {
+                    return preset.token_image_ref.clone();
+                }
+                return None;
             }
         }
 
-        let mut matches = known_token_presets().iter().filter(|preset| {
-            related_ids.iter().any(|id| id == &preset.id) && token_body_matches(&preset.body, body)
-        });
-        let first = matches.next()?;
-        if matches.next().is_some() {
+        let related_matches: Vec<_> = related_presets
+            .into_iter()
+            .filter(|preset| token_body_matches(&preset.body, body))
+            .collect();
+        let matches = if let Some(oracle_id) = source_oracle {
+            related_matches
+                .into_iter()
+                .filter(|preset| token_preset_has_source_ref(preset, oracle_id, source_face))
+                .collect()
+        } else {
+            related_matches
+        };
+        let first = matches.first()?;
+        if !matches
+            .iter()
+            .skip(1)
+            .all(|preset| token_preset_semantics_match(first, preset))
+        {
             return None;
         }
         return first.token_image_ref.clone();
@@ -295,15 +313,7 @@ fn find_token_ref_with_mode(
             return false;
         }
         if let Some(oracle_id) = source_oracle {
-            return preset.source_card_refs.iter().any(|source_ref| {
-                source_ref.scryfall_oracle_id.as_deref() == Some(oracle_id)
-                    && source_face.is_none_or(|face| {
-                        source_ref
-                            .face_name
-                            .as_deref()
-                            .is_none_or(|candidate| candidate == face)
-                    })
-            });
+            return token_preset_has_source_ref(preset, oracle_id, source_face);
         }
         if let Some(name) = source_name {
             return preset
@@ -330,6 +340,29 @@ fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> boo
         && sorted_debug(&a.supertypes) == sorted_debug(&b.supertypes)
         && sorted_debug(&a.colors) == sorted_debug(&b.colors)
         && sorted_debug(&a.keywords) == sorted_debug(&b.keywords)
+}
+
+fn token_preset_semantics_match(a: &TokenPreset, b: &TokenPreset) -> bool {
+    a.category == b.category
+        && a.fidelity == b.fidelity
+        && token_body_matches(&a.body, &b.body)
+        && a.rules_text == b.rules_text
+}
+
+fn token_preset_has_source_ref(
+    preset: &TokenPreset,
+    oracle_id: &str,
+    source_face: Option<&str>,
+) -> bool {
+    preset.source_card_refs.iter().any(|source_ref| {
+        source_ref.scryfall_oracle_id.as_deref() == Some(oracle_id)
+            && source_face.is_none_or(|face| {
+                source_ref
+                    .face_name
+                    .as_deref()
+                    .is_none_or(|candidate| candidate == face)
+            })
+    })
 }
 
 fn sorted_strings(values: &[String]) -> Vec<&str> {
