@@ -8162,7 +8162,7 @@ fn strip_attack_unblocked_qualifier(after: &str) -> (bool, &str) {
 /// text ("attacks alone", Exalted / Sharon Carter class). Encoded as
 /// `Not(MinCoAttackers { minimum: 1 })` — zero same-controller co-attackers.
 fn strip_attack_alone_qualifier(after: &str) -> (bool, &str) {
-    if let Ok((rest, ())) = tag::<_, _, OracleError<'_>>(" alone").parse(after) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" alone").parse(after) {
         (true, rest)
     } else {
         (false, after)
