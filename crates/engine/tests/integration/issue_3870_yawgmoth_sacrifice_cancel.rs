@@ -603,3 +603,48 @@ fn yawgmoth_cancel_restore_survives_persisted_session_roundtrip() {
         "cancel must restore sacrificed permanent after persist round-trip"
     );
 }
+
+#[test]
+fn yawgmoth_cancel_restore_survives_persisted_game_state_roundtrip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let yawgmoth = scenario
+        .add_creature_from_oracle(P0, "Yawgmoth, Thran Physician", 2, 4, YAWGMOTH_ORACLE)
+        .id();
+    let fodder = scenario.add_creature(P0, "Browser Fodder", 1, 1).id();
+
+    let mut runner = scenario.build();
+    let ability_index = yawgmoth_sacrifice_ability_index(&runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: yawgmoth,
+            ability_index,
+        })
+        .expect("begin Yawgmoth activation");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .expect("sacrifice fodder for cost");
+
+    let persisted = engine::types::persisted_game_state::PersistedGameState::capture(runner.state());
+    assert!(
+        !persisted.pending_cast_sacrifice_rollbacks.is_empty(),
+        "precondition: sacrifice rollback must be captured in persisted wrapper"
+    );
+
+    let json = serde_json::to_string(&persisted).expect("serialize persisted wrapper");
+    let restored = engine::types::persisted_game_state::deserialize_resumable_game_state(&json)
+        .expect("deserialize persisted wrapper");
+    *runner.state_mut() = restored;
+
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancel after browser persist boundary");
+
+    assert_eq!(
+        runner.state().objects[&fodder].zone,
+        Zone::Battlefield,
+        "cancel must restore sacrificed permanent after PersistedGameState round-trip"
+    );
+}

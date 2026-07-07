@@ -25,6 +25,7 @@ use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
+use engine::types::persisted_game_state::{deserialize_resumable_game_state, PersistedGameState};
 use engine::types::{GameAction, GameState, PlayerId};
 
 use engine::game::resolve_player_deck_list;
@@ -1170,6 +1171,19 @@ pub fn export_game_state_json() -> Result<String, JsValue> {
     })?
 }
 
+/// Export the authoritative game state for browser/P2P persistence, including
+/// server-authoritative sacrifice rollback snapshots kept outside filtered
+/// `GameState` serde (CR 400.2).
+#[wasm_bindgen]
+pub fn export_persisted_game_state_json() -> Result<String, JsValue> {
+    with_state(|state| {
+        let persisted = PersistedGameState::capture(state);
+        serde_json::to_string(&persisted).map_err(|e| {
+            JsValue::from_str(&format!("Failed to serialize PersistedGameState: {e}"))
+        })
+    })?
+}
+
 /// Restore the game state from a JSON string.
 /// Uses serde_json which handles string-keyed maps (from localStorage round-trip)
 /// correctly deserializing into HashMap<ObjectId, V>.
@@ -1184,8 +1198,8 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
             "restore_game_state refused: undo is disabled in multiplayer sessions",
         ));
     }
-    let mut state: GameState = serde_json::from_str(json_str)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
+    let mut state = deserialize_resumable_game_state(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize game state: {}", e)))?;
     state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
     state.debug_mode = true;
     CARD_DB.with(|cell| {
@@ -1239,8 +1253,8 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
         ));
     }
 
-    let mut state: GameState = serde_json::from_str(json_str)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
+    let mut state = deserialize_resumable_game_state(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize game state: {}", e)))?;
 
     // Stale `rng_seed` replays the pre-save ChaCha20 sequence because
     // stream position is `#[serde(skip)]`. Mirrors server-core.

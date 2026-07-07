@@ -25,6 +25,7 @@ import init, {
   apply_seat_mutation,
   project_seat_view,
   export_game_state_json,
+  export_persisted_game_state_json,
   clear_game_state,
   set_multiplayer_mode,
   resolve_all,
@@ -73,6 +74,7 @@ type EngineRequest =
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
+  | { type: "exportPersistedState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
@@ -335,6 +337,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "exportState": {
         const json = export_game_state_json();
+        result(msg.id, json);
+        break;
+      }
+
+      case "exportPersistedState": {
+        const json = export_persisted_game_state_json();
         result(msg.id, json);
         break;
       }

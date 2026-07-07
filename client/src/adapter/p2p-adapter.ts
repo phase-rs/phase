@@ -300,13 +300,13 @@ export class P2PHostAdapter implements EngineAdapter {
   /** True when the adapter was constructed from a persisted session (resume flow). */
   private readonly isResume: boolean;
   /**
-   * Pending GameState snapshot to hand to `wasm.resumeMultiplayerHostState`
-   * during `initialize()`. Set in the constructor from `resumeData.state`;
+   * Pending persisted snapshot to hand to `wasm.resumeMultiplayerHostState`
+   * during `initialize()`. Set in the constructor from `resumeData.persistedJson`;
    * nulled after the WASM call consumes it. Held on the adapter rather
    * than threaded through `initialize()` so the EngineAdapter interface
    * stays uniform across fresh/resume flows.
    */
-  private resumeGameState: GameState | null = null;
+  private resumeGameStateJson: string | null = null;
 
   constructor(
     private readonly hostDeckData: unknown,
@@ -354,7 +354,7 @@ export class P2PHostAdapter implements EngineAdapter {
       gameId: string;
       roomCode: string;
       hostDisplayName?: string;
-      resumeData?: { state: GameState; session: PersistedP2PHostSession };
+      resumeData?: { persistedJson: string; session: PersistedP2PHostSession };
     },
   ) {
     if (playerCount < 2 || playerCount > 6) {
@@ -379,7 +379,7 @@ export class P2PHostAdapter implements EngineAdapter {
     this.isResume = persistence?.resumeData !== undefined;
 
     if (persistence?.resumeData) {
-      this.resumeGameState = persistence.resumeData.state;
+      this.resumeGameStateJson = persistence.resumeData.persistedJson;
       this.rehydrateFromPersistedSession(persistence.resumeData.session);
       this.pregameSeatView = seatStateToView(this.pregameSeatState);
     }
@@ -776,9 +776,9 @@ export class P2PHostAdapter implements EngineAdapter {
       // mirrors server-core's `from_persisted` pattern. Fresh-host path:
       // just flip the flag; engine state is populated by the guests
       // joining + `initializeGame`.
-      if (this.isResume && this.resumeGameState) {
-        await this.wasm.resumeMultiplayerHostState(this.resumeGameState);
-        this.resumeGameState = null;
+      if (this.isResume && this.resumeGameStateJson) {
+        await this.wasm.resumeMultiplayerHostState(this.resumeGameStateJson);
+        this.resumeGameStateJson = null;
         traceAdapter("Host", "initialize-resume", {
           tokens: this.playerTokens.size,
           gameStarted: this.gameStarted,

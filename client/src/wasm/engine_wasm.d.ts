@@ -85,6 +85,12 @@ export function evaluate_deck_compatibility_js(request: any): any;
 export function export_game_state_json(): string;
 
 /**
+ * Export authoritative game state for browser/P2P persistence, including
+ * sacrifice rollback snapshots kept outside filtered `GameState` serde.
+ */
+export function export_persisted_game_state_json(): string;
+
+/**
  * Return the authoritative list of user-selectable formats as a typed array.
  * The frontend treats this as the single source of truth for rendering
  * format pickers, badges, and default configs — no hand-maintained mirrors.
@@ -356,6 +362,7 @@ export interface InitOutput {
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
+    readonly export_persisted_game_state_json: () => [number, number, number, number];
     readonly getFormatRegistry: () => any;
     readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];

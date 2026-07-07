@@ -2639,7 +2639,9 @@ export interface EngineAdapter {
     aiSeats: { playerId: number; difficulty: string }[],
     maxResolutions?: number,
   ): Promise<BatchResolveResult>;
-  restoreState(state: GameState): void | Promise<void>;
+  restoreState(state: GameState, persistedJson?: string): void | Promise<void>;
+  /** Authoritative persisted envelope for browser/P2P resume (rollback sidecar). */
+  exportPersistedState?(): Promise<string>;
   dispose(): void;
 
   /**

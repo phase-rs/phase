@@ -295,6 +295,10 @@ export class EngineWorkerClient {
     return this.request<string>({ type: "exportState" });
   }
 
+  async exportPersistedState(): Promise<string> {
+    return this.request<string>({ type: "exportPersistedState" });
+  }
+
   async restoreState(stateJson: string): Promise<void> {
     await this.request<null>({ type: "restoreState", stateJson });
   }

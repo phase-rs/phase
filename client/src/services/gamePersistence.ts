@@ -1,6 +1,7 @@
 import { createStore, del, get, set } from "idb-keyval";
 
 import type { FormatConfig, GameState, MatchConfig } from "../adapter/types";
+import type { EngineAdapter } from "../adapter/types";
 import type { SeatState } from "../multiplayer/seatTypes";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
@@ -98,7 +99,31 @@ function getGameStore(): ReturnType<typeof createStore> {
 
 // ── Game State (IndexedDB) ──────────────────────────────────────────────
 
-export async function saveGame(gameId: string, state: GameState): Promise<void> {
+/** Wire envelope for authoritative browser/P2P persistence. */
+export interface PersistedGameStateWire {
+  state: GameState;
+  pending_cast_sacrifice_rollbacks?: Record<string, unknown>;
+}
+
+function isPersistedGameStateWire(value: unknown): value is PersistedGameStateWire {
+  return (
+    typeof value === "object"
+    && value !== null
+    && "state" in value
+    && typeof (value as PersistedGameStateWire).state === "object"
+  );
+}
+
+/**
+ * Persist authoritative engine state. When `persistedJson` is provided it is
+ * written verbatim (includes sacrifice rollback sidecar); otherwise the bare
+ * `GameState` is stored for legacy/manual-import paths.
+ */
+export async function saveGame(
+  gameId: string,
+  state: GameState,
+  persistedJson?: string,
+): Promise<void> {
   if (
     state.match_phase === "Completed"
     || (!state.match_phase && state.waiting_for.type === "GameOver")
@@ -107,7 +132,8 @@ export async function saveGame(gameId: string, state: GameState): Promise<void> 
     return;
   }
   try {
-    await set(GAME_KEY_PREFIX + gameId, state, getGameStore());
+    const toStore = persistedJson ? JSON.parse(persistedJson) : state;
+    await set(GAME_KEY_PREFIX + gameId, toStore, getGameStore());
   } catch (err) {
     console.warn("[saveGame] IndexedDB write failed:", err);
   }
@@ -115,11 +141,42 @@ export async function saveGame(gameId: string, state: GameState): Promise<void> 
 
 export async function loadGame(gameId: string): Promise<GameState | null> {
   try {
-    const state = await get<GameState>(GAME_KEY_PREFIX + gameId, getGameStore());
-    return state ?? null;
+    const raw = await get<unknown>(GAME_KEY_PREFIX + gameId, getGameStore());
+    if (!raw) return null;
+    if (isPersistedGameStateWire(raw)) return raw.state;
+    return raw as GameState;
   } catch {
     return null;
   }
+}
+
+/** Load the raw persisted envelope for engine resume (includes rollback sidecar). */
+export async function loadPersistedGameJson(gameId: string): Promise<string | null> {
+  try {
+    const raw = await get<unknown>(GAME_KEY_PREFIX + gameId, getGameStore());
+    if (!raw) return null;
+    return JSON.stringify(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Persist authoritative engine state when the adapter can export rollbacks. */
+export async function saveGameWithAdapter(
+  gameId: string,
+  state: GameState,
+  adapter: EngineAdapter,
+): Promise<void> {
+  if (adapter.exportPersistedState) {
+    try {
+      const persistedJson = await adapter.exportPersistedState();
+      await saveGame(gameId, state, persistedJson);
+      return;
+    } catch (err) {
+      console.warn("[saveGameWithAdapter] exportPersistedState failed:", err);
+    }
+  }
+  await saveGame(gameId, state);
 }
 
 export async function clearGame(gameId: string): Promise<void> {

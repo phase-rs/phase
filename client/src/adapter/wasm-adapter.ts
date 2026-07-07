@@ -429,12 +429,18 @@ export class WasmAdapter implements EngineAdapter {
     throw new Error("resolveAll requires worker-based engine");
   }
 
-  async restoreState(state: GameState): Promise<void> {
+  async restoreState(state: GameState, persistedJson?: string): Promise<void> {
     this.assertInitialized();
     await this.ensureCardDb();
-    const json = JSON.stringify(state);
+    const json = persistedJson ?? JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+  }
+
+  async exportPersistedState(): Promise<string> {
+    this.assertInitialized();
+    if (this.engine) return this.engine.exportPersistedState();
+    return this.fallback!.exportPersistedState();
   }
 
   /**
@@ -479,9 +485,8 @@ export class WasmAdapter implements EngineAdapter {
    * Distinct from `restoreState` (undo semantics, deterministic re-seed).
    * Mirrors `server-core::GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(state: GameState): Promise<void> {
+  async resumeMultiplayerHostState(persistedJson: string): Promise<void> {
     this.assertInitialized();
-    const json = JSON.stringify(state);
     if (this.engine) {
       // Ensure the card database is loaded before the engine rehydrates
       // ability definitions on restore. Same sequential-queue guarantee
@@ -492,9 +497,9 @@ export class WasmAdapter implements EngineAdapter {
           () => { /* card DB is best-effort */ },
         );
       }
-      await this.engine.resumeMultiplayerHostState(json);
+      await this.engine.resumeMultiplayerHostState(persistedJson);
     } else {
-      this.fallback!.resumeMultiplayerHostState(json);
+      this.fallback!.resumeMultiplayerHostState(persistedJson);
     }
   }
 
@@ -641,6 +646,7 @@ interface MainThreadFallback {
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
   restoreState(stateJson: string): Promise<void>;
+  exportPersistedState(): Promise<string>;
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
@@ -732,6 +738,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     restoreState: (stateJson: string) =>
       enqueue(() => wasm.restore_game_state(stateJson)),
+
+    exportPersistedState: () =>
+      enqueue(() => export_persisted_game_state_json()),
 
     resumeMultiplayerHostState: (stateJson: string) => {
       enqueue(() => wasm.resume_multiplayer_host_state(stateJson));

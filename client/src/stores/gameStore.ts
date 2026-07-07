@@ -17,7 +17,7 @@ import type {
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
-import { loadCheckpoints, saveGame } from "../services/gamePersistence";
+import { loadCheckpoints, loadPersistedGameJson, saveGameWithAdapter } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -35,7 +35,9 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
 export type { ActiveGameMeta, PersistedP2PHostSession } from "../services/gamePersistence";
 export {
   saveGame,
+  saveGameWithAdapter,
   loadGame,
+  loadPersistedGameJson,
   clearGame,
   saveCheckpoints,
   loadCheckpoints,
@@ -147,7 +149,12 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
   ) => Promise<void>;
-  resumeGame: (gameId: string, adapter: EngineAdapter, savedState: GameState) => Promise<void>;
+  resumeGame: (
+    gameId: string,
+    adapter: EngineAdapter,
+    savedState: GameState,
+    persistedJson?: string | null,
+  ) => Promise<void>;
   /**
    * Resume a P2P host game. Distinct from `resumeGame` because the
    * adapter already loaded engine state internally via
@@ -244,15 +251,16 @@ export const useGameStore = create<GameStore>()(
         turnCheckpoints: [],
         startingContest,
       });
-      saveGame(gameId, state);
+      await saveGameWithAdapter(gameId, state, adapter);
     },
 
-    resumeGame: async (gameId, adapter, savedState) => {
+    resumeGame: async (gameId, adapter, savedState, persistedJson) => {
       // Reset stack-pacing throughput — resuming may load a different game than
       // the one just played; stale churn must not carry across.
       resetStackThroughput();
       await adapter.initialize();
-      await adapter.restoreState(savedState);
+      const resumeJson = persistedJson ?? await loadPersistedGameJson(gameId);
+      await adapter.restoreState(savedState, resumeJson ?? undefined);
       const state = await adapter.getState();
       const legalResult = await adapter.getLegalActions();
       const savedCheckpoints = await loadCheckpoints(gameId);
@@ -348,7 +356,7 @@ export const useGameStore = create<GameStore>()(
         };
       });
 
-      if (gameId) saveGame(gameId, newState);
+      if (gameId) await saveGameWithAdapter(gameId, newState, adapter);
 
       return result.events;
     },

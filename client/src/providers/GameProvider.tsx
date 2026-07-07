@@ -44,6 +44,7 @@ import {
   clearP2PHostSession,
   loadActiveGame,
   loadGame,
+  loadPersistedGameJson,
   loadP2PHostSession,
   saveActiveGame,
   useGameStore,
@@ -711,15 +712,15 @@ export function GameProvider({
             // keyed on `phase-<roomCode>`) still match. Partial state
             // (only one record present) is treated as inconsistent:
             // clear both and fall through to a fresh game.
-            const [savedState, savedSession] = await Promise.all([
-              loadGame(gameId),
+            const [savedPersistedJson, savedSession] = await Promise.all([
+              loadPersistedGameJson(gameId),
               loadP2PHostSession(gameId),
             ]);
             signal.throwIfAborted();
 
             const isResume =
-              savedState !== null && savedSession !== null && savedSession.gameStarted;
-            if ((savedState !== null) !== (savedSession !== null)) {
+              savedPersistedJson !== null && savedSession !== null && savedSession.gameStarted;
+            if ((savedPersistedJson !== null) !== (savedSession !== null)) {
               // Inconsistent: one record present, the other missing.
               // Drop both so the menu's Resume button doesn't re-offer.
               await clearGame(gameId);
@@ -800,8 +801,8 @@ export function GameProvider({
                 gameId,
                 roomCode: host.roomCode,
                 hostDisplayName: useMultiplayerStore.getState().displayName || undefined,
-                resumeData: isResume && savedState && savedSession
-                  ? { state: savedState, session: savedSession }
+                resumeData: isResume && savedPersistedJson && savedSession
+                  ? { persistedJson: savedPersistedJson, session: savedSession }
                   : undefined,
               },
             );
@@ -1142,7 +1143,10 @@ export function GameProvider({
     const setupLocal = async () => {
       if (cancelled) return;
 
-      const savedState = await loadGame(gameId);
+      const [savedState, persistedJson] = await Promise.all([
+        loadGame(gameId),
+        loadPersistedGameJson(gameId),
+      ]);
       const adapter = getSharedAdapter();
 
       if (savedState) {
@@ -1151,7 +1155,7 @@ export function GameProvider({
           // and handle token creation / effects after resume.
           await ensureCardDatabase().catch(() => {/* card DB is best-effort */});
           if (cancelled) return;
-          await resumeGame(gameId, adapter, savedState);
+          await resumeGame(gameId, adapter, savedState, persistedJson);
           if (cancelled) return;
           // Derive player count from the restored state — the URL param may be
           // absent on resume (e.g. navigating directly to a saved game URL).
