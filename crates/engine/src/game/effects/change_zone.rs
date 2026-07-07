@@ -83,20 +83,26 @@ fn resolve_forward_result_search_attach_host(
                     TargetRef::Player(id) => AttachTarget::Player(id),
                 })
         }
-        TargetFilter::Player => targets.iter().find_map(|target| match target {
-            TargetRef::Player(id) => Some(AttachTarget::Player(*id)),
-            _ => None,
-        }),
+        TargetFilter::Player => targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Player(id) => Some(AttachTarget::Player(*id)),
+                _ => None,
+            })
+            .next(),
         TargetFilter::Typed(tf)
             if tf
                 .type_filters
                 .iter()
                 .any(|f| matches!(f, TypeFilter::Creature)) =>
         {
-            targets.iter().find_map(|target| match target {
-                TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
-                _ => None,
-            })
+            targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
+                    _ => None,
+                })
+                .next()
         }
         // Typed "target creature/player" hosts (Arachnus Spinner, Curse tutors)
         // resolve from the ability's chosen targets carried through search.
