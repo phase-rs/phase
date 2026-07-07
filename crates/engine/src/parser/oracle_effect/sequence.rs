@@ -2625,7 +2625,8 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
                     tag("that permanent's "),
                     tag("that permanent\u{2019}s "),
                 )),
-                tag("activated abilities can't be activated"),
+                // CR 605.1a: dual-apostrophe predicate via the shared authority.
+                crate::parser::oracle_static::parse_activated_abilities_cant_be_activated,
             ),
         ),
     )))

@@ -5688,9 +5688,15 @@ fn unless_rider_defers_to_body_parser(text: &str) -> bool {
     let after_trimmed = after_unless.trim_end_matches('.').trim();
 
     // CR 605.1a: activation prohibition mana-ability exemption (restriction.rs).
-    if tag::<_, _, OracleError<'_>>("they're mana abilities")
-        .parse(after_trimmed)
-        .is_ok()
+    // Dual-apostrophe: MTGJSON oracle text uses the U+2019 glyph, and this guard
+    // must recognize it so the restriction parser (not the unsupported-unless
+    // fallback) handles "…can't be activated unless they're mana abilities".
+    if alt((
+        tag::<_, _, OracleError<'_>>("they're mana abilities"),
+        tag("they\u{2019}re mana abilities"),
+    ))
+    .parse(after_trimmed)
+    .is_ok()
     {
         return true;
     }

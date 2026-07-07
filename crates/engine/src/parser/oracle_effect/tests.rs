@@ -17169,6 +17169,41 @@ fn cant_be_activated_effect_standalone_preserves_mana_exemption() {
     );
 }
 
+/// CR 602.5 + CR 605.1a (issue #4999 follow-up): the EFFECT-form activation
+/// prohibition must accept the U+2019 apostrophe in the predicate ("can't be
+/// activated") and the exemption suffix ("unless they're mana abilities") — the
+/// effect subject splitter and exemption scan both route through the shared
+/// dual-apostrophe authority — so a U+2019 temporary clause still records the
+/// mana-ability carve-out instead of defaulting to `ActivationExemption::None`.
+#[test]
+fn cant_be_activated_effect_typographic_apostrophe_preserves_mana_exemption() {
+    use crate::types::statics::{ActivationExemption, StaticMode};
+    let def = parse_effect_chain(
+        "target creature's activated abilities can\u{2019}t be activated unless they\u{2019}re mana abilities",
+        AbilityKind::Spell,
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*def.effect
+    else {
+        panic!("expected GenericEffect, got {:?}", def.effect);
+    };
+    let sd = static_abilities
+        .first()
+        .expect("expected transient CantBeActivated static");
+    assert!(
+        matches!(
+            &sd.mode,
+            StaticMode::CantBeActivated {
+                exemption: ActivationExemption::ManaAbilities,
+                ..
+            }
+        ),
+        "U+2019 effect clause must preserve the mana-ability exemption, got {:?}",
+        sd.mode
+    );
+}
+
 /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
 /// creature gets -3/-0 and its activated abilities can't be activated."
 /// The compound splits into a Pump primary and a CantBeActivated conjunct
