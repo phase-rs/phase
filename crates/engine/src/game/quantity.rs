@@ -1516,6 +1516,25 @@ pub(crate) fn object_count_matching_ids(
     ids
 }
 
+fn filter_binds_owned_you(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }
+            )
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_binds_owned_you)
+        }
+        TargetFilter::Not { filter } => filter_binds_owned_you(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_binds_owned_you(filter),
+        _ => false,
+    }
+}
+
 fn resolve_ref(
     state: &GameState,
     qty: &QuantityRef,
@@ -1917,7 +1936,27 @@ fn resolve_ref(
             // selection + the `OtherThanTriggerObject` exclusion); per-object
             // aggregation delegated to `aggregate_property_over` (single
             // summation authority, live-then-LKI per property).
-            let ids = object_count_matching_ids(state, filter, &filter_ctx, source_id);
+            let mut scoped_exile_filter_ctx;
+            let aggregate_filter_ctx = if filter.references_exiled_by_source()
+                && filter_binds_owned_you(filter)
+                && ability.is_some_and(|a| {
+                    a.scoped_player.is_some()
+                        || a.original_controller
+                            .is_some_and(|orig| orig != a.controller)
+                }) {
+                let scoped = ability
+                    .and_then(|a| a.scoped_player.or(Some(a.controller)))
+                    .unwrap_or(controller);
+                scoped_exile_filter_ctx = match ability {
+                    Some(a) => FilterContext::from_ability_with_controller(a, scoped),
+                    None => FilterContext::from_source_with_controller(source_id, scoped),
+                };
+                scoped_exile_filter_ctx.recipient_id = ctx.recipient;
+                &scoped_exile_filter_ctx
+            } else {
+                &filter_ctx
+            };
+            let ids = object_count_matching_ids(state, filter, aggregate_filter_ctx, source_id);
             aggregate_property_over(state, &ids, *function, *property)
         }
         // CR 107.1 + CR 700.1: min/max across players of the count of
