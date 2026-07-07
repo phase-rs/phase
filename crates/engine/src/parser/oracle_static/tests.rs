@@ -16090,6 +16090,143 @@ fn enchanted_creature_is_blue_frog() {
 }
 
 #[test]
+fn lignify_subtype_only_base_pt() {
+    // Lignify — CR 205.1a: "is a Treefolk" sets the creature subtype (replaces
+    // existing creature subtypes) but does NOT touch card types; CR 613.4b: base
+    // P/T 0/4; CR 613.1f: "loses all abilities". The granted phrase names only a
+    // creature subtype (no core-type word), so this is the subtype-only sibling of
+    // the Frogify/Darksteel Mutation family.
+    use crate::types::card_type::{CoreType, SubtypeSet};
+    let def = parse_static_line(
+        "Enchanted creature is a Treefolk with base power and toughness 0/4 and loses all abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+
+    // CR 205.1a: card types are untouched — no SetCardTypes / AddType.
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetCardTypes { .. } | ContinuousModification::AddType { .. }
+        )),
+        "subtype-only 'is a Treefolk' must not change card types (CR 205.1a): {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }),
+        "must wipe existing creature subtypes: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Treefolk".to_string(),
+        }),
+        "must grant Treefolk: {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+    // No spurious CoreType leaks into an AddType.
+    assert!(!mods
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddType { core_type } if *core_type == CoreType::Creature)));
+
+    // CR 613.7 same-layer written order: RemoveAllSubtypes precedes AddSubtype.
+    let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+    assert!(
+        pos(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }) < pos(&ContinuousModification::AddSubtype {
+            subtype: "Treefolk".to_string(),
+        }),
+        "RemoveAllSubtypes must precede AddSubtype(Treefolk): {mods:?}"
+    );
+}
+
+#[test]
+fn lignify_class_prefix_order_loses_abilities() {
+    // Prefix-order sibling: "loses all abilities and is a <subtype> ...". Must emit
+    // exactly one RemoveAllAbilities (not duplicated by the trailing-clause path).
+    use crate::types::card_type::SubtypeSet;
+    let def = parse_static_line(
+        "Enchanted creature loses all abilities and is a Treefolk with base power and toughness 0/4.",
+    )
+    .unwrap();
+    let mods = &def.modifications;
+    assert_eq!(
+        mods.iter()
+            .filter(|m| matches!(m, ContinuousModification::RemoveAllAbilities))
+            .count(),
+        1,
+        "exactly one RemoveAllAbilities: {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Treefolk".to_string(),
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetCardTypes { .. } | ContinuousModification::AddType { .. }
+        )),
+        "no card-type change (CR 205.1a): {mods:?}"
+    );
+}
+
+#[test]
+fn lignify_class_leading_color_subtype() {
+    // Real Frogify oracle shape — "is a blue Frog with base power and toughness
+    // 1/1". Optional leading color → CR 613.1e SetColor; subtype-only → no
+    // SetCardTypes.
+    use crate::types::mana::ManaColor;
+    let def = parse_static_line(
+        "Enchanted creature loses all abilities and is a blue Frog with base power and toughness 1/1.",
+    )
+    .unwrap();
+    let mods = &def.modifications;
+    assert!(mods.contains(&ContinuousModification::SetColor {
+        colors: vec![ManaColor::Blue],
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Frog".to_string(),
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "subtype-only must not set card types (CR 205.1a): {mods:?}"
+    );
+}
+
+#[test]
+fn lignify_class_declines_core_type_phrase() {
+    // Regression / handoff: a granted phrase that names a core card-type word
+    // ("Insect artifact creature") must NOT be claimed by the subtype-only handler
+    // — it belongs to parse_enchanted_is_type, which sets the card types.
+    let def = parse_static_line(
+        "Enchanted creature is an Insect artifact creature with base power and toughness 2/2.",
+    )
+    .unwrap();
+    let mods = &def.modifications;
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "core-type phrase must route to the general handler (SetCardTypes): {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Insect".to_string(),
+    }));
+}
+
+#[test]
 fn enchanted_creature_is_blue_creature_no_subtype() {
     // CR 205.1a: no new creature subtype granted → no Oracle instruction to wipe existing subtypes.
     let def = parse_static_line("Enchanted creature is a blue creature.").unwrap();

@@ -1055,6 +1055,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_enchanted_becomes_type_with_ability(&tp, &text) {
         return Some(def);
     }
+    // CR 205.1a + CR 613.1d (Layer 4) + CR 613.4b (Layer 7b): Lignify class —
+    // "Enchanted creature is a <creature subtype> with base power and toughness N/N
+    // and loses all abilities." The granted phrase names only a creature subtype
+    // (no core card-type word), so `parse_enchanted_is_type` strict-fails on it.
+    // Must precede `parse_enchanted_is_type`; it declines the moment a core-type
+    // word appears so the general handler keeps "Insect artifact creature" shapes.
+    if let Some(def) = parse_enchanted_is_creature_subtype_with_base_pt(&tp, &text) {
+        return Some(def);
+    }
     // CR 205.1a + CR 702.6: "Each <subject> is an Equipment with equip {N} and
     // "<ability>"" — the become-Equipment anthem (Bram, Bludgeon Brawl). Grants
     // the Equipment subtype + Equip keyword + the quoted static ability.
