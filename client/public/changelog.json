@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 165,
+      "date": "2026-07-06",
+      "title": "Morph face-down casting arrives",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Morph, megamorph, and disguise cards can now be cast face down for {3}, including from other zones when another effect lets you cast them there\n• Disguise face-down spells carry ward {2}, and the alternative-cost modal now shows the face-down option with localized labels\n• “Permanents enter tapped this turn” effects now work for cards like Due Respect and Nahiri’s Lithoforming\n• Life and Limb-style compound animation, dynamic power/toughness counts, “for each creature you control with flying” quantities, and Alchemy spellbooks now have broader support\n\n🛠️ Cards That Now Work Right\n• Split cards such as Fire // Ice, Wear // Tear, and Assault // Battery now report their combined mana value and colors when they’re not on the stack\n• Light-Paws-style Aura searches and Curse tutors now attach to the chosen player or permanent instead of losing the host target\n• Teferi’s Puzzle Box now cycles each player’s whole hand to the bottom of their library and draws that many cards\n• Hollow One now discounts from cards cycled or discarded this turn, not random battlefield objects\n• Soulblast, Kaervek’s Spite, Tomb of Urami, Mob Mentality, Blizzard, Goblin Ski Patrol, and same-name/Coven checks now preserve their printed restrictions\n• Dagger Caster, Radiating Lightning, Seismic Wave, The Fall of Kroog, and Wildfire Howl now deal their “each creature/player” follow-up damage to the full group\n\n⚔️ Combat & Gameplay\n• Spells that can only be cast after blockers are declared now wait for the correct combat steps, covering Aleatory, Chaotic Strike, Curtain of Light, and Flash Foliage\n• Damage prevention and replacement shields with conditions now apply correctly to pending damage\n• Chosen-color alternative mana can auto-tap correctly again\n\n🖥️ Interface\n• Setup deck selection has a cleaner, easier-to-scan flow before starting a game",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1523896688463446038"
+    },
+    {
       "id": 164,
       "date": "2026-07-06",
       "title": "Spider-Man cards arrive",
