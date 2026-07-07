@@ -3440,21 +3440,61 @@ fn life_and_limb_real_text_dual_subject_animation() {
     }
 }
 
-// CR 205.1a vs CR 205.1b: the compound-subject animation handler applies strictly
-// ADDITIVE type semantics, so it must decline a compound predicate that lacks the
-// "in addition to their/its other types" marker — a bare "are <P/T> <type>
-// creatures" compound is a type REPLACEMENT and must not be reinterpreted as
-// additive (which would keep the objects' other types instead of replacing them).
+// CR 205.1a vs CR 205.1b: compound-subject animation splits across two handlers.
+// Additive predicates ("in addition to their other types") route to
+// `parse_compound_all_subjects_type_change`; bare "are <P/T> <type> creatures"
+// compounds route to `parse_compound_all_subjects_type_replacement` with subtype
+// replacement semantics (RemoveAllSubtypes + AddSubtype).
 #[test]
-fn compound_subject_animation_declines_non_additive_replacement_predicate() {
-    // No "in addition to their other types" marker → replacement semantics →
-    // this additive handler must not claim it.
+fn compound_subject_animation_replacement_predicate() {
+    use crate::types::card_type::{CoreType, SubtypeSet};
+
+    let line = "All Elves and all Goblins are 2/2 Zombie creatures.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "one compound static: {defs:?}");
+    let def = &defs[0];
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or of both subjects: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
     assert!(
-        parse_static_line_multi("All Elves and all Goblins are 2/2 Zombie creatures.").is_empty(),
-        "non-additive compound animation must not be additive-claimed"
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Elf")))),
+        "Elf conjunct must be creature subtype Elf: {:?}",
+        def.affected
     );
-    // The additive form (Life and Limb) is still claimed — guards against the
-    // gate being over-broad.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Goblin")))),
+        "Goblin conjunct must be creature subtype Goblin: {:?}",
+        def.affected
+    );
+
+    use ContinuousModification as CM;
+    for expected in [
+        CM::SetPower { value: 2 },
+        CM::SetToughness { value: 2 },
+        CM::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        },
+        CM::AddType {
+            core_type: CoreType::Creature,
+        },
+        CM::AddSubtype {
+            subtype: "Zombie".to_string(),
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+
+    // The additive form (Life and Limb) still routes to the additive handler.
     assert_eq!(
         parse_static_line_multi(
             "All Forests and all Saprolings are 1/1 green Saproling creatures and \

@@ -1526,6 +1526,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 611.3 + CR 205.1a + CR 613.4b: non-additive compound-subject animation
+    // ("All Elves and all Goblins are 2/2 Zombie creatures") — replacement
+    // subtype semantics via animation_modifications_with_replacement. Must follow
+    // the additive compound handler so the CR 205.1b gate stays authoritative.
+    if let Some(def) = parse_compound_all_subjects_type_replacement(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
     // lands" — continuous land animation (Living Plane, Nature's Revolt). Must
     // come before parse_land_type_change: both split on "are", but the land

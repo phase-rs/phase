@@ -2018,6 +2018,53 @@ pub(crate) fn parse_compound_all_subjects_type_change(
     )
 }
 
+/// CR 611.3 + CR 613.1 + CR 613.4b + CR 205.1a: "All `<X>` and all `<Y>` are
+/// `<predicate>`" — a compound-subject continuous animation where a single
+/// replacement predicate applies uniformly to every object matching either
+/// subject, without the CR 205.1b additive marker.
+///
+/// Sibling of [`parse_compound_all_subjects_type_change`]: a bare
+/// "are `<P/T>` `<type>` creatures" compound replaces creature subtypes (CR
+/// 205.1a) rather than retaining them additively. The subjects distribute into
+/// an `Or` filter and the predicate is parsed once via `parse_animation_spec` +
+/// `animation_modifications_with_replacement`.
+pub(crate) fn parse_compound_all_subjects_type_replacement(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
+
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+    let predicate_lower = predicate.to_lowercase();
+    if !nom_primitives::scan_contains(&predicate_lower, "creature") {
+        return None;
+    }
+    // CR 205.1b: additive predicates are owned by the additive compound handler.
+    if nom_primitives::scan_contains(&predicate_lower, "in addition to their other")
+        || nom_primitives::scan_contains(&predicate_lower, "in addition to its other")
+    {
+        return None;
+    }
+
+    let spec = super::oracle_effect::animation::parse_animation_spec(
+        predicate,
+        &mut ParseContext::default(),
+    )?;
+    let modifications =
+        super::oracle_effect::animation::animation_modifications_with_replacement(&spec, false);
+    if modifications.is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
+
 /// Parse "all `<X>` and all `<Y>`[ and all `<Z>`…]" into an `Or` of per-subject
 /// filters. Peels conjuncts on the " and all " seam (so every conjunct after the
 /// first is an `all `-quantified subject) and parses each through the shared
