@@ -928,3 +928,86 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
         Some(remaining.as_slice()),
     );
 }
+
+/// CR 702.6: An Equip keyword granted at runtime by a static ability (Bram,
+/// Bludgeon Brawl: "… is an Equipment with equip {N} …") must produce a real,
+/// cost-bearing equip activated ability — offered and charged through the normal
+/// `ActivateAbility` path, exactly like a printed Equipment — rather than a
+/// keyword the runtime ignores.
+#[test]
+fn granted_equip_keyword_offers_functional_equip_ability() {
+    use crate::types::ability::{
+        AbilityCost, AbilityTag, ContinuousModification, Effect, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+
+    let mut state = setup_main_phase();
+    // A Food artifact with NO printed equip keyword or ability.
+    let food = create_object(
+        &mut state,
+        CardId(1500),
+        PlayerId(0),
+        "Test Food".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&food).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Food".to_string());
+    }
+
+    // The Bram / Bludgeon Brawl grant on the object itself: become an Equipment
+    // and gain equip {1}.
+    let equip_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    };
+    let def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Equipment".to_string(),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(equip_cost),
+            },
+        ]);
+    {
+        let obj = state.objects.get_mut(&food).unwrap();
+        obj.static_definitions.push(def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // Layer result: the object is now an Equipment carrying the Equip keyword.
+    let obj = state.objects.get(&food).unwrap();
+    assert!(
+        obj.card_types.subtypes.iter().any(|s| s == "Equipment"),
+        "granted Equipment subtype missing"
+    );
+    assert!(
+        obj.keywords.iter().any(|k| matches!(k, Keyword::Equip(_))),
+        "granted Equip keyword missing"
+    );
+
+    // The runtime now offers a synthesized, sorcery-speed, cost-bearing equip
+    // activated ability tagged `AbilityTag::Equip` — the SAME shape a printed
+    // Equipment gets, so it is offered + charged through the normal
+    // `ActivateAbility` path (not the cost-free `KeywordAction::Equip` path).
+    let abilities = crate::game::casting::activated_ability_definitions(&state, food);
+    let equip = abilities
+        .iter()
+        .find(|(_, ability)| ability.ability_tag == Some(AbilityTag::Equip))
+        .expect("granted equip must be offered as an activated ability");
+    assert!(
+        matches!(equip.1.effect.as_ref(), Effect::Attach { .. }),
+        "granted equip ability must attach: {:?}",
+        equip.1.effect
+    );
+    assert!(
+        matches!(equip.1.cost, Some(AbilityCost::Mana { .. })),
+        "granted equip ability must carry its mana cost: {:?}",
+        equip.1.cost
+    );
+}

@@ -75,6 +75,34 @@ fn runtime_granted_cycling_abilities(
         .collect()
 }
 
+/// CR 702.6: An `Equip` keyword granted at runtime by a static ability (Bram,
+/// Bludgeon Brawl's "… is an Equipment with equip {N} …") does not pass through
+/// card-load synthesis, so its equip activated ability must be synthesized live
+/// from the object's post-layer keyword set. `obj.keywords` is battlefield-
+/// authoritative (AddKeyword grants land there); printed equip keywords are
+/// excluded because card-load synthesis already turned them into an
+/// `obj.abilities` entry, so re-synthesizing them would double-offer equip.
+fn runtime_granted_equip_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    // CR 702.6: Equip functions only while its source is on the battlefield.
+    if obj.zone != Zone::Battlefield {
+        return Vec::new();
+    }
+    obj.keywords
+        .iter()
+        .filter(|keyword| {
+            matches!(keyword, Keyword::Equip(_))
+                && !obj.base_keywords.iter().any(|printed| printed == *keyword)
+        })
+        .filter_map(|keyword| crate::database::synthesis::equip_ability_for_keyword(keyword))
+        .collect()
+}
+
 /// CR 604.1 (seam 4: activated-ability-on-grant): synthesize graveyard activated
 /// abilities (Encore, Scavenge) for keywords granted to a graveyard card by a
 /// static. The `AddKeyword` layer seam installs only the keyword + triggers, so a
@@ -191,6 +219,10 @@ pub fn activated_ability_definitions(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            // CR 702.6: statically granted equip (Bram, Bludgeon Brawl) chained
+            // LAST — the identical append order is REQUIRED in
+            // `activation_ability_definition` so `ability_index` stays consistent.
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .enumerate()
             .map(|(offset, ability)| (printed_len + offset, ability)),
     );
@@ -220,6 +252,7 @@ fn activation_ability_definition(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .nth(offset)?
     };
     if let Some(ref cost) = ability.cost {
