@@ -156,6 +156,23 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(clause);
     }
 
+    // CR 611.3: Compound-subject become — "all <X> become <p1> and all <Y> become
+    // <p2>" (Nightcreep) distributes each conjunct into its own affected set. Must
+    // run before the single-subject handler, which would claim only the first
+    // conjunct and drop the rest into the description.
+    if let Some(clause) = try_parse_compound_all_subjects_become_clause(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability| PredicateAst::Become {
+                effect,
+                duration,
+                sub_ability,
+            },
+            ctx,
+        ));
+    }
+
     if let Some(clause) = try_parse_subject_become_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
@@ -574,6 +591,116 @@ fn build_additive_type_continuous_clause(
             target: application.target.clone(),
         },
         duration: Some(Duration::Permanent),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// Split "all `<A>` become `<p1>` and all `<B>` become `<p2>` [and all `<C>` …]"
+/// into its per-subject conjuncts, re-prepending the "all " elided by the
+/// ` and all ` seam to every conjunct after the first. Structural split on a fixed
+/// literal seam — each returned conjunct is re-parsed with nom combinators by
+/// [`try_parse_compound_all_subjects_become_clause`] via
+/// [`try_parse_subject_become_clause`]. The seam is lowercase mid-sentence in
+/// Oracle text, so the case-sensitive `split_once_on` matches it without folding
+/// the capitalized subject words.
+fn peel_and_all_become_conjuncts(body: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut remaining = body.trim().trim_end_matches('.').trim().to_string();
+    loop {
+        match nom_primitives::split_once_on(&remaining, " and all ") {
+            Ok((_, (before, after))) => {
+                let before = before.trim().to_string();
+                let next = format!("all {}", after.trim_start());
+                parts.push(before);
+                remaining = next;
+            }
+            Err(_) => {
+                parts.push(remaining.trim().to_string());
+                break;
+            }
+        }
+    }
+    parts
+}
+
+/// CR 611.3 + CR 105.2 / CR 613.1e + CR 305.7: Effect-layer compound-subject become
+/// — "[`<duration>`,] all `<X>` become `<p1>` and all `<Y>` become `<p2>`"
+/// (Nightcreep: "Until end of turn, all creatures become black and all lands become
+/// Swamps."). The single-subject [`try_parse_subject_become_clause`] claims only the
+/// first conjunct and drops the remaining predicate into the static `description`,
+/// so the second animation is lost.
+///
+/// This peels each "all `<subject>` become `<predicate>`" conjunct on the
+/// ` and all ` seam, lowers each through the single-subject become builder, and
+/// emits ONE `Effect::GenericEffect` carrying every conjunct's continuous
+/// `static_ability` — CR 611.3: each conjunct is its own affected set, so the
+/// creature half (`SetColor(Black)`) and the land half (`SetBasicLandType(Swamp)`)
+/// apply to distinct object sets under a single duration.
+///
+/// Declines (falls through to the single-subject handler) when there is no
+/// ` and all ` conjunction, or when a conjunct lacks its own `become` verb — a
+/// shared-predicate compound ("all creatures and all lands become black") whose
+/// first conjunct is a bare subject.
+fn try_parse_compound_all_subjects_become_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // A leading duration ("Until end of turn,") scopes every conjunct.
+    let (body, leading_duration) = strip_leading_duration(text);
+
+    // Require a genuine "… and all …" conjunction; single-subject become lines
+    // fall through to `try_parse_subject_become_clause`.
+    nom_primitives::split_once_on(&body.to_lowercase(), " and all ").ok()?;
+
+    let conjuncts = peel_and_all_become_conjuncts(body);
+    if conjuncts.len() < 2 {
+        return None;
+    }
+
+    let mut static_abilities = Vec::new();
+    let mut duration = leading_duration;
+    let mut target = None;
+    for conjunct in &conjuncts {
+        // Each conjunct must independently be an "all <subject> become <predicate>"
+        // animation; a bare subject (shared-predicate compound) declines here.
+        let clause = try_parse_subject_become_clause(conjunct, ctx)?;
+        let Effect::GenericEffect {
+            static_abilities: conjunct_statics,
+            duration: conjunct_duration,
+            target: conjunct_target,
+        } = clause.effect
+        else {
+            return None;
+        };
+        static_abilities.extend(conjunct_statics);
+        // A trailing "until end of turn" rides the final conjunct; prefer any
+        // explicit (non-Permanent) duration over the per-conjunct default.
+        if matches!(duration, None | Some(Duration::Permanent))
+            && !matches!(conjunct_duration, None | Some(Duration::Permanent))
+        {
+            duration = conjunct_duration;
+        }
+        target = target.or(conjunct_target);
+    }
+
+    // Two subjects must each have contributed an animation modification.
+    if static_abilities.len() < 2 {
+        return None;
+    }
+
+    let effect = Effect::GenericEffect {
+        static_abilities,
+        duration: duration.clone(),
+        target,
+    };
+    Some(ParsedEffectClause {
+        effect,
+        duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -3359,6 +3486,52 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
     (text.to_string(), None)
 }
 
+/// CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): Lower a "become[s] [a[n]] `<basic
+/// land type>`" predicate to its land-subtype modification(s). Non-additive
+/// replaces the object's land subtypes (`SetBasicLandType`, CR 305.7 — the land
+/// gains only the named type's intrinsic mana ability); the "in addition to
+/// {their|its} other types" form retains existing land types and adds the subtype
+/// (`AddSubtype`, CR 205.1b). Composed along its axes — optional article, the
+/// basic-land-type word (singular or plural via `parse_basic_land_type_plural`),
+/// and the optional additive marker. Declines any predicate that does not name
+/// exactly a basic land type (optionally with the additive marker), so non-land
+/// becomes fall through to `parse_animation_spec`.
+fn try_parse_become_basic_land_type_modifications(
+    become_text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = become_text
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_lowercase();
+    let (rest, _) = opt(alt((tag::<_, _, VE>("a "), tag::<_, _, VE>("an "))))
+        .parse(lower.as_str())
+        .ok()?;
+    let word_end = rest
+        .find(|c: char| !c.is_alphabetic())
+        .unwrap_or(rest.len());
+    let land_type = crate::parser::oracle_static::parse_basic_land_type_plural(&rest[..word_end])?;
+    let after = rest[word_end..].trim();
+    // CR 205.1b: only a bare type word (replacement) or the "in addition to their/
+    // its other types" additive marker may follow; anything else is a mixed
+    // predicate that must fall through to the animation parser.
+    let additive = if after.is_empty() {
+        false
+    } else if nom_primitives::scan_contains(after, "in addition to") {
+        true
+    } else {
+        return None;
+    };
+    Some(if additive {
+        vec![ContinuousModification::AddSubtype {
+            subtype: land_type.as_subtype_str().to_string(),
+        }]
+    } else {
+        vec![ContinuousModification::SetBasicLandType { land_type }]
+    })
+}
+
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -3414,6 +3587,34 @@ fn build_become_clause(
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
                 .modifications(vec![modification])
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
+    // CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): "become[s] [a] <basic land type>"
+    // (Nightcreep's "all lands become Swamps") is a LAND-subtype change, not a
+    // creature subtype. `parse_animation_spec` below mis-tokenizes the basic-land
+    // word — notably the plural "Swamps" — as a creature subtype (`AddSubtype` +
+    // `RemoveAllSubtypes{Creature}`), so the land never gains the type's intrinsic
+    // mana ability. Intercept it here and emit the correct land-type modification.
+    if let Some(modifications) = try_parse_become_basic_land_type_modifications(become_text) {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
