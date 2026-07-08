@@ -106,7 +106,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_you_have_conditions,
         parse_that_player_has_conditions,
         parse_there_are_conditions,
-        // CR 201.2 + CR 603.4: Named-pair MUST precede the generic compound
+        // CR 201.2 + CR 608.2c: Named-pair MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
         parse_control_named_pair,
@@ -5621,7 +5621,7 @@ enum SpellHistoryConnector {
     Or,
 }
 
-/// CR 201.2 + CR 603.4: A repeated named-spell condition names two separate
+/// CR 201.2 + CR 608.2c: A repeated named-spell condition names two separate
 /// cast-history predicates, not one card name containing the second
 /// "a spell named ..." item.
 fn parse_repeated_named_spells_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
