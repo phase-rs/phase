@@ -3124,11 +3124,13 @@ fn active_continuous_effects_from_static_definitions(
         }
 
         // CR 113.6 + CR 113.6b: Zone-of-function gate.
-        if !def.active_zones.is_empty() {
-            let Some(zone) = source_zone else { continue };
-            if !def.active_zones.contains(&zone) {
+        let Some(zone) = source_zone else { continue };
+        if def.active_zones.is_empty() {
+            if zone != Zone::Battlefield {
                 continue;
             }
+        } else if !def.active_zones.contains(&zone) {
+            continue;
         }
 
         let retained_condition = if let Some(condition) = &def.condition {
