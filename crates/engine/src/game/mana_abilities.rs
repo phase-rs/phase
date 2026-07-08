@@ -87,11 +87,12 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
 /// Criterion (b) accepts `TappedForMana` (CR 106.12a) — the per-resolution
 /// event emitted whenever a `{T}`-cost mana ability resolves and produces mana,
 /// which is exactly the event a `TapsForMana` triggered mana ability fires
-/// from. CR 605.1b also admits "triggered from the activation/resolution of an
-/// activated mana ability" in general, but mana abilities bypass the stack and
-/// do not emit a distinguishable `AbilityActivated` event; widening (b) to that
-/// axis requires first emitting such an event. No real card exercises the gap
-/// today.
+/// from. It also accepts `ManaAdded`, because CR 605.1b explicitly includes
+/// abilities that trigger from mana being added. CR 605.1b also admits
+/// "triggered from the activation/resolution of an activated mana ability" in
+/// general, but mana abilities bypass the stack and do not emit a
+/// distinguishable `AbilityActivated` event; widening (b) to that axis requires
+/// first emitting such an event. No real card exercises the gap today.
 pub fn is_triggered_mana_ability(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
@@ -109,10 +110,13 @@ pub fn is_triggered_mana_ability(
     if chain_has_any_targets(ability) {
         return false;
     }
-    // (b) CR 106.12a: triggered by a `{T}`-cost mana ability resolving and
-    // producing mana. See the doc comment above for the deliberately-not-yet-
-    // widened `AbilityActivated` axis.
-    matches!(trigger_event, Some(GameEvent::TappedForMana { .. }))
+    // (b) CR 106.12a / CR 605.1b: triggered by a `{T}`-cost mana ability
+    // resolving and producing mana, or by mana being added. See the doc comment
+    // above for the deliberately-not-yet-widened `AbilityActivated` axis.
+    matches!(
+        trigger_event,
+        Some(GameEvent::TappedForMana { .. } | GameEvent::ManaAdded { .. })
+    )
 }
 
 /// True iff every reachable link (via `sub_ability` and `else_ability` per

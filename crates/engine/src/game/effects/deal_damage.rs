@@ -734,9 +734,14 @@ pub(crate) fn apply_damage_after_replacement(
             record.source_keywords = obj.keywords.clone();
             record.source_power = obj.power;
             record.source_toughness = obj.toughness;
-            record.source_colors = obj.color.clone();
-            // CR 202.3e: include cost_x_paid for on-stack spells.
-            record.source_mana_value = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid);
+            // CR 202.3d + CR 702.102b: snapshot the source's colors / mana value
+            // through the split-aware authority so a FUSED split spell freezes its
+            // COMBINED colors and mana value for damage-history source filters. For
+            // permanents and non-fused spells these are byte-identical to the prior
+            // `obj.color` / `mana_value_with_x(zone, cost_x_paid)` reads (CR 202.3e:
+            // the non-fused mana-value arm includes the chosen X).
+            record.source_colors = obj.spell_colors();
+            record.source_mana_value = obj.spell_mana_value();
             record.source_controller_snapshot = obj.controller;
             record.source_owner = obj.owner;
             // CR 608.2i: snapshot the source's zone (Stack for a spell,
@@ -3421,6 +3426,53 @@ mod tests {
             state.damage_dealt_this_turn[0].target_controller,
             PlayerId(1)
         );
+    }
+
+    /// CR 202.3d + CR 702.102b: A damage record snapshots its source's mana value
+    /// and colors so mana-value/color-gated "damage dealt by a source this turn"
+    /// look-back filters (which reconstruct a synthetic source from the record) can
+    /// match. For a FUSED split spell source the snapshot must be the COMBINED value
+    /// of both halves — Breaking // Entering: front {U}{B} = MV 2 / {U,B}, back
+    /// {4}{B}{R} = MV 6 / {B,R} → combined MV 8, colors {U,B,R}. Reverting to the
+    /// raw `obj.mana_cost.mana_value_with_x(...)` / `obj.color` reads freezes the
+    /// front half (MV 2, no red) and these assertions flip.
+    #[test]
+    fn damage_record_snapshots_fused_split_source_combined_mana_value_and_colors() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::mana::ManaColor;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let source = sc.add_real_card(P0, "Breaking", Zone::Stack, db);
+        sc.state.objects.get_mut(&source).unwrap().fused_split_spell = true;
+        let target = sc.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        let mut state = sc.state;
+
+        let ctx = DamageContext::fallback(source, P0);
+        let event = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Object(target),
+            amount: 2,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        apply_damage_after_replacement(&mut state, &ctx, event, false, &mut events);
+
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        let record = &state.damage_dealt_this_turn[0];
+        assert_eq!(
+            record.source_mana_value, 8,
+            "a fused split damage source freezes the COMBINED mana value 8, not the front half (2)"
+        );
+        for color in [ManaColor::Blue, ManaColor::Black, ManaColor::Red] {
+            assert!(
+                record.source_colors.contains(&color),
+                "a fused split damage source freezes the COMBINED colors {{U, B, R}}; got {:?}",
+                record.source_colors
+            );
+        }
     }
 
     #[test]

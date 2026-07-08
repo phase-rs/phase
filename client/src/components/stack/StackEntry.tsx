@@ -10,7 +10,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
@@ -77,10 +77,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
+  const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
+  const sourceTokenImageRef =
+    sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
 
-  const { src, isLoading } = useCardImage(imageLookup.name, {
+  const { src, isLoading } = useCardImage(sourceObj ? imageLookup.name : sourceName, {
     size: "normal",
     faceIndex: imageLookup.faceIndex,
+    isToken: sourceIsToken,
+    tokenFilters: sourceObj?.display_source === "Token" ? tokenFiltersForObject(sourceObj) : undefined,
+    tokenImageRef: sourceTokenImageRef,
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
   });
@@ -101,11 +107,21 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   // CR 117.3d: a stored yield the viewer already holds for this entry, so the
   // menu can surface a Revoke that echoes the exact engine-owned YieldTarget
   // (the frontend never constructs an incarnation or card_id itself).
-  const matchingYield = priorityYields?.find((y) =>
-    "ThisObject" in y.target
-      ? y.target.ThisObject.source_id === entry.source_id
-      : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId,
-  );
+  // The per-trigger `description` this entry carries — the G5 discriminator.
+  const entryDescription =
+    entry.kind.type === "TriggeredAbility" ? entry.kind.data.description ?? undefined : undefined;
+  const matchingYield = priorityYields?.find((y) => {
+    // Mirror the engine's None-wildcard rule (game_state.rs `is_priority_yielded`):
+    // an absent/null `trigger_description` matches ANY entry description (coarse/
+    // legacy yields), while a value matches only that exact trigger. A strict-only
+    // compare would wrongly hide the Revoke pill for legacy yields still held.
+    const stored = "ThisObject" in y.target ? y.target.ThisObject : y.target.AllCopies;
+    const descMatches =
+      stored.trigger_description == null || stored.trigger_description === entryDescription;
+    return "ThisObject" in y.target
+      ? y.target.ThisObject.source_id === entry.source_id && descMatches
+      : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
+  });
   // Triggered abilities show "Triggered — From <source>" so the player can
   // tell which permanent owns the trigger without hovering the card image.
   // Activated abilities don't carry a pre-resolved source name (different

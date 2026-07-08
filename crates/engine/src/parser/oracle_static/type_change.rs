@@ -682,6 +682,131 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
     )
 }
 
+/// CR 205.1a + CR 702.6: "Each `<subject>` is an Equipment with equip
+/// `{N}` and \"`<quoted ability>`\"" — the become-Equipment anthem (Bram,
+/// Baguette Brawler; Bludgeon Brawl). Each matching permanent gains the Equipment
+/// artifact subtype (CR 205.1a — setting an artifact subtype replaces the
+/// object's other artifact subtypes), the Equip keyword with the printed cost
+/// (CR 702.6), and the quoted static ability (typically an "Equipped creature
+/// gets +N/+0" anthem, granted via the shared quoted-ability authority).
+pub(crate) fn parse_becomes_equipment_with_ability(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, rest_tp) = tp.split_around(" is an equipment with equip ")?;
+    let affected = super::shared::parse_continuous_subject_filter(subject_tp.original)?;
+
+    // rest: `{cost} and "<quoted ability>"[, where X is <…> mana value][.]`. The
+    // equip cost precedes ` and "`; the quoted ability is bounded by its closing
+    // quote, and any trailing `, where X is …` binding follows it.
+    let (cost_tp, ability_tp) = rest_tp.split_around(" and \"")?;
+    let (quoted_body_tp, tail_tp) = ability_tp.split_around("\"")?;
+    // Punctuation cleanup on the post-quote chunk (a leading comma from the
+    // split, a trailing period) before matching the binding.
+    let tail_core = tail_tp.lower.trim().trim_matches([',', '.']).trim();
+
+    // CR 202.3: Bludgeon Brawl binds X to "that artifact's mana value" — the
+    // Equipment's own mana value — used for BOTH the equip cost ({X}) and the
+    // granted anthem ("gets +X/+0"). Match the binding EXACTLY with full
+    // consumption ("that artifact's mana value" — the unambiguous source; a bare
+    // "its" could refer to the equipped creature), so extra rules text after the
+    // binding is not accepted.
+    let dynamic_self_mana_value = all_consuming(tag::<_, _, OracleError<'_>>(
+        "where x is that artifact's mana value",
+    ))
+    .parse(tail_core)
+    .is_ok();
+
+    // Fail closed on any unrecognized tail: the only text this handler models
+    // after the quoted ability is that exact binding. A non-empty tail that is
+    // not exactly the binding — whether the binding is absent OR followed by an
+    // extra rider ("…artifact's mana value, and it gains flying") — carries
+    // unmodeled rules text and must NOT be silently dropped.
+    if !tail_core.is_empty() && !dynamic_self_mana_value {
+        return None;
+    }
+
+    // Equip cost: a bare `{X}` bound to the source's mana value lowers to
+    // `ManaCost::SelfManaValue` (concretized at activation like a graveyard-grant
+    // "encore {X}, where X is its mana value"); otherwise a fixed mana cost.
+    let cost_text = cost_tp.lower.trim();
+    let equip_cost = if cost_text == "{x}" && dynamic_self_mana_value {
+        ManaCost::SelfManaValue
+    } else {
+        let (cost_rest, cost) = nom_primitives::parse_mana_cost(cost_text).ok()?;
+        if !cost_rest.trim().is_empty() {
+            return None;
+        }
+        cost
+    };
+
+    // Re-wrap the quoted body and delegate to the shared quoted-ability authority
+    // (original case preserves any {symbols}).
+    let quoted = format!("\"{}\"", quoted_body_tp.original.trim());
+    let mut grant_modifications = parse_quoted_ability_modifications(&quoted);
+    if grant_modifications.is_empty() {
+        return None;
+    }
+    // CR 202.3: the standalone anthem parser reads "gets +X/+0" as the cost-X
+    // paid; for a CONTINUOUS grant bound to the Equipment's mana value, rebind
+    // that reference to `SelfManaValue` so it reads the source's mana value.
+    if dynamic_self_mana_value {
+        rebind_cost_x_to_self_mana_value(&mut grant_modifications);
+    }
+
+    // CR 205.1a: Equipment is an artifact subtype; setting it replaces the
+    // object's existing artifact subtypes (Bram's Food → Equipment), so wipe the
+    // artifact subtype set before granting Equipment.
+    let mut modifications = Vec::new();
+    if let Some(set) = core_type_subtype_set(CoreType::Artifact) {
+        modifications.push(ContinuousModification::RemoveAllSubtypes { set });
+    }
+    modifications.push(ContinuousModification::AddSubtype {
+        subtype: "Equipment".to_string(),
+    });
+    modifications.push(ContinuousModification::AddKeyword {
+        keyword: Keyword::Equip(equip_cost),
+    });
+    modifications.extend(grant_modifications);
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
+/// CR 202.3: Rebind a granted anthem's `CostXPaid` power/toughness reference to
+/// the source object's mana value (`SelfManaValue`). Used when a become-Equipment
+/// grant binds X to "that artifact's mana value" (Bludgeon Brawl): the standalone
+/// anthem parser reads the bare "gets +X/+0" as the cost-X paid, but for a
+/// continuous grant X is a fixed characteristic of the granting Equipment.
+/// Recurses into the granted `StaticDefinition` carried by `GrantStaticAbility`.
+fn rebind_cost_x_to_self_mana_value(modifications: &mut [ContinuousModification]) {
+    for modification in modifications.iter_mut() {
+        match modification {
+            ContinuousModification::GrantStaticAbility { definition } => {
+                rebind_cost_x_to_self_mana_value(&mut definition.modifications);
+            }
+            ContinuousModification::AddDynamicPower { value }
+            | ContinuousModification::AddDynamicToughness { value } => {
+                if matches!(
+                    value,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ) {
+                    *value = QuantityExpr::Ref {
+                        qty: QuantityRef::SelfManaValue,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// CR 205.3: the subtype set correlated with a core card type. Used to wipe an
 /// object's existing subtypes of that set before a set-replacement `AddSubtype`
 /// (CR 205.1a). Returns `None` for core types that have no subtype set of
@@ -920,7 +1045,23 @@ pub(crate) fn parse_enchanted_is_type(
         // "is a [land subtype]" ("Enchanted land is a Mountain") grants no
         // core type and is a basic-land-type change — defer to the dedicated
         // SetBasicLandType parser by returning None here.
-        if granted_core_types.is_empty() {
+        // CR 205.1a + CR 613.4b (issue #5300): the Lignify class names only a
+        // creature SUBTYPE in the copula — "Enchanted creature is a Treefolk with
+        // base power and toughness 0/4 and loses all abilities." Setting a creature
+        // subtype replaces the object's creature subtypes but does NOT set or
+        // overwrite its card types (CR 205.1a: removing/replacing a subtype does not
+        // affect card types), so an enchanted Artifact/Land creature keeps
+        // Artifact/Land (Lignify on Gingerbrute → Artifact Creature — Treefolk;
+        // on Dryad Arbor → Land Creature — Forest Treefolk). We therefore do NOT
+        // synthesize a Creature core type — leaving `granted_core_types` empty so
+        // NO `SetCardTypes` is emitted — but still emit the subtype replacement
+        // (`RemoveAllSubtypes{Creature}` → `AddSubtype`) below. A base P/T is
+        // creature-only, disambiguating from the basic-land subtype change
+        // ("Enchanted land is a Mountain", no P/T → None, deferring to
+        // SetBasicLandType).
+        let subtype_only_creature_change =
+            granted_core_types.is_empty() && base_pt.is_some() && !granted_subtypes.is_empty();
+        if granted_core_types.is_empty() && !subtype_only_creature_change {
             return None;
         }
 
@@ -955,7 +1096,9 @@ pub(crate) fn parse_enchanted_is_type(
         // 1. Core types: replacement (SetCardTypes) when CR 205.1a applies (no
         //    "in addition" suffix) or the clause says "loses all other card
         //    types"; else additive AddType (CR 205.1b "in addition").
-        if needs_set_card_types {
+        // CR 205.1a (issue #5300): the subtype-only Lignify branch grants NO core
+        // type — emit no SetCardTypes so the object keeps its existing card types.
+        if needs_set_card_types && !granted_core_types.is_empty() {
             modifications.push(ContinuousModification::SetCardTypes {
                 core_types: granted_core_types.clone(),
             });
@@ -993,7 +1136,7 @@ pub(crate) fn parse_enchanted_is_type(
         // already provides it (Darksteel Mutation explicitly says "loses all
         // other creature types" and its clause_mods contains the wipe).
         if !is_additive
-            && granted_core_types.contains(&CoreType::Creature)
+            && (granted_core_types.contains(&CoreType::Creature) || subtype_only_creature_change)
             && !granted_subtypes.is_empty()
             && !modifications
                 .iter()
@@ -1369,6 +1512,13 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         return None;
     }
 
+    // CR 205.1a: an effect that sets an object's card type replaces its existing
+    // card types unless it retains them (CR 205.1b). A pure non-creature
+    // card-type change with no retention marker therefore REPLACES — Arixmethes,
+    // Slumbering Isle's "it's a land. (It's not a creature.)" must stop the
+    // Kraken from being a creature, not leave it a "Creature Land" (issue #5213).
+    let modifications = maybe_replace_card_types(modifications, body.lower);
+
     // STEP D — attach the condition(s). The leading "during your turn, " timing
     // peel (STEP A.0) and the trailing " as long as <cond>" peel (STEP A) are
     // independent; either, both, or neither may be present.
@@ -1401,6 +1551,48 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         def = def.condition(condition);
     }
     Some(def)
+}
+
+/// CR 205.1a / CR 205.1b: Decide whether a self type-change is a REPLACEMENT or
+/// an additive grant. A set of `AddType` modifications is replaced by a single
+/// `SetCardTypes` (which removes the object's prior card types, CR 205.1a) only
+/// when ALL of these hold:
+///   - every modification is an `AddType` (a pure card-type change — no P/T,
+///     subtype, keyword, color, or supertype, which would signal an animation
+///     that retains its card type),
+///   - none of the added types is `Creature` (creature forms retain via CR
+///     205.1b's "artifact creature" rule and P/T-bearing animations),
+///   - the body carries no CR 205.1b retention marker ("in addition to" /
+///     "still a[n]").
+///
+/// Otherwise the additive modifications are returned unchanged. This makes
+/// Arixmethes' "it's a land" strip the Creature type while leaving creature
+/// animations (Gideon Blackblade, Midnight Mangler, Circle of the Moon Druid)
+/// on their additive path.
+fn maybe_replace_card_types(
+    modifications: Vec<ContinuousModification>,
+    body_lower: &str,
+) -> Vec<ContinuousModification> {
+    if nom_primitives::scan_contains(body_lower, "in addition to")
+        || nom_primitives::scan_contains(body_lower, "still a")
+    {
+        return modifications;
+    }
+    let mut core_types = Vec::new();
+    for modification in &modifications {
+        match modification {
+            ContinuousModification::AddType { core_type } if *core_type != CoreType::Creature => {
+                core_types.push(*core_type);
+            }
+            // Anything else (P/T, subtype, keyword, an added Creature type, …)
+            // keeps the additive form.
+            _ => return modifications,
+        }
+    }
+    if core_types.is_empty() {
+        return modifications;
+    }
+    vec![ContinuousModification::SetCardTypes { core_types }]
 }
 
 /// CR 205.2 + CR 613.1d + CR 613.4b + CR 611.3a: "Each noncreature <T> [you control]
@@ -1756,6 +1948,52 @@ pub(crate) fn parse_subject_is_supertype(
     )
 }
 
+/// CR 305.7: Decompose the predicate of a land type-changing static into layer-4
+/// modifications — replacement (`SetBasicLandType`), additive (`AddSubtype`), or
+/// all-basic-types (`AddAllBasicLandTypes`). Shared by the single-subject and
+/// compound-subject land type-change handlers.
+fn parse_land_type_change_modifications(rest: &str) -> Option<Vec<ContinuousModification>> {
+    let lower_rest = rest.to_lowercase();
+
+    // "every basic land type in addition to their other types"
+    if nom_tag_lower(&lower_rest, &lower_rest, "every basic land type").is_some()
+        && nom_primitives::scan_contains(&lower_rest, "in addition to")
+    {
+        return Some(vec![ContinuousModification::AddAllBasicLandTypes]);
+    }
+
+    // "[Type] in addition to {its/their} other {land }types" → AddSubtype (additive)
+    if let Some(type_part) = strip_in_addition_suffix(&lower_rest) {
+        let basic_type = parse_basic_land_type_plural(type_part.trim())?;
+        return Some(vec![ContinuousModification::AddSubtype {
+            subtype: basic_type.as_subtype_str().to_string(),
+        }]);
+    }
+
+    // CR 305.7: Replacement semantics — "[Type]" or "[Types]" → SetBasicLandType
+    // Try multi-type list first: "Mountain, Forest, and Plains"
+    if let Some(types) = parse_basic_land_type_list(rest.trim()) {
+        if types.len() == 1 {
+            return Some(vec![ContinuousModification::SetBasicLandType {
+                land_type: types[0],
+            }]);
+        }
+        // CR 305.7: Multiple types — first SetBasicLandType clears old subtypes,
+        // subsequent AddSubtype entries add the remaining types.
+        let mut mods = vec![ContinuousModification::SetBasicLandType {
+            land_type: types[0],
+        }];
+        for &lt in &types[1..] {
+            mods.push(ContinuousModification::AddSubtype {
+                subtype: lt.as_subtype_str().to_string(),
+            });
+        }
+        return Some(mods);
+    }
+
+    None
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
@@ -1771,65 +2009,50 @@ pub(crate) fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<St
 
     // Only proceed if subject is a land-type-change subject (avoids matching non-land patterns).
     let affected = parse_land_type_change_subject(subject)?;
-    let lower_rest = rest.to_lowercase();
+    let modifications = parse_land_type_change_modifications(rest)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
 
-    // "every basic land type in addition to their other types"
-    if nom_tag_lower(&lower_rest, &lower_rest, "every basic land type").is_some()
-        && nom_primitives::scan_contains(&lower_rest, "in addition to")
+/// CR 613.4b + CR 205.1b: Merge a creature-animation predicate with the additive
+/// type/subtype grants past `parse_animation_spec`'s internal `" and "` stop.
+/// `parse_animation_spec` supplies base P/T (layer 7b), set color (layer 5),
+/// and leading creature type/subtype grants; `parse_additive_type_clause_modifications`
+/// supplies the trailing `"and <type> lands in addition to their other types"`
+/// nouns (layer 4). Only additive `AddType` / `AddSubtype` grants are merged —
+/// the animation spec's set color takes precedence over the additive parser's
+/// additive color.
+///
+/// Shared by [`parse_land_animation`] (single-subject) and
+/// [`parse_compound_all_subjects_type_change`] (compound-subject).
+fn merge_creature_animation_with_additive_type_modifications(
+    predicate: &str,
+) -> Option<Vec<ContinuousModification>> {
+    let spec = super::oracle_effect::animation::parse_animation_spec(
+        predicate,
+        &mut ParseContext::default(),
+    )?;
+    let mut modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if modifications.is_empty() {
+        return None;
+    }
+    if let Some(additive) = parse_additive_type_clause_modifications(&format!("~ are {predicate}"))
     {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddAllBasicLandTypes])
-                .description(text.to_string()),
-        );
-    }
-
-    // "[Type] in addition to {its/their} other {land }types" → AddSubtype (additive)
-    if let Some(type_part) = strip_in_addition_suffix(&lower_rest) {
-        let basic_type = parse_basic_land_type_plural(type_part.trim())?;
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddSubtype {
-                    subtype: basic_type.as_subtype_str().to_string(),
-                }])
-                .description(text.to_string()),
-        );
-    }
-
-    // CR 305.7: Replacement semantics — "[Type]" or "[Types]" → SetBasicLandType
-    // Try multi-type list first: "Mountain, Forest, and Plains"
-    if let Some(types) = parse_basic_land_type_list(rest.trim()) {
-        if types.len() == 1 {
-            return Some(
-                StaticDefinition::continuous()
-                    .affected(affected)
-                    .modifications(vec![ContinuousModification::SetBasicLandType {
-                        land_type: types[0],
-                    }])
-                    .description(text.to_string()),
+        for modification in additive {
+            let is_type_grant = matches!(
+                modification,
+                ContinuousModification::AddType { .. } | ContinuousModification::AddSubtype { .. }
             );
+            if is_type_grant && !modifications.contains(&modification) {
+                modifications.push(modification);
+            }
         }
-        // CR 305.7: Multiple types — first SetBasicLandType clears old subtypes,
-        // subsequent AddSubtype entries add the remaining types.
-        let mut mods = vec![ContinuousModification::SetBasicLandType {
-            land_type: types[0],
-        }];
-        for &lt in &types[1..] {
-            mods.push(ContinuousModification::AddSubtype {
-                subtype: lt.as_subtype_str().to_string(),
-            });
-        }
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(mods)
-                .description(text.to_string()),
-        );
     }
-
-    None
+    Some(modifications)
 }
 
 /// CR 613.1d (Layer 4) + CR 613.4b (Layer 7b) + CR 205.1b: Parse a continuous
@@ -1845,6 +2068,10 @@ pub(crate) fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<St
 /// additively (CR 613.1d), and card types stay additive, so the land keeps its
 /// land type — the "that are still lands" tail (CR 205.1b) merely confirms that
 /// reading and is consumed by `split_type_retention_clause`.
+///
+/// When the predicate instead uses the explicit CR 205.1b additive marker
+/// ("… and <type> lands in addition to their other types"), trailing land-type
+/// grants are merged via [`merge_creature_animation_with_additive_type_modifications`].
 ///
 /// Dispatched before `parse_land_type_change`; the `"creature"` guard makes
 /// land *type* lines ("Lands you control are Plains") fall through unclaimed.
@@ -1873,20 +2100,226 @@ pub(crate) fn parse_land_animation(tp: &TextPair<'_>, text: &str) -> Option<Stat
     }
     .trim();
 
-    let spec = super::oracle_effect::animation::parse_animation_spec(
-        animation_text,
-        &mut ParseContext::default(),
-    )?;
-    let modifications = super::oracle_effect::animation::animation_modifications(&spec);
-    if modifications.is_empty() {
-        return None;
-    }
+    let modifications = if super::oracle_effect::animation::has_in_addition_to_other_types(rest) {
+        // CR 205.1b: predicates that use the explicit additive marker ("… and
+        // <type> lands in addition to their other types") carry trailing land-type
+        // grants past the animation parser's internal " and " stop — the same merge
+        // `parse_compound_all_subjects_type_change` applies for compound subjects.
+        merge_creature_animation_with_additive_type_modifications(animation_text)?
+    } else {
+        let spec = super::oracle_effect::animation::parse_animation_spec(
+            animation_text,
+            &mut ParseContext::default(),
+        )?;
+        let modifications = super::oracle_effect::animation::animation_modifications(&spec);
+        if modifications.is_empty() {
+            return None;
+        }
+        modifications
+    };
     Some(
         StaticDefinition::continuous()
             .affected(affected)
             .modifications(modifications)
             .description(text.to_string()),
     )
+}
+
+/// CR 611.3 + CR 613.1 + CR 613.4b + CR 205.1b: "All `<X>` and all `<Y>` are
+/// `<predicate>`" — a compound-subject continuous animation/type-change where a
+/// single predicate applies uniformly to every object matching either subject.
+///
+/// Life and Limb is the canonical member: "All Forests and all Saprolings are
+/// 1/1 green Saproling creatures and Forest lands in addition to their other
+/// types." Neither single-subject parser is complete for this predicate — the
+/// animation path drops the trailing additive "and `<type>` lands", and the
+/// creature-subtype path drops the base P/T — so the compound line is dispatched
+/// here. The subjects distribute into an `Or` filter (CR 611.3: the same
+/// continuous effect applies to every object in the affected set), and the
+/// compound predicate is parsed once into a uniform modification set that both
+/// subjects share.
+///
+/// The predicate reuses the two tested predicate parsers: `parse_animation_spec`
+/// supplies the base P/T (CR 613.4b, layer 7b), the set color (CR 105.2, layer
+/// 5) and the leading type/subtype grants; `parse_additive_type_clause_modifications`
+/// supplies the additive type/subtype nouns the animation parser stops short of
+/// at the internal " and " (CR 205.1b, layer 4). Only additive `AddType` /
+/// `AddSubtype` grants are merged in — the animation spec's set color takes
+/// precedence over the additive parser's additive color.
+pub(crate) fn parse_compound_all_subjects_type_change(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    // Require a genuine "all <X> and all <Y>" conjunction so single-subject
+    // "all <X> are ..." lines fall through to their dedicated dispatchers.
+    let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
+
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+    let predicate_lower = predicate.to_lowercase();
+    // Claim only creature-animation predicates; bare land type-change compounds
+    // ("All Mountains and all Forests are Plains") are owned by
+    // `parse_compound_all_subjects_land_type_change`.
+    if !nom_primitives::scan_contains(&predicate_lower, "creature") {
+        return None;
+    }
+    // CR 205.1b: this handler applies strictly ADDITIVE type/subtype semantics
+    // (`AddType` / `AddSubtype`), so it must only claim predicates that carry the
+    // "in addition to {their|its} other types" marker. A compound predicate
+    // without it ("All X and all Y are Zombies") is a type REPLACEMENT (CR 205.1a
+    // `SetCardTypes`) that must fall through to a replacement-semantics handler
+    // rather than be silently reinterpreted as additive.
+    if !nom_primitives::scan_contains(&predicate_lower, "in addition to their other")
+        && !nom_primitives::scan_contains(&predicate_lower, "in addition to its other")
+    {
+        return None;
+    }
+    let modifications = merge_creature_animation_with_additive_type_modifications(predicate)?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 611.3 + CR 613.1 + CR 613.4b + CR 205.1a: "All `<X>` and all `<Y>` are
+/// `<predicate>`" — a compound-subject continuous animation where a single
+/// replacement predicate applies uniformly to every object matching either
+/// subject, without the CR 205.1b additive marker.
+///
+/// Sibling of [`parse_compound_all_subjects_type_change`]: a bare
+/// "are `<P/T>` `<type>` creatures" compound replaces creature subtypes (CR
+/// 205.1a) rather than retaining them additively. The subjects distribute into
+/// an `Or` filter and the predicate is parsed once via `parse_animation_spec` +
+/// `animation_modifications_with_replacement`.
+pub(crate) fn parse_compound_all_subjects_type_replacement(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let affected = parse_compound_all_subjects_filter(subject_tp.original)?;
+
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+    // CR 205.1b: additive predicates are owned by the additive compound handler.
+    if super::oracle_effect::animation::has_in_addition_to_other_types(predicate) {
+        return None;
+    }
+
+    let spec = super::oracle_effect::animation::parse_animation_spec(
+        predicate,
+        &mut ParseContext::default(),
+    )?;
+    let modifications =
+        super::oracle_effect::animation::animation_modifications_with_replacement(&spec, false);
+    if modifications.is_empty()
+        || !modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )
+        })
+    {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 611.3 + CR 305.7 + CR 205.1b: "All `<X>` and all `<Y>` are `<land-type
+/// predicate>`" — a compound-subject land type-change where one predicate applies
+/// uniformly to every object matching either land subject conjunct.
+///
+/// Sibling of the compound animation handlers: `parse_land_type_change` only
+/// resolves single-subject land filters. Subjects distribute into an `Or` filter
+/// via [`parse_compound_all_subjects_land_filter`] (land-only conjuncts — mixed
+/// land/creature compounds like Life and Limb stay on the animation path). The
+/// predicate is parsed once through [`parse_land_type_change_modifications`]. The
+/// `"creature"` guard keeps animation compounds on the animation dispatch path.
+pub(crate) fn parse_compound_all_subjects_land_type_change(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let affected = parse_compound_all_subjects_land_filter(subject_tp.original)?;
+
+    let predicate = predicate_tp.original.trim().trim_end_matches('.').trim();
+    let predicate_lower = predicate.to_lowercase();
+    if nom_primitives::scan_contains(&predicate_lower, "creature") {
+        return None;
+    }
+
+    let modifications = parse_land_type_change_modifications(predicate)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
+}
+
+/// Parse "all `<X>` and all `<Y>`[ and all `<Z>`…]" into an `Or` of per-subject
+/// filters. Peels conjuncts on the " and all " seam (so every conjunct after the
+/// first is an `all `-quantified subject) and parses each through the shared
+/// subject parser. Requires 2+ conjuncts, all of which resolve to a filter;
+/// returns None otherwise so single-subject lines fall through to their
+/// dedicated dispatchers. The mandatory second `all ` quantifier is what
+/// distinguishes this compound animation subject from an incidental " and "
+/// inside a lone subject phrase.
+fn parse_compound_all_subjects_filter(subject: &str) -> Option<TargetFilter> {
+    let lower = subject.to_lowercase();
+    let mut filters: Vec<TargetFilter> = Vec::new();
+    let mut remaining: &str = lower.as_str();
+    // Each " and all " seam ends one conjunct and drops the next conjunct's
+    // `all ` quantifier; the shared parser strips a leading `all ` itself, so the
+    // leading conjunct's own quantifier is harmless.
+    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
+        filters.push(parse_compound_subject_conjunct(conjunct.trim())?);
+        remaining = rest;
+    }
+    filters.push(parse_compound_subject_conjunct(remaining.trim())?);
+    if filters.len() < 2 {
+        return None;
+    }
+    Some(TargetFilter::Or { filters })
+}
+
+/// Resolve one conjunct of a compound animation subject to a filter. A basic
+/// land-type conjunct ("Forests") must resolve to a `Land` + subtype filter
+/// (CR 305.6), so try the land-type-change subject parser first; the shared
+/// subject parser (which defaults a bare subtype to a *creature* subtype)
+/// handles the creature-subtype conjuncts ("Saprolings").
+fn parse_compound_subject_conjunct(conjunct: &str) -> Option<TargetFilter> {
+    parse_land_type_change_subject(conjunct)
+        .or_else(|| super::shared::parse_continuous_subject_filter(conjunct))
+}
+
+/// Parse "all `<X>` and all `<Y>`[ and all `<Z>`…]" into an `Or` of land-only
+/// per-subject filters. Each conjunct must resolve through
+/// [`parse_land_type_change_subject`] — mixed land/creature compounds (Life and
+/// Limb's "Forests and Saprolings") return `None` so animation handlers keep
+/// ownership.
+fn parse_compound_all_subjects_land_filter(subject: &str) -> Option<TargetFilter> {
+    let lower = subject.to_lowercase();
+    let mut filters: Vec<TargetFilter> = Vec::new();
+    let mut remaining: &str = lower.as_str();
+    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
+        filters.push(parse_land_type_change_subject(conjunct.trim())?);
+        remaining = rest;
+    }
+    filters.push(parse_land_type_change_subject(remaining.trim())?);
+    if filters.len() < 2 {
+        return None;
+    }
+    Some(TargetFilter::Or { filters })
 }
 
 /// Parse the subject of a land type-change line into a TargetFilter.

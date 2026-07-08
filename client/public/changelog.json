@@ -1,6 +1,33 @@
 {
   "entries": [
     {
+      "id": 166,
+      "date": "2026-07-07",
+      "title": "Ad Nauseam repeats resolve correctly",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Bludgeon Brawl and Bram-style effects now grant real equip abilities, including mana-value-based equip costs\n• Siren's Call and Maddening Imp now force attacks and punish only the creatures they actually affected at the end step\n• The Mycotyrant, Tidus Doom, Chaos Warp, K'rrik, and broader source-defined token stats are now supported\n• Role tokens now bring their printed abilities and correct face art, so Monster, Royal, and other Roles actually buff the attached creature\n\n🛠️ Cards That Now Work Right\n• Ad Nauseam now reveals, draws, and charges life one repeat at a time instead of batching every accepted reveal at the end\n• Protection choices such as Apostle's Blessing, Giver of Runes, and Angelic Intervention now ask you to choose one protection option instead of building an unusable combined protection\n• Super Intelligence and Maddening Hex-style Auras now trigger only for the enchanted creature's controller or enchanted player\n• Lignify-style enchanted-creature type changes now keep the creature's other card types while replacing creature subtypes and setting base power/toughness\n• Arixmethes-style “it's a type” effects now replace card types correctly, while artifact-creature animations stay additive\n• Enchantments that stop activated abilities now keep the “unless they're mana abilities” exception even when Oracle text uses curly apostrophes\n\n⚔️ Combat & Gameplay\n• Mulligan bottoming now happens at each player's keep or Serum Powder decision point, and the frontend no longer lets you bottom the earmarked Serum Powder\n• “Attacks alone” triggers now fire only when exactly one creature attacks, fixing Exalted and Sharon Carter-style checks\n• Land type-change and land animation statics now cover more compound-subject forms\n• Token dies triggers, X/X token sizing, tracked-set token power/toughness, and split token follow-ups are more reliable\n\n🖥️ Interface\n• Multiplayer turn order chips are clearer and card image fallbacks work better\n• Game surfaces no longer use border styling that looked like interactive tells\n\n🌐 Multiplayer\n• P2P draft backup deletion now requires the host peer id, matching the existing overwrite protection",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524182518331478178"
+    },
+    {
+      "id": 165,
+      "date": "2026-07-06",
+      "title": "Morph face-down casting arrives",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Morph, megamorph, and disguise cards can now be cast face down for {3}, including from other zones when another effect lets you cast them there\n• Disguise face-down spells carry ward {2}, and the alternative-cost modal now shows the face-down option with localized labels\n• “Permanents enter tapped this turn” effects now work for cards like Due Respect and Nahiri’s Lithoforming\n• Life and Limb-style compound animation, dynamic power/toughness counts, “for each creature you control with flying” quantities, and Alchemy spellbooks now have broader support\n\n🛠️ Cards That Now Work Right\n• Split cards such as Fire // Ice, Wear // Tear, and Assault // Battery now report their combined mana value and colors when they’re not on the stack\n• Light-Paws-style Aura searches and Curse tutors now attach to the chosen player or permanent instead of losing the host target\n• Teferi’s Puzzle Box now cycles each player’s whole hand to the bottom of their library and draws that many cards\n• Hollow One now discounts from cards cycled or discarded this turn, not random battlefield objects\n• Soulblast, Kaervek’s Spite, Tomb of Urami, Mob Mentality, Blizzard, Goblin Ski Patrol, and same-name/Coven checks now preserve their printed restrictions\n• Dagger Caster, Radiating Lightning, Seismic Wave, The Fall of Kroog, and Wildfire Howl now deal their “each creature/player” follow-up damage to the full group\n\n⚔️ Combat & Gameplay\n• Spells that can only be cast after blockers are declared now wait for the correct combat steps, covering Aleatory, Chaotic Strike, Curtain of Light, and Flash Foliage\n• Damage prevention and replacement shields with conditions now apply correctly to pending damage\n• Chosen-color alternative mana can auto-tap correctly again\n\n🖥️ Interface\n• Setup deck selection has a cleaner, easier-to-scan flow before starting a game",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1523896688463446038"
+    },
+    {
       "id": 164,
       "date": "2026-07-06",
       "title": "Spider-Man cards arrive",

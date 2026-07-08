@@ -299,6 +299,7 @@ describe("getBoardChoiceView", () => {
       type: "CrewVehicle",
       data: { vehicle_id: 30, creature_ids: [10, 11] },
     });
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
   });
 
   // Regression: a Pilot token (Shorikai) has printed power 1 but crews "as though

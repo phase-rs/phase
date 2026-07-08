@@ -1073,10 +1073,10 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
 }
 
 /// Issue #534 — Skullwinder's ETB trigger must decompose into the ordered
-/// chain `Bounce` (caster's graveyard) → `Choose { Opponent }` → `Bounce`
+/// chain `ChangeZone` (caster's graveyard) → `Choose { Opponent }` → `ChangeZone`
 /// whose target filter carries `FilterProp::Owned { ChosenPlayer { 0 } }`.
 /// The pre-fix parser dropped "then choose an opponent" entirely and left
-/// the dependent `Bounce` scoped to `ScopedPlayer`, which falls back to the
+/// the dependent return scoped to `ScopedPlayer`, which falls back to the
 /// caster — the agency bug. CR 608.2c (rules of English: "That player" is
 /// the just-chosen opponent) + CR 109.4 (the returned card is *owned*).
 #[test]
@@ -1102,8 +1102,15 @@ fn skullwinder_etb_parses_choose_opponent() {
 
     // Node 1: return the caster's own graveyard card.
     assert!(
-        matches!(chain.effect.as_ref(), Effect::Bounce { .. }),
-        "node 1 must be Bounce (caster's graveyard card), got {:?}",
+        matches!(
+            chain.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "node 1 must return caster's graveyard card to hand, got {:?}",
         chain.effect
     );
 
@@ -1125,16 +1132,25 @@ fn skullwinder_etb_parses_choose_opponent() {
     );
 
     // Node 3: the chosen opponent returns a card from THEIR graveyard.
-    let bounce = choose
+    let return_to_hand = choose
         .sub_ability
         .as_ref()
-        .expect("node 3 — chosen player's Bounce");
-    let Effect::Bounce { target, .. } = bounce.effect.as_ref() else {
-        panic!("node 3 must be Bounce, got {:?}", bounce.effect);
+        .expect("node 3 — chosen player's return");
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = return_to_hand.effect.as_ref()
+    else {
+        panic!(
+            "node 3 must return from graveyard to hand, got {:?}",
+            return_to_hand.effect
+        );
     };
     let TargetFilter::Typed(tf) = target else {
         panic!(
-            "node 3 Bounce target must be a Typed filter, got {0:?}",
+            "node 3 return target must be a Typed filter, got {0:?}",
             target
         );
     };
@@ -1145,7 +1161,7 @@ fn skullwinder_etb_parses_choose_opponent() {
                 controller: ControllerRef::ChosenPlayer { index: 0 }
             }
         )),
-        "node 3 Bounce filter must scope ownership to ChosenPlayer {{ index: 0 }}, \
+        "node 3 return filter must scope ownership to ChosenPlayer {{ index: 0 }}, \
              got properties {:?}",
         tf.properties
     );

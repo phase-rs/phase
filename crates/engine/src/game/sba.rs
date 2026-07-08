@@ -500,6 +500,9 @@ fn static_affects_player(
             Some(ControllerRef::TriggeringPlayer) => false,
             // CR 303.4b: Enchanted-player scope has no SBA context. Fail closed.
             Some(ControllerRef::EnchantedPlayer) => false,
+            // CR 102.1: this matcher has no `GameState` to read
+            // `active_player` from. Fail closed (mirrors the siblings above).
+            Some(ControllerRef::ActivePlayer) => false,
             None => true,
         },
         Some(TargetFilter::Player) => true,

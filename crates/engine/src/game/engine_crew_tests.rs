@@ -127,6 +127,35 @@ fn test_crew_activation_enters_crew_vehicle_state() {
 }
 
 #[test]
+fn cancel_crew_selection_returns_to_priority_without_tapping_creatures() {
+    let (mut state, vehicle_id, creature_a, creature_b) = setup_crew_scenario();
+
+    apply_as_current(
+        &mut state,
+        GameAction::CrewVehicle {
+            vehicle_id,
+            creature_ids: vec![],
+        },
+    )
+    .unwrap();
+    assert!(
+        crate::ai_support::legal_actions(&state).contains(&GameAction::CancelCast),
+        "crew selection must advertise CancelCast as legal"
+    );
+
+    let result = apply_as_current(&mut state, GameAction::CancelCast).unwrap();
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert!(!state.objects.get(&creature_a).unwrap().tapped);
+    assert!(!state.objects.get(&creature_b).unwrap().tapped);
+}
+
+#[test]
 fn crew_activation_excludes_cant_tap_creatures_from_threshold() {
     let (mut state, vehicle_id, creature_a, _creature_b) = setup_crew_scenario();
     state.objects.get_mut(&creature_a).unwrap().power = Some(2);

@@ -993,6 +993,20 @@ pub(super) fn handle_resolution_choice(
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
+                // CR 608.2c + CR 107.1c (issue #1032): reset to `Priority`
+                // BEFORE re-entering the chain, mirroring the `decline`
+                // branch's `finish_with_continuation` reset below and
+                // `handle_optional_effect_choice`'s `set_active_priority`
+                // reset (engine_payment_choices.rs). Without this,
+                // `state.waiting_for` is still the just-answered
+                // `RepeatDecision`, which `waits_for_resolution_choice`
+                // (effects/mod.rs) matches — the ChangeZone/LoseLife
+                // sub-chain following this iteration's RevealTop is then
+                // wrongly deferred into `pending_continuation` (accumulating
+                // there via `append_to_sub_chain`) instead of resolving
+                // immediately, and only drains in one batch when the
+                // controller eventually declines.
+                set_priority(state, player);
                 // Re-resolve one more process pass. `ability` retains
                 // `repeat_until: Some(ControllerChoice)`, so this hits the
                 // `repeat_until` dispatch, runs `resolve_chain_body` once, and
@@ -1158,7 +1172,10 @@ pub(super) fn handle_resolution_choice(
                 let mv = state
                     .objects
                     .get(&chosen)
-                    .map(|obj| obj.mana_cost.mana_value())
+                    // CR 202.3d + CR 709.4b: the chosen card is off the stack, so
+                    // a split card's MV budget is its combined halves — must match
+                    // the candidate-eligibility check in free_cast_from_zones.
+                    .map(|obj| obj.effective_mana_value())
                     .unwrap_or(0);
                 if mv > budget {
                     return Err(EngineError::InvalidAction(
@@ -2224,7 +2241,13 @@ pub(super) fn handle_resolution_choice(
                     .exiled_from_hand_this_resolution
                     .saturating_add(hand_exiles);
             }
-            if let Some(cont) = state.pending_continuation.as_mut() {
+            if let Some(mut cont) = state.pending_continuation.take() {
+                cont.search_attach_host =
+                    effects::change_zone::resolve_search_continuation_attach_host(
+                        state,
+                        &cont.chain,
+                    );
+                state.search_continuation_attach_host = cont.search_attach_host;
                 let mut continuation_targets: Vec<_> =
                     chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 701.23a + CR 701.24a: When the searcher is not the caster
@@ -2238,6 +2261,7 @@ pub(super) fn handle_resolution_choice(
                 }
                 cont.chain.targets = continuation_targets.clone();
                 propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
+                state.pending_continuation = Some(cont);
             }
             effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -3184,6 +3208,7 @@ pub(super) fn handle_resolution_choice(
                             // across the `EffectZoneChoice` round-trip against each
                             // chosen object (Summoner's Grimoire).
                             enters_modified_if: enters_modified_if.clone(),
+                            enter_attached_to: None,
                         };
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
@@ -3223,6 +3248,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -3260,6 +3286,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3464,6 +3491,7 @@ pub(super) fn handle_resolution_choice(
                         // CR 614.12: cost-payment exile carries no enter-modifier
                         // gate; thread the (None) round-trip value for consistency.
                         enters_modified_if: enters_modified_if.clone(),
+                        enter_attached_to: None,
                     };
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
@@ -3502,6 +3530,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3536,6 +3565,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =

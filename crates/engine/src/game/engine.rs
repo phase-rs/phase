@@ -462,7 +462,7 @@ fn check_actor_authorization(
         return Ok(());
     }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
-    // MulliganBottomCards, OpeningHandBottomCards), authorize against the full pending set so any
+    // OpeningHandBottomCards), authorize against the full pending set so any
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
@@ -1807,6 +1807,19 @@ fn apply_action(
                 AlternativeCastKeyword::Prototype => {
                     // CR 702.160a: Handle the prototype alternative cost choice during casting.
                     casting::handle_prototype_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::FaceDown => {
+                    // CR 702.37c / CR 702.168b: Handle the "cast normally vs cast
+                    // face down for {3}" choice for a Morph/Megamorph/Disguise card.
+                    casting::handle_face_down_cost_choice_with_payment_mode(
                         state,
                         *player,
                         *object_id,
@@ -3326,16 +3339,16 @@ fn apply_action(
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
             // CR 103.5 + 103.5b: `actor` is already authorized as a member of
             // `pending` by `check_actor_authorization`. The mulligan module
-            // resolves the per-player state update and either re-emits
-            // MulliganDecision (with the actor removed if they kept, retained
-            // with bumped count if they mulliganed, or retained with the
-            // same count if they used Serum Powder) or advances to the next
-            // phase when the pending set is empty.
+            // resolves the per-player state update, transitioning the actor's
+            // entry into `BottomCards` when a declare-point action still owes
+            // bottoms, or advancing the flow when the pending set is empty.
             mulligan::handle_mulligan_decision(state, actor, choice, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
-        (WaitingFor::MulliganBottomCards { .. }, GameAction::SelectCards { cards }) => {
+        (WaitingFor::MulliganDecision { .. }, GameAction::SelectCards { cards }) => {
             // CR 103.5: `actor` is already authorized as a member of `pending`.
+            // A `SelectCards` submission resolves that player's owed
+            // `BottomCards` sub-phase (rejected if their entry is in `Declare`).
             mulligan::handle_mulligan_bottom(state, actor, cards, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
@@ -3751,6 +3764,12 @@ fn apply_action(
             &creature_ids,
             &mut events,
         )?,
+        // CR 602.2b + CR 601.2h: crew's tap cost is not paid until the
+        // activation payment step, so backing out before creature selection is
+        // complete restores priority with no state to undo.
+        (WaitingFor::CrewVehicle { player, .. }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         // CR 702.184a: Station activation from Priority — enters target-selection state.
         (
             WaitingFor::Priority { player },
@@ -5632,6 +5651,27 @@ fn handle_play_land(
         Zone::Battlefield,
         None,
     );
+
+    // CR 110.2 + CR 110.2a (GitHub #696): A played land's controller
+    // defaults to whoever played it, not the card's owner. `player` is the
+    // acting land-player already resolved above (turn_resource_owner, or
+    // acting_player under shared team turns) — the same identity already
+    // used throughout this function for hand/zone lookups, and the correct
+    // one even under Mindslaver-style turn control (the turn's rightful
+    // player controls what gets played on their turn, not whoever is
+    // making the decisions). This is a no-op for the overwhelmingly common
+    // owner==player case. A genuine self-ETB "enters under [X]'s control"
+    // replacement (enters_under) still wins — it runs later in the same
+    // replacement pipeline this event is routed through below, and
+    // hard-overwrites this default unconditionally (identical safety
+    // property to the stack.rs spell-cast seam this mirrors).
+    if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+        controller_override,
+        ..
+    } = &mut proposed
+    {
+        *controller_override = Some(player);
+    }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
     // counters" replacement for planeswalkers and battles entering the

@@ -35,6 +35,11 @@
     "off": "Aus"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Ansicht",
+      "tools": "Werkzeuge",
+      "game": "Spiel"
+    },
     "reportCard": "Karte melden",
     "menu": "Spielmenü",
     "sandboxTools": "Sandbox-Werkzeuge",

@@ -254,7 +254,9 @@ pub fn apnap_order_from(
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::TriggeringPlayer
             // CR 303.4b: Enchanted-player scope is not enumerable. Fail closed.
-            | ControllerRef::EnchantedPlayer,
+            | ControllerRef::EnchantedPlayer
+            // CR 102.1: the active player is exactly this default anchor.
+            | ControllerRef::ActivePlayer,
         ) => state.active_player,
     };
 
@@ -310,7 +312,9 @@ pub fn linked_exile_cards_for_source(
                 (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
                     exiled_id: link.exiled_id,
                     owner: obj.owner,
-                    mana_value: obj.mana_cost.mana_value(),
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card records its combined mana value.
+                    mana_value: obj.effective_mana_value(),
                 })
             })
         })

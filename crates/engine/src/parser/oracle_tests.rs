@@ -93,6 +93,67 @@ fn escape_keyword_extracted_on_instants_and_sorceries() {
     }
 }
 
+/// CR 608.2c + CR 400.7j: Spelunking's full ETB — "draw a card,
+/// then you may put a land card from your hand onto the battlefield. If you
+/// put a Cave onto the battlefield this way, you gain 4 life." CR 400.7j
+/// lets the rider find the Cave the preceding put-land instruction moved to
+/// the battlefield (a public zone). The trailing active-voice "if you put a
+/// Cave onto the battlefield this way" rider must lower the GainLife
+/// sub-ability with a `ZoneChangedThisWay { Cave }` gate, and no part of the
+/// card may be Unimplemented.
+#[test]
+fn spelunking_etb_put_cave_gains_life_conditionally() {
+    let parsed = parse_oracle_text(
+        "When this enchantment enters, draw a card, then you may put a land card from your hand onto the battlefield. If you put a Cave onto the battlefield this way, you gain 4 life.\nLands you control enter untapped.",
+        "Spelunking",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    let etb = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_ref())
+        .expect("Spelunking must have an ETB trigger with an execute chain");
+
+    fn find_gain_life(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(&*def.effect, Effect::GainLife { .. }) {
+            return Some(def);
+        }
+        assert!(
+            !matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "no ETB node may be Unimplemented, got {:?}",
+            def.effect
+        );
+        def.sub_ability.as_deref().and_then(find_gain_life)
+    }
+    let gain = find_gain_life(etb).expect("the ETB chain must contain a GainLife node");
+
+    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = &gain.condition else {
+        panic!(
+            "GainLife must be gated by ZoneChangedThisWay, got {:?}",
+            gain.condition
+        );
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a Typed Cave filter, got {filter:?}");
+    };
+    assert!(
+        typed
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Cave"))),
+        "gate must filter on the Cave subtype, got {:?}",
+        typed.type_filters
+    );
+
+    assert!(
+        !parsed.replacements.is_empty(),
+        "the enter-untapped static replacement must still parse"
+    );
+}
+
 /// CR 207.2c + CR 602.1: an activated ability may carry an italic ability-word
 /// label before its cost ("Mental Organism — Pay 3 life: ~ connives" —
 /// M.O.D.O.K.). The ability word has no rules meaning, so `find_activated_colon`
@@ -975,13 +1036,13 @@ fn compound_target_player_continuations_share_one_target() {
 }
 
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
-    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition,
-    PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement,
-    SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
-    TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AggregateFunction, Comparator, ContinuousModification,
+    ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition,
+    TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -1331,6 +1392,7 @@ fn oracle_face_for(
             scryfall_id: Some(format!("{}-face", name.to_lowercase())),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     };
     crate::database::synthesis::build_oracle_face(&card, None)
 }
@@ -1844,6 +1906,7 @@ fn pupu_ufo_full_card_supported_dynamic_base_power() {
                 scryfall_id: Some("pupu-ufo-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
@@ -1894,6 +1957,7 @@ fn sita_varma_full_card_supported_inverted_genitive_base_pt() {
                 scryfall_id: Some("sita-varma-face".to_string()),
             },
             foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         };
     let face = crate::database::synthesis::build_oracle_face(&card, None);
     let gaps = crate::game::coverage::card_face_gaps(&face);
@@ -6139,6 +6203,124 @@ fn land_grant_reveal_hand_alternative_cost_option() {
     );
 }
 
+// CR 608.2c + CR 205.2b (GitHub #4710): Scourglass — "Destroy all permanents
+// except for artifacts and lands" must exclude both types (including artifact
+// creatures, per CR 205.2b's multi-type-object rule), not silently drop the
+// exception clause and destroy everything. Drives the full ability-line parse
+// (not just `parse_type_phrase` in isolation) so the interaction with the
+// trailing "Activate only during your upkeep." restriction sentence is
+// covered too.
+#[test]
+fn scourglass_destroy_all_excludes_artifacts_and_lands() {
+    let r = parse(
+        "{T}, Sacrifice this artifact: Destroy all permanents except for artifacts and lands. Activate only during your upkeep.",
+        "Scourglass",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DestroyAll { target, .. } = &*r.abilities[0].effect else {
+        panic!(
+            "expected DestroyAll effect, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert!(
+        r.abilities[0]
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::DuringYourUpkeep),
+        "the trailing restriction sentence must still parse: {:?}",
+        r.abilities[0].activation_restrictions
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
+// CR 608.2c (GitHub #4710 class): Elspeth Tirel's −5 loyalty ability —
+// "Destroy all other permanents except for lands and tokens" — exercises the
+// heterogeneous split: "lands" is a `TypeFilter::Non` entry, "tokens" is a
+// `FilterProp::NonToken` entry (tokens are a property, not a card type).
+#[test]
+fn elspeth_tirel_minus_five_excludes_lands_and_tokens() {
+    let r = parse(
+        "Destroy all other permanents except for lands and tokens.",
+        "Elspeth Tirel",
+        &[],
+        &["Planeswalker"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DestroyAll { target, .. } = &*r.abilities[0].effect else {
+        panic!(
+            "expected DestroyAll effect, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert!(typed.properties.contains(&FilterProp::NonToken));
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
+// GitHub #4710 CI hostile fixture (Flame Sweep, caught by CI's parse-diff
+// coverage report on the PR fixing this class): "Flame Sweep deals 2 damage
+// to each creature except for creatures you control with flying." The
+// exception here is a FILTERED SUBSET ("creatures you control with flying"),
+// not a bare type list — the naive suffix parser accepted "creatures" as a
+// recognized type word and stopped at "you" (not a valid list separator),
+// silently emitting `Non(Creature)` alongside the base `Creature` filter: a
+// self-contradictory filter matching zero creatures, breaking the card's
+// damage effect entirely. `parse_except_for_type_list_suffix` must decline
+// the whole clause when trailing text remains after the parsed list items
+// (this card's flying-exception itself stays an out-of-scope, pre-existing
+// gap — the base filter must simply be left as `Creature`, matching
+// pre-fix/baseline behavior, not made worse).
+#[test]
+fn flame_sweep_filtered_subset_exception_does_not_corrupt_base_filter() {
+    let r = parse(
+        "Flame Sweep deals 2 damage to each creature except for creatures you control with flying.",
+        "Flame Sweep",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DamageAll { target, .. } = &*r.abilities[0].effect else {
+        panic!("expected DamageAll effect, got {:?}", r.abilities[0].effect);
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert_eq!(
+        typed.type_filters,
+        vec![TypeFilter::Creature],
+        "the type-list suffix must decline this filtered-subset exception, \
+         not emit a self-contradictory Non(Creature) alongside Creature"
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_trap_alternative_cost() {
     let r = parse(
@@ -6950,19 +7132,23 @@ fn overgrown_zealot_turn_face_up_only_supported() {
 
 /// CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e: Tin Street Gossip's mana
 /// ability — "Add {R}{G}. Spend this mana only to cast face-down spells or to
-/// turn creatures face up" — parses the mana head but must remain coverage-red.
-/// The spend restriction is a disjunction `Any([FaceDownSpell,
-/// TurnPermanentFaceUp])`; `FaceDownSpell` is not production-live (gate
-/// `meta.is_face_down`, never true at a payment site, CR 708.4), so
-/// `is_coverage_supported` for the whole disjunction is `false`. The seam leaves
-/// the restriction unabsorbed, producing an explicit `Effect::Unimplemented`
-/// residual instead of partially absorbing the live turn-face-up branch.
+/// turn creatures face up" — is now coverage-SUPPORTED. The spend restriction is
+/// a disjunction `Any([FaceDownSpell, TurnPermanentFaceUp])`; both leaves are
+/// production-live (FaceDownSpell via this PR's face-down spell casting, gate
+/// `meta.is_face_down` at a `PaymentContext::Spell` site, CR 708.4;
+/// TurnPermanentFaceUp via the paid `GameAction::TurnFaceUp`, CR 116.2b), so
+/// `is_coverage_supported` for the whole disjunction is `true` and the seam
+/// ABSORBS the restriction into the `Effect::Mana` line — no residual
+/// `Effect::Unimplemented`.
 ///
-/// Revert direction: if `Any` returns supported when any branch is live, this test
-/// fails because the restriction folds into `Effect::Mana` and the residual
-/// `Unimplemented` disappears.
+/// This is the parser half of the #5155 D10 closure: #5165 deferred Tin Street's
+/// coverage "until face-down spell casting exists" — it exists now.
+///
+/// Revert direction: if `FaceDownSpell` were reclassified unsupported, `Any` would
+/// return `false`, the seam would leave the restriction unabsorbed, and the
+/// `!parsed_has_unimplemented` + non-empty `restrictions` assertions below flip.
 #[test]
-fn tin_street_gossip_face_down_or_turn_face_up_stays_coverage_red() {
+fn tin_street_gossip_face_down_or_turn_face_up_is_coverage_supported() {
     let r = parse(
             "Vigilance\n{T}: Add {R}{G}. Spend this mana only to cast face-down spells or to turn creatures face up.",
             "Tin Street Gossip",
@@ -6972,8 +7158,8 @@ fn tin_street_gossip_face_down_or_turn_face_up_stays_coverage_red() {
         );
     assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
     assert!(
-        parsed_has_unimplemented(&r),
-        "Tin Street Gossip must remain coverage-red until face-down spell casting exists: abilities={:?} triggers={:?}",
+        !parsed_has_unimplemented(&r),
+        "Tin Street Gossip's face-down/turn-up disjunction is now production-live, so the line must be supported (no Effect::Unimplemented): abilities={:?} triggers={:?}",
         r.abilities,
         r.triggers,
     );
@@ -6991,25 +7177,15 @@ fn tin_street_gossip_face_down_or_turn_face_up_stays_coverage_red() {
     );
     assert_eq!(
         restrictions,
-        &Vec::<ManaSpendRestriction>::new(),
-        "unsupported face-down/turn-up disjunction must remain unabsorbed"
+        &vec![ManaSpendRestriction::Any(vec![
+            ManaSpendRestriction::FaceDownSpell,
+            ManaSpendRestriction::TurnPermanentFaceUp,
+        ])],
+        "the face-down/turn-up disjunction must fold into the mana effect"
     );
-    let residual = r.abilities[0]
-        .sub_ability
-        .as_deref()
-        .expect("unsupported spend restriction must remain as a residual gap");
-    let Effect::Unimplemented { name, description } = &*residual.effect else {
-        panic!(
-            "expected residual Effect::Unimplemented, got {:?}",
-            residual.effect
-        );
-    };
-    assert_eq!(name, "spend");
     assert!(
-        description
-            .as_deref()
-            .is_some_and(|text| text.contains("face-down spells or to turn creatures face up")),
-        "residual gap must be the unsupported spend restriction, got {description:?}"
+        r.abilities[0].sub_ability.is_none(),
+        "the restriction sentence must be folded into the mana effect, leaving no residual gap"
     );
     assert!(
         crate::game::mana_abilities::is_mana_ability(&r.abilities[0]),
@@ -8739,15 +8915,14 @@ fn call_damage_control_distributes_shared_return_effect_across_modes() {
     assert_eq!(r.abilities.len(), 4);
     for (ability, expected) in r.abilities.iter().zip(expected_types) {
         match ability.effect.as_ref() {
-            Effect::Bounce {
-                target,
+            Effect::ChangeZone {
+                origin,
                 destination,
+                target,
                 ..
             } => {
-                assert_eq!(
-                    *destination, None,
-                    "no explicit destination => return to hand"
-                );
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Hand);
                 match target {
                     TargetFilter::Typed(TypedFilter {
                         type_filters,
@@ -8769,7 +8944,7 @@ fn call_damage_control_distributes_shared_return_effect_across_modes() {
                     other => panic!("expected Typed graveyard target, got {other:?}"),
                 }
             }
-            other => panic!("each mode must lower to Bounce, got {other:?}"),
+            other => panic!("each mode must lower to ChangeZone, got {other:?}"),
         }
     }
     assert!(r.parse_warnings.is_empty());
@@ -8946,6 +9121,126 @@ fn spell_temporal_whenever_line_builds_delayed_trigger() {
     assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
     assert!(trigger.valid_card.is_some());
     assert!(r.parse_warnings.is_empty());
+}
+
+#[test]
+fn enchanted_player_cast_trigger_scopes_caster_to_enchanted_player() {
+    // CR 303.4m + CR 702.5a: Maddening Hex — "Whenever enchanted player casts a
+    // noncreature spell, ..." must fire ONLY for the enchanted player's casts
+    // ("enchanted player" = the Aura's attached player, CR 303.4m).
+    // Before the fix the caster filter stayed unset (any player), so the trigger
+    // over-fired on every player's noncreature spell (issue #5288). The enchanted
+    // player is the Aura's attached player, so the caster scopes to `AttachedTo`.
+    let r = parse(
+        "Enchant player\n\
+         Whenever enchanted player casts a noncreature spell, you draw a card.",
+        "Maddening Hex Test",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    let trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::SpellCast)
+        .expect("expected a SpellCast trigger");
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::AttachedTo),
+        "enchanted-player cast trigger must scope the caster to the enchanted player: {:?}",
+        trigger.valid_target
+    );
+    // The noncreature-spell restriction is preserved on the spell object.
+    assert!(
+        trigger.valid_card.is_some(),
+        "noncreature spell restriction must remain set"
+    );
+}
+
+#[test]
+fn opponent_cast_trigger_still_scopes_to_opponent_not_attached_to() {
+    // Regression for the enchanted-player fix: an "an opponent casts ..." cast
+    // trigger must keep its opponent-controller caster scope and NOT collapse to
+    // AttachedTo.
+    let r = parse(
+        "Whenever an opponent casts a noncreature spell, you draw a card.",
+        "Opponent Cast Test",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::SpellCast)
+        .expect("expected a SpellCast trigger");
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )),
+        "opponent cast trigger must stay opponent-scoped: {:?}",
+        trigger.valid_target
+    );
+}
+
+#[test]
+fn super_intelligence_upkeep_scoped_to_enchanted_creature_controller() {
+    // CR 303.4e + CR 109.4 + CR 503.1: Super Intelligence — "At the beginning of
+    // the upkeep of enchanted creature's controller, that player draws a card."
+    // must fire ONLY on the enchanted creature's controller's upkeep, not every
+    // player's. Before the fix the phase trigger had no player scope and behaved
+    // like a Howling Mine for all players (issue #5275).
+    let r = parse(
+        "Enchant creature\n\
+         At the beginning of the upkeep of enchanted creature's controller, that player draws a card.",
+        "Super Intelligence",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    let trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("expected a Phase trigger");
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::ParentTargetController),
+        "upkeep trigger must scope to the enchanted creature's controller: {:?}",
+        trigger.valid_target
+    );
+    // The card's draw effect must still parse (no Unimplemented fallback).
+    let dbg = format!("{:?}", r.triggers);
+    assert!(
+        !dbg.contains("Unimplemented"),
+        "Super Intelligence trigger must fully parse: {dbg}"
+    );
+}
+
+#[test]
+fn each_player_upkeep_phase_trigger_stays_unscoped() {
+    // Regression: a genuine "each player's upkeep" Howling-Mine trigger must keep
+    // firing on every player's upkeep (no valid_target), unaffected by the
+    // enchanted-creature's-controller scoping.
+    let r = parse(
+        "At the beginning of each player's upkeep, that player draws a card.",
+        "Howling Mine Test",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let trigger = r
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("expected a Phase trigger");
+    assert_eq!(
+        trigger.valid_target, None,
+        "each-player's-upkeep must remain unscoped: {:?}",
+        trigger.valid_target
+    );
 }
 
 #[test]
@@ -19172,4 +19467,57 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
     );
     assert_eq!(ct, CounterType::Time, "Ravaging Riftwurm type");
     assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
+}
+
+/// Regression for issue #1272: Violent Urge's Delirium follow-up ("that
+/// creature gains double strike") must scope to the same single target as
+/// the base "+1/+0 and first strike" clause, not to every creature.
+/// Verified fixed by #2999 for the class ("ParentTarget GenericEffect
+/// binding for targeted pump/debuff abilities"), which resolved the
+/// identical bug reported separately for Mu Yanling (#2922) — this test
+/// pins the AST shape down for Violent Urge specifically so a future
+/// regression in either card's class is caught immediately.
+#[test]
+fn violent_urge_delirium_scopes_to_parent_target_not_all_creatures() {
+    let parsed = parse(
+        "Target creature gets +1/+0 and gains first strike until end of turn.\n\
+             Delirium — If there are four or more card types among cards in your graveyard, \
+             that creature gains double strike until end of turn.",
+        "Violent Urge",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 2, "expected two spell abilities");
+
+    let delirium = &parsed.abilities[1];
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = delirium.effect.as_ref()
+    else {
+        panic!(
+            "expected Delirium clause to lower to GenericEffect, got {:?}",
+            delirium.effect
+        );
+    };
+    assert_eq!(
+        static_abilities.len(),
+        1,
+        "expected exactly one static ability granting double strike"
+    );
+    let grant = &static_abilities[0];
+    assert_eq!(
+        grant.affected,
+        Some(TargetFilter::ParentTarget),
+        "the double-strike grant must be scoped to the same target as the \
+         base pump effect (ParentTarget), not an unscoped/all-creatures filter — \
+         this is the exact issue #1272 symptom if it regresses"
+    );
+    assert_eq!(
+        grant.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::DoubleStrike
+        }],
+        "expected a single AddKeyword(DoubleStrike) modification"
+    );
 }

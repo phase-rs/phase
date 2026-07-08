@@ -109,16 +109,25 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
 
     if both {
         modifications.push(ContinuousModification::SetDynamicPower { value: qty.clone() });
-        modifications.push(ContinuousModification::SetDynamicToughness { value: qty });
+        // CR 208.2 + CR 613.4a: "... are each equal to <qty> and its toughness is
+        // equal to that number plus N" (Subgoyf: */1+*). Power stays bare `qty`;
+        // toughness takes the same "+N" offset the `power_only` branch applies,
+        // so a distinct-subtype count of 2 yields 2/3, not 2/2. Absent the plus
+        // clause, toughness stays bare `qty` (the ordinary "each equal to" case).
+        let toughness_value = match parse_that_number_plus_offset(lower) {
+            Some(offset) => QuantityExpr::Offset {
+                inner: Box::new(qty),
+                offset,
+            },
+            None => qty,
+        };
+        modifications.push(ContinuousModification::SetDynamicToughness {
+            value: toughness_value,
+        });
     } else if power_only {
         modifications.push(ContinuousModification::SetDynamicPower { value: qty.clone() });
         // Check for split P/T: "and its toughness is equal to that number plus N"
-        if let Some(after_plus) = strip_after(lower, "that number plus ") {
-            let n_str = after_plus
-                .split(|c: char| !c.is_ascii_digit())
-                .next()
-                .unwrap_or("0");
-            let offset = n_str.parse::<i32>().unwrap_or(0);
+        if let Some(offset) = parse_that_number_plus_offset(lower) {
             modifications.push(ContinuousModification::SetDynamicToughness {
                 value: QuantityExpr::Offset {
                     inner: Box::new(qty),
@@ -140,4 +149,17 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
         def = def.condition(cond);
     }
     Some(def)
+}
+
+/// CR 208.2: Extract the `N` from a trailing "... its toughness is equal to that
+/// number plus N" toughness override. Shared by the `power_only` and `both`
+/// framings so a split-P/T offset (Subgoyf's `*/1+*`) is applied identically in
+/// each. Returns `None` when the phrase is absent (bare "each equal to").
+fn parse_that_number_plus_offset(lower: &str) -> Option<i32> {
+    let after_plus = strip_after(lower, "that number plus ")?;
+    let n_str = after_plus
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or("0");
+    n_str.parse::<i32>().ok()
 }

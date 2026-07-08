@@ -7292,3 +7292,168 @@ mod admin_auth_tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+mod p2p_backup_delete_tests {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use axum::routing::{get, post};
+    use axum::Router;
+    use lobby_broker::Broker;
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::session::SessionManager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+    use url::Url;
+
+    use super::{admin, draft_pools, persistence, AppState, ServerMode};
+
+    const DRAFT_CODE: &str = "BACK01";
+    const HOST_PEER: &str = "peer-host-owner";
+    const OTHER_PEER: &str = "peer-not-owner";
+    const SNAPSHOT: &str = r#"{"status":"Drafting"}"#;
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db_path = temp_dir.path().join("games.db");
+        let game_db = Arc::new(persistence::GameDb::open(&game_db_path).expect("game db"));
+        AppState {
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            db: Arc::new(engine::database::CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            mode: ServerMode::Full,
+            public_url: None,
+        }
+    }
+
+    async fn spawn_p2p_backup_http_test(
+        app_state: AppState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/p2p-draft-backup", post(admin::p2p_backup_store))
+            .route(
+                "/p2p-draft-backup/{code}",
+                get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
+            )
+            .with_state(app_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn request_status(base_url: &str, method: &str, path: &str) -> StatusCode {
+        let url = Url::parse(&format!("{base_url}{path}")).expect("url");
+        let host = url.host_str().expect("host");
+        let port = url.port().expect("port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect");
+        let mut request = format!("{method} {path} HTTP/1.1\r\n");
+        request.push_str(&format!("Host: {host}\r\n"));
+        request.push_str("Connection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).await.expect("read");
+        let response = std::str::from_utf8(&buf[..n]).expect("utf8");
+        let status_code = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .expect("status line");
+        StatusCode::from_u16(status_code).expect("status code")
+    }
+
+    fn seed_backup(app_state: &AppState) {
+        app_state
+            .game_db
+            .save_p2p_backup(DRAFT_CODE, HOST_PEER, SNAPSHOT)
+            .expect("seed backup");
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_missing_host_peer_id_and_preserves_row() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        seed_backup(&app_state);
+        let game_db = Arc::clone(&app_state.game_db);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        assert_eq!(
+            request_status(
+                &base_url,
+                "DELETE",
+                &format!("/p2p-draft-backup/{DRAFT_CODE}")
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+        );
+        assert!(
+            game_db.load_p2p_backup(DRAFT_CODE).expect("load").is_some(),
+            "backup must survive DELETE without host_peer_id"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_mismatched_host_peer_id_and_preserves_row() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        seed_backup(&app_state);
+        let game_db = Arc::clone(&app_state.game_db);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        assert_eq!(
+            request_status(
+                &base_url,
+                "DELETE",
+                &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={OTHER_PEER}"),
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+        );
+        assert!(
+            game_db.load_p2p_backup(DRAFT_CODE).expect("load").is_some(),
+            "backup must survive DELETE with wrong host_peer_id"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_accepts_matching_host_peer_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        seed_backup(&app_state);
+        let game_db = Arc::clone(&app_state.game_db);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        assert_eq!(
+            request_status(
+                &base_url,
+                "DELETE",
+                &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={HOST_PEER}"),
+            )
+            .await,
+            StatusCode::OK,
+        );
+        assert!(
+            game_db.load_p2p_backup(DRAFT_CODE).expect("load").is_none(),
+            "backup must be removed after authorized DELETE"
+        );
+        server.abort();
+    }
+}

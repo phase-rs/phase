@@ -20,6 +20,43 @@ pub struct DeckEntry {
     pub count: u32,
 }
 
+impl DeckEntry {
+    /// CR 202.3d + CR 709.4b: The single authority for building a `DeckEntry`
+    /// from a database-resolved card face. Caches the combined off-stack mana
+    /// value for a split card (the front-half `mana_cost` alone under-counts it)
+    /// on `card.metadata.off_stack_mana_value_override`, so every consumer
+    /// (companion checks, deck legality) reads the rules-correct value regardless
+    /// of which half `card` holds. Routes through the shared
+    /// `CardDatabase::off_stack_mana_value_for_face` seam and only stores the
+    /// override when it actually differs (a split card), keeping `metadata` empty
+    /// otherwise.
+    ///
+    /// Both the in-engine resolver (`resolve_names`) and the server transport
+    /// resolver (`server_core::deck_resolve::resolve_entries`) construct entries
+    /// through here, so the split-card override can never be silently skipped by
+    /// a call site that clones a face directly.
+    pub fn from_resolved_face(db: &CardDatabase, face: &CardFace, count: u32) -> Self {
+        let mut card = face.clone();
+        let combined = db.off_stack_mana_value_for_face(face);
+        if combined != face.mana_cost.mana_value() {
+            card.metadata.off_stack_mana_value_override = Some(combined);
+        }
+        Self { card, count }
+    }
+
+    /// CR 202.3d + CR 709.4b: This entry's OFF-STACK mana value — the load-time
+    /// combined value of both halves for a split card (cached on
+    /// `card.metadata.off_stack_mana_value_override` by `from_resolved_face`), else
+    /// the face's own mana value. The single accessor deck-legality / companion
+    /// checks read so they never depend on which half `card` is.
+    pub fn off_stack_mana_value(&self) -> u32 {
+        self.card
+            .metadata
+            .off_stack_mana_value_override
+            .unwrap_or_else(|| self.card.mana_cost.mana_value())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerDeckPayload {
     #[serde(default)]
@@ -124,10 +161,10 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
         if let Some(index) = entries.iter().position(|entry| entry.card.name == *name) {
             entries[index].count += 1;
         } else if let Some(face) = db.get_face_by_name(name) {
-            entries.push(DeckEntry {
-                card: face.clone(),
-                count: 1,
-            });
+            // CR 202.3d + CR 709.4b: build through the single authority so the
+            // split-card off-stack override is stamped consistently with the
+            // server transport resolver.
+            entries.push(DeckEntry::from_resolved_face(db, face, 1));
         }
     }
     entries

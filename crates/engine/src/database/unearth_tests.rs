@@ -411,6 +411,7 @@ fn atomic_unearth_creature() -> AtomicCard {
             scryfall_id: Some("hellspark-face".to_string()),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     }
 }
 

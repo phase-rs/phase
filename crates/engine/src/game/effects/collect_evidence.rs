@@ -22,7 +22,9 @@ fn total_mana_value(state: &GameState, cards: &[ObjectId]) -> u32 {
     cards
         .iter()
         .filter_map(|id| state.objects.get(id))
-        .map(|obj| obj.mana_cost.mana_value())
+        // CR 202.3d + CR 709.4b: graveyard cards are off the stack, so a split
+        // card contributes its combined mana value to the evidence total.
+        .map(|obj| obj.effective_mana_value())
         .sum()
 }
 

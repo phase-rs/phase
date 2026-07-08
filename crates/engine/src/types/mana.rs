@@ -330,9 +330,10 @@ pub enum PaymentContext<'a> {
 /// the permanent, so a `TurnFaceUp`-restricted mana's runtime gate
 /// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) is live
 /// there and correctly rejected for every other context. A card whose spend
-/// restriction names only production-live branches (Overgrown Zealot;
-/// Creeping Peeper) is therefore absorbed at the `Effect::Mana` seam and
-/// supported via `ManaSpendRestriction::is_coverage_supported`.
+/// restriction names only production-live branches (Overgrown Zealot; Creeping
+/// Peeper; and, since CR 708.4 face-down spell casting, Tin Street Gossip) is
+/// therefore absorbed at the `Effect::Mana` seam and supported via
+/// `ManaSpendRestriction::is_coverage_supported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialAction {
     /// CR 116.2m + CR 709.5e: Paying a locked Room half's unlock cost to give
@@ -551,20 +552,16 @@ pub enum ManaRestriction {
     /// `obj.face_down = true` for a card that is nonetheless CAST FACE UP
     /// (CR 702.143c), so the gate correctly REJECTS those concealment casts.
     ///
-    /// The gate is also fail-closed today: no production path casts a face-down
-    /// spell *through spell payment* in this engine. CR 708.4 face-down play is
-    /// modeled by [`GameAction::PlayFaceDown`] → `game::morph::play_face_down`,
-    /// which moves the card hand→battlefield via the zone pipeline and charges no
-    /// mana (the `{3}` face-down cast cost, CR 702.37c, is not yet implemented).
-    /// So `SpellMeta.is_face_down` is never `true` at any `PaymentContext::Spell`
-    /// payment site, and this gate never over-permits — see
-    /// [`ManaRestriction::allows_spell`]. The restriction stays representable as a
-    /// typed value even though it is dead today: a card whose spend restriction
-    /// includes this is left unabsorbed at the `Effect::Mana` seam and
-    /// intentionally surfaces an `Effect::Unimplemented` gap (honest coverage red)
-    /// via `ManaSpendRestriction::is_coverage_supported`. Once a real face-down
-    /// CAST routes its cost through `PaymentContext::Spell` with `is_face_down =
-    /// true` the gate becomes live with no type change.
+    /// The gate is now live: CR 708.4 morph/megamorph/disguise face-down spell
+    /// casting (`AlternativeCastKeyword::FaceDown` → `continue_cast_face_down`)
+    /// routes the `{3}` face-down cost (CR 702.37c) through `PaymentContext::Spell`
+    /// with `SpellMeta.is_face_down = true`, so this gate is satisfiable there and
+    /// correctly rejected for every other context — a normal face-up cast, and an
+    /// exile-concealment cast (foretell/hideaway) whose `obj.face_down = true` but
+    /// which is cast face up (CR 702.143c), both report `is_face_down = false` —
+    /// see [`ManaRestriction::allows_spell`]. A card whose spend restriction
+    /// includes this leaf is therefore absorbed at the `Effect::Mana` seam and
+    /// coverage-supported via `ManaSpendRestriction::is_coverage_supported`.
     OnlyForFaceDownSpell,
     /// CR 106.6: Disjunctive spend restriction — the mana may be spent on any
     /// payment that satisfies at least one inner restriction. Composition

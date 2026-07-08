@@ -467,6 +467,7 @@ export function getBoardChoiceView(
         },
         response: { type: "CrewVehicle", vehicleId: waitingFor.data.vehicle_id },
         sourceId: waitingFor.data.vehicle_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "SaddleMount":
       return {

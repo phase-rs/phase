@@ -9,8 +9,9 @@ import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-import { COUNTER_COLORS, formatCounterTooltip, formatCounterType } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, formatCounterType } from "../../viewmodel/cardProps.ts";
 import { CardImage } from "../card/CardImage.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
 interface Props {
   objectId: ObjectId;
@@ -176,15 +177,15 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
         </div>
       )}
       {counters.length > 0 && (
-        <div className="absolute right-1 top-1 z-20 flex flex-col gap-0.5">
+        <div className="absolute right-1 top-1 z-[60] flex flex-col gap-0.5">
           {counters.map(([type, count]) => (
-            <span
-              key={type}
-              title={formatCounterTooltip(type, count)}
-              className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-            >
-              {formatCounterType(type)} x{count}
-            </span>
+            <CounterTooltip key={type} type={type} count={count}>
+              <span
+                className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+              >
+                {formatCounterType(type)} x{count}
+              </span>
+            </CounterTooltip>
           ))}
         </div>
       )}

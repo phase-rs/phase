@@ -28,10 +28,10 @@ use crate::types::ability::{
     CastFromZoneDriver, CastingPermission, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
     FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetFilter, TypeFilter, TypedFilter,
+    ObjectScope, PlayPermissionInvalidation, PlayerFilter, PreventionAmount, PreventionScope,
+    PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -931,6 +931,35 @@ fn is_land_enters_tapped_rider(clause: &ClauseIr) -> bool {
     parses_land_enters_tapped_rider(trimmed)
 }
 
+pub(super) fn scan_until_next_same_source_exile_invalidation(lower: &str) -> bool {
+    nom_primitives::scan_preceded(lower, |i| {
+        terminated(parse_until_next_same_source_exile_invalidation, eof).parse(i)
+    })
+    .is_some()
+}
+
+fn parse_until_next_same_source_exile_invalidation(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("until you exile another card with ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("~"),
+        tag("this enchantment"),
+        tag("this artifact"),
+        tag("this creature"),
+        tag("this permanent"),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
+fn is_until_next_same_source_exile_rider(clause: &ClauseIr) -> bool {
+    let lower = clause.source_text.to_ascii_lowercase();
+    nom_on_lower(clause.source_text.trim(), lower.trim(), |i| {
+        all_consuming(parse_until_next_same_source_exile_invalidation).parse(i)
+    })
+    .is_some()
+}
+
 /// Walk the previous def and its `sub_ability` chain for a `PlayFromExile`
 /// permission. The grant produced by the compound "exile … and may play that
 /// card" chain (Lightstall Inquisitor) lands as a sibling def during the lower
@@ -983,6 +1012,22 @@ fn attach_land_enters_tapped_to_previous_play_from_exile(defs: &mut [AbilityDefi
         return false;
     };
     *land_enter_tapped = EtbTapState::Tapped;
+    true
+}
+
+fn attach_until_next_same_source_exile_to_previous_play_from_exile(
+    defs: &mut [AbilityDefinition],
+) -> bool {
+    let Some(CastingPermission::PlayFromExile {
+        duration,
+        invalidation,
+        ..
+    }) = find_prev_play_from_exile_permission_mut(defs)
+    else {
+        return false;
+    };
+    *duration = Duration::Permanent;
+    *invalidation = Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource);
     true
 }
 
@@ -1547,6 +1592,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         }
         if is_land_enters_tapped_rider(clause_ir)
             && attach_land_enters_tapped_to_previous_play_from_exile(&mut defs)
+        {
+            prev_boundary = clause_ir.boundary;
+            continue;
+        }
+        if is_until_next_same_source_exile_rider(clause_ir)
+            && attach_until_next_same_source_exile_to_previous_play_from_exile(&mut defs)
         {
             prev_boundary = clause_ir.boundary;
             continue;
@@ -3169,8 +3220,9 @@ fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
 
 /// CR 608.2c + CR 301.5b: Token creation followed by a sibling `Attach`
 /// ("create a Kor Soldier token. You may attach an Equipment you control to
-/// it") — the bare-"it" host anaphor must target `LastCreated`, not
-/// `ParentTarget` (the token-creating effect has no parent target slot).
+/// it") — the bare-"it" host anaphor must target `LastCreated`, not the
+/// source object or parent trigger subject (the token-creating effect has no
+/// parent target slot).
 fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
     // Walk the whole sub-ability chain: the token + bare-Attach pair is not
     // always at the root. Field-Tested Frying Pan ("create a Food token, then
@@ -3188,7 +3240,9 @@ fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
                     if let Effect::Attach { target, .. } = sub.effect.as_mut() {
                         if matches!(
                             target,
-                            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                            TargetFilter::SelfRef
+                                | TargetFilter::ParentTarget
+                                | TargetFilter::TriggeringSource
                         ) {
                             *target = TargetFilter::LastCreated;
                         }
@@ -3541,6 +3595,17 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
                 *duration = Some(Duration::Permanent);
             }
         }
+        Effect::Attach { target, .. } => {
+            // CR 608.2c + CR 301.5b: after a token creator, "attach this
+            // Equipment to it" may have resolved the host pronoun through the
+            // source-default `SelfRef` path before this gated post-token pass.
+            if matches!(
+                target,
+                TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+            ) {
+                *target = TargetFilter::LastCreated;
+            }
+        }
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
@@ -3551,7 +3616,6 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ..
         }
         | Effect::Pump { target, .. }
-        | Effect::Attach { target, .. }
         // CR 603.7c + CR 608.2c (issue #4601 review): a delayed cleanup that
         // puts the temporary token on top/bottom of a library ("… put it on the
         // bottom of its owner's library at the beginning of the next end step")
@@ -8158,7 +8222,6 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::Token { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
@@ -8166,6 +8229,16 @@ pub(super) fn apply_where_x_effect_expression(
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+            *power = apply_where_x_expression(power.clone(), where_x_expression);
+            *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
         }
         // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
         // is …" binds the search count (Oreskos Explorer). Eldritch Evolution
@@ -9902,7 +9975,7 @@ mod where_x_tests {
     use super::parse_where_x_quantity_expression;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
-        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, QuantityExpr,
+        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::triggers::TriggerMode;
@@ -10214,6 +10287,58 @@ mod where_x_tests {
         assert!(
             exprs.iter().all(has_event_context_amount),
             "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    #[test]
+    fn apply_where_x_effect_expression_rewrites_token_count_and_pt() {
+        let mut effect = Effect::Token {
+            name: "Ooze".to_string(),
+            power: PtValue::Variable("X".to_string()),
+            toughness: PtValue::Variable("X".to_string()),
+            types: vec!["Creature".to_string(), "Ooze".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        super::apply_where_x_effect_expression(&mut effect, Some("that spell's mana value"));
+
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::EventSource,
+            },
+        };
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = effect
+        else {
+            panic!("expected Token");
+        };
+        assert_eq!(count, expected.clone(), "token count must bind where-X");
+        assert_eq!(
+            power,
+            PtValue::Quantity(expected.clone()),
+            "token power must bind where-X"
+        );
+        assert_eq!(
+            toughness,
+            PtValue::Quantity(expected),
+            "token toughness must bind where-X"
         );
     }
 

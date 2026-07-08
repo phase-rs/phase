@@ -2052,22 +2052,14 @@ pub enum ManaSpendRestriction {
     /// The runtime gate reads `SpellMeta.is_face_down`, sourced from the cast's
     /// face-down intent (`build_spell_meta`) rather than `obj.face_down`, so it
     /// correctly REJECTS exile-concealment casts (foretell/hideaway) whose
-    /// `obj.face_down = true` but which are cast face up (CR 702.143c). It is also
-    /// fail-closed: no production path casts a face-down spell *through spell
-    /// payment* in this engine — CR 708.4 face-down play
-    /// (`GameAction::PlayFaceDown` → `game::morph::play_face_down`) enters the
-    /// battlefield via the zone pipeline and charges no mana (the `{3}` face-down
-    /// cast cost, CR 702.37c, is not yet implemented), so `SpellMeta.is_face_down`
-    /// is never `true` at a payment site and the gate never over-permits. The
-    /// variant exists so the restriction stays representable as a typed value even
-    /// though this leaf is dead today: the parser still recognizes the shape, but a
-    /// card whose spend restriction includes this leaf is left unabsorbed at the
-    /// `Effect::Mana` seam and intentionally surfaces an `Effect::Unimplemented`
-    /// gap (honest coverage red) via
-    /// `ManaSpendRestriction::is_coverage_supported`.
-    /// Once a real face-down CAST routes its
-    /// `{3}` cost through `PaymentContext::Spell` the gate becomes live with no
-    /// type change. See
+    /// `obj.face_down = true` but which are cast face up (CR 702.143c). This leaf
+    /// is now production-live: CR 708.4 morph/megamorph/disguise face-down spell
+    /// casting (`AlternativeCastKeyword::FaceDown` → `continue_cast_face_down`)
+    /// routes the `{3}` face-down cost (CR 702.37c) through `PaymentContext::Spell`
+    /// with `SpellMeta.is_face_down = true`, so the gate is satisfiable and a card
+    /// whose spend restriction includes this leaf is absorbed at the `Effect::Mana`
+    /// seam and coverage-supported via `ManaSpendRestriction::is_coverage_supported`.
+    /// See
     /// [`ManaRestriction::OnlyForFaceDownSpell`](super::mana::ManaRestriction::OnlyForFaceDownSpell).
     FaceDownSpell,
     /// CR 106.6 + CR 116.2b + CR 702.37e: "Spend this mana only to turn
@@ -2097,12 +2089,12 @@ impl ManaSpendRestriction {
     /// the parser seam (see `parser::oracle_effect::sequence`), so the surrounding
     /// `Effect::Mana` line keeps a residual `Effect::Unimplemented` — honest
     /// coverage **red** — rather than marking a card supported while one branch it
-    /// names is not production-live. (Dead example today: `FaceDownSpell` — no
-    /// production path casts a spell *through spell payment* face down, so
-    /// `SpellMeta.is_face_down` is never `true` at a payment site. The
-    /// turn-face-up leaf is live via the paid `GameAction::TurnFaceUp` special
-    /// action, but an `Any([FaceDownSpell, TurnPermanentFaceUp])` still remains
-    /// coverage-red until face-down spell casting exists.)
+    /// names is not production-live. As of CR 708.4 face-down spell casting,
+    /// every named leaf is production-live: `FaceDownSpell` was the last dead
+    /// leaf, now satisfiable at a `PaymentContext::Spell` site, so the only
+    /// coverage-red result left is a structurally-empty `Any([])` (no branch to
+    /// support). An `Any([FaceDownSpell, TurnPermanentFaceUp])` (Tin Street
+    /// Gossip) is therefore coverage-supported.
     ///
     /// Any `grants` paired with an unsupported restriction drop with it. This is
     /// intentional: no real card pairs a mana-spell grant with a restriction that
@@ -2116,10 +2108,11 @@ impl ManaSpendRestriction {
         match self {
             // LIVE — production coverage exists via `SpellMeta.has_x_in_cost`.
             ManaSpendRestriction::XCostOnly => true,
-            // CR 708.4: gate is `meta.is_face_down`, which `build_spell_meta` never
-            // sets `true` at a payment site (no production path casts a spell face
-            // down *through spell payment*), so coverage must remain red.
-            ManaSpendRestriction::FaceDownSpell => false,
+            // CR 708.4: gate is `meta.is_face_down`, which `build_spell_meta` now
+            // sets `true` at a `PaymentContext::Spell` site for a morph/megamorph/
+            // disguise face-down cast (`AlternativeCastKeyword::FaceDown` →
+            // `continue_cast_face_down`, CR 702.37c), so the leaf is production-live.
+            ManaSpendRestriction::FaceDownSpell => true,
             // LIVE — production-live leaves with parser/runtime coverage.
             // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: lowered to
             // `OnlyForSpecialAction(SpecialAction::TurnFaceUp)`, now satisfiable —
@@ -2140,9 +2133,9 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellFromZone(_)
             | ManaSpendRestriction::UnlockDoor => true,
             // CR 106.6: coverage for a disjunction requires every named branch to
-            // be production-live. Partial absorption would drop unsupported
-            // branches from coverage accounting, so mixed Tin Street-style `Any`
-            // remains red until `FaceDownSpell` is supported.
+            // be production-live (`.all()`). Partial absorption would drop
+            // unsupported branches from coverage accounting. With `FaceDownSpell`
+            // now live, only a structurally-empty `Any([])` is coverage-red.
             ManaSpendRestriction::Any(subs) => {
                 !subs.is_empty() && subs.iter().all(ManaSpendRestriction::is_coverage_supported)
             }
@@ -2542,6 +2535,12 @@ pub enum CastingPermission {
         /// "enters tapped" is a CR 614.1c "[permanent] enters ..." replacement.
         #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
         land_enter_tapped: EtbTapState,
+        /// CR 611.2a: Additional non-time invalidation printed on the same
+        /// play-from-exile permission. `None` preserves ordinary impulse grants;
+        /// source-bound forms are pruned by the grant resolver when their
+        /// printed invalidation event occurs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invalidation: Option<PlayPermissionInvalidation>,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -2589,6 +2588,16 @@ pub enum CastingPermission {
     /// when the special action resolves; the permission is scoped to the exile
     /// zone and cleared when the object leaves exile.
     Foretold { cost: ManaCost, turn_foretold: u32 },
+}
+
+/// CR 611.2a: Non-time condition that invalidates a per-card play permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PlayPermissionInvalidation {
+    /// "Until you exile another card with [this source]" — the next grant from
+    /// the same source to the same player replaces earlier grants from that
+    /// source without touching unrelated impulse permissions.
+    UntilNextGrantFromSameSource,
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
@@ -3175,6 +3184,14 @@ pub enum ControllerRef {
     /// Curse of Clinging Webs, Curse of the Restless Dead) where the trigger
     /// watches objects controlled by the enchanted player.
     EnchantedPlayer,
+    /// CR 102.1: Filter controller is the active player — the player whose turn
+    /// it is. Exactly one player at any time (unlike `Opponent`, which matches
+    /// every opponent in multiplayer). Resolved live from `state.active_player`
+    /// via `controller_ref_player`. Powers "the active player controls" subjects
+    /// and the card-assembly-bound punisher target on cards that coerce the turn
+    /// player (Siren's Call, Maddening Imp), cast/activated only during an
+    /// opponent's turn.
+    ActivePlayer,
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -3667,6 +3684,12 @@ pub enum FilterProp {
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
+    /// CR 302.6 + CR 508.1a: the object has been under its controller's control
+    /// continuously since that player's most recent turn began (haste-INDEPENDENT
+    /// — cares only about the continuity limb, unlike attack-eligibility's
+    /// haste-OR-continuity). Reads the durable `summoning_sick` flag, set on ETB
+    /// and on any control change, cleared at the controller's next turn.
+    ControlledContinuouslySinceTurnBegan,
     /// CR 400.7 + CR 700.4: The object moved between matching zones during
     /// this turn. Parameterized for phrases like "cards in your graveyard that
     /// were put there from the battlefield this turn"; `None` on either side
@@ -4723,6 +4746,23 @@ pub enum CardTypeSetSource {
     },
 }
 
+/// CR 205.3: Which subtypes are excluded when counting distinct subtypes.
+///
+/// A typed qualifier (not a `bool`) so the exclusion axis stays composable and
+/// extensible — `CreatureTypes` covers Subgoyf ("subtypes other than creature
+/// types"); future readings ("subtypes other than land types") add a variant
+/// rather than a second boolean. `None` counts every subtype value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum SubtypeExclusion {
+    /// Count every distinct subtype value with no exclusion.
+    #[default]
+    None,
+    /// CR 205.3m: Exclude subtypes that are creature types (read from
+    /// `GameState::all_creature_types`).
+    CreatureTypes,
+}
+
 /// CR 601.2h: Which cast object a mana-spent quantity reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastManaObjectScope {
@@ -4978,6 +5018,28 @@ pub enum QuantityRef {
     /// source set. Covers zone cards, linked-exile cards, and matching objects
     /// without proliferating card-type-count siblings.
     DistinctCardTypes { source: CardTypeSetSource },
+    /// CR 205.3 + CR 604.3: Count distinct subtype *values* across a
+    /// parameterized source set (Subgoyf — "the number of different subtypes
+    /// other than creature types among cards in all graveyards"). The subtype
+    /// peer of [`QuantityRef::DistinctCardTypes`] (CR 205.2, card types): it
+    /// reuses the same `CardTypeSetSource` scan axis but tallies distinct
+    /// entries of `CardType::subtypes` (CR 205.3) instead of `core_types`.
+    ///
+    /// Not folded into `DistinctCardTypes` because card types (CR 205.2) and
+    /// subtypes (CR 205.3) are distinct CR subsections read from distinct
+    /// object fields (`core_types` vs `subtypes`) — the categorical-boundary
+    /// rule keeps them separate leaves. Not `ObjectCountDistinct` because this
+    /// counts distinct subtype VALUES (a card with three subtypes contributes
+    /// three), not distinct objects.
+    ///
+    /// `exclude` (CR 205.3m) drops subtypes that are creature types when set to
+    /// `CreatureTypes`; `#[serde(default)]` keeps old saves (implicitly `None`)
+    /// deserializable.
+    DistinctSubtypes {
+        source: CardTypeSetSource,
+        #[serde(default)]
+        exclude: SubtypeExclusion,
+    },
     /// CR 406.6 + CR 607.1: Count of cards currently in exile that are linked to the source
     /// via its exile-linked ability. Used by "as long as there are N or more cards exiled
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
@@ -15058,9 +15120,17 @@ pub enum CastingRestriction {
     DeclareBlockersStep,
     BeforeAttackersDeclared,
     BeforeBlockersDeclared,
+    /// CR 509.1 + CR 510.1 + CR 511.1: "only during combat after blockers are
+    /// declared" — the window that opens once the declare-blockers turn-based
+    /// action has placed blockers and stays open through combat damage and end
+    /// of combat. The exact complement of `BeforeBlockersDeclared` within the
+    /// combat phase (CR 506.1); enforced in `restrictions.rs`.
+    AfterBlockersDeclared,
     BeforeCombatDamage,
     AfterCombat,
-    RequiresCondition { condition: Option<ParsedCondition> },
+    RequiresCondition {
+        condition: Option<ParsedCondition>,
+    },
 }
 
 /// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.
@@ -19723,20 +19793,25 @@ mod tests {
     /// leaf by whether its lowered semantics are production-live today, and require
     /// every branch of an `Any` disjunction to be coverage-supported.
     ///
+    /// As of CR 708.4 face-down spell casting, every named leaf is production-live
+    /// — `FaceDownSpell` was the last hardcoded-false leaf, now satisfiable at a
+    /// `PaymentContext::Spell` site. The ONLY coverage-red result left is a
+    /// structurally-empty `Any([])` (no branch to support); that emptiness guard is
+    /// the remaining non-vacuous false exemplar, so this test can no longer pin a
+    /// dead *leaf* — it pins full-leaf coverage + the emptiness guard instead.
+    ///
     /// Revert direction (each assertion pins one classification):
-    /// - Flipping a LIVE arm to `false` fails its
-    ///   `assert!(... .is_coverage_supported())`.
-    ///   `TurnPermanentFaceUp` is live via the paid `GameAction::TurnFaceUp`
-    ///   special action (CR 116.2b + CR 702.37e); reverting that flip fails its
-    ///   positive assertion below.
-    /// - Flipping a DEAD arm (`FaceDownSpell`) to `true` fails its `assert!(!...)`.
-    /// - `Any([])`, all-dead `Any([FaceDownSpell])`, and mixed Tin Street
-    ///   `Any([FaceDownSpell, TurnPermanentFaceUp])` pin the false direction.
-    /// - Creeping Peeper's all-live
-    ///   `Any([SpellType, UnlockDoor, TurnPermanentFaceUp])` pins the true
-    ///   direction.
+    /// - Flipping any LIVE arm to `false` fails its `assert!(... .is_coverage_supported())`.
+    ///   In particular, reverting this PR's `FaceDownSpell => true` fails its
+    ///   positive assertion below AND Tin Street's mixed-`Any` assertion — that pair
+    ///   is the guard keeping the D10 coverage flip landed.
+    /// - `Any([])` pins the `!subs.is_empty()` emptiness guard in the false
+    ///   direction (returning `true` on an empty set fails it).
+    /// - Creeping Peeper's all-live `Any([SpellType, UnlockDoor, TurnPermanentFaceUp])`
+    ///   and Tin Street's `Any([FaceDownSpell, TurnPermanentFaceUp])` pin the true
+    ///   direction (treating any leaf as poisoning the disjunction fails them).
     #[test]
-    fn is_coverage_supported_distinguishes_live_and_dead_leaves() {
+    fn is_coverage_supported_all_leaves_supported_empty_any_is_false() {
         // LIVE: every current production-live leaf stays coverage-supported.
         assert!(ManaSpendRestriction::SpellOnly.is_coverage_supported());
         assert!(ManaSpendRestriction::SpellType("Enchantment".into()).is_coverage_supported());
@@ -19782,23 +19857,26 @@ mod tests {
         // CR 116.2b + CR 702.37e: the paid `GameAction::TurnFaceUp` handler makes
         // the turn-face-up special-action gate satisfiable.
         assert!(ManaSpendRestriction::TurnPermanentFaceUp.is_coverage_supported());
+        // CR 708.4: `FaceDownSpell` was the LAST dead leaf — this PR's face-down
+        // spell casting makes it production-live (satisfiable at a
+        // `PaymentContext::Spell` site), so full mana-restriction coverage honesty
+        // is now reached: no hardcoded-false leaf remains.
+        assert!(ManaSpendRestriction::FaceDownSpell.is_coverage_supported());
 
-        // DEAD: `FaceDownSpell` is the only remaining hardcoded-false leaf — no
-        // production path casts a spell through spell payment face down.
-        assert!(!ManaSpendRestriction::FaceDownSpell.is_coverage_supported());
-
+        // The ONE remaining coverage-red case is a structurally-empty disjunction —
+        // no branch to support. This is the sole non-vacuous false exemplar.
         assert!(!ManaSpendRestriction::Any(vec![]).is_coverage_supported());
 
-        // All-dead disjunction is dead: an `Any` whose only leaf is the dead
-        // `FaceDownSpell` has no supported branch.
+        // A single live leaf makes its `Any` supported.
         assert!(
-            !ManaSpendRestriction::Any(vec![ManaSpendRestriction::FaceDownSpell,])
+            ManaSpendRestriction::Any(vec![ManaSpendRestriction::FaceDownSpell])
                 .is_coverage_supported()
         );
 
-        // Mixed Tin Street Gossip disjunction remains coverage-red: the
-        // face-down-cast branch is not production-live yet.
-        assert!(!ManaSpendRestriction::Any(vec![
+        // Mixed Tin Street Gossip disjunction is now coverage-supported: both the
+        // face-down-cast leaf (CR 708.4) and the turn-face-up leaf (CR 116.2b) are
+        // production-live.
+        assert!(ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::FaceDownSpell,
             ManaSpendRestriction::TurnPermanentFaceUp,
         ])

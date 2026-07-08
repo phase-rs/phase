@@ -35,6 +35,11 @@
     "off": "Wył."
   },
   "gameMenu": {
+    "sections": {
+      "view": "Widok",
+      "tools": "Narzędzia",
+      "game": "Gra"
+    },
     "reportCard": "Zgłoś kartę",
     "menu": "Menu gry",
     "sandboxTools": "Narzędzia piaskownicy",

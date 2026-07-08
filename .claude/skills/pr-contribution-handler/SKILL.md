@@ -13,7 +13,7 @@ The goal is not just "make CI green." The goal is to leave the PR in the most id
 
 This skill lands contributor work, but **only after it meets the maintainer's bar — and the bar is "is this PR the best it can be, behaviorally AND architecturally?"** not "does CI pass?" The maintainer must be able to be *confident in the review itself* before anything merges. Apply every rule below to every PR.
 
-1. **You may — and should — improve the author's PR.** "We can make changes to the author PR; we just need to ensure it's the best it can be." When a PR is correct but not idiomatic/clean/complete, fix it on the contributor's branch (push when `maintainerCanModify=true`; verify the fork remote points at the *right* contributor before pushing) rather than merging as-is or leaving a nit. Bring it to the shape a principal engineer would merge.
+1. **You may — and should — improve the author's PR.** "We can make changes to the author PR; we just need to ensure it's the best it can be." When a PR is correct but not idiomatic/clean/complete, fix it on the contributor's branch (push when `maintainerCanModify=true`; verify the fork remote points at the *right* contributor before pushing) rather than merging as-is or leaving a nit. Bring it to the shape a principal engineer would merge. If review finds only a couple small, local, low-risk changes between the PR and mergeability, do those fixups yourself instead of making the contributor chase another review round.
 
 2. **CI/Tilt green is necessary, NOT sufficient.** Green CI proves it compiles and existing tests pass. It does **not** prove correctness, no-regression, or performance. Never present "CI green" as evidence a PR is ready. For every PR you must additionally:
    - **Trace the changed logic by hand**, end to end, for the target case AND 2–3 sibling cases in the class AND the obvious edge cases (multiplayer, zero/empty, interaction with existing effects). Confirm it actually produces the rules-correct result — not merely that it "conforms to CLAUDE.md."
@@ -195,7 +195,7 @@ gh pr view <N> --json mergeable,mergeStateStatus --jq '{mergeable, mergeStateSta
 git diff --stat origin/main...HEAD
 ```
 
-- `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY` / branch far behind → needs a rebase before review. If the diff would revert other agents' landed work (token data, deploy config, concurrent integration tests), that is **BLOCK-pending-rebase**, not an inline fix (precedent: #2519 was 53 commits behind and its diff would have reverted ~5,800 unrelated lines; #2520 was 40 behind and bundled two features). On a BLOCK-pending-rebase, release the assignment lock (see *Releasing the Assignment Lock*) — you are handing the PR back, not processing it.
+- `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY` / branch far behind → bring the branch current and resolve textual conflicts when the contributor has been making corrections or the PR is otherwise close to mergeability. This is maintainer shepherding, not a contributor defect; leaving a correcting contributor to repeatedly chase main creates a moving target. If the diff would revert other agents' landed work (token data, deploy config, concurrent integration tests), that is **BLOCK-pending-rebase**, not an inline fix (precedent: #2519 was 53 commits behind and its diff would have reverted ~5,800 unrelated lines; #2520 was 40 behind and bundled two features). On a BLOCK-pending-rebase, release the assignment lock (see *Releasing the Assignment Lock*) — you are handing the PR back, not processing it.
 - Diff touches generated registries (`known-tokens.toml`), stray gitlinks/submodules (`new file mode 160000`), or subsystems unrelated to the stated scope → handle via the Security/Sanity auto-fix classes (strip/revert); if the contamination is load-bearing to the PR's logic, reduce the PR to its real change before review.
 - A PR body claiming "Scope Expansion: None" whose diff is large and cross-cutting is a contradiction to verify, not to trust.
 
@@ -292,6 +292,15 @@ Resolve conflicts in the same architectural style as the surrounding code. Do no
 If `origin/main` is already an ancestor and there are no conflicts, skip the merge — repeatedly bringing-current adds noise to the PR history without changing mergeability under the queue.
 
 **One targeted exception — `baseline_pending` parse-diff.** The parse-diff CI step is merge-base-pinned and immune to branch staleness (see `ci.yml` "Parse-detail diff vs base baseline"), so staleness alone is never a reason to bring-current-and-push. But when the sticky parse-diff comment shows *Baseline pending* (packet reason `review_parse_baseline_pending`), the merge-base's R2 baseline has likely aged out of retention and will **never** populate — bringing the branch current with `origin/main` and pushing is the remedy, because a fresh merge-base has a live baseline and the re-triggered CI regenerates the diff. Do this *before* the review so the card diff is available as evidence (and remember a push to an enqueued PR cancels auto-merge — re-run `gh pr merge --auto` after).
+
+## Requested-Changes Expiry
+
+`pr_review.py` may return `warn_stale_changes_for_handler` or `close_stale_changes_for_handler` for PRs whose current head still has requested changes and no useful contributor follow-up.
+
+- **Warn:** post a comment containing the exact marker from `recommendation.requested_changes_expiry.warning_marker` and clear prose that the PR will be auto-closed if the requested changes are not addressed within `close_after_warning_days` days. Then record an event with `event_type: requested_changes_warning`, `outcome: requested_changes_warning`, the current `head_sha`, and the comment timestamp.
+- **Close:** before closing, live-check the PR head SHA, author comments, and warning marker. If the head changed or the contributor commented after the warning, do not close; route back to review/update-branch as appropriate. If nothing changed and the warning window elapsed, close with a short comment that cites the earlier warning and record `event_type: stale_changes_closed`, `outcome: stale_changes_closed`.
+
+This expiry path is only for contributors not addressing requested changes. It must not close PRs with active correction work, unresolved maintainer-side merge conflicts, queue/CI mechanics, or defects that the handler can fix locally under the small-fixup rule.
 
 ## Review Comment Resolution
 
@@ -476,6 +485,8 @@ Apply exactly one **type label** to every PR you handle (`gh pr edit <PR> --add-
 - **refactor** — restructuring with no behavioral change.
 
 Label every PR you process, including ones you hold or block — the label is independent of merge-readiness. Create a missing convention label with `gh label create` before applying. Verify applied labels via the GraphQL API, not gh CLI stdout (unreliable under the rtk filter).
+
+Apply the policy-configured **`quality` label** in addition to the type label when the PR is additive and genuinely well executed: it adds real engine/parser/frontend capability or coverage, has almost no review churn, lands at the right seam, uses the house idioms, has discriminating tests/proof, and required no maintainer redesign beyond tiny local fixups. Do not apply `quality` to merely acceptable PRs, bugfixes with heavy correction, broad churn, PRs that needed substantial maintainer rescue, or anything still carrying unresolved deferrals. Record matching praise signals (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`, `evidence-backed-pushback` when applicable) in the local event.
 
 ## Enqueue
 

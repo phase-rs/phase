@@ -1298,6 +1298,28 @@ pub fn parse_target_with_syntax<'a>(
     {
         let phrase_start = lower.len() - rest_lower.len();
         let phrase = &text[phrase_start..];
+        // CR 608.2c: A trailing predicate on a bare-noun anaphor ("each of those
+        // creatures that didn't attack this turn", Maddening Imp) must fold into
+        // the tracked set as `TrackedSetFiltered{Not(AttackedThisTurn)}` — the
+        // frozen "those creatures" population INTERSECTED with the did-not-attack
+        // predicate. Parse the whole typed phrase first; if it carries any
+        // predicate PROPERTY beyond the head type noun, wrap it. A bare noun
+        // ("creatures"/"permanents"/"cards") with no trailing predicate yields
+        // only a head `type_filter` and no properties → the plain `TrackedSet`.
+        let (filter, remainder) = parse_type_phrase_with_ctx(phrase, ctx);
+        if target_filter_carries_predicate_property(&filter) {
+            return (
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(filter),
+                    // "each of those <type>" is an anaphor over the affected set
+                    // with no verb-specific zone binding.
+                    caused_by: None,
+                },
+                remainder,
+                syntax,
+            );
+        }
         if let Ok((rest_lower, _)) = alt((
             tag::<_, _, OracleError<'_>>("creatures"),
             tag("permanents"),
@@ -1313,14 +1335,11 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
-        let (filter, remainder) = parse_type_phrase_with_ctx(phrase, ctx);
         if target_filter_has_meaningful_content(&filter) {
             return (
                 TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
                     filter: Box::new(filter),
-                    // "each of those <type>" is an anaphor over the affected set
-                    // with no verb-specific zone binding.
                     caused_by: None,
                 },
                 remainder,
@@ -1911,20 +1930,53 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 109.2: A description that includes a card type or subtype means
+    // permanents of that type/subtype on the battlefield. A leading universal
+    // quantifier — "all", "each", or "every" — ranges over every such object,
+    // source included, so it is a semantic no-op on the filter and adds NO
+    // FilterProp::Another (unlike "other"/"another" below, which exclude the
+    // source). Strip it so a subject like "Each Vehicle you control" / "All Cats
+    // you control" reaches the type word instead of leaking the quantifier into
+    // the subtype string (e.g. Subtype("Each Vehicle")). Guarded on a following
+    // type-phrase lead so a bare quantifier without a type word is left intact.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("all "),
+        tag("each "),
+        tag("every "),
+    ))
+    .parse(&lower[pos..])
+    {
+        // Strip the quantifier when a type-phrase lead follows directly OR through
+        // an "other"/"another" exclusion ("each other creature", "all other
+        // nonland permanents"); in the latter case only the quantifier is consumed
+        // here and the handler below adds `FilterProp::Another`.
+        let after_other = alt((tag::<_, _, OracleError<'_>>("other "), tag("another ")))
+            .parse(rest)
+            .map(|(r, _)| r)
+            .ok();
+        if starts_with_type_phrase_lead(rest)
+            || after_other.is_some_and(starts_with_type_phrase_lead)
+        {
+            pos = lower.len() - rest.len();
+        }
+    }
+
     // Handle "other"/"another" prefix: "other creatures", "another creature",
-    // "other nonland permanents", "another target creature"
+    // "other nonland permanents", "another target creature". Reads from the
+    // current `pos` (not the raw trimmed head) so it composes with a universal
+    // quantifier already stripped above ("all other creatures" → Another + type).
     if tag::<_, _, OracleError<'_>>("other ")
-        .parse(lower_trimmed)
+        .parse(&lower[pos..])
         .is_ok()
     {
         properties.push(FilterProp::Another);
-        pos = offset + "other ".len();
+        pos += "other ".len();
     } else if tag::<_, _, OracleError<'_>>("another ")
-        .parse(lower_trimmed)
+        .parse(&lower[pos..])
         .is_ok()
     {
         properties.push(FilterProp::Another);
-        pos = offset + "another ".len();
+        pos += "another ".len();
     }
     // "another target [type]" — strip "target " after "another " so the type is reachable.
     if properties.contains(&FilterProp::Another) {
@@ -2625,6 +2677,23 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 608.2c + CR 205.2b: "<type> except for <type-list>" — plain type-list
+    // exclusion (Scourglass: "Destroy all permanents except for artifacts and
+    // lands"; Elspeth Tirel: "except for lands and tokens"), distinct from the
+    // predicate-based "except those that" clause immediately above. Tried only
+    // when that block didn't match — "except those "/"other than those " vs
+    // "except for " diverge at the 8th character of "except ", so the two are
+    // mutually exclusive.
+    {
+        let rem = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - rem.len();
+        if let Some((excl_types, excl_props, consumed)) = parse_except_for_type_list_suffix(rem) {
+            neg_type_filters.extend(excl_types);
+            properties.extend(excl_props);
+            pos += ws + consumed;
+        }
+    }
+
     // CR 109.4: "that <player> control(s)" relative clause supplying the object
     // controller — e.g. "permanents you own that your opponents control"
     // (Zedruu). Placed after `parse_that_clause_suffix` so the quality/combat/
@@ -3317,6 +3386,23 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: True when a typed filter carries a `FilterProp` PREDICATE beyond
+/// the bare head type noun (e.g. `Not(AttackedThisTurn)`, `Untapped`, a
+/// controller-scoping property). Used by the "each of those <noun> that
+/// <predicate>" anaphor to decide whether the trailing predicate must fold into
+/// a `TrackedSetFiltered` (frozen set ∩ predicate) rather than collapsing to a
+/// bare `TrackedSet` that would drop the predicate.
+fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => !tf.properties.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_carries_predicate_property)
+        }
+        TargetFilter::Not { filter } => target_filter_carries_predicate_property(filter),
+        _ => false,
+    }
+}
+
 fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
     if !target_phrase_mentions_spell_word(phrase) {
         return filter;
@@ -3763,6 +3849,13 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         value(
             ControllerRef::Opponent,
             tag::<_, _, OracleError<'_>>("your opponents controlled"),
+        ),
+        // CR 102.1 + CR 608.2i: past-tense "the active player controlled"
+        // look-back. Longest-match-first preserved (no prefix collision with
+        // the arms above).
+        value(
+            ControllerRef::ActivePlayer,
+            tag::<_, _, OracleError<'_>>("the active player controlled"),
         ),
     ))
     .parse(trimmed)
@@ -6077,6 +6170,92 @@ fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResu
     nom_primitives::parse_color(rest)
 }
 
+/// CR 608.2c + CR 205.2b: "<type> except for <type-1>[, <type-2>]* and <type-N>"
+/// — a plain type-list exclusion suffix (Scourglass: "Destroy all permanents
+/// except for artifacts and lands"; Elspeth Tirel: "except for lands and
+/// tokens"). Distinct from `parse_that_isnt_subtype_suffix`/the "except those
+/// that <relative-clause>" suffix in `parse_type_phrase_with_ctx`, which
+/// handle predicate-based exclusions, not bare type lists.
+///
+/// Reuses `classify_negation` per list item — it already produces
+/// `TypeFilter::Non(..)`-wrapped types and the matching `FilterProp`s
+/// (`NonToken`, `NotColor`, `NotSupertype`, `NotHistoric`) that the
+/// `"nonartifact"` prefix-negation loop above already feeds into
+/// `neg_type_filters`/`properties`. List items are Oxford-comma-tolerant via
+/// the existing `match_mass_union_separator`, reused rather than duplicated.
+///
+/// Guard: `classify_negation`'s catch-all treats any unrecognized word as a
+/// negated Subtype (correct for its "non-<word>" prefix context — CR 205.3
+/// subtype negation like "nonZombie" is a real pattern). That fallback is
+/// UNSAFE here: "except for Mageta" or "except for commanders" would silently
+/// classify as `Non(Subtype("Mageta"))`, which no permanent has, making the
+/// exclusion a silent no-op that looks fixed but isn't. This function rejects
+/// the whole clause (returns `None`) if any item resolves to a negated
+/// Subtype, leaving those cards' existing (unhandled, honestly silent)
+/// behavior unchanged rather than mis-firing on a named/designation exception.
+fn parse_except_for_type_list_suffix(
+    text: &str,
+) -> Option<(Vec<TypeFilter>, Vec<FilterProp>, usize)> {
+    let (mut rest, _) = tag::<_, _, OracleError<'_>>("except for ")
+        .parse(text)
+        .ok()?;
+    let mut consumed = text.len() - rest.len();
+    let mut neg_types = Vec::new();
+    let mut props = Vec::new();
+
+    loop {
+        let trimmed = rest.trim_start();
+        consumed += rest.len() - trimmed.len();
+        rest = trimmed;
+
+        let (after_word, word) =
+            take_till1::<_, _, OracleError<'_>>(|c: char| !c.is_ascii_alphabetic())
+                .parse(rest)
+                .ok()?;
+        let singular = word.trim_end_matches('s');
+        match classify_negation(singular) {
+            NegationResult::Type(TypeFilter::Non(inner))
+                if matches!(*inner, TypeFilter::Subtype(_)) =>
+            {
+                // Unrecognized word (name, designation, etc.) — decline the
+                // whole clause rather than emit a silently-vacuous exclusion.
+                return None;
+            }
+            NegationResult::Type(tf) => neg_types.push(tf),
+            NegationResult::Prop(prop) => props.push(prop),
+        }
+        consumed += rest.len() - after_word.len();
+        rest = after_word;
+
+        match match_mass_union_separator(rest) {
+            Some(sep_len) => {
+                consumed += sep_len;
+                rest = &rest[sep_len..];
+            }
+            None => break,
+        }
+    }
+
+    // GitHub #4710 CI catch (Flame Sweep): "each creature except for
+    // creatures you control with flying" is a FILTERED-SUBSET exception
+    // (creatures you control with flying), not a bare type list — but the
+    // first word "creatures" alone is a recognized type, so the loop above
+    // greedily accepts it and stops at "you", which isn't a valid separator.
+    // Left unchecked, this silently emits `Non(Creature)` alongside the base
+    // `Creature` filter, a self-contradictory filter matching nothing. A
+    // genuine type-list exception ends the clause outright (Scourglass,
+    // Elspeth Tirel both terminate at "."); if trailing text remains beyond
+    // optional whitespace, this isn't a type list — decline the whole clause
+    // rather than partially apply it, mirroring the Subtype-fallback guard
+    // above.
+    let trailing = rest.trim_start();
+    if !trailing.is_empty() && !trailing.starts_with('.') {
+        return None;
+    }
+
+    Some((neg_types, props, consumed))
+}
+
 /// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
 /// relative-clause negation suffix. Returns negated type filters to append to
 /// the enclosing target's `neg_type_filters`. Mirrors the `non-<Subtype>`
@@ -6992,6 +7171,71 @@ mod tests {
         assert!(tf.properties.contains(&FilterProp::NonToken));
         assert!(tf.properties.contains(&FilterProp::Modified));
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// GitHub #4710 (Scourglass): "permanents except for artifacts and lands"
+    /// must exclude BOTH types, not silently drop the exception clause. Before
+    /// the fix, `parse_type_phrase_with_ctx` had no suffix parser for "except
+    /// for <type-list>" (only the predicate-based "except those that ..." was
+    /// recognized), so the trailing clause was left unconsumed and the filter
+    /// silently matched every permanent.
+    #[test]
+    fn except_for_type_list_excludes_both_types() {
+        let (filter, rest) = parse_type_phrase("permanents except for artifacts and lands");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    }
+
+    /// Elspeth Tirel −5 ("other permanents except for lands and tokens"): the
+    /// exclusion list is heterogeneous — "lands" is a `TypeFilter::Non`
+    /// entry, "tokens" is a `FilterProp::NonToken` entry (tokens are a
+    /// property, not a card type) — proving the mechanism routes each list
+    /// item to the correct accumulator, mirroring how the pre-existing
+    /// "nonartifact, nontoken permanent" prefix negation already splits the
+    /// same two categories.
+    #[test]
+    fn except_for_type_list_splits_type_and_token_property() {
+        let (filter, rest) = parse_type_phrase("other permanents except for lands and tokens");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+        assert!(
+            !tf.type_filters.iter().any(
+                |t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Subtype(_)))
+            ),
+            "must not misclassify 'tokens' as a negated Subtype, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// GitHub #4710 hostile fixture (Mageta the Lion class): "except for
+    /// Mageta" names a specific permanent, not a type. `classify_negation`'s
+    /// catch-all treats any unrecognized word as a negated Subtype, which
+    /// would silently produce `Non(Subtype("Mageta"))` — a no-op exclusion
+    /// (no permanent has that subtype) that looks fixed but isn't. The suffix
+    /// parser must decline the whole clause instead, leaving the base filter
+    /// unchanged rather than mis-firing on a named exception it can't model.
+    #[test]
+    fn except_for_named_exception_does_not_misfire_as_subtype_negation() {
+        let (filter, rest) = parse_type_phrase("creatures except for Mageta");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tag::<_, _, OracleError<'_>>("except for")
+                .parse(rest.trim_start())
+                .is_ok(),
+            "the unrecognized exception clause must be left unconsumed, got rest={rest:?}"
+        );
     }
 
     /// CR 201.2 (issue #2016): the "named <CardName>" suffix must terminate the
@@ -13660,6 +13904,87 @@ mod tests {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
+        }
+    }
+
+    /// CR 109.2: A leading universal quantifier ("all"/"each"/"every") ranging
+    /// over a type/subtype subject must be stripped to reach the type word — it
+    /// must NOT leak into the subtype string (e.g. Subtype("Each Vehicle")) and
+    /// must NOT add `FilterProp::Another` (it selects the source too, unlike
+    /// "other"). Consumers of `parse_type_phrase` that exercise this: the
+    /// "sacrifice all <type> you control" additional/activation cost filters
+    /// (Soulblast — creatures; Kaervek's Spite — permanents; Tomb of Urami —
+    /// lands) and the "Whenever all <type> you control attack" trigger
+    /// `valid_card` (Mob Mentality — non-Wall creatures). Before this fix those
+    /// filters were left empty/untyped (matching every object) or the trigger
+    /// failed to classify.
+    #[test]
+    fn parse_type_phrase_universal_quantifier_stripped_no_leak() {
+        for (text, subtype) in [
+            ("each Vehicle you control", "Vehicle"),
+            ("all Cats you control", "Cat"),
+            ("every Skeleton you control", "Skeleton"),
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(subtype.to_string())),
+                "expected Subtype(\"{subtype}\") for '{text}', got {:?}",
+                tf.type_filters
+            );
+            // The quantifier must NOT survive inside the subtype string.
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+                "quantifier leaked into subtype for '{text}': {:?}",
+                tf.type_filters
+            );
+            // Universal quantifiers select the source too — no Another exclusion.
+            assert!(
+                !tf.properties.contains(&FilterProp::Another),
+                "unexpected Another for '{text}': {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+
+        // "all/each/every OTHER <type>" must strip the quantifier AND still carry
+        // the type plus `FilterProp::Another` (source excluded) — the quantifier
+        // must not leave the "other" exclusion stranded. Covers "each other
+        // creature" / "all other creatures" (review-flagged gap).
+        for text in [
+            "each other creature you control",
+            "all other creatures you control",
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature for '{text}', got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+                "quantifier/other leaked into subtype for '{text}': {:?}",
+                tf.type_filters
+            );
+            // "other" excludes the source → Another IS present here.
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "expected Another for '{text}': {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
         }
     }
 
