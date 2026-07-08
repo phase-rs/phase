@@ -574,7 +574,10 @@ fn handle_flashback(
     }]
 }
 
-/// Handler for Shroud -- permanent cannot be the target of spells or abilities.
+/// CR 702.18a: Shroud — surfaces a RuleModification marker for registry/
+/// coverage consumers. Permanent-scope shroud is enforced via
+/// `Keyword::Shroud` on the object; player-scope shroud (`StaticMode::Shroud`
+/// on a player-affected static) is enforced by [`player_cannot_be_targeted_by`].
 fn handle_shroud(
     _state: &GameState,
     _mode: &StaticMode,
@@ -586,10 +589,11 @@ fn handle_shroud(
 }
 
 /// CR 702.11: Hexproof — surfaces a RuleModification marker so downstream
-/// coverage/registry consumers see the grant. Runtime targeting for
-/// permanent-scope hexproof flows through `Keyword::Hexproof` on the object
-/// (granted via `ContinuousModification::AddKeyword` paths); the player-scope
-/// marker mirrors `handle_shroud`.
+/// coverage/registry consumers see the grant. Permanent-scope hexproof flows
+/// through `Keyword::Hexproof` on the object (`AddKeyword` paths). Player-scope
+/// hexproof (`StaticMode::Hexproof` on a player-affected static — Crystal
+/// Barricade / Sigarda's player half) is enforced by
+/// [`player_cannot_be_targeted_by`] (CR 702.11c).
 fn handle_hexproof(
     _state: &GameState,
     _mode: &StaticMode,
@@ -1368,11 +1372,83 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
     false
 }
 
+/// CR 702.11c: Whether `player_id` currently has hexproof as a player.
+///
+/// True when a functioning `StaticMode::Hexproof` static's `affected` filter
+/// matches the player (Battlefield/command-zone grantors — Sigarda's player
+/// half, "You have hexproof.") or when a transient continuous effect grants
+/// `AddStaticMode { Hexproof }` to that player specifically. Does **not**
+/// inspect permanent-scope `Keyword::Hexproof` (that is the object target path
+/// in `targeting::can_target`).
+pub fn player_has_hexproof(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::Hexproof,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::Hexproof)
+}
+
+/// CR 702.18a: Whether `player_id` currently has shroud as a player.
+///
+/// Symmetric to [`player_has_hexproof`] for `StaticMode::Shroud` / transient
+/// `AddStaticMode { Shroud }` grants. Permanent-scope shroud stays on the
+/// object keyword path.
+pub fn player_has_shroud(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::Shroud,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::Shroud)
+}
+
+/// CR 702.11c + CR 702.18a + CR 702.16b: Single authority for whether a player
+/// may be chosen as a target of the spell/ability identified by `source_id`.
+///
+/// Invoked by every player-candidate enumeration in `targeting` (typed player
+/// filters, `Any`/`add_players`, and specific-player pins). Composes:
+/// - Shroud — blocks **every** source (CR 702.18a), including the player's own;
+/// - Hexproof — blocks only **opponents'** sources (CR 702.11c);
+/// - Protection — quality match against the source (CR 702.16b / CR 702.16j).
+///
+/// Detection Tower–class `IgnoreHexproof` does **not** bypass player hexproof:
+/// CR 702.11e speaks to choosing a *creature* as though it lacked hexproof.
+pub fn player_cannot_be_targeted_by(
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    // CR 702.18a: shroud on a player — can't be the target of spells or abilities
+    // from any player.
+    if player_has_shroud(state, player_id) {
+        return true;
+    }
+    // CR 702.11c: hexproof on a player — can't be the target of spells or
+    // abilities opponents control. CR 102.2 / CR 102.3: "opponent" is team-aware
+    // (2HG teammates are not opponents), so reuse `players::is_opponent` rather
+    // than a bare `ctrl != player_id` inequality that would treat teammates as
+    // opponents.
+    let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+    if player_has_hexproof(state, player_id)
+        && source_controller
+            .is_some_and(|ctrl| crate::game::players::is_opponent(state, player_id, ctrl))
+    {
+        return true;
+    }
+    // CR 702.16b + CR 702.16j: protection from the source.
+    player_protection_from(state, player_id, Some(source_id))
+}
+
 /// CR 702.16: Single authority for player-scoped protection enforcement.
 ///
 /// Returns `true` if `player_id` has protection from `source` (identified by
-/// `source` ObjectId). Consulted by targeting (CR 702.16b) and damage
-/// prevention (CR 702.16e + CR 615.1).
+/// `source` ObjectId). Consulted by targeting (via [`player_cannot_be_targeted_by`],
+/// CR 702.16b) and damage prevention (CR 702.16e + CR 615.1).
 ///
 /// Short-circuits on `player_has_protection_from_everything` (the transient-
 /// effect `Everything` authority, CR 702.16j), then scans battlefield/command-
@@ -2901,6 +2977,161 @@ mod tests {
         assert!(
             !player_protection_from(&state, PlayerId(1), Some(own_source)),
             "the opponent gains no protection — affected is the controller only"
+        );
+    }
+
+    /// CR 702.11c: A functioning player-scope `StaticMode::Hexproof` makes its
+    /// controller illegal as an opponent's target, but not as their own.
+    #[test]
+    fn player_cannot_be_targeted_by_respects_player_hexproof() {
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Source".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_has_hexproof(&state, PlayerId(0)),
+            "controller must report player hexproof"
+        );
+        assert!(
+            !player_has_hexproof(&state, PlayerId(1)),
+            "opponent is not hexproof"
+        );
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), opponent_source),
+            "opponent may not target the hexproof player"
+        );
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), own_source),
+            "hexproof player may still be targeted by their own spells"
+        );
+    }
+
+    /// CR 702.11c + CR 102.2 / CR 102.3: In 2HG, a teammate is not an opponent,
+    /// so player hexproof must not block a teammate source while still blocking
+    /// the opposing team.
+    #[test]
+    fn player_cannot_be_targeted_by_hexproof_allows_2hg_teammate() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        // 2HG seats: P0+P1 one team, P2+P3 the other. Grant hexproof to P0.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let teammate_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Teammate Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(2),
+            "Opposing Team Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_has_hexproof(&state, PlayerId(0)),
+            "P0 must still report player hexproof in 2HG"
+        );
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), teammate_source),
+            "2HG teammate must still be able to target the hexproof player"
+        );
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), opposing_source),
+            "opposing-team source must still be blocked by player hexproof"
+        );
+    }
+
+    /// CR 702.18a: Player shroud blocks targeting from every controller.
+    #[test]
+    fn player_cannot_be_targeted_by_respects_player_shroud() {
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Shroud".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Shroud).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Source".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(player_has_shroud(&state, PlayerId(0)));
+        assert!(player_cannot_be_targeted_by(
+            &state,
+            PlayerId(0),
+            opponent_source
+        ));
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), own_source),
+            "shroud blocks the player's own targeting too"
         );
     }
 

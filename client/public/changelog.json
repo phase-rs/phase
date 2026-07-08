@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 167,
+      "date": "2026-07-08",
+      "title": "Eidolon taxes opponents, dredge works mid-draw",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Eidolon of Obstruction now taxes opponents — loyalty abilities of planeswalkers your opponents control cost {1} more to activate, and the tax is enforced on the real activation, not just in theory\n• The Doctor's Tomb now redistributes life correctly even when a replacement effect interrupts the assignment\n\n🛠️ Cards That Now Work Right\n• Dredge, Notion Thief, and Hullbreacher now behave during multi-card draws — dredging one card of a two-card draw delivers the dredged card plus a normal draw instead of drawing nothing\n• Famished Worldsire (“Devour land 3”) now enters with 3 counters per sacrificed permanent instead of just 1\n• Scourglass and Elspeth Tirel now spare the excepted permanents on “destroy all X except for artifacts and lands / lands and tokens” instead of wiping everything\n• Park Heights Pegasus now draws only when two or more creatures entered this turn, not on every combat hit\n• Spelunking's “if you put a Cave onto the battlefield this way, gain 4 life” bonus now actually triggers\n• Evelyn, the Covetous and Ragavan — permanents you cast or play from exile that you don't own now enter under your control, not their owner's\n• Relic of Progenitus and similar “target player exiles a card from their graveyard” effects now target the chosen player's graveyard, not your own\n• Cloud-style “when this enters, attach up to one target Equipment you control to it” abilities now attach to the creature that entered\n• Underworld Breach and other battlefield-only static grants no longer leak their effect while off the battlefield\n• Perpetual cost-grant effects now bind to the right earlier card instead of a stray referent\n• A batch of triaged interaction bugs around playing cards from exile and cost-paid toughness conditions now resolve correctly\n• More card templates parse cleanly: relative card-type targets, repeated named-permanent control clauses, compound activation conditions, source-exile play durations, and supertype-qualified enchant targets\n\n⚔️ Combat & Gameplay\n• Auto-pass is smarter: it now holds priority so you can tap a mana creature whose trigger benefits you (like Zhur-Taa Druid pinging an opponent), while still auto-passing on symmetric or self-punishing taps like Manabarbs\n• Grouped mana sources handle priority more reliably during auto-pass\n• Attack splitting across multiple defending players is fixed\n\n🖥️ Interface\n• Real mana-font iconography throughout the board — keyword ability badges on cards, loyalty +N/−N/0 badges in planeswalker choices, counter and energy/rad/poison glyphs on pills and the HUD, and a proper tap glyph on tapped cards\n• Tooltips and dialogs now layer correctly instead of hiding behind card previews\n• Board choice overlays and the attack-target picker are cleaner and more reliable\n\n🌐 Multiplayer\n• P2P draft backup snapshots now require host-owner verification to read, so a guessed draft code alone can no longer expose them",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524438100871221280"
+    },
+    {
       "id": 166,
       "date": "2026-07-07",
       "title": "Ad Nauseam repeats resolve correctly",
