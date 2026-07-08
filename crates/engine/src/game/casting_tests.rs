@@ -26318,22 +26318,33 @@ fn escape_grant_from_graveyard_source_does_not_apply_to_itself() {
     source.static_definitions = parsed.statics.clone().into();
     source.base_static_definitions = Arc::new(parsed.statics);
     source.mana_cost = ManaCost::Cost {
-        generic: 1,
-        shards: vec![ManaCostShard::Red],
+        generic: 0,
+        shards: vec![],
     };
 
-    // A second nonland card also sitting in the graveyard, which WOULD be
-    // escape-eligible if Breach's grant were (incorrectly) still active.
-    let filler_id = create_object(
-        &mut state,
-        CardId(1200),
-        PlayerId(0),
-        "Filler".to_string(),
-        Zone::Graveyard,
-    );
-    let filler = state.objects.get_mut(&filler_id).unwrap();
-    filler.card_types.core_types.push(CoreType::Sorcery);
-    filler.base_card_types = filler.card_types.clone();
+    // Three other nonland cards make the escape additional cost payable. This
+    // keeps the negative assertions below load-bearing: if Breach's grant were
+    // incorrectly active from the graveyard, both Breach and Filler 0 would be
+    // castable via escape.
+    let mut filler_ids = Vec::new();
+    for idx in 0..3 {
+        let filler_id = create_object(
+            &mut state,
+            CardId(1200 + idx),
+            PlayerId(0),
+            format!("Filler {idx}"),
+            Zone::Graveyard,
+        );
+        let filler = state.objects.get_mut(&filler_id).unwrap();
+        filler.card_types.core_types.push(CoreType::Sorcery);
+        filler.base_card_types = filler.card_types.clone();
+        filler.mana_cost = ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        };
+        filler_ids.push(filler_id);
+    }
+    let filler_id = filler_ids[0];
 
     let castable = spell_objects_available_to_cast(&state, PlayerId(0));
     assert!(
