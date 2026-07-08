@@ -510,7 +510,7 @@ export class P2PDraftHost {
 
     // Force the first persisted state to upload immediately so the host
     // claims the backup row before the normal N-picks interval.
-    this.picksSinceLastBackup = BACKUP_INTERVAL_PICKS;
+    this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
     this.persistSession();
     const freshHostView = await this.adapter.getViewForSeat(0);
     this.emit({ type: "draftStarted", view: freshHostView });
