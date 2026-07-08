@@ -9347,6 +9347,30 @@ fn static_creatures_attacking_your_opponents_have_double_strike() {
 }
 
 #[test]
+fn static_creatures_attacking_enchanted_player_have_trample() {
+    // CR 303.4b + CR 508.1b: Curse of Hospitality — an Aura enchanting a player
+    // grants trample to creatures attacking the enchanted player. Parameterizes
+    // the attacking-scope axis with the `EnchantedPlayer` defender, reusing the
+    // same `FilterProp::Attacking` + `parse_continuous_gets_has` path as the
+    // "attacking you" / "attacking your opponents" scopes.
+    let def = parse_static_line("Creatures attacking enchanted player have trample.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::EnchantedPlayer)
+            }]
+        ),))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
+        }));
+}
+
+#[test]
 fn static_creatures_attacking_opponents_and_planeswalkers_get_pump() {
     let def = parse_static_line(
         "Creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn.",
@@ -15440,6 +15464,25 @@ fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
         "retention form must NOT replace card types: {:?}",
         retain.modifications
     );
+}
+
+// Follow-up to #5305: nom P/T remainder combinator for parse_enchanted_is_type.
+#[test]
+fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
+    let (rest, (p, t)) = super::grammar::parse_pt_mod_with_remainder("0/4 and loses all abilities")
+        .expect("unsigned base P/T + trailing clause");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), "and loses all abilities");
+
+    let (rest, (p, t)) =
+        super::grammar::parse_pt_mod_with_remainder("0/4.").expect("trailing period only");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), ".");
+
+    let (rest, (p, t)) =
+        super::grammar::parse_pt_mod_with_remainder("0/4").expect("bare base P/T with no tail");
+    assert_eq!((p, t), (0, 4));
+    assert!(rest.trim().is_empty());
 }
 
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land

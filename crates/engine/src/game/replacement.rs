@@ -327,6 +327,13 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     state.post_replacement_event_target = None;
     state.post_replacement_token_choice_applied = None;
     state.pending_connive_reentry = None;
+    // CR 121.6b + CR 800.4a: `PendingMultiDraw` is single-player-scoped (it
+    // tracks only the departing player's own in-flight multi-card draw), so
+    // it is safe to null outright here — unlike the deliberately-preserved
+    // multi-player queue fields nearby in `elimination.rs`
+    // (`pending_team_draw_step` etc.), which need the interrupted APNAP queue
+    // resumed for the remaining players rather than field-nulling.
+    state.pending_multi_draw = None;
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -9654,6 +9661,144 @@ mod tests {
         assert!(
             find_applicable_replacements(&state, &stale_controller_draw, &registry).is_empty(),
             "dredge must not follow the card's stale battlefield controller"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // CR 121.6b (GitHub Dredge/Bazaar-of-Baghdad report): a multi-card draw must
+    // offer replacement independently per unit, not as one atomic batch. Drives
+    // the real production path (`resume_multi_draw` + `apply_as_current` +
+    // `GameAction::ChooseReplacement`), matching `library_placement_survives_two_
+    // sequential_parks`'s pattern (zone_pipeline.rs) for a genuine multi-pause
+    // resume, not just a `find_applicable_replacements` shape check.
+    // ---------------------------------------------------------------------------
+
+    /// Reported bug reproduction: a `count: 2` draw with exactly one
+    /// dredge-eligible card must dredge ONE unit and draw the other normally —
+    /// not zero out both (the pre-fix behavior: the whole count was replaced by
+    /// the single dredge outcome, matching "drew no cards" from the report).
+    #[test]
+    fn multi_draw_dredges_one_of_two_units_other_draws_normally() {
+        use crate::game::effects::draw::resume_multi_draw;
+        use crate::types::actions::GameAction;
+
+        let mut state = dredge_state(10);
+        let mut events = Vec::new();
+
+        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let ReplacementResult::NeedsChoice(chooser) = result else {
+            panic!("expected the first unit's dredge offer to pause, got {result:?}");
+        };
+        assert_eq!(chooser, PlayerId(0));
+        assert_eq!(
+            state.pending_multi_draw,
+            Some(crate::types::game_state::PendingMultiDraw {
+                player: PlayerId(0),
+                remaining: 1,
+                accumulated: 0,
+            }),
+            "one unit must remain queued after the first unit parks"
+        );
+
+        // Accept the dredge offer for unit 1 through the real production path —
+        // `handle_replacement_choice` applies the accepted event AND drains
+        // `pending_multi_draw` for the remaining unit.
+        state.priority_player = chooser;
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("resume the dredge choice");
+
+        assert!(
+            state.pending_multi_draw.is_none(),
+            "the multi-draw must fully complete once both units resolve, got {:?}",
+            state.pending_multi_draw
+        );
+        assert!(
+            state.players[0].hand.contains(&ObjectId(10)),
+            "the dredged card must return to hand"
+        );
+        assert_eq!(
+            state.players[0]
+                .hand
+                .iter()
+                .filter(|id| **id != ObjectId(10))
+                .count(),
+            1,
+            "unit 2 must draw exactly one normal card (not zero, not two) since \
+             the only dredge-eligible card left the graveyard after unit 1"
+        );
+        assert_eq!(
+            state.last_effect_count,
+            Some(1),
+            "CR 609.3: the TRUE total actually drawn across the whole 2-unit \
+             instruction is 1 (unit 1 dredged for 0, unit 2 drew 1 normally) — \
+             not 2 (the naive per-unit count) and not 0 (the last unit's count \
+             if last_effect_count were wrongly overwritten per-unit)"
+        );
+    }
+
+    /// Declining the dredge offer on unit 1 must still let unit 2 draw normally
+    /// — the hostile sibling of the accept case above.
+    #[test]
+    fn multi_draw_decline_dredge_unit_one_still_draws_unit_two_normally() {
+        use crate::game::effects::draw::resume_multi_draw;
+        use crate::types::actions::GameAction;
+
+        let mut state = dredge_state(10);
+        let mut events = Vec::new();
+
+        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let ReplacementResult::NeedsChoice(chooser) = result else {
+            panic!("expected the first unit's dredge offer to pause, got {result:?}");
+        };
+
+        // Decline (index 1) — the dredge card stays in the graveyard, unit 1
+        // draws normally, and unit 2 must ALSO still be offered the same dredge
+        // (still eligible, since it was never returned to hand).
+        state.priority_player = chooser;
+        let outcome = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("resume the decline choice");
+
+        assert!(
+            matches!(outcome.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "declining unit 1 must still offer the SAME dredge for unit 2 \
+             (the card never left the graveyard) — got {:?}",
+            outcome.waiting_for
+        );
+        assert!(
+            state.objects[&ObjectId(10)].zone == Zone::Graveyard,
+            "the dredge card must remain in the graveyard after unit 1 declines"
+        );
+
+        // Decline unit 2's offer as well — both units now draw normally. This
+        // is the exact regression matthewevans's review flagged on PR #5360:
+        // unit 1's actually-drawn count is folded into `pending_multi_draw`
+        // directly in `handle_replacement_choice`'s `Draw` arm (NOT inside
+        // `resume_multi_draw`'s own closure, since that arm resolves the
+        // ALREADY-paused unit rather than looping into a fresh one) — before
+        // this fix, that count was silently dropped, undercounting the total.
+        let outcome_2 = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("resume unit 2's decline choice");
+        assert!(
+            matches!(outcome_2.waiting_for, WaitingFor::Priority { .. }),
+            "both units resolved — no further replacement choice should remain, got {:?}",
+            outcome_2.waiting_for
+        );
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "CR 609.3: both units drew normally (unit 1's declined draw, folded \
+             into the resumed multi-draw's total, PLUS unit 2's declined draw) \
+             — the total must be 2, not 1 (which would mean unit 1's own draw \
+             was silently dropped from the accumulator)"
         );
     }
 
