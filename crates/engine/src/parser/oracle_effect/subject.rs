@@ -4131,14 +4131,6 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
     None
 }
 
-/// CR 305.7: A bare basic land type name after "become" — "Swamps", "Plains", etc.
-fn try_parse_become_basic_land_type_modification(
-    become_text: &str,
-) -> Option<ContinuousModification> {
-    parse_basic_land_type_plural(become_text.trim())
-        .map(|land_type| ContinuousModification::SetBasicLandType { land_type })
-}
-
 /// True when `lower` ends with the "of your choice" anchor. Pattern 2 (whole
 /// input parsed, trailing fixed phrase consumed last): `take_until` skips to the
 /// final occurrence and `all_consuming` requires the suffix to terminate the
@@ -5696,13 +5688,13 @@ mod tests {
         ));
         // Unrelated predicates still fall through (the animation path handles them).
         assert!(try_parse_become_color_modification("a giant lizard").is_none());
-        assert!(matches!(
-            try_parse_become_basic_land_type_modification("Swamps"),
-            Some(ContinuousModification::SetBasicLandType {
+        assert_eq!(
+            try_parse_become_basic_land_type_modifications("Swamps"),
+            Some(vec![ContinuousModification::SetBasicLandType {
                 land_type: BasicLandType::Swamp,
-            })
-        ));
-        assert!(try_parse_become_basic_land_type_modification("black").is_none());
+            }])
+        );
+        assert!(try_parse_become_basic_land_type_modifications("black").is_none());
     }
 
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
