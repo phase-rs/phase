@@ -1118,6 +1118,7 @@ fn lower_as_enters_anchor_word_modal(
             characteristic_defining: false,
             description: Some(format!("CR 614.12c [{label}]: {body}")),
             attack_defended: None,
+            source_controller: None,
         };
         result.statics.push(placeholder);
     }
@@ -1641,6 +1642,9 @@ pub(super) const ABILITY_WORD_NAMES: &[&str] = &[
     "pack tactics",
     "paradox",
     "parley",
+    // CR 207.2c: Warhammer 40,000 Commander (40K) flavor ability words — no rules meaning.
+    "proclamator hailer",
+    "protector",
     "radiance",
     "raid",
     "rally",

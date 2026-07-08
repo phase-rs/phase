@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, PriorityYieldOp};
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
@@ -452,6 +452,7 @@ fn check_actor_authorization(
     if matches!(
         action,
         GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityYield { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
@@ -461,7 +462,7 @@ fn check_actor_authorization(
         return Ok(());
     }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
-    // MulliganBottomCards, OpeningHandBottomCards), authorize against the full pending set so any
+    // OpeningHandBottomCards), authorize against the full pending set so any
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
@@ -553,9 +554,11 @@ enum AutoPassDecision {
 /// priority window.
 ///
 /// Interrupts (MTGA-style): `UntilStackEmpty` bails when the stack empties or
-/// grows beyond the baseline (trigger or opponent spell); `UntilEndOfTurn`
+/// grows beyond the baseline (trigger or opponent spell); `UntilTurnBoundary`
 /// bails when an opponent-controlled object is on top of the stack or when the
-/// current phase is in the user-supplied `phase_stops` list.
+/// current phase is in the user-supplied `phase_stops` list. The per-window
+/// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
+/// `MyNextTurnStart` behave identically within a priority window.
 fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassDecision {
     let Some(mode) = state.auto_pass.get(&player) else {
         return AutoPassDecision::Exit;
@@ -568,12 +571,15 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
                 AutoPassDecision::Pass
             }
         }
-        AutoPassMode::UntilEndOfTurn => {
-            let opponent_on_stack = state
-                .stack
-                .last()
-                .is_some_and(|top| top.controller != player);
-            if opponent_on_stack || phase_stop_hit(state, player) {
+        AutoPassMode::UntilTurnBoundary { .. } => {
+            // CR 117.3d: An opponent-controlled top-of-stack normally ends the
+            // session so the player can respond — unless they have pre-committed
+            // to yield priority for that exact triggered ability, in which case
+            // the session keeps auto-passing through it.
+            let opponent_on_stack = state.stack.last().is_some_and(|top| {
+                top.controller != player && !state.is_priority_yielded(player, top)
+            });
+            if opponent_on_stack || state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
             } else {
                 AutoPassDecision::Pass
@@ -582,23 +588,15 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
     }
 }
 
-/// True when `player` has an active `UntilEndOfTurn` auto-pass session.
+/// True when `player` has an active turn-boundary auto-pass session (either
+/// boundary). Both `EndOfCurrentTurn` and `MyNextTurnStart` drive the
+/// DeclareAttackers/DeclareBlockers empty auto-submit arms, since both
+/// auto-submit empty attackers within the current turn.
 fn end_of_turn_active(state: &GameState, player: PlayerId) -> bool {
     matches!(
         state.auto_pass.get(&player),
-        Some(AutoPassMode::UntilEndOfTurn)
+        Some(AutoPassMode::UntilTurnBoundary { .. })
     )
-}
-
-/// True when the current phase appears in `player`'s configured phase-stop list.
-/// Consulted at every engine-driven auto-pass site so the user's preference is
-/// respected whether or not an auto-pass session is active (e.g. suppresses
-/// the empty-blockers auto-submit when the defender wants a Ninjutsu window).
-fn phase_stop_hit(state: &GameState, player: PlayerId) -> bool {
-    state
-        .phase_stops
-        .get(&player)
-        .is_some_and(|stops| stops.contains(&state.phase))
 }
 
 fn pass_priority_once_with_pipeline(
@@ -726,7 +724,7 @@ fn priority_player_has_meaningful_action(state: &GameState) -> bool {
 /// action that ends the loop. The cap-path [`priority_player_has_meaningful_action`]
 /// checks only the CURRENT priority holder; the loop-shortcut WIN designates a
 /// LOSER, so its gate must be stronger — the would-be loop-breaker (a victim whose
-/// priority is auto-passed by a stale `UntilStackEmpty`/`UntilEndOfTurn` session,
+/// priority is auto-passed by a stale `UntilStackEmpty`/`UntilTurnBoundary` session,
 /// which `priority_auto_pass_decision` Passes WITHOUT a meaningful check) need NOT
 /// hold priority at the modulo-match iteration. Probe EVERY living player as the
 /// priority holder (`legal_actions`/`has_meaningful_priority_action` key off
@@ -945,10 +943,10 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 }
             }
 
-            // UntilEndOfTurn: auto-submit empty attackers unless the user flagged
-            // this phase as a stop.
+            // UntilTurnBoundary: auto-submit empty attackers unless the user
+            // flagged this phase as a stop.
             WaitingFor::DeclareAttackers { player, .. }
-                if end_of_turn_active(state, *player) && !phase_stop_hit(state, *player) =>
+                if end_of_turn_active(state, *player) && !state.phase_stop_hit(*player) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {
@@ -973,7 +971,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player)
+            } if !state.phase_stop_hit(*player)
                 && (valid_blocker_ids.is_empty()
                     || !super::combat::has_attackers_in_play(state)) =>
             {
@@ -1141,6 +1139,33 @@ fn apply_action(
             state.phase_stops.remove(&actor);
         } else {
             state.phase_stops.insert(actor, stops.clone());
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // CR 117.3d: SetPriorityYield propagates the actor's standing priority-yield
+    // preference — a pre-committed decision to pass priority while a class of
+    // triggered ability resolves. Pure preference state, routed by `actor`, and
+    // handled BEFORE the loop-ring clear and auto-pass session clearing below so
+    // yields are exempt from that per-session teardown (CR 400.7: an `Add`
+    // snapshots the source's latched identity from the on-stack trigger).
+    if let GameAction::SetPriorityYield { op } = &action {
+        match op {
+            PriorityYieldOp::Add { source_id, scope } => {
+                if let Some(target) = state.resolve_yield_target_from_stack(*source_id, *scope) {
+                    state.add_priority_yield(actor, target);
+                }
+            }
+            PriorityYieldOp::Remove { target } => {
+                state.remove_priority_yield(actor, target);
+            }
+            PriorityYieldOp::ClearAll => {
+                state.clear_priority_yields(actor);
+            }
         }
         return Ok(ActionResult {
             events: vec![],
@@ -1782,6 +1807,19 @@ fn apply_action(
                 AlternativeCastKeyword::Prototype => {
                     // CR 702.160a: Handle the prototype alternative cost choice during casting.
                     casting::handle_prototype_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::FaceDown => {
+                    // CR 702.37c / CR 702.168b: Handle the "cast normally vs cast
+                    // face down for {3}" choice for a Morph/Megamorph/Disguise card.
+                    casting::handle_face_down_cost_choice_with_payment_mode(
                         state,
                         *player,
                         *object_id,
@@ -3199,14 +3237,10 @@ fn apply_action(
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
-            // Tap the permanent (no summoning sickness check — CR 702.51a + CR 302.6)
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.tapped = true;
-            }
-            events.push(GameEvent::PermanentTapped {
-                object_id,
-                caused_by: None,
-            });
+            // CR 701.26a + CR 508.1f: route the convoke tap through the single
+            // authority so a "can't become tapped" creature is refused (no
+            // summoning sickness check — CR 702.51a + CR 302.6).
+            crate::game::restrictions::tap_permanent_for_cost(state, object_id, &mut events)?;
             let unit = match mode {
                 ConvokeMode::Convoke => {
                     crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
@@ -3305,16 +3339,16 @@ fn apply_action(
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
             // CR 103.5 + 103.5b: `actor` is already authorized as a member of
             // `pending` by `check_actor_authorization`. The mulligan module
-            // resolves the per-player state update and either re-emits
-            // MulliganDecision (with the actor removed if they kept, retained
-            // with bumped count if they mulliganed, or retained with the
-            // same count if they used Serum Powder) or advances to the next
-            // phase when the pending set is empty.
+            // resolves the per-player state update, transitioning the actor's
+            // entry into `BottomCards` when a declare-point action still owes
+            // bottoms, or advancing the flow when the pending set is empty.
             mulligan::handle_mulligan_decision(state, actor, choice, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
-        (WaitingFor::MulliganBottomCards { .. }, GameAction::SelectCards { cards }) => {
+        (WaitingFor::MulliganDecision { .. }, GameAction::SelectCards { cards }) => {
             // CR 103.5: `actor` is already authorized as a member of `pending`.
+            // A `SelectCards` submission resolves that player's owed
+            // `BottomCards` sub-phase (rejected if their entry is in `Declare`).
             mulligan::handle_mulligan_bottom(state, actor, cards, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
@@ -3715,6 +3749,7 @@ fn apply_action(
                 vehicle_id,
                 crew_power,
                 eligible_creatures,
+                ..
             },
             GameAction::CrewVehicle {
                 vehicle_id: _vid,
@@ -3729,6 +3764,12 @@ fn apply_action(
             &creature_ids,
             &mut events,
         )?,
+        // CR 602.2b + CR 601.2h: crew's tap cost is not paid until the
+        // activation payment step, so backing out before creature selection is
+        // complete restores priority with no state to undo.
+        (WaitingFor::CrewVehicle { player, .. }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         // CR 702.184a: Station activation from Priority — enters target-selection state.
         (
             WaitingFor::Priority { player },
@@ -3771,6 +3812,7 @@ fn apply_action(
                 mount_id,
                 saddle_power,
                 eligible_creatures,
+                ..
             },
             GameAction::SaddleMount {
                 mount_id: _mid,
@@ -4168,6 +4210,29 @@ fn apply_action(
                 return Err(EngineError::NotYourPriority);
             }
             let p = *player;
+            // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
+            // a face-down permanent face up is a special action whose morph/disguise/
+            // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
+            // validates the action and derives that cost; payment routes through
+            // `PaymentContext::SpecialAction(TurnFaceUp)` so spend-restricted mana
+            // ("only to turn permanents face up", Overgrown Zealot / Tin Street
+            // Gossip) is eligible here while other-context mana is rejected. Mirrors
+            // the `UnlockDoor` special-action handler.
+            let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
+            let cost = casting::apply_special_action_cost_reduction(
+                state,
+                p,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost,
+            );
+            casting::pay_special_action_mana_cost(
+                state,
+                p,
+                Some(object_id),
+                &cost,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                &mut events,
+            )?;
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
@@ -4324,7 +4389,9 @@ fn apply_action(
                 AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
                     initial_stack_len: state.stack.len(),
                 },
-                AutoPassRequest::UntilEndOfTurn => AutoPassMode::UntilEndOfTurn,
+                AutoPassRequest::UntilTurnBoundary { until } => {
+                    AutoPassMode::UntilTurnBoundary { until }
+                }
             };
             state.auto_pass.insert(*player, stored_mode);
             let wf = pass_priority_once_with_pipeline(state, &mut events, None)?;
@@ -4657,6 +4724,19 @@ fn apply_action(
             )?
         }
         // CR 601.2d: Distribute among targets (casting-time distribution).
+        (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+            let player = *player;
+            match state.pending_cast.take() {
+                Some(pending) => {
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                }
+                None => {
+                    return Err(EngineError::InvalidAction(
+                        "No pending cast to cancel during distribution".to_string(),
+                    ));
+                }
+            }
+        }
         (
             WaitingFor::DistributeAmong {
                 player,
@@ -4720,27 +4800,34 @@ fn apply_action(
                 // already on the stack (pushed at distribute-among pause time);
                 // mutate its ability with the distribution and clear
                 // `pending_trigger_entry` so the resolver may now fire it.
-                //
-                // Invariants (panic on violation — no recovery path):
-                // * `pending_trigger_entry` is `Some(_)` (push-first contract).
-                // * Entry id references a `TriggeredAbility` `StackEntry`.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability);
-                priority::clear_priority_passes(state);
-                // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
-                // behind this distribute-among trigger so each independent
-                // instance reaches the stack (issue #416).
-                debug_assert!(
-                    !triggers::is_pending_trigger_construction_active(state),
-                    "deferred-trigger drain entered with construction still active",
-                );
-                if let Some(waiting_for) =
-                    triggers::drain_deferred_trigger_queue(state, &mut events)
-                {
-                    waiting_for
-                } else {
+                if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
+                    // Unexpected dangling cursor: the entry is no longer on the
+                    // stack. Recover per CR 608.2b / CR 800.4a (a stack object
+                    // that has left the stack does not resolve) — record the
+                    // diagnostic, abandon, and return priority instead of
+                    // panicking (re-normalized next pass; CR 117.3b would give
+                    // the active player).
+                    triggers::abandon_ceased_pending_trigger(state, &pending_trigger.ability);
+                    priority::clear_priority_passes(state);
                     WaitingFor::Priority { player: p }
+                } else {
+                    priority::clear_priority_passes(state);
+                    // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
+                    // behind this distribute-among trigger so each independent
+                    // instance reaches the stack (issue #416).
+                    debug_assert!(
+                        !triggers::is_pending_trigger_construction_active(state),
+                        "deferred-trigger drain entered with construction still active",
+                    );
+                    if let Some(waiting_for) =
+                        triggers::drain_deferred_trigger_queue(state, &mut events)
+                    {
+                        waiting_for
+                    } else {
+                        WaitingFor::Priority { player: p }
+                    }
                 }
             } else {
                 // Resolution-time distribution continuation path.
@@ -4774,6 +4861,37 @@ fn apply_action(
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::counters::drain_pending_counter_moves(state, &mut events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                effects::drain_pending_continuation(state, &mut events);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 107.1c + CR 608.2d: Submit the "remove any number of counters"
+        // resolution-time selection (Rhys, the Evermore; Tetravus). ORDERING
+        // INVARIANT: apply removals (stamping `last_effect_count`) BEFORE draining
+        // the continuation, so a chained "create that many" rider reads the count.
+        (
+            WaitingFor::RemoveCountersChoice {
+                player,
+                source_id,
+                available,
+                pending_effect,
+                ..
+            },
+            GameAction::ChooseCountersToRemove { selections },
+        ) => {
+            let p = *player;
+            effects::counters::validate_and_queue_counter_removal(
+                state,
+                &selections,
+                *source_id,
+                available,
+                pending_effect,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            effects::counters::drain_pending_counter_removals(state, &mut events);
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 effects::drain_pending_continuation(state, &mut events);
             }
@@ -5318,6 +5436,18 @@ fn handle_play_land(
             "Player is under a CantPlayLand static (CR 305.2)".to_string(),
         ));
     }
+    // CR 116.2a + CR 305.1: A `ProhibitPlayFromZone` deny covers the play-land
+    // half of "play" (a land play is a special action, not a cast), so this gate
+    // is the land-side counterpart to the cast-gate check in
+    // `casting::prepare_spell_cast` (Memory Vessel: "can't play cards from their
+    // hand"). The card's current zone is the discriminator.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
+            ));
+        }
+    }
     let additional = super::static_abilities::additional_land_drops(state, player);
     let effective_limit = state.max_lands_per_turn.saturating_add(additional);
     // CR 805.4c: per-player land count under team turns (each teammate has
@@ -5521,6 +5651,27 @@ fn handle_play_land(
         Zone::Battlefield,
         None,
     );
+
+    // CR 110.2 + CR 110.2a (GitHub #696): A played land's controller
+    // defaults to whoever played it, not the card's owner. `player` is the
+    // acting land-player already resolved above (turn_resource_owner, or
+    // acting_player under shared team turns) — the same identity already
+    // used throughout this function for hand/zone lookups, and the correct
+    // one even under Mindslaver-style turn control (the turn's rightful
+    // player controls what gets played on their turn, not whoever is
+    // making the decisions). This is a no-op for the overwhelmingly common
+    // owner==player case. A genuine self-ETB "enters under [X]'s control"
+    // replacement (enters_under) still wins — it runs later in the same
+    // replacement pipeline this event is routed through below, and
+    // hard-overwrites this default unconditionally (identical safety
+    // property to the stack.rs spell-cast seam this mirrors).
+    if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+        controller_override,
+        ..
+    } = &mut proposed
+    {
+        *controller_override = Some(player);
+    }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
     // counters" replacement for planeswalkers and battles entering the
@@ -6161,6 +6312,17 @@ fn handle_equip_activation(
 /// CR 702.122a: Activate a Vehicle's crew ability from Priority.
 /// Unlike Equip (CR 702.6a) and Saddle (CR 702.171a), Crew has NO "Activate only as a
 /// sorcery" restriction — it can be activated any time the controller has priority.
+fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
+    state.objects.get(&id).is_some_and(|o| {
+        o.controller == player
+            && !o.tapped
+            && o.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature)
+            && !crate::game::restrictions::object_cant_tap(state, id)
+    })
+}
+
 fn handle_crew_activation(
     state: &mut GameState,
     player: PlayerId,
@@ -6227,25 +6389,18 @@ fn handle_crew_activation(
         .copied()
         .filter(|&id| {
             id != vehicle_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                            && !super::static_abilities::object_has_cant_crew(state, id)
-                    })
-                    .unwrap_or(false)
+                && is_tappable_creature_for_cost(state, id, player)
+                && !super::static_abilities::object_has_cant_crew(state, id)
         })
         .collect();
 
     // Validate total power of all eligible creatures can meet the threshold.
     // CR 702.122a: a creature's contribution may be modified ("as though its
-    // power were N greater" / "using its toughness rather than its power").
-    let total_power: i32 = eligible_creatures
+    // power were N greater" / "using its toughness rather than its power"). The
+    // per-creature contributions travel with the choice so the UI gates the
+    // selection on the same adjusted values the engine validates against, rather
+    // than re-deriving from raw power.
+    let contributions: Vec<i32> = eligible_creatures
         .iter()
         .map(|&id| {
             super::static_abilities::object_crew_power_contribution(
@@ -6254,7 +6409,8 @@ fn handle_crew_activation(
                 crate::types::statics::CrewAction::Crew,
             )
         })
-        .sum();
+        .collect();
+    let total_power: i32 = contributions.iter().sum();
 
     if total_power < crew_power as i32 {
         return Err(EngineError::ActionNotAllowed(
@@ -6269,6 +6425,7 @@ fn handle_crew_activation(
         vehicle_id,
         crew_power,
         eligible_creatures,
+        contributions,
     })
 }
 
@@ -6350,6 +6507,11 @@ fn handle_crew_announcement(
                 "Creature is no longer eligible for crewing".to_string(),
             ));
         }
+        if crate::game::restrictions::object_cant_tap(state, cid) {
+            return Err(EngineError::InvalidAction(
+                "Creature can't become tapped".to_string(),
+            ));
+        }
         if super::static_abilities::object_has_cant_crew(state, cid) {
             return Err(EngineError::InvalidAction(
                 "Creature can't crew Vehicles".to_string(),
@@ -6370,15 +6532,11 @@ fn handle_crew_announcement(
         ));
     }
 
-    // CR 701.26a + CR 702.122b: Tap each creature as cost payment — creature "crews" the Vehicle.
+    // CR 701.26a + CR 702.122b + CR 508.1f: Tap each creature as cost payment —
+    // creature "crews" the Vehicle. Routed through the single authority so a
+    // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        if let Some(obj) = state.objects.get_mut(&cid) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: cid,
-            caused_by: None,
-        });
+        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
     }
 
     // CR 602.5b: Record this crew activation so an "Activate only once each turn"
@@ -6449,20 +6607,7 @@ fn handle_station_activation(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| {
-            id != spacecraft_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                    .unwrap_or(false)
-        })
+        .filter(|&id| id != spacecraft_id && is_tappable_creature_for_cost(state, id, player))
         .collect();
 
     if eligible_creatures.is_empty() {
@@ -6521,6 +6666,7 @@ fn handle_station_announcement(
             .card_types
             .core_types
             .contains(&crate::types::card_type::CoreType::Creature)
+        || crate::game::restrictions::object_cant_tap(state, creature_id)
     {
         return Err(EngineError::InvalidAction(
             "Creature is no longer eligible for Station".to_string(),
@@ -6539,14 +6685,10 @@ fn handle_station_announcement(
         crate::types::statics::CrewAction::Station,
     );
 
-    // CR 701.26a: Tap the creature as cost payment.
-    if let Some(obj) = state.objects.get_mut(&creature_id) {
-        obj.tapped = true;
-    }
-    events.push(GameEvent::PermanentTapped {
-        object_id: creature_id,
-        caused_by: None,
-    });
+    // CR 701.26a: Tap the creature as cost payment. Routed through the single
+    // authority (CR 508.1f exempts attacker declaration) so a "can't become
+    // tapped" creature is refused.
+    crate::game::restrictions::tap_permanent_for_cost(state, creature_id, events)?;
 
     Ok(push_keyword_action(
         state,
@@ -6614,24 +6756,11 @@ fn handle_saddle_activation(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| {
-            id != mount_id
-                && state
-                    .objects
-                    .get(&id)
-                    .map(|o| {
-                        o.controller == player
-                            && !o.tapped
-                            && o.card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                    .unwrap_or(false)
-        })
+        .filter(|&id| id != mount_id && is_tappable_creature_for_cost(state, id, player))
         .collect();
 
     // CR 702.171a: a creature's saddle contribution may be modified.
-    let total_power: i32 = eligible_creatures
+    let contributions: Vec<i32> = eligible_creatures
         .iter()
         .map(|&id| {
             super::static_abilities::object_crew_power_contribution(
@@ -6640,7 +6769,8 @@ fn handle_saddle_activation(
                 crate::types::statics::CrewAction::Saddle,
             )
         })
-        .sum();
+        .collect();
+    let total_power: i32 = contributions.iter().sum();
 
     if total_power < saddle_power as i32 {
         return Err(EngineError::ActionNotAllowed(
@@ -6655,6 +6785,7 @@ fn handle_saddle_activation(
         mount_id,
         saddle_power,
         eligible_creatures,
+        contributions,
     })
 }
 
@@ -6705,6 +6836,11 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
+        if crate::game::restrictions::object_cant_tap(state, cid) {
+            return Err(EngineError::InvalidAction(
+                "Creature can't become tapped".to_string(),
+            ));
+        }
         // CR 702.171a: apply any saddle power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
@@ -6719,15 +6855,11 @@ fn handle_saddle_announcement(
         ));
     }
 
-    // CR 701.26a + CR 702.171c: Tap each creature as cost payment — creature "saddles" the Mount.
+    // CR 701.26a + CR 702.171c + CR 508.1f: Tap each creature as cost payment —
+    // creature "saddles" the Mount. Routed through the single authority so a
+    // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        if let Some(obj) = state.objects.get_mut(&cid) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: cid,
-            caused_by: None,
-        });
+        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
     }
 
     Ok(push_keyword_action(

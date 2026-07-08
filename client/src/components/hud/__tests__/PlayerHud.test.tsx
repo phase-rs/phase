@@ -42,4 +42,23 @@ describe("PlayerHud", () => {
 
     expect(screen.queryByText(/Poison counters:/)).toBeNull();
   });
+
+  it("renders local Next Up badge only for the next actual turn", () => {
+    act(() => {
+      useGameStore.setState({
+        gameState: buildGameState({
+          derived: {
+            turn_order: [
+              { player: 0, slot_index: 1, turns_from_now: 1 },
+              { player: 0, slot_index: 2, turns_from_now: 2 },
+            ],
+          },
+        }),
+      });
+    });
+
+    render(<PlayerHud />);
+
+    expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
+  });
 });

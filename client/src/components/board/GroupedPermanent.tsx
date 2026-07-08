@@ -1,4 +1,13 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
@@ -37,6 +46,18 @@ type PickerContext =
   | { mode: "attackers" | "blockers" | "equip" | "target" | "tap"; eligibleIds: ObjectId[] }
   | { mode: "boardChoice"; eligibleIds: ObjectId[]; choice: BoardChoiceView };
 
+const COLLAPSED_PICKER_WIDTH_PX = 208;
+const COLLAPSED_PICKER_GAP_PX = 8;
+const COLLAPSED_PICKER_VIEWPORT_PADDING_PX = 8;
+
+interface CollapsedPickerPosition {
+  top: number | "auto";
+  bottom: number | "auto";
+  left: number;
+  width: number;
+  maxHeight: number;
+}
+
 function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | null {
   switch (waitingFor?.type) {
     case "TargetSelection":
@@ -74,6 +95,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 }: GroupedPermanentProps) {
   const { t } = useTranslation("game");
   const [pickerOpen, setPickerOpen] = useState(false);
+  const collapsedAnchorRef = useRef<HTMLDivElement | null>(null);
   const playerId = usePlayerId();
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const combatMode = useUiStore((s) => s.combatMode);
@@ -214,7 +236,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 
   if (renderMode === "collapsed") {
     return (
-      <div className="relative">
+      <div ref={collapsedAnchorRef} className={`relative ${canOpenPicker ? "z-40" : ""}`}>
         <div className={`relative rounded-lg ${aggregateRingClass}`}>
           <PermanentCard
             objectId={group.ids[0]}
@@ -262,6 +284,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         />
         {pickerOpen && pickerContext && (
           <CollapsedGroupPicker
+            anchorEl={collapsedAnchorRef.current}
             context={pickerContext}
             group={group}
             selectedAttackers={selectedAttackers}
@@ -368,6 +391,7 @@ function CollapsedGroupBadges({
 }
 
 interface CollapsedGroupPickerProps {
+  anchorEl: HTMLElement | null;
   context: PickerContext;
   group: GroupedPermanentType;
   selectedAttackers: ObjectId[];
@@ -380,6 +404,7 @@ interface CollapsedGroupPickerProps {
 }
 
 function CollapsedGroupPicker({
+  anchorEl,
   context,
   group,
   selectedAttackers,
@@ -392,8 +417,52 @@ function CollapsedGroupPicker({
 }: CollapsedGroupPickerProps) {
   const { t } = useTranslation("game");
   const objects = useGameStore((s) => s.gameState?.objects);
+  const [position, setPosition] = useState<CollapsedPickerPosition | null>(null);
   const selectedAttackerCount = context.eligibleIds.filter((id) => selectedAttackers.includes(id)).length;
   const selectedTapCount = context.eligibleIds.filter((id) => selectedCardIds.includes(id)).length;
+
+  const updatePosition = useCallback(() => {
+    if (!anchorEl) return;
+    const rect = anchorEl.getBoundingClientRect();
+    const viewportPadding = COLLAPSED_PICKER_VIEWPORT_PADDING_PX;
+    const width = Math.max(
+      0,
+      Math.min(COLLAPSED_PICKER_WIDTH_PX, window.innerWidth - viewportPadding * 2),
+    );
+    const left = Math.max(
+      viewportPadding,
+      Math.min(
+        rect.left + rect.width / 2 - width / 2,
+        window.innerWidth - width - viewportPadding,
+      ),
+    );
+    const spaceBelow = window.innerHeight - rect.bottom - COLLAPSED_PICKER_GAP_PX - viewportPadding;
+    const spaceAbove = rect.top - COLLAPSED_PICKER_GAP_PX - viewportPadding;
+    const openUp = spaceAbove > spaceBelow;
+    const maxHeight = Math.max(0, openUp ? spaceAbove : spaceBelow);
+
+    setPosition({
+      top: openUp ? "auto" : rect.bottom + COLLAPSED_PICKER_GAP_PX,
+      bottom: openUp ? window.innerHeight - rect.top + COLLAPSED_PICKER_GAP_PX : "auto",
+      left,
+      width,
+      maxHeight,
+    });
+  }, [anchorEl]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [updatePosition]);
+
+  useEffect(() => {
+    if (!anchorEl) return undefined;
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [anchorEl, updatePosition]);
 
   const selectAttackerCount = (count: number) => {
     setGroupSelectedAttackers(group.ids, context.eligibleIds.slice(0, count));
@@ -412,8 +481,21 @@ function CollapsedGroupPicker({
     return Math.min(context.eligibleIds.length, Math.max(0, waitingFor.data.count - selectedOutsideGroup));
   }, [context.eligibleIds.length, group.ids, selectedCardIds, waitingFor]);
 
-  return (
-    <div className="absolute left-1/2 top-full z-50 mt-2 w-52 -translate-x-1/2 rounded border border-slate-500 bg-slate-950/95 p-2 text-xs text-white shadow-2xl">
+  if (!anchorEl || !position) return null;
+
+  return createPortal(
+    <div
+      className="fixed z-[160] overflow-y-auto overscroll-contain rounded border border-slate-500 bg-slate-950/95 p-2 text-xs text-white shadow-2xl"
+      style={{
+        top: position.top,
+        bottom: position.bottom,
+        left: position.left,
+        width: position.width,
+        maxHeight: position.maxHeight,
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="truncate font-semibold">{group.name}</span>
         <button
@@ -482,7 +564,8 @@ function CollapsedGroupPicker({
           }}
         />
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

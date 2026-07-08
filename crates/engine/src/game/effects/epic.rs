@@ -77,6 +77,7 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
         condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: effect.controller,
+            gate: crate::types::ability::TurnGate::None,
         },
         ability: ResolvedAbility::new(
             Effect::EpicCopy {

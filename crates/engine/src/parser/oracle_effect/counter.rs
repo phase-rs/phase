@@ -194,7 +194,21 @@ fn resolve_counter_placement_target<'a>(
         return (TargetFilter::SelfRef, parsed_remainder, None);
     }
     if is_it_pronoun(on_rest) {
-        return (resolve_it_pronoun(ctx), parsed_remainder, None);
+        // CR 608.2c: a bare "it" after a token-creating clause earlier in the
+        // same effect chain binds to that just-created token — the anaphor's
+        // most-recent object referent — not the ability source. Esper Terra:
+        // "Create a token ... It gains haste. If it's a Saga, put up to three
+        // lore counters on it." `ctx.token_created_in_chain` is seeded by the
+        // chunk loop ONLY when the chain's most-recent prior referent is a
+        // Token/CopyTokenOf/Populate creator; explicit "~"/name sources return
+        // above at the SelfRef guard and never reach here, and non-token
+        // self-triggers leave the flag false, so both keep `SelfRef`.
+        let it_target = if ctx.token_created_in_chain {
+            TargetFilter::LastCreated
+        } else {
+            resolve_it_pronoun(ctx)
+        };
+        return (it_target, parsed_remainder, None);
     }
     // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
     // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
@@ -339,6 +353,20 @@ pub(super) fn try_parse_put_counter<'a>(
     // Use parse_count_expr to handle Variable("X") for kicker-X patterns.
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
+
+    // CR 608.2d + CR 122.1: "put up to N <type> counters" — the controller may
+    // place fewer than N (down to zero). Strip the leading "up to " marker here
+    // and wrap the parsed count in `QuantityExpr::up_to` at build time so the AST
+    // records the "may pick fewer" grammar. Mirrors the Draw/Discard/PutSticker
+    // up-to convention. Only the COUNT-side "up to" (leading, before the counter
+    // type) is caught here; the TARGET-side "on up to N target(s)" is a distinct
+    // MultiTargetSpec path in `resolve_counter_placement_target`, so the two never
+    // shadow each other.
+    let (after_put, count_is_up_to) =
+        match nom_on_lower(after_put, after_put, |i| value((), tag("up to ")).parse(i)) {
+            Some(((), rest)) => (rest.trim_start(), true),
+            None => (after_put, false),
+        };
 
     // CR 122.1 + CR 208.3: Detect the dynamic-quantity phrasing
     // "a number of {type} counters equal to {qty}" (Gruff Triplets:
@@ -486,7 +514,14 @@ pub(super) fn try_parse_put_counter<'a>(
     Some((
         Effect::PutCounter {
             counter_type,
-            count: count_expr,
+            // CR 608.2d: wrap the final count in `UpTo` when the clause said
+            // "up to N" (stripped above). `count_expr` is never itself an `UpTo`
+            // here, so the non-nesting `up_to` debug_assert holds.
+            count: if count_is_up_to {
+                QuantityExpr::up_to(count_expr)
+            } else {
+                count_expr
+            },
             target,
         },
         remainder,
@@ -758,6 +793,22 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     }) {
         (QuantityExpr::Fixed { value: -1 }, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
+        value((), tag("any number of ")).parse(i)
+    }) {
+        // CR 107.1c + CR 608.2d: "remove any number of counters" is a
+        // resolution-time player choice (any per-type subset, 0..=available,
+        // incl. zero). Encode it as `UpTo` over the "remove all" sentinel so the
+        // runtime resolver discriminates on the peel FLAG (`count.is_up_to()`),
+        // not the scalar: the interactive path derives the legal domain from the
+        // board rather than resolving the inner `Fixed{-1}` numerically. If the
+        // resolver ever fails to peel, the safe-degrade is the existing
+        // "remove all" branch (`Fixed{-1}` clamps to the board — legal, just
+        // non-interactive). Rhys, the Evermore / Tetravus.
+        (
+            QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
+            rest.trim_start(),
+        )
+    } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("up to ")).parse(i)
     }) {
         let (n, r) = parse_number(rest.trim())?;
@@ -790,6 +841,23 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         value((), tag("from ")).parse(i)
     })?;
     let target_text = target_text.trim();
+
+    // CR 608.2d: "remove any number of counters from among <objects>" distributes
+    // the removal, at resolution, among any number of UNTARGETED permanents — a
+    // MULTI-SOURCE choice. The single-source interactive path (Rhys, Tetravus)
+    // cannot model "from among", so leave such cards Unimplemented (out of scope)
+    // rather than silently collapsing them to a single-source removal (Galloping
+    // Lizrog, Eventide's Shadow). Scoped to the `UpTo` ("any number") branch so
+    // non-interactive removals are untouched.
+    if count.is_up_to()
+        && nom_on_lower(target_text, target_text, |i| {
+            value((), tag("among ")).parse(i)
+        })
+        .is_some()
+    {
+        return None;
+    }
+
     let target = resolve_remove_counter_from_target(target_text, ctx);
 
     Some(Effect::RemoveCounter {
@@ -2491,6 +2559,244 @@ mod tests {
             QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount
             }
+        );
+    }
+
+    // ---- Gap-A ("up to N" counter count) + §B2 (token anaphor bind) ----
+
+    const ESPER_CHAPTER: &str = "Create a token that's a copy of target nonlegendary enchantment you control. It gains haste. If it's a Saga, put up to three lore counters on it. Sacrifice it at the beginning of your next end step.";
+
+    fn collect_defs<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        out: &mut Vec<&'a crate::types::ability::AbilityDefinition>,
+    ) {
+        out.push(def);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_defs(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            collect_defs(els, out);
+        }
+        for m in &def.mode_abilities {
+            collect_defs(m, out);
+        }
+    }
+
+    fn find_put_counter(
+        def: &crate::types::ability::AbilityDefinition,
+    ) -> Option<(Effect, Option<crate::types::ability::AbilityCondition>)> {
+        let mut all = Vec::new();
+        collect_defs(def, &mut all);
+        all.into_iter()
+            .find(|d| matches!(*d.effect, Effect::PutCounter { .. }))
+            .map(|d| ((*d.effect).clone(), d.condition.clone()))
+    }
+
+    fn chain_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+        let mut all = Vec::new();
+        collect_defs(def, &mut all);
+        all.iter()
+            .any(|d| matches!(*d.effect, Effect::Unimplemented { .. }))
+    }
+
+    /// Gap-A CR 608.2d: "put up to three lore counters on <self>" wraps the parsed
+    /// count in `UpTo{Fixed(3)}` (not a bare `Fixed(3)`); explicit self-reference
+    /// keeps `SelfRef`. Reverting the up-to strip returns `None` (Unimplemented).
+    #[test]
+    fn put_up_to_three_lore_counters_wraps_up_to_fixed() {
+        let text = "put up to three lore counters on this creature";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, CounterType::Lore);
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 3 })
+            },
+            "up-to must wrap Fixed(3), not drop the marker"
+        );
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "explicit self-ref stays SelfRef"
+        );
+    }
+
+    /// Gap-A building-block: "up to X" wraps a `Variable("X")` count (the
+    /// Clockwork class), proving the wrap is count-kind-agnostic, not hardcoded.
+    #[test]
+    fn put_up_to_x_counters_wraps_variable() {
+        let text = "put up to X +1/+1 counters on this creature";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            }
+        );
+    }
+
+    /// Gap-A NEG (count-side vs target-side "up to"): the leading count strip must
+    /// NOT steal the TARGET-side "on up to N target(s)". Count stays `Fixed(1)`; a
+    /// `MultiTargetSpec` carries the target-side "up to".
+    #[test]
+    fn count_side_up_to_strip_does_not_steal_target_side() {
+        let text = "put a +1/+1 counter on up to three target creatures";
+        let (effect, _, multi) =
+            try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 1 },
+            "count-side up-to must not be stolen by the target-side up-to"
+        );
+        assert!(
+            multi.is_some(),
+            "target-side up-to preserved as MultiTargetSpec"
+        );
+    }
+
+    /// §B2 unit: the bare "it" counter branch binds by `token_created_in_chain`.
+    /// Flag false (no token creator — the 1,215-card self-trigger class) → SelfRef;
+    /// flag true (a token creator is the chain's most-recent referent) →
+    /// LastCreated. Directly exercises the `resolve_counter_placement_target`
+    /// it-pronoun branch both ways.
+    #[test]
+    fn put_on_it_binds_by_token_created_in_chain_flag() {
+        let text = "put a +1/+1 counter on it";
+
+        let (no_token, _, _) =
+            try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { target, .. } = no_token else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "no token in chain → bare it stays SelfRef"
+        );
+
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let (with_token, _, _) = try_parse_put_counter(text, text, &mut ctx).expect("parse");
+        let Effect::PutCounter { target, .. } = with_token else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "token in chain → bare it binds the created token"
+        );
+    }
+
+    /// Gap-A + §B2 integration: the real Esper Terra chapter chain parses with zero
+    /// `Unimplemented`, its PutCounter count is `UpTo{Fixed(3)}`, its target is the
+    /// created token (`LastCreated`, NOT `SelfRef`), and it carries the is-a-Saga
+    /// gate. Reverting the §B2 chunk-loop bind → `SelfRef`; reverting the Gap-A
+    /// strip → the whole "put" clause is `Unimplemented`.
+    #[test]
+    fn esper_chapter_put_counter_up_to_binds_last_created() {
+        let def = super::super::parse_effect_chain(
+            ESPER_CHAPTER,
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "chapter must parse with zero Unimplemented (reach-guard)"
+        );
+        let (effect, condition) = find_put_counter(&def).expect("chapter contains a PutCounter");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, CounterType::Lore);
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 3 })
+            },
+            "count must be UpTo{{Fixed(3)}}, not a bare Fixed(3)"
+        );
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "§B2: 'on it' after CopyTokenOf binds the created token, not SelfRef"
+        );
+        assert!(
+            condition.is_some(),
+            "the put node keeps its is-a-Saga condition gate"
+        );
+    }
+
+    /// §B2 guard companion (POSITIVE — original clobber behavior preserved): a
+    /// counter "it" that follows a TYPED target with NO token creator (Turtle Van:
+    /// "Put a +1/+1 counter on target creature, then double the number of +1/+1
+    /// counters on it") STILL binds the parent target (`ParentTarget`). The
+    /// `mod.rs:14753` `LastCreated` guard fires only when the parse bound
+    /// `LastCreated` (a token creator was present), so this non-token anaphor is
+    /// untouched — it must NOT become `LastCreated` or `SelfRef`. Brackets the
+    /// guard's revert-to-red (which proves the NEW token behavior).
+    #[test]
+    fn multiply_counter_on_it_after_typed_target_no_token_stays_parent_target() {
+        let def = super::super::parse_effect_chain(
+            "Put a +1/+1 counter on target creature, then double the number of +1/+1 counters on it.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let mut all = Vec::new();
+        collect_defs(&def, &mut all);
+        let mc_target = all
+            .iter()
+            .find_map(|d| match &*d.effect {
+                Effect::MultiplyCounter { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("chain contains a MultiplyCounter");
+        assert_eq!(
+            mc_target,
+            TargetFilter::ParentTarget,
+            "non-token typed-target counter anaphor must stay ParentTarget (guard untouched)"
+        );
+    }
+
+    /// §B2 NEG (over-rewrite safety, the 9 genuine-source cards — e.g. construct a
+    /// cosmic cube / edgar markov's coffin): an explicit self-reference after a
+    /// token creator STAYS `SelfRef` (it takes the explicit-target path, never the
+    /// it-pronoun branch). Revert-to-red = a post-token structure-only gate would
+    /// flip this to `LastCreated`.
+    #[test]
+    fn explicit_self_ref_after_token_creator_stays_self_ref() {
+        let def = super::super::parse_effect_chain(
+            "Create a 1/1 white Soldier creature token. Put a +1/+1 counter on this creature.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let (effect, _) = find_put_counter(&def).expect("PutCounter present");
+        let Effect::PutCounter { target, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "explicit 'this creature' after a token creator must stay SelfRef"
         );
     }
 }

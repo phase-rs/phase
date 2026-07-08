@@ -12,7 +12,7 @@ use nom::Parser;
 
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
-use crate::parser::oracle_util::{parse_subtype, OUTLAW_SUBTYPES};
+use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
 use crate::types::ability::{
     Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -167,6 +167,11 @@ pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
         value(ControllerRef::Opponent, tag("an opponent controls")),
         value(ControllerRef::Opponent, tag("your opponents control")),
         value(ControllerRef::TargetPlayer, tag("target player controls")),
+        // CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained target-player scope.
+        value(
+            ControllerRef::TargetOpponent,
+            tag("target opponent controls"),
+        ),
     ))
     .parse(input)
 }
@@ -288,8 +293,15 @@ fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
 /// "this artifact".
 ///
 /// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
+///
+/// CR 201.5a: a granted body's by-name reference to its GRANTING object is
+/// masked to [`GRANTING_SELF_PLACEHOLDER`] by `normalize_card_name_refs` and
+/// recognized here (first alt) as `TargetFilter::GrantingObject` — distinct
+/// from the host `SelfRef`. This single edit covers the effect-target channel
+/// (`parse_target` → here) for "Return/Destroy/gains control of <self>".
 pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
+        parse_granting_object_ref,
         value(TargetFilter::SelfRef, tag("~")),
         parse_it_self_reference,
         // CR 201.5: "itself" is a self-reference to the object the ability is on.
@@ -303,6 +315,29 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
         value(TargetFilter::SelfRef, tag("this attraction")),
+    ))
+    .parse(input)
+}
+
+/// CR 201.5a: Single recognition authority for the granting-object by-name
+/// self-reference placeholder emitted by the quote masker in
+/// `normalize_card_name_refs`. Used as the first alt in both
+/// [`parse_self_reference`] (effect-target channel) and
+/// [`parse_cost_self_reference`] (cost channel).
+pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::GrantingObject, tag(GRANTING_SELF_PLACEHOLDER)).parse(input)
+}
+
+/// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
+/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand").
+/// Recognizes the granter placeholder → `GrantingObject` and the host tokens
+/// (`~`, "cardname") → `SelfRef`, in one authority so every cost site routes
+/// through the same logic instead of an ad-hoc per-site `tag("~")` copy.
+pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        parse_granting_object_ref,
+        value(TargetFilter::SelfRef, tag("~")),
+        value(TargetFilter::SelfRef, tag("cardname")),
     ))
     .parse(input)
 }

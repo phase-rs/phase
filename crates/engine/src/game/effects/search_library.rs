@@ -42,6 +42,27 @@ fn resolve_library_owner(
             return player;
         }
     }
+    // CR 701.23a + CR 108.3 / CR 109.4: An object-relative name-hate search
+    // (The End, Deadly Cover-Up, Crumble to Dust, Surgical Extraction, Test of
+    // Talents, Deicide) carries its searched player as a `Typed` controller-ref
+    // (`ParentTargetOwner` / `ParentTargetController`) on `target_player`. Only
+    // the *searched zones' owner* is derived here; the caster remains the
+    // searcher (`searcher_is_library_owner(Typed{..}) == false`, CR 701.23a
+    // asymmetric). The bare `ParentTargetController` branch above is untouched so
+    // Assassin's Trophy's self-search is preserved.
+    if let TargetFilter::Typed(tf) = target_player {
+        if let Some(ctrl) = &tf.controller {
+            if let Some(pid) = crate::game::filter::controller_ref_player(
+                state,
+                ability.source_id,
+                Some(ability.controller),
+                Some(ability),
+                ctrl,
+            ) {
+                return pid;
+            }
+        }
+    }
     ability.controller
 }
 
@@ -136,7 +157,9 @@ pub fn selection_satisfies_constraint(
                 let Some(obj) = state.objects.get(id) else {
                     return false;
                 };
-                total += obj.mana_cost.mana_value() as i32;
+                // CR 202.3d + CR 709.4b: searched cards are in a library (off the
+                // stack), so a split card contributes its combined mana value.
+                total += obj.effective_mana_value() as i32;
             }
             comparator.evaluate(total, *value)
         }
@@ -212,7 +235,9 @@ fn selection_has_distinct_quality(
         SharedQuality::ManaValue => {
             let mut seen = std::collections::HashSet::new();
             chosen.iter().all(|id| match state.objects.get(id) {
-                Some(obj) => seen.insert(obj.mana_cost.mana_value()),
+                // CR 202.3d + CR 709.4b: distinct combined mana values off the
+                // stack (a split card's MV is both halves combined).
+                Some(obj) => seen.insert(obj.effective_mana_value()),
                 None => false,
             })
         }
@@ -268,8 +293,12 @@ fn selection_has_distinct_quality(
         SharedQuality::CreatureType => {
             distinct_string_sets(state, chosen, |obj| obj.card_types.subtypes.clone())
         }
+        // CR 709.4b: combined colors off the stack for a split card.
         SharedQuality::Color => distinct_string_sets(state, chosen, |obj| {
-            obj.color.iter().map(|color| format!("{color:?}")).collect()
+            obj.effective_colors()
+                .iter()
+                .map(|color| format!("{color:?}"))
+                .collect()
         }),
         SharedQuality::LandType => distinct_string_sets(state, chosen, |obj| {
             obj.card_types

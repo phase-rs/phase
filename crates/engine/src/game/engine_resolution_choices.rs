@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, LibraryPosition, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, GuessOutcome, LibraryPosition,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, ChosenDamageSource, GameState, OutsideGameChoiceSource,
-    PayableResource, PendingContinuation, WaitingFor,
+    ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
+    OutsideGameChoiceSource, PayableResource, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -116,6 +116,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::BeholdChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -123,6 +124,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
+            | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
@@ -136,6 +138,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
             | WaitingFor::KeepWithinTotalPowerChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
@@ -291,6 +294,28 @@ fn validate_dig_selection(
 
 /// CR 701.23a + CR 614.1 / CR 110.5b: Apply a cultivate-class search-destination
 /// split. `primary_ids` are routed to `primary_destination` through the full
+/// CR 400.7 + CR 608.2c: True when a search continuation's chain relocates the
+/// found set to exile (a `ChangeZone { destination: Exile }` anywhere in the
+/// chain). Distinguishes name-hate exile searches (whose hand-origin members
+/// feed the `ExiledFromHandThisResolution` draw rider) from tutors that put the
+/// found card into a hand or onto the battlefield.
+fn continuation_exiles_found_set(chain: &ResolvedAbility) -> bool {
+    let mut cursor = Some(chain);
+    while let Some(def) = cursor {
+        if matches!(
+            &def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            return true;
+        }
+        cursor = def.sub_ability.as_deref();
+    }
+    false
+}
+
 /// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
 /// REPLACEMENT effects can intercept — "lands you control enter untapped
 /// instead"); `rest_ids` are routed to `rest_destination` via the shared rest
@@ -940,6 +965,20 @@ pub(super) fn handle_resolution_choice(
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
+                // CR 608.2c + CR 107.1c (issue #1032): reset to `Priority`
+                // BEFORE re-entering the chain, mirroring the `decline`
+                // branch's `finish_with_continuation` reset below and
+                // `handle_optional_effect_choice`'s `set_active_priority`
+                // reset (engine_payment_choices.rs). Without this,
+                // `state.waiting_for` is still the just-answered
+                // `RepeatDecision`, which `waits_for_resolution_choice`
+                // (effects/mod.rs) matches — the ChangeZone/LoseLife
+                // sub-chain following this iteration's RevealTop is then
+                // wrongly deferred into `pending_continuation` (accumulating
+                // there via `append_to_sub_chain`) instead of resolving
+                // immediately, and only drains in one batch when the
+                // controller eventually declines.
+                set_priority(state, player);
                 // Re-resolve one more process pass. `ability` retains
                 // `repeat_until: Some(ControllerChoice)`, so this hits the
                 // `repeat_until` dispatch, runs `resolve_chain_body` once, and
@@ -1105,7 +1144,10 @@ pub(super) fn handle_resolution_choice(
                 let mv = state
                     .objects
                     .get(&chosen)
-                    .map(|obj| obj.mana_cost.mana_value())
+                    // CR 202.3d + CR 709.4b: the chosen card is off the stack, so
+                    // a split card's MV budget is its combined halves — must match
+                    // the candidate-eligibility check in free_cast_from_zones.
+                    .map(|obj| obj.effective_mana_value())
                     .unwrap_or(0);
                 if mv > budget {
                     return Err(EngineError::InvalidAction(
@@ -1359,6 +1401,37 @@ pub(super) fn handle_resolution_choice(
                 player,
             );
             let _ = effects::populate::create_token_copy(state, token_id, &dummy_ability, events);
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::BeholdChoice { player, choices },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // CR 701.4a + CR 608.2d: behold selects exactly ONE object from the
+            // mixed-zone candidate set (battlefield-you-control ∪ hand).
+            if chosen.len() != 1 {
+                return Err(EngineError::InvalidAction(format!(
+                    "Behold requires exactly one object, got {}",
+                    chosen.len()
+                )));
+            }
+            let chosen_id = chosen[0];
+            if !choices.contains(&chosen_id) {
+                return Err(EngineError::InvalidAction(
+                    "Selected object is not a beholdable candidate".to_string(),
+                ));
+            }
+            // CR 701.4a: reveal the beheld card only if it is a hand card (a
+            // controlled battlefield permanent is already public). The non-chosen
+            // candidates are never revealed — they stay hidden.
+            effects::behold::reveal_if_from_hand(state, player, chosen_id, events);
+            // CR 608.2c: the behold was performed → the "if you do, [rider]" gate
+            // fires. On the optional Sarkhan path this re-affirms the accept-time
+            // clobber (`resolve_optional_effect_decision`); for a mandatory
+            // behold-class card it is the sole hook that fires the rider.
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.set_optional_effect_performed_recursive(true);
+            }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
@@ -2112,7 +2185,41 @@ pub(super) fn handle_resolution_choice(
             }
 
             set_priority(state, player);
-            if let Some(cont) = state.pending_continuation.as_mut() {
+            // CR 400.7 + CR 608.2c: Count found-set cards exiled from a hand so
+            // the shared "That player ... draws a card for each card exiled from
+            // their hand this way" rider (The End, Deadly Cover-Up, Test of
+            // Talents) resolves. The interactive found-set exile runs through the
+            // pending continuation's single ChangeZone, which bypasses the
+            // mass-move counter at change_zone.rs:1422. Count here, before the
+            // drain runs the Draw, and gate on the continuation actually exiling
+            // the set so a tutor-to-hand never increments it. The count is taken
+            // just before the move (a rare replacement that prevents an exile
+            // would over-count — the plan's completion-site pin).
+            let continuation_exiles_set = state
+                .pending_continuation
+                .as_ref()
+                .is_some_and(|cont| continuation_exiles_found_set(&cont.chain));
+            if continuation_exiles_set {
+                let hand_exiles = chosen
+                    .iter()
+                    .filter(|id| {
+                        state
+                            .objects
+                            .get(id)
+                            .is_some_and(|obj| obj.zone == Zone::Hand)
+                    })
+                    .count() as u32;
+                state.exiled_from_hand_this_resolution = state
+                    .exiled_from_hand_this_resolution
+                    .saturating_add(hand_exiles);
+            }
+            if let Some(mut cont) = state.pending_continuation.take() {
+                cont.search_attach_host =
+                    effects::change_zone::resolve_search_continuation_attach_host(
+                        state,
+                        &cont.chain,
+                    );
+                state.search_continuation_attach_host = cont.search_attach_host;
                 let mut continuation_targets: Vec<_> =
                     chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 701.23a + CR 701.24a: When the searcher is not the caster
@@ -2126,6 +2233,7 @@ pub(super) fn handle_resolution_choice(
                 }
                 cont.chain.targets = continuation_targets.clone();
                 propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
+                state.pending_continuation = Some(cont);
             }
             effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -2493,6 +2601,7 @@ pub(super) fn handle_resolution_choice(
                 branch_descriptions: _,
                 parent_targets,
                 context,
+                replacement_applied,
                 remaining_players,
             },
             GameAction::ChooseBranch { index },
@@ -2507,6 +2616,7 @@ pub(super) fn handle_resolution_choice(
                     branches,
                     parent_targets,
                     context,
+                    replacement_applied,
                     remaining_players,
                     index,
                 },
@@ -3070,6 +3180,7 @@ pub(super) fn handle_resolution_choice(
                             // across the `EffectZoneChoice` round-trip against each
                             // chosen object (Summoner's Grimoire).
                             enters_modified_if: enters_modified_if.clone(),
+                            enter_attached_to: None,
                         };
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
@@ -3109,6 +3220,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 return Ok(action_result_outcome(
@@ -3146,6 +3258,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3350,6 +3463,7 @@ pub(super) fn handle_resolution_choice(
                         // CR 614.12: cost-payment exile carries no enter-modifier
                         // gate; thread the (None) round-trip value for consistency.
                         enters_modified_if: enters_modified_if.clone(),
+                        enter_attached_to: None,
                     };
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
@@ -3388,6 +3502,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3422,6 +3537,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 614.12: preserve the moved-object type
                                         // gate across a further as-enters pause.
                                         enters_modified_if: ctx.enters_modified_if.clone(),
+                                        enter_attached_to: None,
                                         effect_kind,
                                     });
                                 state.waiting_for =
@@ -3610,6 +3726,7 @@ pub(super) fn handle_resolution_choice(
                 options,
                 choice_type,
                 source_id,
+                persist_player,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -3637,7 +3754,20 @@ pub(super) fn handle_resolution_choice(
             // protection, Sewer Nemesis CDA, …), recompute layers for the
             // layer-affecting choice kinds, and record `last_named_choice`.
             // Single authority shared with the random `Effect::Choose` resolver.
-            effects::choose::bind_named_choice(state, &choice_type, &choice, source_id);
+            effects::choose::bind_named_choice(
+                state,
+                &choice_type,
+                &choice,
+                source_id,
+                persist_player,
+            );
+            if choice_type.is_card_predicate_guess() {
+                events.push(GameEvent::CardPredicateGuessMade {
+                    player_id: player,
+                    source_id,
+                    choice: choice.clone(),
+                });
+            }
 
             // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
             // answer binds a resolution-scoped chosen player. Append it to the
@@ -3726,6 +3856,81 @@ pub(super) fn handle_resolution_choice(
             } else {
                 effects::drain_pending_continuation(state, events);
             }
+            state.last_named_choice = None;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 608.2d + CR 608.2e: an opponent / the defending player answered the
+        // guess. Compute correctness against the UNFILTERED state, record the
+        // guessed value for downstream reads, stamp the outcome onto the stashed
+        // branch chain, then drain it synchronously under the source controller.
+        (
+            WaitingFor::OpponentGuess {
+                player: guesser,
+                options,
+                choice_type,
+                source_id,
+                proposition_truth,
+            },
+            GameAction::ChooseOption { choice },
+        ) => {
+            // (a) Validate the guess is a legal option.
+            if !options.contains(&choice) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Invalid guess '{}', must be one of: {:?}",
+                    choice, options
+                )));
+            }
+
+            // (b) Correctness, resolved against the unfiltered GameState.
+            let outcome = if effects::opponent_guess::guess_is_correct(
+                state,
+                source_id,
+                &options,
+                &choice,
+                proposition_truth,
+            ) {
+                GuessOutcome::Correct
+            } else {
+                GuessOutcome::Incorrect
+            };
+
+            // (c) Record the guessed value WITHOUT persisting it to the source.
+            // "they lose life equal to the number they guessed" reads the
+            // guesser's value via `QuantityRef::Variable` -> `last_named_choice`;
+            // `source_id: None` sets `last_named_choice` without pushing a
+            // `ChosenAttribute::Number` (bind_named_choice gates the push on
+            // source_id.is_some()), keeping the source's committed-number history
+            // (which drives BOTH the DistinctFromSourceHistory exclusion AND the
+            // last-committed read) guesser-free. Only meaningful for a committed
+            // number guess; propositions carry no downstream guessed-value read.
+            if proposition_truth.is_none() {
+                effects::choose::bind_named_choice(state, &choice_type, &choice, None, None);
+            }
+
+            // (d) Stamp the outcome across the stashed continuation chain so each
+            // branch head re-evaluates `Guessed { outcome }` against it on drain.
+            // Also expose the guesser as a front player target so a "they lose
+            // life ..." `ParentTarget` anaphor in a branch resolves to them
+            // (CR 608.2d — the guesser is the player the branch acts on).
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.set_guess_outcome_recursive(Some(outcome));
+                cont.chain.push_front_player_target_recursive(guesser);
+            }
+
+            // (e) Priority to the source CONTROLLER (the player resolving this
+            // ability), not the guesser — the guesser only answered a sub-prompt;
+            // the resolution continues under the controller (e.g. Seventh
+            // Doctor's "you may cast it" CastOffer is to the controller). This
+            // also clears the OpponentGuess wait so the drain's guard passes.
+            let controller = state
+                .objects
+                .get(&source_id)
+                .map(|o| o.controller)
+                .unwrap_or(state.active_player);
+            set_priority(state, controller);
+            effects::drain_pending_continuation(state, events);
+            // Cleared ONLY after the synchronous drain (mirrors NamedChoice), so
+            // the wrong/right branch's "number they guessed" read sees it.
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -4171,6 +4376,118 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
         }
+        // CR 101.4 + CR 707.2 + CR 122.1: One player submitted their ordered
+        // 1..=max selection for `EachPlayerCopyChosen`. Collect APNAP choices
+        // first; copy/counter actions run only after the complete set is known.
+        (
+            WaitingFor::EachPlayerCopyChosenSelection {
+                player,
+                eligible,
+                min,
+                max,
+                choose_filter,
+                copy_modifications,
+                scale,
+                source_id,
+                source_controller,
+                remaining_players,
+                mut all_choices,
+                scoped_players,
+                trigger_event,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            // CR 707.2: validate an ordered, distinct, in-eligible selection of
+            // size `min..=max`. Order is load-bearing (index 0 copied, index 1
+            // scales).
+            if targets.len() < min as usize || targets.len() > max as usize {
+                return Err(EngineError::InvalidAction(format!(
+                    "EachPlayerCopyChosen: must choose between {min} and {max} objects, got {}",
+                    targets.len()
+                )));
+            }
+            let mut chosen: Vec<ObjectId> = Vec::with_capacity(targets.len());
+            for t in &targets {
+                if !eligible.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selected object not eligible".to_string(),
+                    ));
+                }
+                let TargetRef::Object(id) = t else {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selection must be objects".to_string(),
+                    ));
+                };
+                if chosen.contains(id) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: duplicate object in selection".to_string(),
+                    ));
+                }
+                if !effects::each_player_copy_chosen::is_live_eligible_choice(
+                    state,
+                    player,
+                    *id,
+                    &choose_filter,
+                    source_id,
+                    source_controller,
+                ) {
+                    return Err(EngineError::InvalidAction(
+                        "EachPlayerCopyChosen: selected object no longer eligible".to_string(),
+                    ));
+                }
+                chosen.push(*id);
+            }
+            all_choices.push(CopyChosenSelection { player, chosen });
+            let params = effects::each_player_copy_chosen::CopyChosenParams {
+                choose_filter,
+                min,
+                max,
+                copy_modifications,
+                scale,
+                source_id,
+                source_controller,
+                scoped_players,
+                trigger_event: trigger_event.clone(),
+            };
+            // Priority sentinel — `advance_to_next_player` writes `waiting_for`
+            // only when it prompts the next chooser or the action phase pauses.
+            let events_before = events.len();
+            set_priority(state, player);
+            // CR 608.2: restore the phenomenon trigger event across the
+            // collection/action continuation.
+            let previous_trigger_event = state.current_trigger_event.clone();
+            state.current_trigger_event = trigger_event;
+            let drive_result = effects::each_player_copy_chosen::advance_to_next_player(
+                state,
+                remaining_players,
+                all_choices,
+                &params,
+                events,
+            );
+            state.current_trigger_event = previous_trigger_event;
+            if let Err(e) = drive_result {
+                return Err(EngineError::InvalidAction(format!("{e:?}")));
+            }
+            // CR 603.2 + CR 603.3b: trigger bookkeeping across the paused walk,
+            // mirroring the `CategoryChoice` arm. If the walk settled back to
+            // Priority, drain any triggers deferred by earlier paused rounds;
+            // otherwise (a later player's selection or a replacement choice is
+            // now pending) batch this action's events for a later drain so the
+            // created tokens' ETB observers are not dropped.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+            } else {
+                let trigger_events: Vec<GameEvent> = events[events_before..]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         // CR 107.1c + CR 701.21a (Slaughter the Strong): player kept a subset of
         // their creatures within the total-power cap; sacrifice the rest.
         (
@@ -4580,5 +4897,114 @@ fn propagate_targets_through_search_shuffle(ability: &mut ResolvedAbility, targe
             next.targets = targets.to_vec();
         }
         cursor = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    #[test]
+    fn land_nonland_guess_logs_without_persisting_a_source_label() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            Zone::Battlefield,
+        );
+        let waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+            persist_player: None,
+        };
+        let mut events = Vec::new();
+
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::ChooseOption {
+                choice: "Nonland".to_string(),
+            },
+            &mut events,
+        )
+        .expect("choice resolves");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardPredicateGuessMade {
+                player_id,
+                source_id: Some(event_source_id),
+                choice,
+            } if *player_id == PlayerId(1)
+                && *event_source_id == source_id
+                && choice == "Nonland"
+        )));
+        let source = state.objects.get(&source_id).expect("source exists");
+        assert!(
+            source.chosen_attributes.is_empty(),
+            "opponent guess labels must not remain rendered on the source card"
+        );
+    }
+
+    #[test]
+    fn land_nonland_kind_choice_does_not_debug_log_or_persist_source_label() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Abundance".to_string(),
+            Zone::Battlefield,
+        );
+        let waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardPredicate {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+            persist_player: None,
+        };
+        let mut events = Vec::new();
+
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::ChooseOption {
+                choice: "Land".to_string(),
+            },
+            &mut events,
+        )
+        .expect("choice resolves");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::CardPredicateGuessMade { .. })),
+            "ordinary land/nonland kind choices should not produce debug guess logs"
+        );
+        assert!(
+            state
+                .objects
+                .get(&source_id)
+                .expect("source exists")
+                .chosen_attributes
+                .is_empty(),
+            "transient land/nonland kind choices should not render source labels"
+        );
     }
 }

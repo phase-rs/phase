@@ -824,8 +824,12 @@ pub(crate) fn compute_copy_batch_prefix(
 ///   bodies that share grammar with `BecomeCopy`).
 /// - `SetCardTypes` — Myrkul, Lord of Bones: "it's an enchantment and loses
 ///   all other card types" replaces the copied core card-type set (CR 613.1d).
-/// - `AddKeyword` is NOT consumed here — keywords flow through the typed
-///   `extra_keywords` channel earlier in the resolver.
+/// - `AddKeyword` — dual-path: keywords in the typed `extra_keywords` channel
+///   are applied earlier in the resolver, and an `AddKeyword` that instead lands
+///   in `additional_modifications` (e.g. an "except it has menace" body, or a
+///   keyword adjacent to a quoted-ability grant) is applied here too, on the
+///   `AddKeyword` arm below (CR 707.9a). Both routes add to the copiable keyword
+///   set idempotently.
 ///
 /// Modifications not relevant to token-copy semantics (e.g. `CopyValues`,
 /// `ChangeController`, dynamic P/T) are skipped silently — they have no
@@ -1461,6 +1465,80 @@ mod tests {
                 .contains(&PlayerId(0)),
             "should record token creation"
         );
+    }
+
+    /// CR 707.2 + CR 111.10: a copy token sourced from a card with only a
+    /// runtime name, no printed ref, and no source-related token ids remains a
+    /// card-display copy even if the copied body matches a catalog token preset.
+    #[test]
+    fn copy_token_of_name_only_card_does_not_bind_catalog_preset() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fanatic of Rhonas".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.display_source = DisplaySource::Card;
+            source.base_power = Some(4);
+            source.base_toughness = Some(4);
+            source.power = Some(4);
+            source.toughness = Some(4);
+            source.base_color = vec![ManaColor::Black];
+            source.color = vec![ManaColor::Black];
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![
+                    "Zombie".to_string(),
+                    "Snake".to_string(),
+                    "Druid".to_string(),
+                ],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert_eq!(token.name, "Fanatic of Rhonas");
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(4));
+        assert_eq!(token.color, vec![ManaColor::Black]);
+        assert_eq!(token.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(
+            token.card_types.subtypes,
+            vec![
+                "Zombie".to_string(),
+                "Snake".to_string(),
+                "Druid".to_string()
+            ]
+        );
+        assert_eq!(token.display_source, DisplaySource::Card);
+        assert_eq!(token.token_image_ref, None);
     }
 
     /// CR 614.1a + CR 707.2: A token-count-doubling replacement (Doubling

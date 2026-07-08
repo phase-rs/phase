@@ -733,6 +733,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 Zone::Battlefield,
                 None,
             );
+            // CR 601.2a + CR 110.2 + CR 110.2a (GitHub #696): A cast permanent's
+            // controller defaults to whoever cast it, not the card's owner —
+            // "that player becomes its controller" (CR 601.2a) when the spell is
+            // put on the stack, and per CR 110.2a "that object enters the
+            // battlefield under that player's control unless the effect
+            // states otherwise." `entry.controller` is the actual caster
+            // (stamped at announce_spell_on_stack from the real
+            // GameAction::CastSpell dispatch), fixed for the spell's lifetime
+            // on the stack. This is a no-op for the overwhelmingly common
+            // owner==caster case. A genuine self-ETB "enters under [X]'s
+            // control" replacement (enters_under) still wins — it runs later,
+            // in replace_event below, and hard-overwrites this default
+            // unconditionally.
+            if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                controller_override,
+                ..
+            } = &mut proposed
+            {
+                *controller_override = Some(entry.controller);
+            }
             // CR 702.190b: Sneak-cast permanent enters the battlefield tapped.
             // Seed the ZoneChange so ETB-tapped goes through the replacement
             // pipeline (CR 614.1c).
@@ -1975,6 +1995,9 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         targets,
         source_id: _,
         source_incarnation,
+        // Latched card identity for `AllCopies` priority yields; a batched
+        // self-counter spell never carries one (set only on triggered pushes).
+        source_card_id,
         controller: _,
         original_controller,
         scoped_player,
@@ -2003,12 +2026,14 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         chosen_x,
         cost_paid_object,
         effect_context_object,
+        amassed_army_object,
         ability_index,
         may_trigger_origin,
         target_selection_mode,
         target_chooser,
         chosen_players,
         repeat_until,
+        replacement_applied: _,
         sub_link,
         modal,
         mode_abilities,
@@ -2027,6 +2052,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     self_counter
         && targets.is_empty()
         && source_incarnation.is_none()
+        && source_card_id.is_none()
         && original_controller.is_none()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
@@ -2054,6 +2080,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && chosen_x.is_none()
         && cost_paid_object.is_none()
         && effect_context_object.is_none()
+        && amassed_army_object.is_none()
         && ability_index.is_none()
         && may_trigger_origin.is_none()
         && *target_selection_mode == TargetSelectionMode::Chosen
@@ -2888,6 +2915,10 @@ pub(crate) fn create_warp_delayed_trigger(
     // higher incarnation and the exile finds no valid target.
     delayed_ability
         .set_source_incarnation_recursive(state.objects.get(&object_id).map(|o| o.incarnation));
+    // CR 400.7 identity latch + CR 704.5d: snapshot the source's card identity
+    // so an `AllCopies` priority yield can match by card identity after the
+    // source ceases to exist.
+    delayed_ability.source_card_id = state.objects.get(&object_id).map(|o| o.card_id);
 
     state
         .delayed_triggers
@@ -4309,6 +4340,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
         }

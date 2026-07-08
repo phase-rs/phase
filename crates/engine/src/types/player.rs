@@ -182,6 +182,15 @@ pub struct Player {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion: Option<CompanionInfo>,
 
+    /// CR 607.2d / CR 607.2m (by analogy): durable per-player chosen attributes —
+    /// the player-axis mirror of `GameObject.chosen_attributes`. Today this holds
+    /// the "last chose <anchor>" label (`ChosenAttribute::Label`) for planar
+    /// anchor choices (Two Streams Facility). Players never change zones, so a
+    /// per-player choice persists until it is reassigned (unlike an object's
+    /// `chosen_attributes`, which clears on zone change per CR 400.7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_attributes: Vec<crate::types::ability::ChosenAttribute>,
+
     // Derived fields (computed in WASM bridge, not persisted)
     #[serde(skip_deserializing, default)]
     pub can_look_at_top_of_library: bool,
@@ -228,6 +237,7 @@ impl Default for Player {
             bending_types_this_turn: HashSet::new(),
             player_counters: HashMap::new(),
             companion: None,
+            chosen_attributes: Vec::new(),
             can_look_at_top_of_library: false,
             commander_color_identity: Vec::new(),
             status: PlayerStatus::Active,

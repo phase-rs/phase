@@ -178,6 +178,46 @@ export function isFaceDownExileCardVisibleToViewer(
   );
 }
 
+/**
+ * Whether `viewerId` may see the identity of `obj` for the card-report picker.
+ *
+ * Composes the engine-mirroring reveal-set helpers above; NEVER infers
+ * visibility from `name !== HIDDEN_CARD_NAME`. In single-player the client
+ * renders the raw, unredacted state (the `showAiHand` debug toggle depends on
+ * it), so hidden-zone objects carry their real names and a name check would leak
+ * every opponent card. Conservative: hides on any doubt, never leaks.
+ */
+export function isObjectReportableToViewer(
+  gameState: GameState | null,
+  obj: GameObject,
+  viewerId: PlayerId,
+): boolean {
+  if (!gameState) return false;
+  // CR 701.20b: a publicly revealed card is visible to every player.
+  const revealed = gameState.revealed_cards?.includes(obj.id) ?? false;
+  switch (obj.zone) {
+    case "Stack":
+    case "Battlefield":
+      // Public zones; a face-down (morph/manifest) permanent hides its identity
+      // from non-owners unless it has been publicly revealed.
+      return !obj.face_down || obj.owner === viewerId || revealed;
+    case "Graveyard":
+    case "Command":
+      return true; // public, face-up
+    case "Exile":
+      return !obj.face_down || isFaceDownExileCardVisibleToViewer(gameState, obj, viewerId);
+    case "Hand":
+      // Own hand, or a card revealed to everyone (mirror OpponentHand's gate).
+      return (
+        obj.owner === viewerId ||
+        revealed ||
+        (gameState.public_revealed_cards?.includes(obj.id) ?? false)
+      );
+    case "Library":
+      return false; // hidden; rare face-up-top reveals are out of scope
+  }
+}
+
 export function getWaitingForObjectChoiceIds(
   waitingFor: WaitingFor | null | undefined,
 ): ObjectId[] {
@@ -239,7 +279,12 @@ export type BoardChoiceSelection =
   | { type: "single"; immediate: true }
   | { type: "exactCount"; count: number; immediate?: boolean }
   | { type: "rangeCount"; min: number; max: number }
-  | { type: "totalPowerAtLeast"; power: number }
+  // `contributions` maps an eligible object id to the power it contributes
+  // toward the threshold. Supplied by the engine for Crew (CR 702.122a), where
+  // "as though its power were N greater" / "using its toughness" make the
+  // contribution differ from printed power; when absent (Ward-sacrifice total
+  // power), the summation falls back to raw power.
+  | { type: "totalPowerAtLeast"; power: number; contributions?: Record<ObjectId, number> }
   // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any subset whose
   // combined power is at most `power`; selecting beyond it blocks confirm.
   | { type: "totalPowerAtMost"; power: number };
@@ -262,6 +307,26 @@ export interface BoardChoiceView {
   sourceId?: ObjectId;
   skipAction?: GameAction;
   cancelAction?: GameAction;
+}
+
+/**
+ * Zip the engine's parallel `eligible_creatures` / `contributions` arrays into a
+ * lookup from object id to its adjusted crew/saddle contribution. The engine
+ * emits them index-aligned (CR 702.122a / 702.171a); a length mismatch falls
+ * back to an empty map so the caller degrades to raw power rather than misreads.
+ */
+function zipContributions(
+  eligibleCreatures: ObjectId[],
+  contributions?: number[],
+): Record<ObjectId, number> {
+  const map: Record<ObjectId, number> = {};
+  if (!contributions || eligibleCreatures.length !== contributions.length) {
+    return map;
+  }
+  eligibleCreatures.forEach((id, index) => {
+    map[id] = contributions[index];
+  });
+  return map;
 }
 
 function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"]): ObjectId | undefined {
@@ -392,16 +457,31 @@ export function getBoardChoiceView(
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible_creatures,
         intent: "crew",
-        selection: { type: "totalPowerAtLeast", power: waitingFor.data.crew_power },
+        selection: {
+          type: "totalPowerAtLeast",
+          power: waitingFor.data.crew_power,
+          contributions: zipContributions(
+            waitingFor.data.eligible_creatures,
+            waitingFor.data.contributions,
+          ),
+        },
         response: { type: "CrewVehicle", vehicleId: waitingFor.data.vehicle_id },
         sourceId: waitingFor.data.vehicle_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "SaddleMount":
       return {
         player: waitingFor.data.player,
         objectIds: waitingFor.data.eligible_creatures,
         intent: "saddle",
-        selection: { type: "totalPowerAtLeast", power: waitingFor.data.saddle_power },
+        selection: {
+          type: "totalPowerAtLeast",
+          power: waitingFor.data.saddle_power,
+          contributions: zipContributions(
+            waitingFor.data.eligible_creatures,
+            waitingFor.data.contributions,
+          ),
+        },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },
         sourceId: waitingFor.data.mount_id,
       };
@@ -522,8 +602,14 @@ export function boardChoiceSelectedPower(
   // the total, so a 5/-1 pair fits a cap of 4. Crew/Saddle-style
   // `totalPowerAtLeast` contributes positive power only.
   const clampNegative = choice.selection.type === "totalPowerAtLeast";
+  // CR 702.122a / 702.171a: for Crew/Saddle the engine supplies each creature's
+  // adjusted contribution (Pilot tokens' "+2 greater", Giant Ox's toughness).
+  // Prefer it over printed power so the UI gates on the same value the engine
+  // validates; fall back to raw power when the engine sent no contributions.
+  const contributions =
+    choice.selection.type === "totalPowerAtLeast" ? choice.selection.contributions : undefined;
   return selectedIds.reduce((sum, id) => {
-    const power = objects?.[id]?.power ?? 0;
+    const power = contributions?.[id] ?? objects?.[id]?.power ?? 0;
     return sum + (clampNegative ? Math.max(power, 0) : power);
   }, 0);
 }

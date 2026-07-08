@@ -57,7 +57,7 @@ export type ServerDraftAdapterEvent =
   | { type: "timerSync"; remainingMs: number }
   | { type: "draftOver"; standings: StandingEntry[] }
   | { type: "draftActionRejected"; reason: string }
-  | { type: "gameStateUpdated"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult }
+  | { type: "gameStateUpdated"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
   | { type: "actionPendingChanged"; pending: boolean }
   | { type: "disconnected" }
@@ -607,6 +607,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             state: this.gameState,
             events: data.events,
             legalResult: this._legalActions,
+            logEntries: data.log_entries,
           });
         }
         break;
