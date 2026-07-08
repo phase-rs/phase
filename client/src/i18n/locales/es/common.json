@@ -35,11 +35,25 @@
     "off": "Desactivado"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Vista",
+      "tools": "Herramientas",
+      "game": "Partida"
+    },
+    "reportCard": "Informar de una carta",
     "menu": "Menú de la partida",
     "sandboxTools": "Herramientas de sandbox",
     "sandboxToolsTitle": "Herramientas de sandbox — configura cualquier estado del tablero (`)",
+    "openSandboxTools": "Abrir herramientas de sandbox",
+    "clickModeButton": "Botón de modo clic",
+    "shown": "Visible",
+    "hidden": "Oculto",
     "resume": "Reanudar",
     "settings": "Ajustes",
+    "boardLayoutSplit": "Dividido",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Cambiar a vista de mesa dividida",
+    "switchToLegacyView": "Cambiar a vista legacy enfocada",
     "helpShortcuts": "Ayuda y atajos",
     "showAiHand": "Mostrar la mano de la IA",
     "hideAiHand": "Ocultar la mano de la IA",
@@ -202,6 +216,12 @@
       "message": "Configura cualquier estado del tablero con <tools>Herramientas de sandbox</tools> — añade cartas y fichas, cambia vidas y contadores, copia permanentes o salta fases. Ábrelo en cualquier momento con la tecla <key>`</key>.",
       "dismiss": "Descartar",
       "open": "Abrir Herramientas de sandbox"
+    },
+    "reportCardNudge": {
+      "message": "¿Una carta se muestra o juega mal? Toca la <flag>bandera de reporte</flag> arriba a la izquierda para reportarla y poder corregirla.",
+      "dismiss": "Descartar",
+      "open": "Reportar carta",
+      "debugPrompt": "¿Una carta se muestra o juega mal? Repórtala para que podamos corregirla."
     }
   },
   "splash": {
@@ -228,5 +248,16 @@
     "settings": "Ajustes",
     "languageSettings": "Idioma ({{lang}}) — abrir ajustes",
     "languageTitle": "Idioma: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Algo salió mal",
+    "body": "La aplicación encontró un error inesperado y no puede continuar en esta pantalla. Recargar suele solucionarlo.",
+    "reload": "Recargar"
+  },
+  "actionError": {
+    "title": "{{action}} falló",
+    "skipTarget": "Omitir objetivo",
+    "genericAction": "Acción",
+    "unknownEngineError": "Error desconocido del motor"
   }
 }

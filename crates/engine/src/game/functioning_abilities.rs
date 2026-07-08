@@ -107,6 +107,30 @@ pub fn trigger_opts_in_to_command_zone(def: &TriggerDefinition) -> bool {
     def.trigger_zones.contains(&Zone::Command)
 }
 
+/// CR 113.6b + CR 114.4 + CR 311.2 / CR 312.2: object-level command-zone
+/// static-effect-source admission. True when this command-zone object
+/// contributes at least one static that functions from the command zone: an
+/// emblem (CR 114.3/114.4), a face-up conspiracy (CR 905.4), OR any non-emblem
+/// object (e.g. an ACTIVE PLANE / phenomenon, which remains in and functions
+/// from the command zone per CR 311.2 / CR 312.2) carrying a static that opts
+/// in via `active_zones.contains(Command)` (CR 113.6b). This is the single
+/// authority consulted by every continuous-effect source gather (the
+/// static-source index and the layer gather + its fallback), so a plane's
+/// continuous statics (anthems, keyword grants) are visible exactly like an
+/// emblem's. `non_emblem_command_zone_static_functions` handles the face-up
+/// conspiracy sub-case internally, so emblems, conspiracies, and planes all
+/// route through one predicate.
+pub fn object_sources_static_from_command_zone(obj: &GameObject) -> bool {
+    if obj.zone != Zone::Command {
+        return false;
+    }
+    obj.is_emblem
+        || obj
+            .static_definitions
+            .iter_all()
+            .any(|def| non_emblem_command_zone_static_functions(obj, def))
+}
+
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
 /// the CR 702.26b / CR 114.4 gate and the per-static CR 604.1 / CR 613.1
 /// `condition` gate applied.
@@ -382,6 +406,42 @@ mod tests {
             format!("TestObj{id}"),
             zone,
         )
+    }
+
+    /// CR 113.6b + CR 311.2: a non-emblem command-zone object (active plane) is
+    /// admitted as a static-effect source ONLY when it carries a static that
+    /// opts into the command zone via `active_zones.contains(Command)`. A
+    /// battlefield-default (empty `active_zones`) static on such an object is NOT
+    /// admitted — validates the admission helper, the level synthesis stamps at.
+    #[test]
+    fn object_sources_static_from_command_zone_requires_command_optin() {
+        // Command-zone object with a Command-stamped continuous static → admitted.
+        let mut plane = make_obj(1, Zone::Command);
+        plane.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Command])]
+                .into();
+        assert!(object_sources_static_from_command_zone(&plane));
+
+        // Same object, but the static defaults to the battlefield (empty
+        // active_zones) → NOT admitted (a stray battlefield static can't leak).
+        let mut battlefield_default = make_obj(2, Zone::Command);
+        battlefield_default.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous)].into();
+        assert!(!object_sources_static_from_command_zone(
+            &battlefield_default
+        ));
+
+        // An emblem in the command zone is always admitted.
+        let mut emblem = make_obj(3, Zone::Command);
+        emblem.is_emblem = true;
+        assert!(object_sources_static_from_command_zone(&emblem));
+
+        // A battlefield object is never admitted through THIS command-zone gate.
+        let mut bf = make_obj(4, Zone::Battlefield);
+        bf.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Command])]
+                .into();
+        assert!(!object_sources_static_from_command_zone(&bf));
     }
 
     #[test]

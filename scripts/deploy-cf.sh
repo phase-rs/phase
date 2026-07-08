@@ -25,7 +25,7 @@ touch "$DEPLOY_CACHE"
 
 # --- Generate lightweight coverage summary for menu page ---
 echo "Generating coverage summary..."
-jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' \
+jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, token_coverage}' \
   client/public/coverage-data.json > client/public/coverage-summary.json
 
 # --- R2 uploads (run in background, parallel to WASM build) ---

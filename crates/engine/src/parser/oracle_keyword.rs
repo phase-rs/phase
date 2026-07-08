@@ -567,8 +567,11 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
 
     let filters: Vec<TargetFilter> = legs
         .into_iter()
-        .map(|tf| {
-            let mut f = TypedFilter::new(tf);
+        .map(|leg| {
+            let mut f = TypedFilter::new(leg.type_filter);
+            if !leg.properties.is_empty() {
+                f = f.properties(leg.properties);
+            }
             if let Some(ref c) = controller {
                 f = f.controller(c.clone());
             }
@@ -4105,6 +4108,41 @@ mod tests {
             };
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
+    }
+
+    /// CR 205.4a + CR 702.5a: Supertype adjectives belong to the Enchant list
+    /// leg they prefix; they must not be dropped or applied to sibling legs.
+    #[test]
+    fn extract_enchant_multi_type_preserves_per_leg_supertype() {
+        use crate::types::card_type::Supertype;
+
+        let kw = super::try_parse_multi_type_enchant("Enchant legendary creature or planeswalker")
+            .expect("multi-type with qualified leg should parse");
+        let Keyword::Enchant(TargetFilter::Or { filters }) = kw else {
+            panic!("expected Or");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(first) = &filters[0] else {
+            panic!("expected first Typed leg");
+        };
+        assert_eq!(first.type_filters, vec![TypeFilter::Creature]);
+        assert!(first.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Legendary
+        }));
+
+        let TargetFilter::Typed(second) = &filters[1] else {
+            panic!("expected second Typed leg");
+        };
+        assert_eq!(second.type_filters, vec![TypeFilter::Planeswalker]);
+        assert!(
+            !second
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::HasSupertype { .. })),
+            "supertype leaked to sibling leg: {:?}",
+            second.properties
+        );
     }
 
     /// CR 702.5a: "Enchant creature or Food" (Sugar Coat, BLB) — Food is an

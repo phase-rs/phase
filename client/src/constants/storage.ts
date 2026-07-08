@@ -8,6 +8,13 @@ export const STORAGE_KEY_PREFIX = "phase-deck:";
 /** Key for the currently selected/active deck name in localStorage */
 export const ACTIVE_DECK_KEY = "phase-active-deck";
 
+/** Sentinel stored as the active deck when setup should randomize at game start. */
+export const RANDOM_DECK_SELECTION = "__phase_random_deck__";
+
+export function isRandomDeckSelection(deckName: string | null | undefined): deckName is typeof RANDOM_DECK_SELECTION {
+  return deckName === RANDOM_DECK_SELECTION;
+}
+
 /** Prefix for per-game saved state. Full key: `${GAME_KEY_PREFIX}${gameId}` */
 export const GAME_KEY_PREFIX = "phase-game:";
 
@@ -133,6 +140,7 @@ export function stampDeckMeta(deckName: string, addedAt?: number): void {
 
 /** Update the lastPlayedAt timestamp for a deck. Call when starting a game. */
 export function touchDeckPlayed(deckName: string): void {
+  if (isRandomDeckSelection(deckName)) return;
   const store = loadMetadataStore();
   const existing = store[deckName];
   // Spread the existing entry so folder/star membership survives a play.
@@ -299,6 +307,7 @@ export function deleteFolder(id: string): void {
  * well-formed even if the migration hasn't run yet.
  */
 export function loadSavedDeck(deckName: string): ParsedDeck | null {
+  if (isRandomDeckSelection(deckName)) return null;
   const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
   if (!raw) return null;
   try {
@@ -321,6 +330,7 @@ export function loadSavedDeck(deckName: string): ParsedDeck | null {
  * an invalid value.
  */
 export function loadSavedDeckBracket(deckName: string): CommanderBracket | null {
+  if (isRandomDeckSelection(deckName)) return null;
   const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
   if (!raw) return null;
   try {

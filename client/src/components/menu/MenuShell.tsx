@@ -126,7 +126,7 @@ export function MenuPanel({ children, className }: MenuPanelProps) {
   return (
     <div
       className={[
-        "rounded-[22px] border border-white/10 bg-black/18 p-5 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md",
+        "surface-card rounded-[10px] border border-white/10 p-5 shadow-[0_12px_32px_rgba(0,0,0,0.28)] backdrop-blur-md",
         className,
       ].filter(Boolean).join(" ")}
     >

@@ -390,6 +390,7 @@ fn real_encore_card_synthesizes_encore_ability() {
             scryfall_id: Some("coastline-marauders-face".to_string()),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     };
 
     let face = crate::database::synthesis::build_oracle_face(&atomic, None);

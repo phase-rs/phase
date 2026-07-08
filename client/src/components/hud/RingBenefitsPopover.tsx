@@ -57,7 +57,7 @@ export function RingBenefitsPopover({ anchorEl, level, bearerName }: Props) {
 
   return createPortal(
     <div
-      className="pointer-events-none fixed z-50"
+      className="pointer-events-none fixed z-[130]"
       style={{ left: pos.left, top: pos.top, transform }}
       aria-hidden
     >

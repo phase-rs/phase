@@ -35,11 +35,25 @@
     "off": "Désactivé"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Vue",
+      "tools": "Outils",
+      "game": "Partie"
+    },
+    "reportCard": "Signaler une carte",
     "menu": "Menu de la partie",
     "sandboxTools": "Outils bac à sable",
     "sandboxToolsTitle": "Outils bac à sable — configurez n'importe quel état du plateau (`)",
+    "openSandboxTools": "Ouvrir les outils bac à sable",
+    "clickModeButton": "Bouton mode clic",
+    "shown": "Affiché",
+    "hidden": "Masqué",
     "resume": "Reprendre",
     "settings": "Paramètres",
+    "boardLayoutSplit": "Divisé",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Passer à la vue table divisée",
+    "switchToLegacyView": "Passer à la vue legacy focalisée",
     "helpShortcuts": "Aide et raccourcis",
     "showAiHand": "Afficher la main de l'IA",
     "hideAiHand": "Masquer la main de l'IA",
@@ -202,6 +216,12 @@
       "message": "Configurez n'importe quel état du plateau avec les <tools>Outils bac à sable</tools> — ajoutez des cartes et des jetons, modifiez les points de vie et les marqueurs, copiez des permanents ou changez de phase. Ouvrez-les à tout moment avec la touche <key>`</key>.",
       "dismiss": "Ignorer",
       "open": "Ouvrir les outils bac à sable"
+    },
+    "reportCardNudge": {
+      "message": "Une carte s'affiche ou se joue mal ? Touchez le <flag>drapeau de signalement</flag> en haut à gauche pour la signaler afin que nous la corrigions.",
+      "dismiss": "Ignorer",
+      "open": "Signaler une carte",
+      "debugPrompt": "Une carte s'affiche ou se joue mal ? Signalez-la pour que nous la corrigions."
     }
   },
   "splash": {
@@ -228,5 +248,16 @@
     "settings": "Paramètres",
     "languageSettings": "Langue ({{lang}}) — ouvrir les paramètres",
     "languageTitle": "Langue : {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Une erreur est survenue",
+    "body": "L'application a rencontré une erreur inattendue et ne peut pas continuer sur cet écran. Recharger règle généralement le problème.",
+    "reload": "Recharger"
+  },
+  "actionError": {
+    "title": "Échec de {{action}}",
+    "skipTarget": "Ignorer la cible",
+    "genericAction": "Action",
+    "unknownEngineError": "Erreur moteur inconnue"
   }
 }

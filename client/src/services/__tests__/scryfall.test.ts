@@ -218,6 +218,84 @@ describe("fetchCardData", () => {
   });
 });
 
+describe("fetchCardData — combined multi-face names", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // A two-face card keyed the way the export does it: by front-face name and by
+  // the spaced display name, but NOT by the glued combined form.
+  function makeDfcDataMap(): Response {
+    const dfc = {
+      oracle_id: "peter-oracle",
+      face_names: ["peter parker", "the amazing spider-man"],
+      faces: [
+        { normal: "https://img.example/peter-front.jpg", art_crop: "https://img.example/peter-front-art.jpg" },
+        { normal: "https://img.example/peter-back.jpg", art_crop: "https://img.example/peter-back-art.jpg" },
+      ],
+      layout: "transform",
+      name: "Peter Parker // The Amazing Spider-Man",
+      mana_cost: "{1}{W}",
+      cmc: 2,
+      type_line: "Legendary Creature — Human Hero",
+      colors: ["W"],
+      color_identity: ["W"],
+      keywords: [],
+    };
+    const map: Record<string, unknown> = {
+      "peter parker": dfc,
+      "peter parker // the amazing spider-man": dfc,
+      // A single-faced card whose own printed name contains "//" (issue #4790).
+      "sp//dr, piloted by peni": {
+        oracle_id: "spdr-oracle",
+        face_names: ["sp//dr, piloted by peni"],
+        faces: [{ normal: "https://img.example/spdr.jpg", art_crop: "https://img.example/spdr-art.jpg" }],
+        name: "SP//dr, Piloted by Peni",
+        mana_cost: "{3}{W}{U}",
+        cmc: 5,
+        type_line: "Legendary Artifact Creature — Spider Hero",
+        colors: ["W", "U"],
+        color_identity: ["W", "U"],
+        keywords: [],
+      },
+    };
+    return new Response(JSON.stringify(map), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("resolves a hand-typed glued double-faced name via the front face", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Peter Parker//The Amazing Spider-Man");
+
+    expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves the canonical spaced double-faced name directly", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Peter Parker // The Amazing Spider-Man");
+
+    expect(card.name).toBe("Peter Parker // The Amazing Spider-Man");
+  });
+
+  it("does not mis-split a single-faced card whose name contains \"//\" (issue #4790)", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeDfcDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("SP//dr, Piloted by Peni");
+
+    // Its own name is a primary key, so the exact match wins before any split.
+    expect(card.name).toBe("SP//dr, Piloted by Peni");
+    expect(card.type_line).toContain("Spider Hero");
+  });
+});
+
 describe("fetchCardImageUrl", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -235,6 +313,103 @@ describe("fetchCardImageUrl", () => {
 
     expect(url).toBe("https://img.example/Lightning%20Bolt.jpg");
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to a real local printing when canonical image data is Scryfall's soon placeholder", async () => {
+    const oracleId = "war-room-oracle";
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            [oracleId]: {
+              oracle_id: oracleId,
+              face_names: ["war room"],
+              faces: [
+                {
+                  normal: "https://errors.scryfall.com/soon.jpg",
+                  art_crop: "https://errors.scryfall.com/soon.jpg",
+                },
+              ],
+              layout: "normal",
+              name: "War Room",
+              mana_cost: "",
+              cmc: 0,
+              type_line: "Land",
+              colors: [],
+              color_identity: [],
+              keywords: [],
+            },
+            "war room": {
+              oracle_id: oracleId,
+              face_names: ["war room"],
+              faces: [
+                {
+                  normal: "https://errors.scryfall.com/soon.jpg",
+                  art_crop: "https://errors.scryfall.com/soon.jpg",
+                },
+              ],
+              layout: "normal",
+              name: "War Room",
+              mana_cost: "",
+              cmc: 0,
+              type_line: "Land",
+              colors: [],
+              color_identity: [],
+              keywords: [],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            [oracleId]: [
+              {
+                id: "future-placeholder",
+                set: "soc",
+                set_name: "Secrets of Strixhaven Commander",
+                collector_number: "422",
+                released_at: "2026-04-24",
+                border_color: "black",
+                frame_effects: [],
+                full_art: false,
+                faces: [
+                  {
+                    normal: "https://errors.scryfall.com/soon.jpg",
+                    art_crop: "https://errors.scryfall.com/soon.jpg",
+                  },
+                ],
+              },
+              {
+                id: "real-printing",
+                set: "cmm",
+                set_name: "Commander Masters",
+                collector_number: "1054",
+                released_at: "2023-08-04",
+                border_color: "black",
+                frame_effects: [],
+                full_art: false,
+                faces: [
+                  {
+                    normal: "https://cards.scryfall.io/normal/front/w/r/war-room.jpg",
+                    art_crop: "https://cards.scryfall.io/art_crop/front/w/r/war-room.jpg",
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+    const { fetchCardImageAssetByOracleId, fetchCardImageUrl } = await loadScryfallModule();
+    const url = await fetchCardImageUrl("War Room", 0, "normal");
+    const oracleAsset = await fetchCardImageAssetByOracleId(oracleId, "War Room", "normal");
+
+    expect(url).toBe("https://cards.scryfall.io/normal/front/w/r/war-room.jpg");
+    expect(oracleAsset.src).toBe("https://cards.scryfall.io/normal/front/w/r/war-room.jpg");
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   it("throws when card image is not in local data (no API fallback)", async () => {

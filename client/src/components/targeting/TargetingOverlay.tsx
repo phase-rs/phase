@@ -16,6 +16,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import type { GameEvent, GameObject } from "../../adapter/types.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
@@ -175,7 +176,7 @@ export function TargetingOverlay() {
   return (
     <AnimatePresence>
       <motion.div
-        className="pointer-events-none fixed inset-0 z-40"
+        className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.dialogHost}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}

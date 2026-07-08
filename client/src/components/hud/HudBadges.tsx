@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next";
 
 import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
+import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import type {
   DungeonId,
@@ -168,7 +169,10 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
             aria-hidden
             className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-lime-950/28 blur-[1px]"
           />
-          <span className="relative">{value}</span>
+          <span className="relative inline-flex items-center gap-px">
+            <span aria-hidden>☠</span>
+            {value}
+          </span>
         </span>
       </BadgeTip>
     );
@@ -186,7 +190,10 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
             aria-hidden
             className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.95)_0_9%,transparent_11%),radial-gradient(circle_at_68%_30%,rgba(207,250,254,0.9)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(8,145,178,0.7)_0_11%,transparent_13%),linear-gradient(135deg,#ecfeff_0%,#67e8f9_36%,#0891b2_72%,#083344_100%)]"
           />
-          <span className="relative">⚡{value}</span>
+          <span className="relative inline-flex items-center gap-px">
+            <ManaFontIcon iconClass="ms-energy" fallbackText="⚡" />
+            {value}
+          </span>
         </span>
       </BadgeTip>
     );
@@ -238,7 +245,10 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
             aria-hidden
             className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/28 blur-[1px]"
           />
-          <span className="relative">☢{value}</span>
+          <span className="relative inline-flex items-center gap-px">
+            <ManaFontIcon iconClass="ms-counter-rad" fallbackText="☢" />
+            {value}
+          </span>
         </span>
       </BadgeTip>
     );

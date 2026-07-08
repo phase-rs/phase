@@ -221,6 +221,11 @@ pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
 /// CR 702.188a + CR 604.1: honor web-slinging GRANTED by a CastWithKeyword static
 /// (Amazing Spider-Man), not only printed keywords. effective_spell_keywords merges
 /// printed obj.keywords with statically-granted keywords for `caster`.
+///
+/// CR 702.102b: CORRECTNESS-NEUTRAL — web-slinging (CR 702.188a) functions only on
+/// creature spells and is never carried by or value-key-granted to an
+/// instant/sorcery split card, so a fused split cast's combined-vs-front projection
+/// can never change this read. Left on the non-fuse-aware collector deliberately.
 pub fn effective_web_slinging_cost(
     state: &GameState,
     caster: PlayerId,
@@ -306,7 +311,10 @@ pub(crate) fn resolve_keyword_mana_cost(
         ManaCost::SelfManaValue => state
             .objects
             .get(&object_id)
-            .map(|obj| ManaCost::generic(obj.mana_cost.mana_value()))
+            // CR 202.3d + CR 709.4b: for a split card off the stack (e.g. an
+            // Encore/foretell cost bound to "its mana value" from the graveyard/
+            // exile), the mana value is the combined value of both halves.
+            .map(|obj| ManaCost::generic(obj.effective_mana_value()))
             .unwrap_or(ManaCost::NoCost),
         // CR 601.2f: "its mana cost reduced by {N}" (Dream Devourer foretell,
         // Aminatou miracle) — reduce only the generic component, floor at {0}.
@@ -368,10 +376,13 @@ pub(crate) fn concretize_encore_mana_value_in_ability_cost(
 ) {
     match cost {
         AbilityCost::Mana { cost: mana } if cost_has_x(mana) => {
+            // CR 202.3d + CR 709.4b + CR 702.141a: Encore is activated from the
+            // graveyard (off the stack), so a split card binds X to its combined
+            // mana value.
             let mana_value = state
                 .objects
                 .get(&source_id)
-                .map(|obj| obj.mana_cost.mana_value())
+                .map(|obj| obj.effective_mana_value())
                 .unwrap_or(0);
             mana.concretize_x(mana_value);
         }
@@ -466,14 +477,18 @@ pub fn source_matches_protection_target(
     protected: &GameObject,
     source: &GameObject,
 ) -> bool {
+    // CR 709.4b: A split source off the stack has the combined colors of both
+    // halves; on the stack (the usual protection-source case) it is the chosen
+    // half. `effective_colors` no-ops for single-face and on-stack sources.
+    let source_colors = source.effective_colors();
     match protection {
-        ProtectionTarget::Color(color) => source.color.contains(color),
+        ProtectionTarget::Color(color) => source_colors.contains(color),
         ProtectionTarget::CardType(type_name) => source_matches_card_type(source, type_name),
         ProtectionTarget::Quality(quality) => source_matches_quality(source, quality),
-        ProtectionTarget::Multicolored => source.color.len() > 1,
+        ProtectionTarget::Multicolored => source_colors.len() > 1,
         ProtectionTarget::ChosenColor => protected
             .chosen_color()
-            .is_some_and(|color| source.color.contains(&color)),
+            .is_some_and(|color| source_colors.contains(&color)),
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
         // This arm only fires for objects that themselves carry the choice
@@ -544,9 +559,16 @@ fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str
 }
 
 pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
+    // CR 709.4b: combined colors off the stack for a split source; no-op for
+    // single-face and on-stack sources.
+    let color_count = source.effective_colors().len();
     match quality {
-        "monocolored" => source.color.len() == 1,
-        "multicolored" => source.color.len() > 1,
+        // CR 105.2c: An object with no colors is colorless. Uses the split-aware
+        // combined color count so an off-stack split card is classified by both
+        // halves (CR 709.4b).
+        "colorless" => color_count == 0,
+        "monocolored" => color_count == 1,
+        "multicolored" => color_count > 1,
         _ => false,
     }
 }
@@ -573,7 +595,8 @@ fn source_matches_protection_filter(
             let QuantityExpr::Fixed { value: threshold } = value else {
                 return false;
             };
-            comparator.evaluate(source.mana_cost.mana_value() as i32, *threshold)
+            // CR 202.3d + CR 709.4b: combined MV off the stack for a split source.
+            comparator.evaluate(source.effective_mana_value() as i32, *threshold)
         }
         // Future: other intrinsic properties (HasColor, PowerLE/GE, etc.)
         // can be added here as the class of filter-based protection grows.
@@ -689,11 +712,12 @@ pub fn activate_ninjutsu(
                 .ok_or("Specified creature is not an attacker")?
                 .clone();
 
-            let is_blocked = combat
-                .blocker_assignments
-                .get(&creature_to_return)
-                .is_some_and(|blockers| !blockers.is_empty());
-            if is_blocked {
+            // CR 702.49a: ninjutsu returns an UNBLOCKED attacking creature.
+            // CR 509.1h: "blocked" is the attacker's `blocked` flag — a creature
+            // made blocked by an effect (with no blocker assignments) is blocked
+            // and thus ineligible, and one stays blocked even if its blockers are
+            // gone. Reading the flag (not `blocker_assignments`) closes both gaps.
+            if attacker_info.blocked {
                 return Err("Attacker is blocked".to_string());
             }
 
@@ -2280,7 +2304,9 @@ mod tests {
     fn ninjutsu_fails_if_attacker_is_blocked() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
 
-        // Add a blocker assignment
+        // CR 509.1h: a declared block sets the attacker's `blocked` flag (this is
+        // what `place_blocking` / blocker declaration does in production). Ninjutsu
+        // reads that flag, so mark the attacker blocked and record the blocker.
         let blocker_id = create_object(
             &mut state,
             CardId(3),
@@ -2288,16 +2314,65 @@ mod tests {
             "Wall".to_string(),
             crate::types::zones::Zone::Battlefield,
         );
-        state
-            .combat
-            .as_mut()
-            .unwrap()
-            .blocker_assignments
-            .insert(attacker_id, vec![blocker_id]);
+        {
+            let combat = state.combat.as_mut().unwrap();
+            combat
+                .blocker_assignments
+                .insert(attacker_id, vec![blocker_id]);
+            combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == attacker_id)
+                .unwrap()
+                .blocked = true;
+        }
 
         let mut events = Vec::new();
         let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail when attacker is blocked");
+    }
+
+    #[test]
+    fn ninjutsu_fails_if_attacker_blocked_by_effect_without_assignments() {
+        // CR 702.49a + CR 509.1h: ninjutsu returns an UNBLOCKED attacker. An
+        // attacker made blocked purely by an effect (blocked flag set, NO
+        // blocker_assignments) is ineligible. This fails if keywords.rs reverts to
+        // the old `blocker_assignments`-non-empty check.
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+        crate::game::combat::mark_attacker_blocked(&mut state, attacker_id);
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .blocker_assignments
+                .is_empty(),
+            "reach-guard: an effect-block has no blocker assignments"
+        );
+
+        let mut events = Vec::new();
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
+        assert!(
+            result.is_err(),
+            "ninjutsu must reject an effect-blocked attacker (CR 702.49a + 509.1h)"
+        );
+
+        // Reach-guard: the SAME scenario with an unblocked attacker succeeds,
+        // proving the rejection above is caused by the blocked flag, not an
+        // unrelated failure.
+        let (mut ok_state, ok_attacker, ok_ninja) = setup_ninjutsu_scenario();
+        let mut ok_events = Vec::new();
+        let ok = activate_ninjutsu(
+            &mut ok_state,
+            PlayerId(0),
+            ok_ninja,
+            ok_attacker,
+            &mut ok_events,
+        );
+        assert!(
+            ok.is_ok(),
+            "unblocked attacker must be ninjutsu-eligible: {ok:?}"
+        );
     }
 
     #[test]
@@ -2406,6 +2481,51 @@ mod tests {
                     } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
                 ))),
             "Ninjutsu should be grouped under the hand object for frontend playability"
+        );
+    }
+
+    #[test]
+    fn source_matches_quality_colorless_tracks_zero_color_sources() {
+        let mut colorless = make_obj();
+        let mut white = make_obj();
+        white.color.push(ManaColor::White);
+
+        assert!(
+            source_matches_quality(&colorless, "colorless"),
+            "objects with no colors must satisfy the colorless quality"
+        );
+        assert!(
+            !source_matches_quality(&white, "colorless"),
+            "colored objects must not satisfy the colorless quality"
+        );
+
+        colorless.color.push(ManaColor::Blue);
+        assert!(
+            !source_matches_quality(&colorless, "colorless"),
+            "once an object gains a color, the colorless quality must stop matching"
+        );
+    }
+
+    #[test]
+    fn protection_from_colorless_prevents_only_colorless_sources() {
+        let mut protected = make_obj();
+        protected
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Quality(
+                "colorless".to_string(),
+            )));
+
+        let colorless_source = make_obj();
+        let mut green_source = make_obj();
+        green_source.color.push(ManaColor::Green);
+
+        assert!(
+            protection_prevents_from(&protected, &colorless_source),
+            "protection from colorless must stop a source with no colors"
+        );
+        assert!(
+            !protection_prevents_from(&protected, &green_source),
+            "protection from colorless must not stop a colored source"
         );
     }
 

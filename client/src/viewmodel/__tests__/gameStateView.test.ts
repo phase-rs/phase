@@ -282,6 +282,7 @@ describe("getBoardChoiceView", () => {
         vehicle_id: 30,
         crew_power: 4,
         eligible_creatures: [10, 11],
+        contributions: [2, 3],
       },
     });
     const objects = buildObjectMap(
@@ -297,6 +298,54 @@ describe("getBoardChoiceView", () => {
     expect(buildBoardChoiceAction(choice, [10, 11])).toEqual({
       type: "CrewVehicle",
       data: { vehicle_id: 30, creature_ids: [10, 11] },
+    });
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
+  });
+
+  // Regression: a Pilot token (Shorikai) has printed power 1 but crews "as though
+  // its power were 2 greater" (contribution 3). The UI must gate on the engine's
+  // contribution, not raw power, so a lone Pilot satisfies Crew 3. Summing raw
+  // power gave 1 < 3 and wrongly blocked the crew ("crews for just 1").
+  it("gates CrewVehicle by the engine contribution, not printed power", () => {
+    const choice = getBoardChoiceView({
+      type: "CrewVehicle",
+      data: {
+        player: 0,
+        vehicle_id: 30,
+        crew_power: 3,
+        eligible_creatures: [10],
+        contributions: [3],
+      },
+    });
+    const objects = buildObjectMap(buildGameObject({ id: 10, power: 1 }));
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    // Printed power is 1, but the engine says this creature contributes 3.
+    expect(boardChoiceSelectedPower(choice, [10], objects)).toBe(3);
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(true);
+  });
+
+  it("gates SaddleMount by the engine contribution, not printed power", () => {
+    const choice = getBoardChoiceView({
+      type: "SaddleMount",
+      data: {
+        player: 0,
+        mount_id: 40,
+        saddle_power: 3,
+        eligible_creatures: [10],
+        contributions: [3],
+      },
+    });
+    const objects = buildObjectMap(buildGameObject({ id: 10, power: 1 }));
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(boardChoiceSelectedPower(choice, [10], objects)).toBe(3);
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(true);
+    expect(buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "SaddleMount",
+      data: { mount_id: 40, creature_ids: [10] },
     });
   });
 

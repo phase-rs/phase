@@ -12,6 +12,7 @@ import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { type AttackerStack, evenSplit, groupAttackers } from "../../utils/combat.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { PeekTab } from "../modal/DialogShell.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
 /** Internal assignment map: every attacker maps to its chosen target, or `null`
  *  while it sits in the Unassigned bucket. */
@@ -156,10 +157,10 @@ export function AttackTargetPicker({
     mutate((next) => spreadStackEvenly(next, stack, sortedTargets));
   }
 
-  /** Spread every stack evenly across every target. */
+  /** Spread every selected attacker evenly across every target. */
   function spreadAll() {
     mutate((next) => {
-      for (const stack of stacks) spreadStackEvenly(next, stack, sortedTargets);
+      spreadAttackersEvenly(next, stacks.flatMap((stack) => stack.ids), sortedTargets);
     });
   }
 
@@ -607,12 +608,21 @@ function highestOnTarget(stack: AttackerStack, target: AttackTarget, map: Assign
  * in display order, with the remainder front-loaded by {@link evenSplit}.
  */
 function spreadStackEvenly(map: AssignmentMap, stack: AttackerStack, targets: AttackTarget[]): void {
+  spreadAttackersEvenly(map, stack.ids, targets);
+}
+
+/**
+ * Redistribute attackers evenly across `targets` (overrides prior assignments).
+ * Attackers are walked in stable UI order and handed to targets in display
+ * order, with the remainder front-loaded by {@link evenSplit}.
+ */
+function spreadAttackersEvenly(map: AssignmentMap, attackerIds: ObjectId[], targets: AttackTarget[]): void {
   if (targets.length === 0) return;
-  const counts = evenSplit(stack.count, targets.length);
+  const counts = evenSplit(attackerIds.length, targets.length);
   let member = 0;
   targets.forEach((target, ti) => {
     for (let k = 0; k < counts[ti]; k++) {
-      map.set(stack.ids[member], target);
+      map.set(attackerIds[member], target);
       member += 1;
     }
   });
@@ -702,9 +712,11 @@ function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
       {counters.length > 0 && (
         <div className="mt-0.5 flex flex-wrap gap-1">
           {counters.map(({ type, count }) => (
-            <span key={type} className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
-              {formatCounterType(type)} x{count}
-            </span>
+            <CounterTooltip key={type} type={type} count={count}>
+              <span className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
+                {formatCounterType(type)} x{count}
+              </span>
+            </CounterTooltip>
           ))}
         </div>
       )}

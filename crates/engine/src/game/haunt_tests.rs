@@ -507,6 +507,7 @@ fn atomic(name: &str, types: &[&str], type_line: &str, oracle: &str) -> AtomicCa
             scryfall_id: Some(format!("{name}-face")),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     }
 }
 

@@ -114,7 +114,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
   it("rejects stale setup wire protocol versions", () => {
     expect(() => validateMessage({
       type: "game_setup",
-      wireProtocolVersion: 3,
+      wireProtocolVersion: 4,
       assignedPlayerId: 1,
       playerToken: "token-123",
       state: buildGameState(),

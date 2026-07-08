@@ -74,8 +74,8 @@ use super::oracle_modal::{
     strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
-    find_copy_verb_present, lower_as_enters_becomes_choice_modal, lower_replacement_ir,
-    parse_replacement_line,
+    find_copy_verb_present, lower_as_enters_becomes_choice_modal,
+    lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -96,7 +96,7 @@ use super::oracle_static::{
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, split_same_is_true_static_tail,
-    strip_reminder_text, TextPair,
+    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 
 /// Collected parsed abilities from Oracle text.
@@ -425,6 +425,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
                 DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::Upkeep,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 tag("at the beginning of your first upkeep, "),
             ),
@@ -793,6 +794,27 @@ pub(crate) fn parse_graveyard_keyword_continuation(
             }
             Some(Keyword::Encore(ManaCost::SelfManaCost))
         }
+        GrantedCastKeywordKind::Embalm => {
+            // CR 702.128a: "Its embalm cost is equal to its mana cost."
+            // (Naktamun). Same shape as scavenge/encore.
+            let (_, rest) = nom_on_lower(text, &lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("its embalm cost is equal to "),
+                        tag("the embalm cost is equal to "),
+                    )),
+                )
+                .parse(i)
+            })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
+            if !continuation_fully_consumed(rest) {
+                return None;
+            }
+            Some(Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                ManaCost::SelfManaCost,
+            )))
+        }
         GrantedCastKeywordKind::Foretell => {
             // CR 702.143a + CR 601.2f: "Its foretell cost is equal to its mana
             // cost reduced by {N}." (Dream Devourer, reduced by {2}). The bare
@@ -1105,6 +1127,10 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::EnteredThisTurn { filter } => target_filter_uses_filter_prop(filter, pred),
         QuantityRef::DistinctCardTypes {
             source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        }
+        | QuantityRef::DistinctSubtypes {
+            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+            ..
         } => target_filter_uses_filter_prop(filter, pred),
         _ => false,
     }
@@ -2321,7 +2347,145 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
     // trigger stays registered as-is (its TrackedSet target gracefully resolves
     // to nothing when the exile link has already returned the card).
     synthesize_etb_exile_ltb_return_pair(&mut result.triggers);
+    bind_active_player_punisher_target(&mut result.abilities);
     result
+}
+
+/// CR 102.1 + CR 603.7c + CR 608.2c: Bind the delayed punisher's "that player
+/// controls" anaphor to the active player named by the sibling mass-attack
+/// coerce clause (Siren's Call). The two lines parse to two abilities: a
+/// mass-`MustAttack` `GenericEffect` over an `ActivePlayer` subject, and a
+/// sibling delayed `DestroyAll` over a non-Wall creature filter carrying
+/// `Not(AttackedThisTurn)` whose controller parsed to the default `You`. When
+/// BOTH siblings co-exist in one card's abilities (frame-local), rewrite the
+/// DestroyAll target's controller to `ActivePlayer`. A standalone "destroy all
+/// creatures you control" with no coerce sibling is untouched.
+fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
+    use crate::parser::oracle_effect::{
+        set_target_filter_controller_ref, target_filter_controller_ref,
+    };
+
+    // Detect the mass-MustAttack coerce clause over an ActivePlayer subject.
+    let ability_has_active_player_coerce = |a: &AbilityDefinition| {
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = a.effect.as_ref()
+        else {
+            return false;
+        };
+        static_abilities.iter().any(|st| {
+            matches!(st.mode, StaticMode::MustAttack)
+                && st.affected.as_ref().and_then(target_filter_controller_ref)
+                    == Some(ControllerRef::ActivePlayer)
+        })
+    };
+    let has_active_player_coerce = abilities.iter().any(ability_has_active_player_coerce);
+    if !has_active_player_coerce {
+        return;
+    }
+
+    for ability in abilities.iter_mut() {
+        // Siren's Call route: the coerce and the delayed DestroyAll are SEPARATE
+        // top-level abilities. Rewrite the delayed punisher whose target carries
+        // `Not(AttackedThisTurn)` and defaulted to `controller: You`.
+        if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_mut() {
+            let inner = effect.as_mut();
+            if let Effect::DestroyAll { target, .. } = inner.effect.as_mut() {
+                if target_filter_has_not_attacked_this_turn(target)
+                    && target_filter_controller_ref(target) == Some(ControllerRef::You)
+                {
+                    set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
+
+                    // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this
+                    // effect for each creature the player didn't control
+                    // continuously since the beginning of the turn." Attach the
+                    // continuity predicate to the destroyed set and CONSUME the
+                    // redundant `Unimplemented{"ignore"}` sibling, so the destroyed
+                    // set = non-Wall ∧ ActivePlayer ∧ Not(AttackedThisTurn) ∧
+                    // ControlledContinuouslySinceTurnBegan.
+                    if sub_ability_is_continuity_exemption(inner.sub_ability.as_deref()) {
+                        add_filter_prop_to_typed(
+                            target,
+                            FilterProp::ControlledContinuouslySinceTurnBegan,
+                        );
+                        inner.sub_ability = None;
+                    }
+                }
+            }
+        }
+
+        // CR 608.2c: Maddening Imp's "each of those creatures that didn't attack
+        // this turn" is now a FROZEN tracked-set snapshot — the mass-MustAttack
+        // coerce publishes the population it named at resolution
+        // (`is_mass_coerce_static` → `publish_tracked_set_with_causes`) and the
+        // delayed `DestroyAll{TrackedSetFiltered{0, Not(AttackedThisTurn)}}`
+        // consumes it (sentinel pinned to the concrete id at delayed-trigger
+        // creation by `bind_tracked_set_to_effect`). No card-assembly rewrite is
+        // needed here for Maddening Imp; the former live-refilter route (and its
+        // `coerce_affected_filter` helper) was superseded and removed.
+    }
+}
+
+/// CR 302.6 + CR 508.1a: Recognize Siren's Call's continuous-control exemption
+/// sibling — an `Unimplemented` node whose text is "ignore this effect for each
+/// creature [the player] didn't control continuously since the beginning of the
+/// turn." Decomposed with nom combinators (prefix + optional subject + tail),
+/// not a verbatim string match, so it covers the phrasing class.
+fn sub_ability_is_continuity_exemption(sub: Option<&AbilityDefinition>) -> bool {
+    let Some(sub) = sub else {
+        return false;
+    };
+    let Effect::Unimplemented { name, description } = sub.effect.as_ref() else {
+        return false;
+    };
+    // The full clause lives in `description` ("Ignore this effect for each
+    // creature …"); `name` is only the leading verb token ("ignore"). Match the
+    // description, falling back to `name` if no description is present.
+    let text = description.as_deref().unwrap_or(name).to_lowercase();
+    parse_continuity_exemption_clause(text.trim()).is_ok_and(|(rest, ())| rest.trim().is_empty())
+}
+
+fn parse_continuity_exemption_clause(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag::<_, _, OracleError<'_>>("ignore this effect for each creature").parse(i)?;
+    // Optional subject anaphor: " the player" / " that player" / "".
+    let (i, _) = opt(alt((tag(" the player"), tag(" that player")))).parse(i)?;
+    let (i, _) = alt((tag(" didn't control"), tag(" doesn't control"))).parse(i)?;
+    let (i, _) = tag(" continuously since the beginning of the turn").parse(i)?;
+    Ok((i, ()))
+}
+
+/// Append `prop` to every `Typed` node reachable through `And`/`Or`/`Not`.
+fn add_filter_prop_to_typed(filter: &mut TargetFilter, prop: FilterProp) {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.push(prop),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                add_filter_prop_to_typed(inner, prop.clone());
+            }
+        }
+        TargetFilter::Not { filter } => add_filter_prop_to_typed(filter, prop),
+        _ => {}
+    }
+}
+
+/// Whether a target filter carries `FilterProp::Not(AttackedThisTurn)` on any
+/// `Typed` node reachable through `And`/`Or`/`Not` — the punisher's
+/// "that didn't attack this turn" clause.
+fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Not { prop }
+                    if matches!(prop.as_ref(), FilterProp::AttackedThisTurn { defender: None })
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_has_not_attacked_this_turn)
+        }
+        TargetFilter::Not { filter } => target_filter_has_not_attacked_this_turn(filter),
+        _ => false,
+    }
 }
 
 /// CR 607.1 + CR 610.3: Detect an (ETB exile, LTB return) trigger pair and
@@ -2632,6 +2796,11 @@ pub(crate) fn parse_oracle_ir(
         // zero parsed abilities for these cards.
         let reminder_body_owned = extract_ability_word_reminder_body(raw_line);
         let raw_line: &str = reminder_body_owned.as_deref().unwrap_or(raw_line);
+        let activation_timing_parenthetical_owned =
+            preserve_activation_timing_parenthetical(raw_line);
+        let raw_line: &str = activation_timing_parenthetical_owned
+            .as_deref()
+            .unwrap_or(raw_line);
 
         let line = strip_reminder_text(raw_line);
         let ability_cant_be_copied = x_annotation_marks_ability_uncopyable(&line);
@@ -3864,6 +4033,19 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 continue;
             }
+            // CR 614.1c + CR 708.11: dual "As ~ enters[ or is turned face up],
+            // put X +1/+1 counters on it, where X is …" (Crowd-Control Warden).
+            // A single sentence that never splits on `.`, so it needs a
+            // multi-emit-into-`result` path (one `Moved`/Battlefield + one
+            // `TurnFaceUp` replacement sharing the PutCounter execute). Runs BEFORE
+            // the generic sequence/line parsers, whose per-arm parsers each return
+            // one definition and cannot emit the dual pair. The tight
+            // PutCounter-SelfRef guard makes it fall through on any non-counter
+            // as-enters line, so the choose/becomes/enters-with siblings are safe.
+            if lower_as_enters_or_face_up_counters(&line, &mut result) {
+                i += 1;
+                continue;
+            }
             // CR 614.1c: Effects that read "[This permanent] enters with ...",
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
@@ -4699,7 +4881,88 @@ pub fn parse_oracle_text(
         types,
         subtypes,
     );
-    lower_oracle_ir(&ir)
+    let mut parsed = lower_oracle_ir(&ir);
+    scrub_granting_placeholder_descriptions(&mut parsed);
+    parsed
+}
+
+/// CR 201.5a: Single post-parse degrade net for [`GRANTING_SELF_PLACEHOLDER`].
+/// The masker inserts the placeholder into verb-object self-ref positions so the
+/// self-ref combinators can map it to `TargetFilter::GrantingObject`. After
+/// parsing, any residual placeholder lives ONLY in display `description` strings
+/// (which embed the raw quoted text, e.g. an equipment's outer "…has \"…\""
+/// static description); it must render as `~` and never leak the raw private-use
+/// char into card-data. This is the shared-parse-entry cleanup the plan promised
+/// — one sweep, not a per-consumer patch.
+fn scrub_granting_placeholder_descriptions(parsed: &mut ParsedAbilities) {
+    for def in &mut parsed.abilities {
+        scrub_ability_descriptions(def);
+    }
+    for trig in &mut parsed.triggers {
+        scrub_trigger_descriptions(trig);
+    }
+    for st in &mut parsed.statics {
+        scrub_static_descriptions(st);
+    }
+    for rep in &mut parsed.replacements {
+        scrub_replacement_descriptions(rep);
+    }
+}
+
+fn scrub_description(desc: &mut Option<String>) {
+    if let Some(s) = desc {
+        if s.contains(GRANTING_SELF_PLACEHOLDER) {
+            *s = s.replace(GRANTING_SELF_PLACEHOLDER, "~");
+        }
+    }
+}
+
+fn scrub_ability_descriptions(def: &mut AbilityDefinition) {
+    scrub_description(&mut def.description);
+    // allow-noncombinator: destructure-read of the Unimplemented gap description
+    // (a display string), not a hand-constructed literal or parsing dispatch.
+    if let Effect::Unimplemented { description, .. } = def.effect.as_mut() {
+        scrub_description(description);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        scrub_ability_descriptions(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        scrub_ability_descriptions(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        scrub_ability_descriptions(mode);
+    }
+}
+
+fn scrub_trigger_descriptions(trig: &mut TriggerDefinition) {
+    scrub_description(&mut trig.description);
+    if let Some(execute) = trig.execute.as_mut() {
+        scrub_ability_descriptions(execute);
+    }
+}
+
+fn scrub_static_descriptions(st: &mut StaticDefinition) {
+    scrub_description(&mut st.description);
+    for modification in st.modifications.iter_mut() {
+        match modification {
+            ContinuousModification::GrantAbility { definition } => {
+                scrub_ability_descriptions(definition)
+            }
+            ContinuousModification::GrantTrigger { trigger } => scrub_trigger_descriptions(trigger),
+            ContinuousModification::GrantStaticAbility { definition } => {
+                scrub_static_descriptions(definition)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scrub_replacement_descriptions(rep: &mut ReplacementDefinition) {
+    scrub_description(&mut rep.description);
+    if let Some(execute) = rep.execute.as_mut() {
+        scrub_ability_descriptions(execute);
+    }
 }
 
 /// Try to parse "Equip {cost}" or "Equip — {cost}" lines.
@@ -5040,7 +5303,7 @@ fn parse_loyalty_number(s: &str) -> Option<i32> {
 /// a cost reduction pattern. If found, remove it from the chain and return the parsed
 /// `CostReduction`. The cost reduction may be several levels deep (e.g., Boseiju has
 /// SearchLibrary → ChangeZone → ChangeZone → Unimplemented(cost reduction)).
-fn extract_cost_reduction_from_chain(def: &mut AbilityDefinition) {
+pub(crate) fn extract_cost_reduction_from_chain(def: &mut AbilityDefinition) {
     if let Some(reduction) = strip_cost_reduction_node(&mut def.sub_ability) {
         def.cost_reduction = Some(reduction);
     }
@@ -5233,12 +5496,13 @@ fn find_top_level_colon(line: &str) -> Option<usize> {
 /// but only <phrase>" form (and composable with other timing-suffix handlers).
 /// Returns `None` for phrases without a recognized timing gate so the caller can
 /// decline rather than mis-classify.
-fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRestriction>> {
-    let phrase = phrase.trim().trim_end_matches('.').trim();
-    let lower = phrase.to_lowercase();
-    // Speed / turn / upkeep gates — case-insensitive value matches. "their" is the
-    // activating player's possessive, equivalent to "your" once an activator is fixed.
-    let gate = alt((
+/// The single-gate `during`-role / speed sub-combinator, factored out so it can
+/// be the first half of a compound "X and only Y" / "X, Y" activation-timing
+/// gate. Each arm emits an EXISTING enforced `ActivationRestriction` value —
+/// the opponent-turn arm reuses `opponents_turn_activation_restriction()`
+/// (= `RequiresCondition{Not(IsYourTurn)}`), NOT a new variant.
+fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    alt((
         value(
             ActivationRestriction::AsSorcery,
             tag::<_, _, OracleError<'_>>("as a sorcery"),
@@ -5260,10 +5524,49 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
             alt((tag("during your upkeep"), tag("during their upkeep"))),
         ),
     ))
-    .parse(lower.as_str());
+    .parse(i)
+}
+
+/// CR 508.1 + CR 509.1: the combat-window half of a compound activation-timing
+/// gate — "before combat" / "before attackers are declared" both map to the
+/// EXISTING `BeforeAttackersDeclared` variant (enforced via
+/// `is_before_attackers_declared` = `PreCombatMain | BeginCombat`), so no new
+/// variant is introduced.
+fn parse_activation_before_window_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    value(
+        ActivationRestriction::BeforeAttackersDeclared,
+        alt((tag("before combat"), tag("before attackers are declared"))),
+    )
+    .parse(i)
+}
+
+fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let phrase = phrase.trim().trim_end_matches('.').trim();
+    let lower = phrase.to_lowercase();
+    // Speed / turn / upkeep gates — case-insensitive value matches. "their" is the
+    // activating player's possessive, equivalent to "your" once an activator is fixed.
+    let gate = parse_activation_during_role_gate(lower.as_str());
     if let Ok((rest, restr)) = gate {
         if rest.trim().is_empty() {
             return Some(vec![restr]);
+        }
+        // CR 602.5b + CR 102.1 + CR 509.1: compound
+        // "during <turn-role> [and only | , ] before combat/attackers"
+        // activation-timing gate — turn-role half reuses
+        // RequiresCondition{Not(IsYourTurn)} / DuringYourTurn, combat-window half
+        // reuses BeforeAttackersDeclared. Composed with a trailing
+        // `opt(pair(separator, before-window))`, no permutation enumeration and no
+        // `contains`/`split_once` dispatch. Preserves the single-gate behavior
+        // above (a bare "during an opponent's turn" still returns one restriction).
+        let compound = (
+            alt((tag::<_, _, OracleError<'_>>(" and only "), tag(", "))),
+            parse_activation_before_window_gate,
+        )
+            .parse(rest);
+        if let Ok((tail, (_sep, window))) = compound {
+            if tail.trim().is_empty() {
+                return Some(vec![restr, window]);
+            }
         }
     }
     // CR 602.5: "if <condition>" gate (Lightning Storm "if ~ is on the stack").
@@ -5275,6 +5578,53 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         }]);
     }
     None
+}
+
+// CR 602.1b: Activation instructions after the colon restrict when an ability
+// can be activated and are not part of the ability's effect.
+// CR 304.5 / CR 307.5: "Only as an instant" and "only as a sorcery" define
+// the priority and timing permissions for activating the ability.
+fn parse_activation_speed_parenthetical_body(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let lower = phrase.to_lowercase();
+    let (_, rest_original) = nom_on_lower(phrase, &lower, |i| {
+        value((), tag("activate only ")).parse(i)
+    })?;
+    let restrictions = parse_activation_timing_restriction(rest_original)?;
+    restrictions
+        .iter()
+        .all(|restriction| {
+            matches!(
+                restriction,
+                ActivationRestriction::AsInstant | ActivationRestriction::AsSorcery
+            )
+        })
+        .then_some(restrictions)
+}
+
+// CR 602.1b: A parenthesized speed instruction after an activated ability is
+// still an activation restriction, so keep it visible before reminder stripping.
+fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
+    let lower = raw_line.to_lowercase();
+    let (_, parenthetical_original) = nom_on_lower(raw_line, &lower, |i| {
+        let (i, _) = take_until::<_, _, OracleError<'_>>(" (activate only ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" (").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let prefix_len = raw_line.len() - parenthetical_original.len() - " (".len();
+    let prefix = raw_line[..prefix_len].trim_end();
+
+    let Ok((tail, inner_original)) = terminated(take_until::<_, _, OracleError<'_>>(")"), tag(")"))
+        .parse(parenthetical_original)
+    else {
+        return None;
+    };
+    if !tail.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let timing_text = inner_original.trim().trim_end_matches('.').trim();
+    parse_activation_speed_parenthetical_body(timing_text)?;
+    Some(format!("{prefix} {timing_text}."))
 }
 
 fn opponents_turn_activation_restriction() -> ActivationRestriction {
@@ -5373,6 +5723,17 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
+        if let Some((before, restrictions)) = split_legacy_play_this_ability_timing(&remaining) {
+            remaining = before
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints.restrictions.extend(restrictions);
+            if remaining.is_empty() {
+                break;
+            }
+            continue;
+        }
+
         const OPPONENTS_ACTIVATE_SUFFIX: &str = "only your opponents may activate this ability";
         if lower.ends_with(OPPONENTS_ACTIVATE_SUFFIX) {
             let end = remaining.len() - OPPONENTS_ACTIVATE_SUFFIX.len();
@@ -5446,25 +5807,12 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        if let Some(prefix) =
-            lower.strip_suffix("activate only during your turn, before attackers are declared")
-        {
-            let end = remaining.len()
-                - "activate only during your turn, before attackers are declared".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringYourTurn);
-            constraints
-                .restrictions
-                .push(ActivationRestriction::BeforeAttackersDeclared);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
+        // CR 602.5b + CR 102.1 + CR 509.1: The former verbatim-string hack for
+        // "activate only during your turn, before attackers are declared" is
+        // subsumed by the compound `parse_activation_timing_restriction` grammar,
+        // which the `activate only ` routing arm above reaches BEFORE this point
+        // (it emits `[DuringYourTurn, BeforeAttackersDeclared]` via the
+        // during-role + before-window sub-combinators). Pinned by Test 10c.
 
         if let Some(prefix) =
             lower.strip_suffix("activate only during combat before combat damage has been dealt")
@@ -5645,6 +5993,35 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
     }
 
     (remaining, constraints)
+}
+
+// CR 602.1d: Older cards referred to activating an activated ability as
+// "playing" that ability.
+// CR 602.1b + CR 307.5: "Play this ability as a sorcery" is a trailing
+// activation instruction, not part of the ability's effect.
+fn split_legacy_play_this_ability_timing(text: &str) -> Option<(&str, Vec<ActivationRestriction>)> {
+    let lower = text.to_lowercase();
+    let (_, restriction_original) = nom_on_lower(text, &lower, |i| {
+        let (i, before) = take_until::<_, _, OracleError<'_>>("play this ability ").parse(i)?;
+        if !is_empty_or_sentence_boundary(before) {
+            return Err(nom::Err::Error(OracleError::new(
+                before,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+        let (i, _) = tag::<_, _, OracleError<'_>>("play this ability ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let prefix_len = text.len() - restriction_original.len() - "play this ability ".len();
+    let restrictions = parse_activation_timing_restriction(restriction_original)?;
+    Some((&text[..prefix_len], restrictions))
+}
+
+fn is_empty_or_sentence_boundary(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .next_back()
+        .is_none_or(|ch| ch == '.')
 }
 
 /// CR 602.5b: Recognize a standalone `"Activate only once each turn"` cadence

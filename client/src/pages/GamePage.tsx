@@ -11,7 +11,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } from "../adapter/types";
+import type { DeckCardCount, GameFormat, MatchConfig, ObjectId, SerializedAbilityCost } from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -37,14 +37,17 @@ import { BlockRequirementBadges } from "../components/combat/BlockRequirementBad
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
+import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
+import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
+import { ReportCardNudge } from "../components/help/ReportCardNudge.tsx";
 import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
 import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
@@ -136,9 +139,16 @@ import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
+import {
+  abilityChoiceLabel,
+  formatAbilityCost,
+  loyaltyBadge,
+  stripLoyaltyCostPrefix,
+} from "../viewmodel/costLabel.ts";
+import { ManaFontIcon } from "../components/icons/ManaFontIcon.tsx";
 import {
   getCastableZoneViewerTarget,
+  getBoardChoiceView,
   getOpponentIds,
   getSeatCount,
   getWaitingForObjectChoiceIds,
@@ -148,6 +158,7 @@ import {
   type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
+import { GAME_Z_LAYER } from "../constants/ui.ts";
 
 type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
@@ -833,13 +844,26 @@ function GamePageContent({
   const playerId = usePlayerId();
   const perspectivePlayerId = usePerspectivePlayerId();
   const isSpectatorMode = useSpectatorMode();
+  // Card-report picker is valid in a live, participating game (never spectate).
+  const canReportCard = gameState != null && !isSpectatorMode;
   const canActForWaitingState = useCanActForWaitingState();
+  const boardChoiceLayerActive = useMemo(() => {
+    const choice = getBoardChoiceView(waitingFor, objects);
+    return canActForWaitingState && choice?.player === playerId;
+  }, [canActForWaitingState, objects, playerId, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
   const dismissedSandboxToolsNudge = usePreferencesStore((s) => s.dismissedSandboxToolsNudge);
+  const dismissedReportCardNudge = usePreferencesStore((s) => s.dismissedReportCardNudge);
+  const cardReportDialogOpen = useUiStore((s) => s.cardReportDialogOpen);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
+  const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
+  const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const toggleDebugClickModeButtonVisible = useUiStore(
+    (s) => s.toggleDebugClickModeButtonVisible,
+  );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
@@ -854,6 +878,9 @@ function GamePageContent({
     multiplayerBoardLayout,
     seatCount,
   );
+  const handleToggleMultiplayerBoardLayout = useCallback(() => {
+    setMultiplayerBoardLayout(multiplayerBoardLayout === "split" ? "focused" : "split");
+  }, [multiplayerBoardLayout, setMultiplayerBoardLayout]);
   const gridTemplateRows = splitBoardActive ? splitGridTemplateRows : focusedGridTemplateRows;
   const handleKickPlayer = useCallback((pid: number) => {
     const adapter = useGameStore.getState().adapter as
@@ -1107,8 +1134,6 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
-    "--game-top-controls-height": isMobile ? "3.75rem" : "4.25rem",
-    "--game-top-controls-width": isMobile ? "11rem" : "13.25rem",
     "--game-targeting-prompt-top": splitBoardActive
       ? isMobile ? "4.25rem" : "4.75rem"
       : "0.25rem",
@@ -1149,6 +1174,31 @@ function GamePageContent({
   const showSandboxToolsNudge =
     !dismissedSandboxToolsNudge &&
     dismissedFlowHelpNudge &&
+    !debugPanelOpen &&
+    !helpSheetOpen &&
+    (mode === "ai" || mode === "local") &&
+    viewingZone == null &&
+    preferencesOpen == null &&
+    boardContextMenu == null &&
+    !showCardDataMissing &&
+    resumeResetReason == null &&
+    !showConcedeDialog &&
+    disconnectChoice == null &&
+    pauseReason == null &&
+    reconnectState.status === "idle" &&
+    waitingFor?.type === "Priority" &&
+    waitingFor.data.player === playerId &&
+    canActForWaitingState &&
+    stackLength === 0;
+
+  // Last in the first-run hint chain (requires the sandbox nudge dismissed first)
+  // so the three hints never stack. Same calm-moment guards, plus: gated on the
+  // report affordance being available and hidden once the dialog is already open.
+  const showReportCardNudge =
+    !dismissedReportCardNudge &&
+    dismissedSandboxToolsNudge &&
+    canReportCard &&
+    !cardReportDialogOpen &&
     !debugPanelOpen &&
     !helpSheetOpen &&
     (mode === "ai" || mode === "local") &&
@@ -1229,9 +1279,12 @@ function GamePageContent({
 
       <DebugModeBanner />
 
-      {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand */}
+      {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand.
+          Board choices lift the grid above normal HUD rails, but must stay below
+          DialogHost/TargetingOverlay so confirm controls are not hidden behind
+          the player hand. Keep this ordering in GAME_Z_LAYER. */}
       <div
-        className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
+        className={`relative ${boardChoiceLayerActive && !isReconnecting ? GAME_Z_LAYER.boardChoiceGrid : GAME_Z_LAYER.board} grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
           gridTemplateRows,
@@ -1371,7 +1424,10 @@ function GamePageContent({
               <CombatPhaseIndicator />
               <HandBadge className="w-full" />
             </div>
-            <FullControlToggle className="w-full" />
+            <div className="flex items-center gap-1.5">
+              <PriorityYieldList />
+              <FullControlToggle className="w-full" />
+            </div>
           </div>
         )}
         <div
@@ -1380,6 +1436,7 @@ function GamePageContent({
         >
           {showFlowHelpNudge && <FlowHelpNudge />}
           {showSandboxToolsNudge && <SandboxToolsNudge />}
+          {showReportCardNudge && <ReportCardNudge />}
           <div className="hidden max-lg:landscape:block lg:block">
             <CombatPhaseIndicator />
           </div>
@@ -1393,6 +1450,9 @@ function GamePageContent({
               <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
                 <TurnStatusLine />
                 <HandBadge />
+                {/* CR 117.3d: standing priority-yield summary chip, beside the
+                    Full Control toggle (self-hides when no yields stand). */}
+                <PriorityYieldList />
                 <FullControlToggle />
               </div>
               <ActionButton />
@@ -1412,14 +1472,21 @@ function GamePageContent({
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
+        multiplayerBoardLayout={seatCount > 2 ? multiplayerBoardLayout : undefined}
+        onToggleMultiplayerBoardLayout={seatCount > 2 ? handleToggleMultiplayerBoardLayout : undefined}
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
         onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
+        debugClickModeButtonVisible={debugClickModeButtonVisible}
+        onToggleDebugClickModeButtonVisible={toggleDebugClickModeButtonVisible}
+        showReportCard={canReportCard}
+        onReportCardClick={() => useUiStore.getState().openCardReportDialog()}
       />
       <HelpSheet />
+      <CardReportDialog />
 
       {/* Connection failure toast */}
       {isOnlineMode && (
@@ -1440,7 +1507,7 @@ function GamePageContent({
       {opponentDisconnected && !pauseReason && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60" />
-          <div className="relative z-10 w-full max-w-sm rounded-[24px] border border-yellow-400/30 bg-[#0b1020]/96 p-6 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
+          <div className="relative z-10 w-full max-w-sm rounded-[12px] border border-yellow-400/30 bg-[#0b1020] p-6 text-center shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
             <h2 className="mb-2 text-lg font-bold text-yellow-400">
               {t("gamePage.opponentDisconnected.title")}
             </h2>
@@ -1567,6 +1634,9 @@ function GamePageContent({
           onCustomizeLayout={() => useUiStore.getState().setFlexEditMode(true)}
           onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
           onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
+          onReportCard={
+            canReportCard ? () => useUiStore.getState().openCardReportDialog() : undefined
+          }
         />
       )}
 
@@ -1753,6 +1823,24 @@ function GamePageContent({
             (e) => e.player === playerId,
           );
           if (!entry) return null;
+          // CR 103.5b: bottoming is folded into the MulliganDecision variant as
+          // a per-entry BottomCards sub-phase resolved at this player's own
+          // declare point.
+          if (entry.phase.type === "BottomCards") {
+            return (
+              <MulliganBottomCardsPrompt
+                playerId={entry.player}
+                count={entry.phase.count}
+                openingHandBottom={false}
+                excludedCardId={
+                  entry.phase.then.type === "UseSerumPowder"
+                    ? entry.phase.then.object_id
+                    : undefined
+                }
+                onChoose={handleBottomCards}
+              />
+            );
+          }
           return (
             <MulliganDecisionPrompt
               playerId={entry.player}
@@ -1776,8 +1864,7 @@ function GamePageContent({
           </div>
         )}
 
-      {(waitingFor?.type === "MulliganBottomCards" ||
-        waitingFor?.type === "OpeningHandBottomCards") &&
+      {waitingFor?.type === "OpeningHandBottomCards" &&
         (() => {
           const entry = waitingFor.data.pending.find(
             (e) => e.player === playerId,
@@ -1787,7 +1874,7 @@ function GamePageContent({
             <MulliganBottomCardsPrompt
               playerId={entry.player}
               count={entry.count}
-              openingHandBottom={waitingFor.type === "OpeningHandBottomCards"}
+              openingHandBottom
               onChoose={handleBottomCards}
             />
           );
@@ -1900,6 +1987,10 @@ interface MulliganBottomCardsPromptProps {
   playerId: number;
   count: number;
   openingHandBottom?: boolean;
+  // CR 103.5b: when this bottom obligation completes into UseSerumPowder, the
+  // earmarked Powder object must stay in hand to be exiled by its own effect,
+  // so it is not selectable as a bottomed card (the engine rejects it too).
+  excludedCardId?: ObjectId;
   onChoose: (id: string) => void;
 }
 
@@ -1948,7 +2039,7 @@ function MulliganPanel({
           animate={{ opacity: 1, scale: 1, ...slideTransform }}
           transition={{ duration: 0.24, ease: "easeOut" }}
         >
-          <div className="flex w-full flex-col overflow-hidden rounded-[14px] lg:rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md">
+          <div className="flex w-full flex-col overflow-hidden rounded-[12px] border border-white/10 bg-[#0b1020] shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
             <div className="modal-header-compact border-b border-white/10">
               <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500">
                 {eyebrow}
@@ -2269,6 +2360,7 @@ function MulliganBottomCardsPrompt({
   playerId,
   count,
   openingHandBottom = false,
+  excludedCardId,
   onChoose,
 }: MulliganBottomCardsPromptProps) {
   const { t } = useTranslation("game");
@@ -2292,7 +2384,13 @@ function MulliganBottomCardsPrompt({
 
   if (!player || !objects) return null;
 
-  const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
+  // CR 103.5b: the earmarked Serum Powder object stays in hand to be exiled by
+  // its own effect, so it is excluded from the selectable bottom-cards set (the
+  // engine rejects any selection containing it).
+  const handObjects = player.hand
+    .filter((id) => id !== excludedCardId)
+    .map((id) => objects[id])
+    .filter(Boolean);
   const isReady = selectedCardIds.length === count;
 
   const handleConfirm = () => {
@@ -2560,7 +2658,7 @@ function GameOverScreen({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="relative z-10 mt-6 rounded-[20px] border border-white/10 bg-black/18 px-5 py-4 text-center backdrop-blur-md"
+            className="relative z-10 mt-6 rounded-[10px] border border-white/10 bg-slate-950/82 px-5 py-4 text-center"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
@@ -2599,7 +2697,7 @@ function GameOverScreen({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="relative z-10 mt-8 flex w-full max-w-[min(28rem,calc(100vw-2rem))] flex-col gap-3 rounded-[22px] border border-white/10 bg-[#0b1020]/82 p-2 shadow-[0_20px_48px_rgba(0,0,0,0.38)] backdrop-blur-md sm:w-auto sm:max-w-fit sm:flex-row sm:items-center sm:justify-center"
+            className="relative z-10 mt-8 flex w-full max-w-[min(28rem,calc(100vw-2rem))] flex-col gap-3 rounded-[10px] border border-white/10 bg-[#0b1020] p-2 shadow-[0_12px_32px_rgba(0,0,0,0.38)] sm:w-auto sm:max-w-fit sm:flex-row sm:items-center sm:justify-center"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15, duration: 0.3 }}
@@ -2733,6 +2831,29 @@ function AbilityChoiceModal() {
           objects,
           webSlingingCosts,
         );
+        // CR 606.1: prefix a loyalty badge for planeswalker ability costs,
+        // reading the structured Loyalty cost (never parsing the label string).
+        const ability =
+          action.type === "ActivateAbility"
+            ? obj.abilities[action.data.ability_index]
+            : undefined;
+        const badge = loyaltyBadge(ability?.cost);
+        if (badge) {
+          return {
+            id: String(i),
+            label: stripLoyaltyCostPrefix(label),
+            description,
+            // No `size`: mana-font scales the loyalty glyph off the parent's
+            // font-size (font-size:1.5em), so it inherits the option row size.
+            icon: (
+              <ManaFontIcon
+                iconClass={badge.iconClasses}
+                fallbackText={badge.text}
+                label={badge.text}
+              />
+            ),
+          };
+        }
         return { id: String(i), label, description };
       })}
       onChoose={(id) => {
@@ -3179,17 +3300,23 @@ function ActivationCostOneOfChoiceModal() {
 function DebugModeBanner() {
   const { t } = useTranslation("game");
   const active = useUiStore((s) => s.debugInteractionMode);
+  const visible = useUiStore((s) => s.debugClickModeButtonVisible);
   const toggle = useUiStore((s) => s.toggleDebugInteractionMode);
 
-  if (!active) return null;
+  if (!active && !visible) return null;
 
   return (
     <div className="fixed left-1/2 top-2 z-50 -translate-x-1/2">
       <button
         onClick={toggle}
-        className="rounded-full border border-amber-500/40 bg-amber-950/80 px-4 py-1.5 font-mono text-xs font-semibold text-amber-300 shadow-lg backdrop-blur-sm transition-colors hover:bg-amber-900/80"
+        className={
+          "rounded-full border px-4 py-1.5 font-mono text-xs font-semibold shadow-lg backdrop-blur-sm transition-colors " +
+          (active
+            ? "border-amber-500/40 bg-amber-950/80 text-amber-300 hover:bg-amber-900/80"
+            : "border-gray-600/50 bg-gray-950/75 text-gray-400 hover:border-amber-600/50 hover:text-amber-300")
+        }
       >
-        {t("gamePage.debug.modeBanner")}
+        {active ? t("gamePage.debug.modeBanner") : t("gamePage.debug.modeButtonOff")}
       </button>
     </div>
   );

@@ -21,7 +21,6 @@ import {
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { ArchenemyPanel } from "./ArchenemyPanel.tsx";
 import { CombatLine } from "./CombatLine.tsx";
-import { OpponentSeatHeader } from "./OpponentSeatHeader.tsx";
 import { OpponentSeatPane } from "./OpponentSeatPane.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 import { PlanechasePanel } from "./PlanechasePanel.tsx";
@@ -276,42 +275,24 @@ export const GameBoard = memo(function GameBoard({
         ) : splitBoardActive ? (
           <div className="flex min-h-0 basis-[60%] flex-col overflow-visible pt-[var(--game-split-safe-top,0px)]">
             {opponents.length > 0 ? (
-              <>
-                <div
-                  className="grid h-[var(--game-top-controls-height,4.25rem)] min-w-0 shrink-0 items-center gap-1 px-1"
-                  style={{ gridTemplateColumns: `repeat(${opponents.length}, minmax(0, 1fr))` }}
-                >
-                  {opponents.map((opponentId, index) => (
-                    <div
-                      key={opponentId}
-                      className={index === 0 ? "min-w-0 pl-[var(--game-top-controls-width,13.25rem)]" : "min-w-0"}
-                    >
-                      <OpponentSeatHeader
-                        playerId={opponentId}
-                        compact={index === 0}
-                        onKickPlayer={onKickPlayer}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div
-                  className="grid min-h-0 min-w-0 flex-1 items-stretch gap-1 overflow-visible px-1"
-                  style={{ gridTemplateColumns: `repeat(${opponents.length}, minmax(0, 1fr))` }}
-                >
-                  {opponents.map((opponentId) => (
-                    <OpponentSeatPane
-                      key={opponentId}
-                      playerId={opponentId}
-                      battlefieldView={
-                        opponentBattlefieldViews.get(opponentId)
-                        ?? buildPlayerBattlefieldView(gameState, opponentId)
-                      }
-                      showCards={showOpponentCards}
-                      onViewZone={onViewZone}
-                    />
-                  ))}
-                </div>
-              </>
+              <div
+                className="grid min-h-0 min-w-0 flex-1 items-stretch gap-1 overflow-visible px-1"
+                style={{ gridTemplateColumns: `repeat(${opponents.length}, minmax(0, 1fr))` }}
+              >
+                {opponents.map((opponentId) => (
+                  <OpponentSeatPane
+                    key={opponentId}
+                    playerId={opponentId}
+                    battlefieldView={
+                      opponentBattlefieldViews.get(opponentId)
+                      ?? buildPlayerBattlefieldView(gameState, opponentId)
+                    }
+                    showCards={showOpponentCards}
+                    onKickPlayer={onKickPlayer}
+                    onViewZone={onViewZone}
+                  />
+                ))}
+              </div>
             ) : (
               <div className="flex flex-1 items-center justify-center">
                 <span className="text-xs text-gray-600">{t("board.clickOpponent")}</span>
