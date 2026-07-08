@@ -1449,3 +1449,42 @@ pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticConditio
         })
     })
 }
+
+/// CR 611.3: Peel a `"all <X> … and all <Y> …"` phrase into per-conjunct strings
+/// on the `" and all "` seam. Each conjunct after the first is re-prefixed with
+/// `"all "` because the seam consumes the quantifier. Returns `None` when fewer
+/// than two conjuncts are found — single-subject lines fall through to dedicated
+/// handlers.
+///
+/// Shared by compound-subject static parsers (`parse_compound_all_subjects_filter`
+/// in `type_change.rs`, sibling land/animation handlers) and the effect-layer
+/// compound-quantified become handler (`try_parse_compound_all_subjects_become_clause`
+/// in `oracle_effect/subject.rs`). The mandatory second `all` quantifier is what
+/// distinguishes this compound form from an incidental `" and "` inside a lone
+/// subject phrase.
+pub(crate) fn peel_compound_all_quantified_conjuncts(text: &str) -> Option<Vec<String>> {
+    let trimmed = text.trim().trim_end_matches('.').to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut conjuncts = Vec::new();
+    let mut current_original = trimmed;
+    loop {
+        let current_lower = current_original.to_lowercase();
+        let tp = TextPair::new(&current_original, &current_lower);
+        match tp.split_around(" and all ") {
+            Some((before, after)) => {
+                conjuncts.push(before.original.trim().to_string());
+                current_original = format!("all {}", after.original.trim());
+            }
+            None => {
+                conjuncts.push(current_original.trim().to_string());
+                break;
+            }
+        }
+    }
+    if conjuncts.len() < 2 {
+        return None;
+    }
+    Some(conjuncts)
+}
