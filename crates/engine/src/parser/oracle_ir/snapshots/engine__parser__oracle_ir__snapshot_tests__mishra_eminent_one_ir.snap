@@ -1,0 +1,175 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "PreLoweredTrigger": {
+        "mode": "Phase",
+        "execute": {
+          "kind": "Spell",
+          "effect": {
+            "type": "CopyTokenOf",
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Artifact",
+                {
+                  "Non": "Creature"
+                }
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "owner": {
+              "type": "Controller"
+            },
+            "enters_attacking": false,
+            "tapped": false,
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "additional_modifications": [
+              {
+                "type": "SetPower",
+                "value": 4
+              },
+              {
+                "type": "SetToughness",
+                "value": 4
+              },
+              {
+                "type": "AddSubtype",
+                "subtype": "Construct"
+              },
+              {
+                "type": "AddType",
+                "core_type": "Artifact"
+              },
+              {
+                "type": "AddType",
+                "core_type": "Creature"
+              },
+              {
+                "type": "SetName",
+                "name": "Mishra's Warform"
+              }
+            ]
+          },
+          "cost": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "GenericEffect",
+              "static_abilities": [
+                {
+                  "mode": "Continuous",
+                  "affected": {
+                    "type": "LastCreated"
+                  },
+                  "modifications": [
+                    {
+                      "type": "AddKeyword",
+                      "keyword": "Haste"
+                    }
+                  ],
+                  "condition": null,
+                  "affected_zone": null,
+                  "effect_zone": null,
+                  "active_zones": [],
+                  "characteristic_defining": false,
+                  "description": "gain haste"
+                }
+              ],
+              "duration": "UntilEndOfTurn",
+              "target": {
+                "type": "LastCreated"
+              }
+            },
+            "cost": null,
+            "sub_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "CreateDelayedTrigger",
+                "condition": {
+                  "type": "AtNextPhase",
+                  "phase": "End"
+                },
+                "effect": {
+                  "kind": "Spell",
+                  "effect": {
+                    "type": "Sacrifice",
+                    "target": {
+                      "type": "LastCreated"
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    }
+                  },
+                  "cost": null,
+                  "sub_ability": null,
+                  "duration": null,
+                  "description": null,
+                  "target_prompt": null,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false,
+                  "sub_link": "SequentialSibling"
+                },
+                "uses_tracked_set": false
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "duration": "UntilEndOfTurn",
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false,
+            "sub_link": "SequentialSibling"
+          },
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "valid_card": null,
+        "origin": null,
+        "destination": null,
+        "trigger_zones": [
+          "Battlefield"
+        ],
+        "phase": "BeginCombat",
+        "optional": false,
+        "damage_kind": "Any",
+        "secondary": false,
+        "valid_target": null,
+        "valid_source": null,
+        "description": "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.",
+        "constraint": {
+          "type": "OnlyDuringYourTurn"
+        },
+        "condition": null,
+        "batched": false
+      }
+    }
+  ],
+  "source_text": "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is Mishra's Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.",
+  "card_name": "Mishra, Eminent One"
+}
