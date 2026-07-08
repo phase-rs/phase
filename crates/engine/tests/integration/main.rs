@@ -472,6 +472,7 @@ mod issue_haze_frog_other_creature_prevention;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
+mod kaya_geist_hunter;
 mod kaya_spirits_justice_per_opponent_exile;
 mod kaysa_green_anthem;
 mod knighthood_first_strike_grant;
