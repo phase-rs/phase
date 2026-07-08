@@ -1,6 +1,8 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::types::ability::{CountScope, DoorLockOp};
+use crate::types::ability::{
+    AbilityCondition, AbilityDefinition, CountScope, DoorLockOp, TypeFilter,
+};
 use crate::types::counter::{CounterMatch, CounterType};
 
 #[test]
@@ -45,8 +47,6 @@ fn escape_keyword_extracted_on_instants_and_sorceries() {
 /// card may be Unimplemented.
 #[test]
 fn spelunking_etb_put_cave_gains_life_conditionally() {
-    use crate::types::ability::{AbilityCondition, AbilityDefinition, TypeFilter};
-
     let parsed = parse_oracle_text(
         "When this enchantment enters, draw a card, then you may put a land card from your hand onto the battlefield. If you put a Cave onto the battlefield this way, you gain 4 life.\nLands you control enter untapped.",
         "Spelunking",

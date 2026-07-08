@@ -12,6 +12,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition::{
     inject_controller_you, parse_cast_using_teamwork_phrase, parse_spell_target_superlative_suffix,
+    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -5932,9 +5933,6 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
 ///     unlocks the whole "if you put a [type] onto the battlefield this way,
 ///     [bonus]" fetch/ramp payoff class).
 fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
-    use crate::parser::oracle_nom::condition::{
-        parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
-    };
     let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(lower)
         .or_else(|_| parse_you_put_onto_battlefield_this_way_clause(lower))
         .ok()?;
