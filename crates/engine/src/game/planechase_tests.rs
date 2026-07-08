@@ -349,6 +349,51 @@ fn chaos_ensues_fires_plane_chaos_trigger() {
     );
 }
 
+/// CR 311.7 + CR 119.7 + CR 119.8: The Doctor's Tomb — "whenever chaos ensues,
+/// redistribute any number of players' life totals". Synthesizes the plane's
+/// chaos trigger with the parsed `RedistributeLifeTotals` effect, forces chaos,
+/// and asserts the trigger reaches the stack carrying that effect (the runtime
+/// path the parsed card rides).
+#[test]
+fn chaos_ensues_fires_redistribute_life_totals_trigger() {
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    state.active_player = p0;
+    let redistribute_chaos = TriggerDefinition::new(TriggerMode::ChaosEnsues)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::RedistributeLifeTotals,
+        ));
+    let plane = synthesized_planar_face(CoreType::Plane, vec![redistribute_chaos], vec![]);
+    let (plane_id, _) = setup_planechase(&mut state, p0, ("The Doctor's Tomb", &plane), &[]);
+
+    let stack_before = state.stack.len();
+    let mut events = Vec::new();
+    chaos_ensues(&mut state, &mut events);
+    process_triggers(&mut state, &events);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ChaosEnsued { plane_id: id } if *id == plane_id)),
+        "ChaosEnsued event keyed to the active plane emitted"
+    );
+    assert_eq!(
+        state.stack.len(),
+        stack_before + 1,
+        "redistribute chaos trigger must reach the stack"
+    );
+    let top = state.stack.back().expect("stack entry present");
+    assert!(
+        matches!(
+            top.ability().map(|a| &a.effect),
+            Some(Effect::RedistributeLifeTotals)
+        ),
+        "the chaos trigger on the stack carries the RedistributeLifeTotals effect"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 6. planar die distribution 4/1/1 (B2 guard, DISCRIMINATING)
 // ---------------------------------------------------------------------------

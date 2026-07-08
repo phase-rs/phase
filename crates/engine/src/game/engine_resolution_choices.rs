@@ -77,6 +77,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::CastOffer {
@@ -550,6 +551,39 @@ pub(super) fn handle_resolution_choice(
                 player_state.library.push_back(card_id);
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::RedistributeLifeTotals { player, options },
+            GameAction::SubmitLifeRedistribution { option_index },
+        ) => {
+            // CR 119.7 + CR 119.8: apply the chosen assignment. Every enumerated
+            // option is already legal because the resolver filtered each receiver.
+            let option = options.get(option_index).ok_or_else(|| {
+                EngineError::InvalidAction(format!(
+                    "Life redistribution option {option_index} out of range"
+                ))
+            })?;
+            let assignment = option.assignment.clone();
+            match effects::life::apply_life_totals_assignment(
+                state,
+                &assignment,
+                player,
+                None,
+                events,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+            {
+                // CR 616.1: a competing replacement installed a choice WaitingFor;
+                // the resume path completes the assignment and continuation.
+                effects::life::LifeAssignmentOutcome::Deferred => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                effects::life::LifeAssignmentOutcome::Applied => {
+                    ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                        state, player, events,
+                    ))
+                }
+            }
         }
         (
             WaitingFor::CoinFlipKeepChoice {

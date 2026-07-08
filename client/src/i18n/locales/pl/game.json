@@ -1686,6 +1686,13 @@
     "subtitleBinary": "Wybierz jedną z dwóch opcji poniżej.",
     "optionFallback": "Opcja {{number}}"
   },
+  "redistributeLifeTotals": {
+    "eyebrow": "Punkty życia",
+    "title": "Rozdziel punkty życia na nowo",
+    "subtitle": "Wybierz, jak ponownie przydzielić punkty życia graczy.",
+    "keepCurrent": "Zachowaj obecne wartości",
+    "playerLife": "{{player}}: {{life}} życia"
+  },
   "combatTax": {
     "eyebrow": "Podatek bojowy",
     "titleAttack": "Zapłać, aby atakować",

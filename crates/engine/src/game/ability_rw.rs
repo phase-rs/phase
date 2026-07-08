@@ -2893,6 +2893,9 @@ fn legacy_effect(x: &Effect) -> bool {
         }
         // Payload-less keyword action (planar chaos, CR 311.7) — no tag-bearing field.
         Effect::ChaosEnsues => false,
+        // Payload-less self-gathering effect (redistribute life totals, CR 119.7 + CR 119.8)
+        // — no tag-bearing field.
+        Effect::RedistributeLifeTotals => false,
         // Payload-less keyword action (reverse turn order, CR 103.1) — no
         // tag-bearing field and reads no per-object state.
         Effect::ReverseTurnOrder => false,
@@ -5328,6 +5331,9 @@ fn rw_effect(
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::ExchangeLifeWithStat { .. }
         | Effect::ExchangeLifeTotals { .. }
+        // CR 119.7 + CR 119.8: writes multiple players' life totals via an interactive
+        // permutation — conservative alongside the life-total sibling.
+        | Effect::RedistributeLifeTotals
         | Effect::SetDayNight { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize

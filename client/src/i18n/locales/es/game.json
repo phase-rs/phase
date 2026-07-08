@@ -1686,6 +1686,13 @@
     "subtitleBinary": "Elige una de las dos opciones siguientes.",
     "optionFallback": "Opción {{number}}"
   },
+  "redistributeLifeTotals": {
+    "eyebrow": "Totales de vida",
+    "title": "Redistribuir los totales de vida",
+    "subtitle": "Elige cómo reasignar los totales de vida de los jugadores.",
+    "keepCurrent": "Mantener los totales actuales",
+    "playerLife": "{{player}}: {{life}} vidas"
+  },
   "combatTax": {
     "eyebrow": "Impuesto de combate",
     "titleAttack": "Pagar para atacar",

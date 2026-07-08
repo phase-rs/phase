@@ -9355,6 +9355,53 @@ fn reverse_turn_order_parses_as_reverse_turn_order_effect() {
     ));
 }
 
+/// CR 119.7 + CR 119.8: "redistribute any number of players' life totals" (Reverse the
+/// Sands, The Doctor's Tomb) parses to the field-less redistribution effect —
+/// with the reminder stripped, the trailing period trimmed, and both the ASCII
+/// and typographic apostrophe accepted. The possessive subject ("players'") is
+/// an optional axis, so the bare "redistribute any number of life totals" form
+/// (You Live Only Because I Will It — Archenemy scheme) parses identically.
+#[test]
+fn redistribute_life_totals_parses_as_redistribute_effect() {
+    use crate::parser::oracle_effect::parse_effect;
+    use crate::parser::oracle_util::strip_reminder_text;
+    assert!(matches!(
+        parse_effect("redistribute any number of players' life totals"),
+        Effect::RedistributeLifeTotals
+    ));
+    // Trailing period trimmed by the anchored production.
+    assert!(matches!(
+        parse_effect("redistribute any number of players' life totals."),
+        Effect::RedistributeLifeTotals
+    ));
+    // Full printed form: reminder text is stripped upstream (as the trigger/
+    // ability clause pipeline does) before the effect parser sees it.
+    assert!(matches!(
+        parse_effect(&strip_reminder_text(
+            "redistribute any number of players' life totals. (Each of those players gets one life total back.)"
+        )),
+        Effect::RedistributeLifeTotals
+    ));
+    // Typographic apostrophe variant.
+    assert!(matches!(
+        parse_effect("redistribute any number of players\u{2019} life totals"),
+        Effect::RedistributeLifeTotals
+    ));
+    // Bare form without the possessive subject (You Live Only Because I Will It).
+    // The scheme's "you may" wrapping and reminder are stripped upstream before
+    // the effect parser sees the imperative.
+    assert!(matches!(
+        parse_effect("redistribute any number of life totals"),
+        Effect::RedistributeLifeTotals
+    ));
+    assert!(matches!(
+        parse_effect(&strip_reminder_text(
+            "redistribute any number of life totals. (Each affected player or team gets one of those life totals back.)"
+        )),
+        Effect::RedistributeLifeTotals
+    ));
+}
+
 /// Temple of Atropos parses with ZERO Unimplemented: the phase trigger inserts a
 /// beginning phase (CR 501.1), and the chaos trigger reverses the turn order
 /// (CR 103.1) then planeswalks (the already-supported `Planeswalk` sub-ability).

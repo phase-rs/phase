@@ -8470,6 +8470,32 @@ pub(super) fn parse_imperative_family_ast(
         });
     }
 
+    // CR 119.7 + CR 119.8: "redistribute any number of players' life totals" (Reverse the
+    // Sands, The Doctor's Tomb) and the bare "redistribute any number of life
+    // totals" (You Live Only Because I Will It — Archenemy scheme). Verb-initial,
+    // but handled here as an anchored whole-phrase production (alongside the
+    // ExchangeLifeTotals sibling above) so the generic "any number of" quantifier
+    // stripping in later dispatch can't fragment the phrase. The reminder text
+    // ("(Each of those players gets one life total back.)" / "(Each affected
+    // player or team gets one of those life totals back.)") is stripped upstream.
+    // The possessive subject ("players'") is an optional axis so the whole class
+    // parses; accept both the ASCII (`players'`) and typographic
+    // (`players\u{2019}`) apostrophe as a single `alt()` axis (compose, don't
+    // enumerate).
+    if all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("redistribute any number of "),
+            opt((tag("players"), alt((tag("'"), tag("\u{2019}"))), tag(" "))),
+            tag("life totals"),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::RedistributeLifeTotals);
+    }
+
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
@@ -10883,6 +10909,9 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b } => {
             Effect::ExchangeLifeTotals { player_a, player_b }
         }
+        // CR 119.7 + CR 119.8: field-less interactive life-total redistribution. The
+        // resolver self-gathers participants, so no target wiring is needed.
+        ImperativeFamilyAst::RedistributeLifeTotals => Effect::RedistributeLifeTotals,
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.

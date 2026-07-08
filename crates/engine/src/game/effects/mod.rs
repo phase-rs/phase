@@ -164,6 +164,7 @@ pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
 pub mod rebound;
+pub mod redistribute_life_totals;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remember_card;
@@ -1903,6 +1904,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
@@ -3354,6 +3356,7 @@ pub fn resolve_effect(
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
         Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
         Effect::ExchangeLifeTotals { .. } => exchange_life_totals::resolve(state, ability, events),
+        Effect::RedistributeLifeTotals => redistribute_life_totals::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())

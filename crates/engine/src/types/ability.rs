@@ -11127,6 +11127,14 @@ pub enum Effect {
     /// physical seating is unchanged. Payload-less resolving keyword action
     /// (mirrors `Effect::ChaosEnsues`). RUNTIME: reverse_turn_order::resolve.
     ReverseTurnOrder,
+    /// CR 119.7 + CR 119.8: The controller redistributes any number of players' life
+    /// totals — a controller-chosen permutation of the chosen players' life
+    /// totals (Reverse the Sands, The Doctor's Tomb). Field-less: "any number of
+    /// players" is self-gathered at resolution (no target slot). The resolver
+    /// enumerates the legal assignments (CR 119.7 can't-gain / CR 119.8 can't-lose
+    /// filter each receiver) and installs `WaitingFor::RedistributeLifeTotals`.
+    /// RUNTIME: redistribute_life_totals::resolve.
+    RedistributeLifeTotals,
     /// CR 701.51b: Open N Attractions by putting cards from the top of your
     /// Attraction deck onto the battlefield.
     OpenAttractions {
@@ -13412,6 +13420,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
@@ -13783,6 +13792,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
@@ -14034,6 +14044,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
@@ -14197,6 +14208,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::Planeswalk => "Planeswalk",
         Effect::ChaosEnsues => "ChaosEnsues",
+        Effect::RedistributeLifeTotals => "RedistributeLifeTotals",
         Effect::ReverseTurnOrder => "ReverseTurnOrder",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
@@ -14439,6 +14451,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     Planeswalk,
     ChaosEnsues,
+    RedistributeLifeTotals,
     ReverseTurnOrder,
     OpenAttractions,
     RollToVisitAttractions,
@@ -14698,6 +14711,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
+            Effect::RedistributeLifeTotals => EffectKind::RedistributeLifeTotals,
             Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
