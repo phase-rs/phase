@@ -6,7 +6,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerFilter;
-use nom::character::complete::{alphanumeric1, digit1, one_of};
+use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair};
 
@@ -1529,6 +1529,26 @@ pub(crate) fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
     }
 
     None
+}
+
+/// Parse a leading P/T pair from Oracle text, returning values and remainder.
+///
+/// CR 613.4b: Layer 7b base power/toughness literals after "with base power
+/// and toughness". Composes the signed [`nom_primitives::parse_pt_modifier`]
+/// path and an unsigned `N/N` path so trailing clause text (e.g. "and loses
+/// all abilities") is left in the nom remainder for downstream parsers.
+pub(crate) fn parse_pt_mod_with_remainder(input: &str) -> OracleResult<'_, (i32, i32)> {
+    let input = input.trim();
+    alt((
+        nom_primitives::parse_pt_modifier,
+        (
+            nom_primitives::parse_number,
+            char('/'),
+            nom_primitives::parse_number,
+        )
+            .map(|(power, _, toughness)| (power as i32, toughness as i32)),
+    ))
+    .parse(input)
 }
 
 /// Parse a P/T modifier like "+2/+3", "-1/-1", "+3/-2" from Oracle text.
