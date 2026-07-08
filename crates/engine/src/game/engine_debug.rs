@@ -112,17 +112,15 @@ pub fn apply_debug_action(
 
         DebugAction::DrawCards { player_id, count } => {
             validate_player(state, player_id)?;
-            // CR 614.6 + CR 614.11 + CR 704.3: route through the single-authority
-            // helper so post-replacement continuations (Jace WinTheGame,
-            // Abundance reveal-until) drain in the same step as the draw.
+            // CR 121.6b + CR 614.6 + CR 614.11 + CR 704.3: route through
+            // `resume_multi_draw` (not the raw `draw_through_replacement`) so a
+            // `count > 1` debug draw offers replacement independently per unit,
+            // matching the real draw pipeline, and post-replacement
+            // continuations (Jace WinTheGame, Abundance reveal-until) still
+            // drain in the same step.
             let event_start = events.len();
-            let result = super::effects::draw::draw_through_replacement(
-                state,
-                player_id,
-                count,
-                events,
-                super::effects::draw::apply_draw_after_replacement,
-            );
+            let result =
+                super::effects::draw::resume_multi_draw(state, player_id, count, 0, events);
             // CR 603.2: Mirror the normal draw pipeline — `PassPriority` /
             // `run_post_action_pipeline` scans CardDrawn events after the draw
             // step's turn-based action. Debug draw previously returned without
