@@ -18860,7 +18860,7 @@
     "gap_count": 0
   },
   "bounty agent": {
-    "ast_hash": "f1284efb8782c0eb",
+    "ast_hash": "e500c018b7221c5d",
     "supported": true,
     "gap_count": 0
   },
@@ -44150,9 +44150,9 @@
     "gap_count": 0
   },
   "eidolon of obstruction": {
-    "ast_hash": "271b4bfe1bd1affc",
-    "supported": false,
-    "gap_count": 1
+    "ast_hash": "f0b7a7672557f8f8",
+    "supported": true,
+    "gap_count": 0
   },
   "eidolon of philosophy": {
     "ast_hash": "ecf6d26994e5299b",
@@ -96540,7 +96540,7 @@
     "gap_count": 0
   },
   "mizzix's mastery": {
-    "ast_hash": "41548e0fb4596f37",
+    "ast_hash": "b5c7258a15bf17d1",
     "supported": false,
     "gap_count": 1
   },
@@ -107690,7 +107690,7 @@
     "gap_count": 0
   },
   "paladin danse, steel maverick": {
-    "ast_hash": "f90fdce1e29204b2",
+    "ast_hash": "0e275386420f41dc",
     "supported": true,
     "gap_count": 0
   },
