@@ -3849,18 +3849,22 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
     static_definitions: &[StaticDefinition],
 ) -> Vec<ActiveCombatAssignmentRuleEffect> {
     let mut effects = Vec::new();
-    let source_zone = state.objects.get(&source_id).map(|o| o.zone);
+    let source_obj = state.objects.get(&source_id);
 
     for def in static_definitions {
         if def.mode != StaticMode::Continuous {
             continue;
         }
 
-        if !def.active_zones.is_empty() {
-            let Some(zone) = source_zone else { continue };
-            if !def.active_zones.contains(&zone) {
-                continue;
-            }
+        // CR 113.6 + CR 113.6b: shared zone-of-function gate, matching
+        // `active_static_definitions`. Combat-assignment-rule effects are
+        // `StaticMode::Continuous`-only (checked above), so the CR 113.6g
+        // stack exception is irrelevant here.
+        let Some(source_obj) = source_obj else {
+            continue;
+        };
+        if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
+            continue;
         }
 
         let retained_condition = if let Some(condition) = &def.condition {
