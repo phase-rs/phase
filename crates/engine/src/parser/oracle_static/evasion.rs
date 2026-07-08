@@ -352,58 +352,119 @@ pub(crate) fn parse_compound_subject_rule_static(
     )
 }
 
-/// CR 702.16 + CR 609.6: Compound-subject keyword-grant statics of the form
-/// `"You and creatures you control have <keyword>"` — a single keyword grant
-/// bound to a player plus an object subset. A single `StaticDefinition` cannot
-/// carry both a player scope and an object scope, so decompose into two:
-///   - an object-half `Continuous` def whose `affected` is the object subset;
-///   - a player-half `PlayerProtection` def whose `affected` is the controller.
+/// CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: Compound-subject keyword-grant
+/// statics of the form `"You and <object subject> have <keyword>"` — a single
+/// keyword grant bound to a player plus an object subset.
 ///
-/// Restricted to `Protection(_)` grants — the only player-applicable keyword
-/// with a runtime-implemented `PlayerProtection` mode. Returns `None` for any
-/// other granted keyword (a player cannot meaningfully "have flying").
+/// A single `StaticDefinition` cannot carry both a player scope and an object
+/// scope, so decompose into two:
+///   - an object-half `Continuous` def whose `affected` is the object subset;
+///   - a player-half def whose mode is the player-applicable keyword mode
+///     (`PlayerProtection` / `Hexproof` / `Shroud`) and whose `affected` is the
+///     controller.
+///
+/// Object subjects reuse [`parse_rule_static_subject_filter`] so subtype scopes
+/// ("Humans you control"), self refs ("this creature"), and "other <subtype>
+/// you control" all resolve — not a hard-coded alt of three controller phrases.
+///
+/// Only player-applicable keywords claim this pattern (a player cannot
+/// meaningfully "have flying"). Leading `"During your turn, "` gates both
+/// halves with `DuringYourTurn` (Gruul Spellbreaker). Trailing `" as long as
+/// <cond>"` is applied by `parse_continuous_gets_has` on the object half and
+/// then copied onto the player half; inverted `"As long as <cond>, …"` forms
+/// are rewritten to that trailing shape by the multi-dispatch path before
+/// reaching here.
 pub(crate) fn parse_compound_subject_keyword_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
 
-    // Subject: "you and <object subject phrase> ".
-    let (after_you, _) = tag::<_, _, VE<'_>>("you and ").parse(lower).ok()?;
-    let (predicate_lower, _) = alt((
-        tag::<_, _, VE<'_>>("creatures you control "),
-        tag("other creatures you control "),
-        tag("permanents you control "),
-    ))
-    .parse(after_you)
-    .ok()?;
+    // Optional leading turn window (Gruul Spellbreaker class).
+    let (body_lower, turn_condition) =
+        if let Ok((rest, _)) = tag::<_, _, VE<'_>>("during your turn, ").parse(lower) {
+            (rest, Some(StaticCondition::DuringYourTurn))
+        } else {
+            (lower, None)
+        };
 
-    // Map the matched lowercase spans back onto the original-case text so the
-    // object-subject filter and predicate retain their original casing.
-    let object_subject = text[text.len() - after_you.len()..text.len() - predicate_lower.len()]
+    // Subject: "you and <object subject phrase>".
+    let (after_you, _) = tag::<_, _, VE<'_>>("you and ").parse(body_lower).ok()?;
+
+    // Locate the continuous predicate verb ("have"/"has"/"gain"/"gains"/…) so
+    // the object subject can be any phrase `parse_rule_static_subject_filter`
+    // understands — not a hard-coded controller-phrase alt list.
+    let subject_end = find_continuous_predicate_start(after_you)?;
+    let object_subject_lower = after_you[..subject_end].trim();
+    let predicate_lower = after_you[subject_end..].trim();
+    if object_subject_lower.is_empty() || predicate_lower.is_empty() {
+        return None;
+    }
+
+    // Map the matched lowercase spans back onto the original-case text. When a
+    // leading turn window was peeled, recover its original-case body slice first.
+    // Do NOT trim body_original — its byte length must stay aligned with
+    // `body_lower` / `after_you` for the offset arithmetic below.
+    let body_original = if turn_condition.is_some() {
+        let prefix_len = lower.len() - body_lower.len();
+        text.get(prefix_len..)?
+    } else {
+        text
+    };
+    debug_assert_eq!(body_original.len(), body_lower.len());
+    let after_you_len = after_you.len();
+    let body_after_you_start = body_original.len().checked_sub(after_you_len)?;
+    let object_subject = body_original
+        .get(body_after_you_start..body_after_you_start + subject_end)?
         .trim()
         .trim_end_matches(' ');
-    let predicate = text[text.len() - predicate_lower.len()..].trim();
+    let predicate = body_original
+        .get(body_after_you_start + subject_end..)?
+        .trim();
 
     let affected = parse_rule_static_subject_filter(object_subject)?;
+    // Player half is reserved for the controller; refuse a second player scope
+    // ("you and each player have …") so we never emit two player defs.
+    if rule_static_affected_is_player_scope(&affected) {
+        return None;
+    }
 
-    // Object-half: delegate the predicate to the shared keyword-grant builder.
-    let object_def = parse_continuous_gets_has(predicate, affected, text)?;
+    // Object-half: delegate the predicate to the shared keyword-grant builder
+    // (also peels trailing " as long as <cond>" onto `object_def.condition`).
+    let mut object_def = parse_continuous_gets_has(predicate, affected, text)?;
 
-    // Extract the granted protection target — only `Protection(_)` grants get a
-    // player-half. Any other keyword (or no keyword) → not this pattern.
-    let protection_target = object_def.modifications.iter().find_map(|m| match m {
+    // Derive the player-half mode from the granted keyword. Only player-
+    // applicable keyword modes claim this pattern.
+    let player_mode = object_def.modifications.iter().find_map(|m| match m {
         ContinuousModification::AddKeyword {
             keyword: crate::types::keywords::Keyword::Protection(pt),
-        } => Some(pt.clone()),
+        } => Some(StaticMode::PlayerProtection(pt.clone())),
+        ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Hexproof,
+        } => Some(StaticMode::Hexproof),
+        ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Shroud,
+        } => Some(StaticMode::Shroud),
         _ => None,
     })?;
 
-    let player_def = StaticDefinition::new(StaticMode::PlayerProtection(protection_target))
+    // Propagate leading turn-window / trailing as-long-as gates onto both halves
+    // so the compound grant stays time-locked as one continuous effect (CR 611.3a).
+    object_def.condition = match (turn_condition, object_def.condition.take()) {
+        (Some(turn), Some(trailing)) => Some(StaticCondition::And {
+            conditions: vec![turn, trailing],
+        }),
+        (Some(turn), None) => Some(turn),
+        (None, Some(trailing)) => Some(trailing),
+        (None, None) => None,
+    };
+
+    let mut player_def = StaticDefinition::new(player_mode)
         .affected(TargetFilter::Typed(
             TypedFilter::default().controller(ControllerRef::You),
         ))
         .description(text.to_string());
+    player_def.condition = object_def.condition.clone();
 
     Some(vec![object_def, player_def])
 }
