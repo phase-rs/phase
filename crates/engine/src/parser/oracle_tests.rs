@@ -19243,3 +19243,56 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
     assert_eq!(ct, CounterType::Time, "Ravaging Riftwurm type");
     assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
 }
+
+/// Regression for issue #1272: Violent Urge's Delirium follow-up ("that
+/// creature gains double strike") must scope to the same single target as
+/// the base "+1/+0 and first strike" clause, not to every creature.
+/// Verified fixed by #2999 for the class ("ParentTarget GenericEffect
+/// binding for targeted pump/debuff abilities"), which resolved the
+/// identical bug reported separately for Mu Yanling (#2922) — this test
+/// pins the AST shape down for Violent Urge specifically so a future
+/// regression in either card's class is caught immediately.
+#[test]
+fn violent_urge_delirium_scopes_to_parent_target_not_all_creatures() {
+    let parsed = parse(
+        "Target creature gets +1/+0 and gains first strike until end of turn.\n\
+             Delirium — If there are four or more card types among cards in your graveyard, \
+             that creature gains double strike until end of turn.",
+        "Violent Urge",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 2, "expected two spell abilities");
+
+    let delirium = &parsed.abilities[1];
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = delirium.effect.as_ref()
+    else {
+        panic!(
+            "expected Delirium clause to lower to GenericEffect, got {:?}",
+            delirium.effect
+        );
+    };
+    assert_eq!(
+        static_abilities.len(),
+        1,
+        "expected exactly one static ability granting double strike"
+    );
+    let grant = &static_abilities[0];
+    assert_eq!(
+        grant.affected,
+        Some(TargetFilter::ParentTarget),
+        "the double-strike grant must be scoped to the same target as the \
+         base pump effect (ParentTarget), not an unscoped/all-creatures filter — \
+         this is the exact issue #1272 symptom if it regresses"
+    );
+    assert_eq!(
+        grant.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::DoubleStrike
+        }],
+        "expected a single AddKeyword(DoubleStrike) modification"
+    );
+}
