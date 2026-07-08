@@ -5180,6 +5180,41 @@ fn trigger_cause_matches(
             // additional time when a dungeon room is entered.
             matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
+        TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
+            // CR 601.2 + CR 707.10: Veyran-class doublers fire only for
+            // triggers caused by the doubler's controller casting or copying
+            // a spell. Both event kinds qualify ("you casting or copying");
+            // a copy is not cast (CR 707.10), so `SpellCopied` is a distinct
+            // event and must be matched explicitly.
+            let (controller, object_id) = match event {
+                Some(GameEvent::SpellCast {
+                    controller,
+                    object_id,
+                    ..
+                })
+                | Some(GameEvent::SpellCopied {
+                    controller,
+                    object_id,
+                    ..
+                }) => (*controller, *object_id),
+                _ => return false,
+            };
+            if controller != doubler_controller {
+                return false;
+            }
+            if core_types.is_empty() {
+                return true;
+            }
+            // CR 603.2d: The spell's type is named in the qualifier ("an
+            // instant or sorcery spell") — the stack object's core types must
+            // intersect the predicate's list.
+            state.objects.get(&object_id).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .iter()
+                    .any(|ct| core_types.contains(ct))
+            })
+        }
     }
 }
 

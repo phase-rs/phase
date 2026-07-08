@@ -649,6 +649,7 @@ fn pass_priority_once_with_pipeline(
         events,
         &state.waiting_for.clone(),
         skip_triggers,
+        false,
     )?;
     sync_waiting_for(state, &wf);
 
@@ -1114,6 +1115,7 @@ fn apply_action(
 
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
+    let mut skip_deferred_trigger_drain = false;
 
     // CancelAutoPass works from any WaitingFor state (player may cancel during
     // interactive choices). Routed by `actor` — previously used
@@ -4014,6 +4016,7 @@ fn apply_action(
                 &mut events,
                 &WaitingFor::Priority { player: p },
                 true,
+                false,
             )?
         }
         // CR 702.94a: Miracle reveal — decline path. Reuses the generic
@@ -4033,6 +4036,7 @@ fn apply_action(
                 &mut events,
                 &WaitingFor::Priority { player: p },
                 true,
+                false,
             )?
         }
         // CR 702.94a + CR 608.2g: Miracle cast offer — the miracle triggered
@@ -4086,6 +4090,7 @@ fn apply_action(
                 &mut events,
                 &WaitingFor::Priority { player: p },
                 true,
+                false,
             )?
         }
         // CR 702.35a: Madness cast offer — the madness triggered ability has
@@ -4149,6 +4154,7 @@ fn apply_action(
                         &mut events,
                         &WaitingFor::Priority { player: p },
                         true,
+                        false,
                     )?
                 }
                 // The graveyard move paused on a CR 616.1 ordering choice; the
@@ -4177,6 +4183,13 @@ fn apply_action(
                     waiting_for,
                 ) => {
                     triggers_processed_inline = true;
+                    waiting_for
+                }
+                engine_resolution_choices::ResolutionChoiceOutcome::WaitingForWithParkedObservers(
+                    waiting_for,
+                ) => {
+                    triggers_processed_inline = true;
+                    skip_deferred_trigger_drain = true;
                     waiting_for
                 }
                 engine_resolution_choices::ResolutionChoiceOutcome::ActionResult(result) => {
@@ -4970,6 +4983,7 @@ fn apply_action(
             &mut events,
             &waiting_for,
             triggers_processed_inline,
+            skip_deferred_trigger_drain,
         )?;
         state.waiting_for = wf.clone();
         return Ok(ActionResult {

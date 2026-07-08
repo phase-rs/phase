@@ -8953,6 +8953,10 @@ fn static_max_untap_one_creature() {
             max: 1,
         }
     );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
+    );
 }
 
 // CR 502.3: Damping Field / Imi Statue — artifact form.
@@ -8967,6 +8971,10 @@ fn static_max_untap_one_artifact() {
             filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             max: 1,
         }
+    );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
     );
 }
 
@@ -8988,6 +8996,64 @@ fn static_max_untap_one_nonbasic_land() {
             ])),
             max: 1,
         }
+    );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
+    );
+}
+
+// CR 502.3 + CR 611.3a: Winter Orb. Verbatim Oracle text (Scryfall). Discriminating:
+// before this fix, parsed to a no-op Continuous with modifications: [] (the
+// effect was silently dropped).
+#[test]
+fn static_max_untap_winter_orb_conditional() {
+    let def = parse_static_line(
+        "As long as this artifact is untapped, players can't untap more than one land during their untap steps.",
+    )
+    .expect("Winter Orb must parse to a static definition");
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land()),
+            max: 1,
+        },
+        "Winter Orb must cap untapping at one land, not fall through to a no-op Continuous"
+    );
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped) ('as long as untapped'), got {:?}",
+        def.condition
+    );
+}
+
+// CR 502.3 + CR 611.3a: Static Orb — same template, N=2, "permanents" (no
+// subtype restriction). Verbatim Oracle text (Scryfall).
+#[test]
+fn static_max_untap_static_orb_conditional() {
+    let def = parse_static_line(
+        "As long as this artifact is untapped, players can't untap more than two permanents during their untap steps.",
+    )
+    .expect("Static Orb must parse to a static definition");
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::permanent()),
+            max: 2,
+        }
+    );
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
     );
 }
 
@@ -9537,6 +9603,190 @@ fn static_creatures_attacking_you_get_pump() {
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddPower { value: -1 }));
+}
+
+#[test]
+fn static_creatures_attacking_last_chosen_player_scope() {
+    // CR 508.1b + CR 613.1: Triarch Stalker / Beckoning Will-o'-Wisp scope the
+    // attacking axis by the source's persisted chosen player. Both "the last
+    // chosen player" and the shorter "the chosen player" phrasing map to
+    // `ControllerRef::SourceChosenPlayer`, reusing the same `FilterProp::Attacking`
+    // + `parse_continuous_gets_has` path as the you/opponents/enchanted scopes.
+    let menace =
+        parse_static_line("Creatures attacking the last chosen player have menace.").unwrap();
+    assert_eq!(menace.mode, StaticMode::Continuous);
+    assert_eq!(
+        menace.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+    assert!(menace
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Menace,
+        }));
+
+    let pump = parse_static_line("Creatures attacking the last chosen player get +1/+0.").unwrap();
+    assert_eq!(
+        pump.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+    assert!(pump
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+
+    // Shorter "the chosen player" phrasing resolves to the same scope.
+    let short = parse_static_line("Creatures attacking the chosen player have menace.").unwrap();
+    assert_eq!(
+        short.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+}
+
+#[test]
+fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
+    // CR 613.1 + CR 608.2c: the combat trigger "choose an opponent" must persist
+    // its choice durably (as `ChosenAttribute::Player`) BECAUSE a separate
+    // continuous static reads it via `ControllerRef::SourceChosenPlayer`. The
+    // `reconcile_persisted_player_choice_for_source_chosen_ref` pass flips the
+    // choice's `persist` to true when such a reference is present.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "Targeting Relay — At the beginning of combat on your turn, choose an opponent.\nCreatures attacking the last chosen player have menace.",
+        "Triarch Stalker",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Necron".to_string()],
+    );
+
+    // The static reads the source's persisted chosen player.
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer),
+            })
+        )),
+        "static must scope attackers by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    // The combat trigger's opponent choice must persist so the static can read it.
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "choose an opponent must persist when a SourceChosenPlayer static reads it, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn choose_opponent_without_source_chosen_reference_does_not_persist() {
+    // Targeted-pass regression: a "choose an opponent" trigger whose choice is
+    // consumed WITHIN the same resolution (Ruhan — the forced attack reads the
+    // resolution-scoped `ChosenPlayer { index }`) carries no durable
+    // `SourceChosenPlayer` reference, so the reconcile pass must leave it
+    // `persist: false`.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, choose an opponent at random. ~ attacks that player this combat if able.",
+        "Ruhan of the Fomori",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: false,
+                ..
+            }
+        ),
+        "a same-resolution opponent choice must NOT be flipped to persist, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn choose_persists_when_only_a_trigger_reads_the_chosen_player() {
+    // CR 613.1 + CR 503.1a: the durable `SourceChosenPlayer` reference can live in
+    // a TRIGGER (a phase trigger scoped to "the chosen player's upkeep", plus its
+    // effect targeting that player) rather than a static or activated ability. The
+    // reconcile pass must scan triggers as READERS, not only as writers, so the
+    // preceding "choose an opponent" is flipped to persist. LOAD-BEARING
+    // REGRESSION: without the `result.triggers` reader scan the choose stays
+    // `persist: false` and the chosen player is lost after the choice resolves.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "When this artifact enters the battlefield, choose an opponent.\nAt the beginning of the chosen player's upkeep, this artifact deals 1 damage to that player.",
+        "Chosen-Player Rack",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    // Sanity: the reference lives only in the phase trigger's `valid_target`.
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|t| t.valid_target == Some(TargetFilter::SourceChosenPlayer)),
+        "expected a phase trigger scoped to SourceChosenPlayer, got {:?}",
+        parsed.triggers
+    );
+    // The ETB choose must be flipped to persist by the trigger-reader scan.
+    let choose = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find(|a| matches!(&*a.effect, Effect::Choose { .. }))
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "a choose read only by a trigger must still persist, got {:?}",
+        choose.effect
+    );
 }
 
 #[test]

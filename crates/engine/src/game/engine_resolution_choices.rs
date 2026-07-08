@@ -23,6 +23,10 @@ use super::{casting, casting_costs, mana_abilities};
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
     WaitingForWithInlineTriggers(WaitingFor),
+    /// CR 603.3b: observer triggers from a completed search put/shuffle were
+    /// collected into `deferred_triggers` but must not drain until the caller
+    /// receives priority again (issue #5336: Kodama + Nature's Lore).
+    WaitingForWithParkedObservers(WaitingFor),
     ActionResult(ActionResult),
 }
 
@@ -71,6 +75,33 @@ fn batch_or_drain_observer_triggers(
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         None
     }
+}
+
+/// CR 603.2 + CR 603.3b + CR 701.23: after a search tutor's put/shuffle
+/// continuation drains, park ETB/dies/discards observers for the next priority
+/// checkpoint instead of dispatching them while the test harness (or UI) may
+/// still be inside the same `SelectCards` action (issue #5336).
+fn park_search_observer_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    events_before_drain: usize,
+) -> ResolutionChoiceOutcome {
+    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+        .iter()
+        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+    }
+    // The parent spell already left the stack; clear the stashed resolving entry
+    // so the next priority pass can drain `deferred_triggers`.
+    if state.pending_continuation.is_none()
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        state.resolving_stack_entry = None;
+    }
+    ResolutionChoiceOutcome::WaitingForWithParkedObservers(state.waiting_for.clone())
 }
 
 pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
@@ -2210,15 +2241,19 @@ pub(super) fn handle_resolution_choice(
                 }
                 // CR 609.3 fast-path: found <= primary_count, so ALL chosen go to
                 // the primary destination and the rest is empty. No second prompt.
+                let events_before_drain = events.len();
                 apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
                 set_priority(state, player);
                 effects::drain_pending_continuation(state, events);
-                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    state.waiting_for.clone(),
+                return Ok(park_search_observer_triggers(
+                    state,
+                    events,
+                    events_before_drain,
                 ));
             }
 
             set_priority(state, player);
+            let events_before_drain = events.len();
             // CR 400.7 + CR 608.2c: Count found-set cards exiled from a hand so
             // the shared "That player ... draws a card for each card exiled from
             // their hand this way" rider (The End, Deadly Cover-Up, Test of
@@ -2270,7 +2305,7 @@ pub(super) fn handle_resolution_choice(
                 state.pending_continuation = Some(cont);
             }
             effects::drain_pending_continuation(state, events);
-            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            park_search_observer_triggers(state, events, events_before_drain)
         }
         (
             WaitingFor::SearchPartitionChoice {
@@ -2314,6 +2349,7 @@ pub(super) fn handle_resolution_choice(
                 primary_enter_tapped,
                 rest_destination,
             };
+            let events_before_partition = events.len();
             apply_search_partition(
                 state,
                 &primary_chosen,
@@ -2325,7 +2361,7 @@ pub(super) fn handle_resolution_choice(
             )?;
             set_priority(state, player);
             effects::drain_pending_continuation(state, events);
-            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            park_search_observer_triggers(state, events, events_before_partition)
         }
         (
             WaitingFor::OutsideGameChoice {
