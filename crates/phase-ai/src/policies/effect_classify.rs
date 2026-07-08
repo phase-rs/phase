@@ -331,6 +331,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ReassembleContraption { .. }
         | Effect::ReassembleContraptionOnSprocket { .. }
         | Effect::ReduceNextSpellCost { .. }
+        | Effect::RedistributeLifeTotals
         | Effect::RegisterBending { .. }
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }

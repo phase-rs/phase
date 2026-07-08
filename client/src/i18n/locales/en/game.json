@@ -1723,6 +1723,13 @@
     "subtitleBinary": "Pick one of the two options below.",
     "optionFallback": "Option {{number}}"
   },
+  "redistributeLifeTotals": {
+    "eyebrow": "Life Totals",
+    "title": "Redistribute life totals",
+    "subtitle": "Choose how to reassign the players' life totals.",
+    "keepCurrent": "Keep current totals",
+    "playerLife": "{{player}}: {{life}} life"
+  },
   "combatTax": {
     "eyebrow": "Combat Tax",
     "titleAttack": "Pay to Attack",

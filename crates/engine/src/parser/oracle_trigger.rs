@@ -36,15 +36,16 @@ use super::oracle_util::{
     strip_reminder_text, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::types::ability::ManaProduction;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
     ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition,
-    TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
+    StaticCondition, TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -1549,6 +1550,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             && !execute.optional_targeting
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
+            lift_shared_quality_parent_target_to_triggering_source_in_ability(execute);
         }
     }
 
@@ -1640,6 +1642,110 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
         }
         lift_parent_target_to_triggering_source(link.effect.as_mut());
         node = link.sub_ability.as_deref_mut();
+    }
+}
+
+fn lift_shared_quality_parent_target_to_triggering_source_in_ability(
+    ability: &mut AbilityDefinition,
+) {
+    lift_shared_quality_parent_target_to_triggering_source(ability.effect.as_mut());
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        lift_shared_quality_parent_target_to_triggering_source_in_ability(sub);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        lift_shared_quality_parent_target_to_triggering_source_in_ability(else_ability);
+    }
+}
+
+fn lift_shared_quality_parent_target_to_triggering_source(effect: &mut Effect) {
+    if let Effect::Mana { produced, .. } = effect {
+        lift_mana_production_quantities_to_triggering_source(produced);
+    }
+}
+
+fn lift_mana_production_quantities_to_triggering_source(produced: &mut ManaProduction) {
+    match produced {
+        ManaProduction::Colorless { count }
+        | ManaProduction::AnyOneColor { count, .. }
+        | ManaProduction::AnyCombination { count, .. }
+        | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::OpponentLandColors { count }
+        | ManaProduction::AnyCombinationOfObjectColors { count, .. }
+        | ManaProduction::AnyTypeProduceableBy { count, .. }
+        | ManaProduction::AnyInCommandersColorIdentity { count, .. }
+        | ManaProduction::AnyOneColorAmongPermanents { count, .. } => {
+            lift_quantity_expr_shared_quality_parent_target_to_triggering_source(count);
+        }
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::TriggerEventManaType => {}
+    }
+}
+
+fn lift_quantity_expr_shared_quality_parent_target_to_triggering_source(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            lift_quantity_ref_shared_quality_parent_target_to_triggering_source(qty);
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => lift_quantity_expr_shared_quality_parent_target_to_triggering_source(inner),
+        QuantityExpr::Difference { left, right } => {
+            lift_quantity_expr_shared_quality_parent_target_to_triggering_source(left);
+            lift_quantity_expr_shared_quality_parent_target_to_triggering_source(right);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                lift_quantity_expr_shared_quality_parent_target_to_triggering_source(inner);
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+fn lift_quantity_ref_shared_quality_parent_target_to_triggering_source(qty: &mut QuantityRef) {
+    match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. } => {
+            lift_filter_shared_quality_parent_target_to_triggering_source(filter);
+        }
+        _ => {}
+    }
+}
+
+fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                if let FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(reference),
+                    ..
+                } = prop
+                {
+                    if matches!(reference.as_ref(), TargetFilter::ParentTarget) {
+                        **reference = TargetFilter::TriggeringSource;
+                    }
+                }
+            }
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for filter in filters {
+                lift_filter_shared_quality_parent_target_to_triggering_source(filter);
+            }
+        }
+        TargetFilter::Not { filter } => {
+            lift_filter_shared_quality_parent_target_to_triggering_source(filter);
+        }
+        _ => {}
     }
 }
 

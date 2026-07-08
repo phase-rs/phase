@@ -3764,6 +3764,12 @@ fn apply_action(
             &creature_ids,
             &mut events,
         )?,
+        // CR 602.2b + CR 601.2h: crew's tap cost is not paid until the
+        // activation payment step, so backing out before creature selection is
+        // complete restores priority with no state to undo.
+        (WaitingFor::CrewVehicle { player, .. }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         // CR 702.184a: Station activation from Priority — enters target-selection state.
         (
             WaitingFor::Priority { player },

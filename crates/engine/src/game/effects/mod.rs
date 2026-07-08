@@ -164,6 +164,7 @@ pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
 pub mod rebound;
+pub mod redistribute_life_totals;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remember_card;
@@ -1865,6 +1866,10 @@ fn apply_parent_chain_context(
         child.dig_found_nothing_for_parent_target = true;
         state.last_dig_found_nothing = false;
     }
+    if state.last_choose_from_zone_found_nothing {
+        child.choose_from_zone_found_nothing_for_parent_target = true;
+        state.last_choose_from_zone_found_nothing = false;
+    }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
     // its parent; its instructions are followed in order during a single
     // resolution. Propagate the parent's `ability_index` so chain-level
@@ -1903,6 +1908,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
@@ -3354,6 +3360,7 @@ pub fn resolve_effect(
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
         Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
         Effect::ExchangeLifeTotals { .. } => exchange_life_totals::resolve(state, ability, events),
+        Effect::RedistributeLifeTotals => redistribute_life_totals::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())
@@ -5437,6 +5444,7 @@ pub fn resolve_ability_chain(
         // (e.g. Avenging Angel's LTB self-return). Reset at every fresh
         // resolution so that can never happen.
         state.last_dig_found_nothing = false;
+        state.last_choose_from_zone_found_nothing = false;
         // CR 701.20e: A new top-level resolution ends any prior private "look at"
         // peek window — the looked-at card from an unrelated resolution must not
         // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
@@ -15948,6 +15956,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::OncePerTurn,
                     source_id: None,
+                    invalidation: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     card_filter: None,
@@ -19168,6 +19177,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
                     source_id: None,
+                    invalidation: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                     card_filter: None,

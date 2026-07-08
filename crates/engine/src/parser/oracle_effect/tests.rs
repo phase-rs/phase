@@ -1,10 +1,11 @@
 use super::*;
 use crate::parser::parse_oracle_text;
-use crate::types::ability::AttachmentKind;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
+use crate::types::ability::{AttachmentKind, PerpetualModification};
 use crate::types::card_type::CoreType;
-use crate::types::mana::ManaCostShard;
+use crate::types::mana::{ManaCost, ManaCostShard};
+use crate::types::statics::CostModifyMode;
 
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
@@ -15865,7 +15866,7 @@ fn one_two_or_three_target_creatures_each_pump() {
 
 /// CR 115.1d + CR 700.2: Trystan's Command mode 2 — "return one or two
 /// target permanent cards from your graveyard to your hand" must attach
-/// `MultiTargetSpec { min: 1, max: 2 }` on the bounce/return effect.
+/// `MultiTargetSpec { min: 1, max: 2 }` on the graveyard-to-hand return effect.
 #[test]
 fn return_one_or_two_target_permanents_from_graveyard_is_multi_targeted() {
     let clause = parse_effect_clause(
@@ -15873,8 +15874,15 @@ fn return_one_or_two_target_permanents_from_graveyard_is_multi_targeted() {
         &mut ParseContext::default(),
     );
     assert!(
-        matches!(clause.effect, Effect::Bounce { .. }),
-        "expected Bounce, got {:?}",
+        matches!(
+            clause.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "expected graveyard-to-hand ChangeZone, got {:?}",
         clause.effect
     );
     assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)));
@@ -16593,6 +16601,60 @@ fn instead_condition_recognizes_sacrificed_creature_was_a_subtype() {
             "override should be 2× EventContextAmount damage to parent target, got {:?}",
             other
         ),
+    }
+}
+
+/// CR 117.1 + CR 400.7j + CR 608.2k + CR 614.1a: Witch's Oven class —
+/// the "sacrificed creature" cost-paid object is checked against its LKI
+/// toughness to replace the token quantity. This is a property predicate on
+/// the paid object, not a target/anaphor lookup.
+#[test]
+fn instead_condition_recognizes_sacrificed_creature_possessive_toughness() {
+    let ability = parse_effect_chain(
+        "Create a Food token. If the sacrificed creature's toughness was 4 or greater, create two Food tokens instead.",
+        AbilityKind::Spell,
+    );
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("expected instead sub_ability");
+    let cond = sub
+        .condition
+        .as_ref()
+        .expect("instead sub_ability must carry a condition");
+    let AbilityCondition::ConditionInstead { inner } = cond else {
+        panic!("expected ConditionInstead, got {cond:?}");
+    };
+    let AbilityCondition::CostPaidObjectMatchesFilter { filter } = inner.as_ref() else {
+        panic!("expected CostPaidObjectMatchesFilter, got {inner:?}");
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected Typed filter, got {filter:?}");
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "type_filters must include Creature noun, got {:?}",
+        typed.type_filters
+    );
+    assert!(
+        typed.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }
+        )),
+        "properties must include toughness >= 4, got {:?}",
+        typed.properties
+    );
+    match &*sub.effect {
+        Effect::Token { name, count, .. } => {
+            assert_eq!(name, "Food");
+            assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+        }
+        other => panic!("override should create two Food tokens, got {other:?}"),
     }
 }
 
@@ -21940,8 +22002,17 @@ fn chained_return_up_to_one_target_creature_card_preserves_multi_target() {
         sub.multi_target,
         Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
     );
-    let Effect::Bounce { target, .. } = sub.effect.as_ref() else {
-        panic!("expected Bounce sub-effect, got {:?}", sub.effect);
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!(
+            "expected graveyard-to-hand sub-effect, got {:?}",
+            sub.effect
+        );
     };
     let TargetFilter::Typed(filter) = target else {
         panic!("expected typed return target, got {target:?}");
@@ -23410,7 +23481,12 @@ fn deadly_brew_sacrifice_planeswalker_return_condition() {
         }) if type_filters.contains(&TypeFilter::Permanent)
     ));
     match &*return_sub.effect {
-        Effect::Bounce { target, .. } => {
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target,
+            ..
+        } => {
             let TargetFilter::Typed(typed) = target else {
                 panic!(
                     "expected typed graveyard permanent target, got {0:?}",
@@ -23431,7 +23507,7 @@ fn deadly_brew_sacrifice_planeswalker_return_condition() {
                 .iter()
                 .any(|p| matches!(p, FilterProp::Another)));
         }
-        other => panic!("expected graveyard-to-hand Bounce, got {other:?}"),
+        other => panic!("expected graveyard-to-hand ChangeZone, got {other:?}"),
     }
 }
 
@@ -31488,9 +31564,10 @@ fn perpetual_parser_maps_modify_cost() {
     );
 }
 
-/// Anaphoric "that card perpetually gains …" — the EXACT clause printed on
-/// Paths of Tuinvale and Talion's Throneguard. Back-references the parent
-/// target ([`TargetFilter::ParentTarget`]).
+/// Definite "that card perpetually gains ..." back-references the parent
+/// target ([`TargetFilter::ParentTarget`]). Bare "It ..." needs the surrounding
+/// chain context and is covered by `perpetual_anaphor_after_chosen_card_targets_parent_target`
+/// and `perpetual_modify_cost_bound_it_uses_prior_referent`.
 #[test]
 fn perpetual_modify_cost_anaphor_that_card() {
     use crate::types::ability::PerpetualModification;
@@ -31510,36 +31587,6 @@ fn perpetual_modify_cost_anaphor_that_card() {
             } if *amount == ManaCost::generic(1)
         ),
         "'that card' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
-    );
-
-    let e = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
-    assert!(
-        matches!(
-            &e,
-            Effect::ApplyPerpetual {
-                target: TargetFilter::ParentTarget,
-                modification: PerpetualModification::ModifyCost {
-                    mode: CostModifyMode::Reduce,
-                    amount,
-                },
-            } if *amount == ManaCost::generic(1)
-        ),
-        "'it' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
-    );
-
-    let e = parse_effect("It perpetually gains \"This spell costs {2} more to cast.\"");
-    assert!(
-        matches!(
-            &e,
-            Effect::ApplyPerpetual {
-                target: TargetFilter::ParentTarget,
-                modification: PerpetualModification::ModifyCost {
-                    mode: CostModifyMode::Raise,
-                    amount,
-                },
-            } if *amount == ManaCost::generic(2)
-        ),
-        "'it' anaphor must map to ParentTarget Raise generic(2), got {e:?}"
     );
 }
 
@@ -31616,6 +31663,63 @@ fn perpetual_anaphor_after_chosen_card_targets_parent_target() {
         ),
         "chosen-card P/T 'it' must map to ParentTarget ApplyPerpetual, got {:?}",
         sub.effect
+    );
+}
+
+#[test]
+fn perpetual_modify_cost_bound_it_uses_prior_referent() {
+    fn assert_sub_cost(def: &AbilityDefinition, mode: CostModifyMode, amount: ManaCost) {
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("bound-it chain must produce a perpetual sub-ability");
+        match &*sub.effect {
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification:
+                    PerpetualModification::ModifyCost {
+                        mode: actual_mode,
+                        amount: actual_amount,
+                    },
+            } if *actual_mode == mode && *actual_amount == amount => {}
+            other => panic!(
+                "expected bound-it ApplyPerpetual ParentTarget {mode:?} {amount:?}, got {other:?}"
+            ),
+        }
+    }
+
+    let bloodsprout = parse_effect_chain(
+        "Choose a nonland card in your hand. It perpetually gains \"This spell costs {1} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert_sub_cost(&bloodsprout, CostModifyMode::Reduce, ManaCost::generic(1));
+
+    let geistchanneler = parse_effect_chain(
+        "choose an instant or sorcery card in your hand with mana value 3 or greater. It perpetually gains \"This spell costs {2} less to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert_sub_cost(
+        &geistchanneler,
+        CostModifyMode::Reduce,
+        ManaCost::generic(2),
+    );
+
+    let nightclub = parse_effect_chain(
+        "return target nonland permanent an opponent controls to its owner's hand. It perpetually gains \"This spell costs {2} more to cast.\"",
+        AbilityKind::Spell,
+    );
+    assert_sub_cost(&nightclub, CostModifyMode::Raise, ManaCost::generic(2));
+
+    let standalone = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
+    assert!(
+        !matches!(
+            standalone,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::ModifyCost { .. },
+                ..
+            }
+        ),
+        "standalone bound-it clause must stay honest-red, got {standalone:?}"
     );
 }
 
@@ -36548,6 +36652,74 @@ fn play_exiled_card_this_turn_regression_unchanged() {
     };
     assert_eq!(duration, Duration::UntilEndOfTurn);
     assert_eq!(mana_spend_permission, None);
+}
+
+/// CR 607.2a + CR 611.2a: Furious Rise / Superior Foes / Unstable Amulet
+/// grant permission to play the just-exiled card only until the same source
+/// exiles another card.
+#[test]
+fn play_from_exile_until_source_exiles_another_card_has_source_invalidation() {
+    for text in [
+        "you may play that card until you exile another card with ~",
+        "you may play it until you exile another card with ~",
+        "you may play that card until you exile another card with this ability",
+    ] {
+        let e = parse_effect(text);
+        let Effect::GrantCastingPermission {
+            permission, target, ..
+        } = e
+        else {
+            panic!("expected GrantCastingPermission for {text:?}, got {e:?}");
+        };
+        let CastingPermission::PlayFromExile {
+            duration,
+            invalidation,
+            ..
+        } = permission
+        else {
+            panic!("expected PlayFromExile permission for {text:?}");
+        };
+        assert_eq!(duration, Duration::Permanent);
+        assert_eq!(
+            invalidation,
+            Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource)
+        );
+        assert_eq!(
+            target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+            "source-exile duration must still bind the grant to the tracked exile set"
+        );
+    }
+}
+
+#[test]
+fn play_that_card_until_next_same_source_exile_has_source_invalidation() {
+    let ability = parse_effect_chain(
+        "Exile the top card of your library. You may play that card until you exile another card with this enchantment.",
+        AbilityKind::Spell,
+    );
+    let grant = ability
+        .sub_ability
+        .as_ref()
+        .expect("expected PlayFromExile grant after ExileTop");
+    let Effect::GrantCastingPermission { permission, .. } = grant.effect.as_ref() else {
+        panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+    };
+    let CastingPermission::PlayFromExile {
+        duration,
+        invalidation,
+        ..
+    } = permission
+    else {
+        panic!("expected PlayFromExile permission, got {permission:?}");
+    };
+    assert_eq!(*duration, Duration::Permanent);
+    assert_eq!(
+        *invalidation,
+        Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource)
+    );
 }
 
 /// Discriminating: the "for as long as it remains exiled, and mana of any
@@ -41991,5 +42163,180 @@ fn slimefoot_reanimate_self_and_up_to_one_creature_shape() {
     assert!(
         !reanimate_subtree_has_unimplemented(ability),
         "the reanimation ability must have no Unimplemented node: {ability:#?}"
+    );
+}
+
+fn type_filter_tree_contains(filter: &TypeFilter, needle: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::AnyOf(filters) => filters
+            .iter()
+            .any(|filter| type_filter_tree_contains(filter, needle)),
+        TypeFilter::Non(inner) => type_filter_tree_contains(inner, needle),
+        other => other == needle,
+    }
+}
+
+fn target_filter_tree_contains_type(filter: &TargetFilter, needle: &TypeFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .type_filters
+            .iter()
+            .any(|filter| type_filter_tree_contains(filter, needle)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_tree_contains_type(filter, needle)),
+        TargetFilter::Not { filter } => target_filter_tree_contains_type(filter, needle),
+        _ => false,
+    }
+}
+
+fn target_filter_tree_has_property(
+    filter: &TargetFilter,
+    predicate: fn(&FilterProp) -> bool,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(predicate),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_tree_has_property(filter, predicate)),
+        TargetFilter::Not { filter } => target_filter_tree_has_property(filter, predicate),
+        _ => false,
+    }
+}
+
+fn target_filter_tree_has_controller(filter: &TargetFilter, controller: &ControllerRef) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller.as_ref() == Some(controller),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_tree_has_controller(filter, controller)),
+        TargetFilter::Not { filter } => target_filter_tree_has_controller(filter, controller),
+        _ => false,
+    }
+}
+
+fn find_change_zone_to(
+    ability: &AbilityDefinition,
+    destination: Zone,
+) -> Option<&AbilityDefinition> {
+    if matches!(
+        ability.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: d,
+            ..
+        } if *d == destination
+    ) {
+        return Some(ability);
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| find_change_zone_to(sub, destination))
+        .or_else(|| {
+            ability
+                .else_ability
+                .as_deref()
+                .and_then(|else_ability| find_change_zone_to(else_ability, destination))
+        })
+}
+
+#[test]
+fn return_from_graveyard_to_hand_lowers_to_change_zone() {
+    let ability = parse_effect_chain(
+        "return up to one target non-Avatar creature or planeswalker card from your graveyard to your hand",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = ability.effect.as_ref()
+    else {
+        panic!(
+            "expected graveyard-to-hand ChangeZone, got {:?}",
+            ability.effect
+        );
+    };
+    assert!(
+        target_filter_tree_contains_type(target, &TypeFilter::Creature),
+        "target must include creature cards, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_contains_type(target, &TypeFilter::Planeswalker),
+        "target must include planeswalker cards, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_has_property(target, |prop| matches!(
+            prop,
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            }
+        )),
+        "target must be constrained to graveyard, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_has_controller(target, &ControllerRef::You)
+            || target_filter_tree_has_property(target, |prop| matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                }
+            )),
+        "target must be constrained to your graveyard, got {target:?}"
+    );
+}
+
+#[test]
+fn optional_sacrifice_if_you_do_return_keeps_graveyard_filter() {
+    let ability = parse_effect_chain(
+        "You may sacrifice three other nonland permanents. If you do, return a creature card from your graveyard to the battlefield with a finality counter on it.",
+        AbilityKind::Spell,
+    );
+    let returned = find_change_zone_to(&ability, Zone::Battlefield)
+        .expect("expected graveyard-to-battlefield return");
+    assert!(
+        matches!(
+            returned.condition,
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed
+            })
+        ),
+        "return must be gated on the optional sacrifice, got {:?}",
+        returned.condition
+    );
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        target,
+        enter_with_counters,
+        ..
+    } = returned.effect.as_ref()
+    else {
+        panic!("expected graveyard ChangeZone, got {:?}", returned.effect);
+    };
+    assert_ne!(
+        target,
+        &TargetFilter::ParentTarget,
+        "return must keep a selectable graveyard filter, not ParentTarget"
+    );
+    assert!(
+        target_filter_tree_contains_type(target, &TypeFilter::Creature),
+        "target must include creature cards, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_has_property(target, |prop| matches!(
+            prop,
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            }
+        )),
+        "target must be constrained to graveyard, got {target:?}"
+    );
+    assert!(
+        enter_with_counters.iter().any(|(counter, count)| {
+            matches!(counter, CounterType::Generic(name) if name == "finality")
+                && matches!(count, QuantityExpr::Fixed { value: 1 })
+        }),
+        "return must carry a finality counter, got {enter_with_counters:?}"
     );
 }

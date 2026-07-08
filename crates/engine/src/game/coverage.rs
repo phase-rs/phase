@@ -1161,6 +1161,7 @@ fn fmt_duration(d: &Duration) -> String {
             format!("until end of next turn ({})", fmt_player_scope(player))
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
+        Duration::UntilSourceExilesAnotherCard => "until source exiles another card".to_string(),
         Duration::UntilNextStepOf { step, player } => {
             format!(
                 "until next {} ({})",
@@ -3357,6 +3358,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions

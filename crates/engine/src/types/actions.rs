@@ -336,6 +336,11 @@ pub enum GameAction {
     ChooseBranch {
         index: usize,
     },
+    /// CR 119.7 + CR 119.8: Submit one of the engine-enumerated life-total redistribution
+    /// options. `option_index` indexes `WaitingFor::RedistributeLifeTotals.options`.
+    SubmitLifeRedistribution {
+        option_index: usize,
+    },
     /// CR 609.7a: Choose a source of damage for a prevention or replacement effect.
     ChooseDamageSource {
         source: ObjectId,
@@ -1376,6 +1381,7 @@ impl GameAction {
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
             | GameAction::ChooseBranch { .. }
+            | GameAction::SubmitLifeRedistribution { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
             | GameAction::RespondToSpliceOffer { .. }

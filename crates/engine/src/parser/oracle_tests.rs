@@ -3530,6 +3530,52 @@ fn eldritch_evolution_parses_sacrifice_cost_and_dynamic_search_filter() {
     );
 }
 
+#[test]
+fn sift_through_sands_condition_requires_both_named_spells() {
+    let r = parse(
+        "Draw two cards, then discard a card.\n\
+         If you've cast a spell named Peer Through Depths and a spell named Reach Through Mists this turn, you may search your library for a card named The Unspeakable, put it onto the battlefield, then shuffle.",
+        "Sift Through Sands",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1);
+
+    let mut cursor = Some(&r.abilities[0]);
+    let mut search_condition = None;
+    while let Some(ability) = cursor {
+        if matches!(&*ability.effect, Effect::SearchLibrary { .. }) {
+            assert!(ability.optional, "Sift search clause must remain optional");
+            search_condition = ability.condition.as_ref();
+            break;
+        }
+        cursor = ability.sub_ability.as_deref();
+    }
+    let Some(AbilityCondition::And { conditions }) = search_condition else {
+        panic!("expected SearchLibrary gated by both named spells, got {search_condition:?}");
+    };
+
+    for expected_name in ["peer through depths", "reach through mists"] {
+        assert!(
+            conditions.iter().any(|condition| matches!(
+                condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                } if properties.iter().any(|prop| matches!(prop, FilterProp::Named { name } if name == expected_name))
+            )),
+            "missing Sift named-spell gate for {expected_name}: {conditions:?}"
+        );
+    }
+}
+
 /// Issue #1997 — Embiggen: +1/+1 per typeline component on the targeted creature.
 #[test]
 fn embiggen_parses_non_brushwagg_pump_scaled_by_typeline_components() {
@@ -6203,6 +6249,124 @@ fn land_grant_reveal_hand_alternative_cost_option() {
     );
 }
 
+// CR 608.2c + CR 205.2b (GitHub #4710): Scourglass — "Destroy all permanents
+// except for artifacts and lands" must exclude both types (including artifact
+// creatures, per CR 205.2b's multi-type-object rule), not silently drop the
+// exception clause and destroy everything. Drives the full ability-line parse
+// (not just `parse_type_phrase` in isolation) so the interaction with the
+// trailing "Activate only during your upkeep." restriction sentence is
+// covered too.
+#[test]
+fn scourglass_destroy_all_excludes_artifacts_and_lands() {
+    let r = parse(
+        "{T}, Sacrifice this artifact: Destroy all permanents except for artifacts and lands. Activate only during your upkeep.",
+        "Scourglass",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DestroyAll { target, .. } = &*r.abilities[0].effect else {
+        panic!(
+            "expected DestroyAll effect, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert!(
+        r.abilities[0]
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::DuringYourUpkeep),
+        "the trailing restriction sentence must still parse: {:?}",
+        r.abilities[0].activation_restrictions
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
+// CR 608.2c (GitHub #4710 class): Elspeth Tirel's −5 loyalty ability —
+// "Destroy all other permanents except for lands and tokens" — exercises the
+// heterogeneous split: "lands" is a `TypeFilter::Non` entry, "tokens" is a
+// `FilterProp::NonToken` entry (tokens are a property, not a card type).
+#[test]
+fn elspeth_tirel_minus_five_excludes_lands_and_tokens() {
+    let r = parse(
+        "Destroy all other permanents except for lands and tokens.",
+        "Elspeth Tirel",
+        &[],
+        &["Planeswalker"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DestroyAll { target, .. } = &*r.abilities[0].effect else {
+        panic!(
+            "expected DestroyAll effect, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert!(typed.properties.contains(&FilterProp::NonToken));
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
+// GitHub #4710 CI hostile fixture (Flame Sweep, caught by CI's parse-diff
+// coverage report on the PR fixing this class): "Flame Sweep deals 2 damage
+// to each creature except for creatures you control with flying." The
+// exception here is a FILTERED SUBSET ("creatures you control with flying"),
+// not a bare type list — the naive suffix parser accepted "creatures" as a
+// recognized type word and stopped at "you" (not a valid list separator),
+// silently emitting `Non(Creature)` alongside the base `Creature` filter: a
+// self-contradictory filter matching zero creatures, breaking the card's
+// damage effect entirely. `parse_except_for_type_list_suffix` must decline
+// the whole clause when trailing text remains after the parsed list items
+// (this card's flying-exception itself stays an out-of-scope, pre-existing
+// gap — the base filter must simply be left as `Creature`, matching
+// pre-fix/baseline behavior, not made worse).
+#[test]
+fn flame_sweep_filtered_subset_exception_does_not_corrupt_base_filter() {
+    let r = parse(
+        "Flame Sweep deals 2 damage to each creature except for creatures you control with flying.",
+        "Flame Sweep",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DamageAll { target, .. } = &*r.abilities[0].effect else {
+        panic!("expected DamageAll effect, got {:?}", r.abilities[0].effect);
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert_eq!(
+        typed.type_filters,
+        vec![TypeFilter::Creature],
+        "the type-list suffix must decline this filtered-subset exception, \
+         not emit a self-contradictory Non(Creature) alongside Creature"
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_trap_alternative_cost() {
     let r = parse(
@@ -8797,15 +8961,14 @@ fn call_damage_control_distributes_shared_return_effect_across_modes() {
     assert_eq!(r.abilities.len(), 4);
     for (ability, expected) in r.abilities.iter().zip(expected_types) {
         match ability.effect.as_ref() {
-            Effect::Bounce {
-                target,
+            Effect::ChangeZone {
+                origin,
                 destination,
+                target,
                 ..
             } => {
-                assert_eq!(
-                    *destination, None,
-                    "no explicit destination => return to hand"
-                );
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Hand);
                 match target {
                     TargetFilter::Typed(TypedFilter {
                         type_filters,
@@ -8827,7 +8990,7 @@ fn call_damage_control_distributes_shared_return_effect_across_modes() {
                     other => panic!("expected Typed graveyard target, got {other:?}"),
                 }
             }
-            other => panic!("each mode must lower to Bounce, got {other:?}"),
+            other => panic!("each mode must lower to ChangeZone, got {other:?}"),
         }
     }
     assert!(r.parse_warnings.is_empty());
@@ -9189,6 +9352,53 @@ fn reverse_turn_order_parses_as_reverse_turn_order_effect() {
     assert!(matches!(
         parse_effect("reverse the turn order"),
         Effect::ReverseTurnOrder
+    ));
+}
+
+/// CR 119.7 + CR 119.8: "redistribute any number of players' life totals" (Reverse the
+/// Sands, The Doctor's Tomb) parses to the field-less redistribution effect —
+/// with the reminder stripped, the trailing period trimmed, and both the ASCII
+/// and typographic apostrophe accepted. The possessive subject ("players'") is
+/// an optional axis, so the bare "redistribute any number of life totals" form
+/// (You Live Only Because I Will It — Archenemy scheme) parses identically.
+#[test]
+fn redistribute_life_totals_parses_as_redistribute_effect() {
+    use crate::parser::oracle_effect::parse_effect;
+    use crate::parser::oracle_util::strip_reminder_text;
+    assert!(matches!(
+        parse_effect("redistribute any number of players' life totals"),
+        Effect::RedistributeLifeTotals
+    ));
+    // Trailing period trimmed by the anchored production.
+    assert!(matches!(
+        parse_effect("redistribute any number of players' life totals."),
+        Effect::RedistributeLifeTotals
+    ));
+    // Full printed form: reminder text is stripped upstream (as the trigger/
+    // ability clause pipeline does) before the effect parser sees it.
+    assert!(matches!(
+        parse_effect(&strip_reminder_text(
+            "redistribute any number of players' life totals. (Each of those players gets one life total back.)"
+        )),
+        Effect::RedistributeLifeTotals
+    ));
+    // Typographic apostrophe variant.
+    assert!(matches!(
+        parse_effect("redistribute any number of players\u{2019} life totals"),
+        Effect::RedistributeLifeTotals
+    ));
+    // Bare form without the possessive subject (You Live Only Because I Will It).
+    // The scheme's "you may" wrapping and reminder are stripped upstream before
+    // the effect parser sees the imperative.
+    assert!(matches!(
+        parse_effect("redistribute any number of life totals"),
+        Effect::RedistributeLifeTotals
+    ));
+    assert!(matches!(
+        parse_effect(&strip_reminder_text(
+            "redistribute any number of life totals. (Each affected player or team gets one of those life totals back.)"
+        )),
+        Effect::RedistributeLifeTotals
     ));
 }
 

@@ -1723,6 +1723,7 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::SubmitSpellbookDraft { .. }
         | GameAction::ChoosePile { .. }
         | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
         | GameAction::ChooseDamageSource { .. } => {
             AvailableActionConversion::Unsupported("local.selection-unsupported")
         }

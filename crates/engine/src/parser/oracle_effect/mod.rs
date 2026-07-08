@@ -43,15 +43,15 @@ use lower::{
     extract_switch_pt_multi_target, is_token_creating_effect, parse_damage_player_scope,
     parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
-    split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
-    strip_each_scope_who_cant_subject, strip_each_scope_who_does_subject,
-    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
-    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_return_destination_ext,
-    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
-    strip_repeat_count_suffix, strip_return_destination_ext,
-    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
-    try_parse_distribute_counters, try_parse_distribute_damage,
+    scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
+    strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
+    strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
+    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
+    strip_leading_duration, strip_leading_return_destination_ext, strip_leading_sequence_connector,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
+    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
+    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
+    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -97,10 +97,10 @@ use crate::types::ability::{
     DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction,
     GuessSubject, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
     ManaSpendPermission, MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope,
-    OriginConstraint, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
-    RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
+    OriginConstraint, PlayPermissionInvalidation, PlayerFilter, PlayerRelation, PlayerScope,
+    PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
+    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
     SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
@@ -6659,8 +6659,8 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
             target: Some(target),
             ..
         } => rebind(target),
-        // CR 109.4 + CR 608.2c + CR 608.2d (issue #534): `Bounce`'s recipient
-        // ("a card from THEIR graveyard to THEIR hand") is encoded inside the
+        // CR 109.4 + CR 608.2c + CR 608.2d (issue #534): return effects'
+        // recipient ("a card from THEIR graveyard to THEIR hand") is encoded inside the
         // target filter's `FilterProp::Owned { controller }` — the card is
         // *owned* (CR 109.4: graveyard cards have an owner, not a controller),
         // not a top-level player slot. Rebind the nested `Owned` property
@@ -6668,7 +6668,7 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
         // emits one) from `ScopedPlayer` to `ChosenPlayer { index }` so the
         // chosen opponent's graveyard is enumerated at resolution time
         // (CR 608.2d — the chosen opponent announces which card returns).
-        Effect::Bounce { target, .. } => {
+        Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => {
             rebind_owned_scope(target, ControllerRef::ChosenPlayer { index })
         }
         _ => {}
@@ -6678,7 +6678,7 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
 /// CR 109.4 (issue #534): Tree-walk a `TargetFilter` and rewrite every
 /// `ScopedPlayer` ref — both the top-level `TypedFilter.controller` slot and
 /// every nested `FilterProp::Owned { controller }` property — to
-/// `ChosenPlayer { index }`. Used by the `Bounce` arm of
+/// `ChosenPlayer { index }`. Used by the return-effect arms of
 /// `retarget_effect_to_chosen_player` and by the chosen-subject post-pass in
 /// `parse_subject_application`'s caller, because graveyard ownership lives
 /// in a filter property, not a top-level player slot (cards in non-stack /
@@ -7794,7 +7794,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // less/more to cast\"" — persistent self-spell cost modifier (CR 601.2f).
     // Tried before the keyword grant: disjoint (this requires a quoted body, the
     // keyword grant a bare keyword list), but the quote guard keeps it explicit.
-    if let Some(effect) = try_parse_perpetual_modify_cost(tp) {
+    if let Some(effect) = try_parse_perpetual_modify_cost(tp, ctx) {
         return parsed_clause(effect);
     }
 
@@ -8355,6 +8355,33 @@ fn parse_perpetual_self_subject(lower: &str) -> Option<(&str, TargetFilter)> {
     Some((rest, TargetFilter::Any))
 }
 
+/// Cost-grant-only bound pronoun form: "It perpetually gains ...".
+///
+/// Standalone "it" must not silently fall back to the source. It is accepted
+/// only when the effect-chain context has a prior object referent that runtime
+/// target propagation can expose as [`TargetFilter::ParentTarget`]: either a
+/// typed target from an earlier clause or an immediately preceding
+/// [`Effect::ChooseFromZone`] choice.
+fn parse_bound_it_perpetual_gain_cost_subject<'a>(
+    lower: &'a str,
+    ctx: &ParseContext,
+) -> Option<&'a str> {
+    if !(ctx.parent_target_available || ctx.pending_tracked_set_origin.is_some()) {
+        return None;
+    }
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>("it perpetually ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("gains "),
+        tag::<_, _, OracleError<'_>>("gain "),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(rest)
+}
+
 /// Digital-only Alchemy: parse "perpetually gains [keyword(s)]" —
 /// [`PerpetualModification::GrantKeywords`] (Monoist Gravliner).
 fn try_parse_perpetual_grant_keywords(tp: TextPair) -> Option<Effect> {
@@ -8404,12 +8431,20 @@ fn parse_quoted_self_spell_cost_body(
 /// [`PerpetualModification::ModifyCost`]. The quoted self-spell cost modifier is
 /// realized at resolution by injecting a synthetic [`StaticMode::ModifyCost`]
 /// into the card's persistent static baseline.
-fn try_parse_perpetual_modify_cost(tp: TextPair) -> Option<Effect> {
+fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<Effect> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
     }
 
-    let (rest, target) = parse_perpetual_self_subject(tp.lower)?;
+    let (rest, target) = if tag::<_, _, OracleError<'_>>("it perpetually ")
+        .parse(tp.lower)
+        .is_ok()
+    {
+        parse_bound_it_perpetual_gain_cost_subject(tp.lower, ctx)
+            .map(|rest| (rest, TargetFilter::ParentTarget))?
+    } else {
+        parse_perpetual_self_subject(tp.lower)?
+    };
 
     // Quoted body: "this spell costs {N} less/more to cast[.,]".
     let ((amount, mode), rest) = nom_on_lower(rest, rest, |input| {
@@ -10545,6 +10580,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         },
         target: TargetFilter::TrackedSet {
             id: TrackedSetId(0),
@@ -10664,6 +10700,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             single_use,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         },
         // CR 603.7 + CR 608.2c: TrackedSet sentinel — the runtime resolver
         // normalizes `TrackedSetId(0)` to the most recently published set
@@ -10755,6 +10792,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         },
         target,
         grantee,
@@ -10933,8 +10971,11 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // CR 400.7i + CR 611.2a: "for as long as ... remain[s] exiled" persists until
     // zone-exit cleanup clears the exile-scoped permission, matching the existing
     // any-mana remains-exiled grant path.
+    let invalidation = scan_until_next_same_source_exile_invalidation(tp.lower)
+        .then_some(PlayPermissionInvalidation::UntilNextGrantFromSameSource);
     let (_, dur) = strip_trailing_duration(tp.original);
-    let duration = if scan_contains_phrase(tp.lower, "remain exiled")
+    let duration = if invalidation.is_some()
+        || scan_contains_phrase(tp.lower, "remain exiled")
         || scan_contains_phrase(tp.lower, "remains exiled")
     {
         Duration::Permanent
@@ -10957,6 +10998,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation,
         },
         // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
         // (the cards exiled by the prior clause) rather than fall back to the
@@ -11019,6 +11061,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         },
         target: tracked_set_filter(),
         grantee: Default::default(),
@@ -11178,6 +11221,7 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
                 single_use: false,
                 cast_cost_raise: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
             },
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -13536,6 +13580,15 @@ fn try_parse_verb_and_target<'a>(
                         },
                         rem,
                     ))
+                } else if origin.is_some() {
+                    Some((
+                        TargetedImperativeAst::ReturnToZone {
+                            target,
+                            origin,
+                            destination: Zone::Hand,
+                        },
+                        rem,
+                    ))
                 } else {
                     Some((TargetedImperativeAst::Return { target, selection }, rem))
                 }
@@ -15534,13 +15587,18 @@ fn replace_definition_targets_with_parent(def: &mut AbilityDefinition) {
 /// must not collapse such recipients to `ParentTarget` just because the
 /// attachment side uses a set anaphor ("one of them").
 fn attach_recipient_is_explicitly_typed(target: &TargetFilter) -> bool {
+    target_filter_has_explicit_object_constraints(target)
+}
+
+fn target_filter_has_explicit_object_constraints(target: &TargetFilter) -> bool {
     match target {
         TargetFilter::Typed(tf) => {
             !tf.type_filters.is_empty() || tf.controller.is_some() || !tf.properties.is_empty()
         }
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(attach_recipient_is_explicitly_typed)
-        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(target_filter_has_explicit_object_constraints),
+        TargetFilter::Not { filter } => target_filter_has_explicit_object_constraints(filter),
         _ => false,
     }
 }
@@ -15649,7 +15707,8 @@ fn replace_target_with_parent(effect: &mut Effect) {
             .iter()
             .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)) => {}
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
-            if !matches!(target, TargetFilter::SelfRef) =>
+            if !matches!(target, TargetFilter::SelfRef)
+                && !target_filter_has_explicit_object_constraints(target) =>
         {
             *target = TargetFilter::ParentTarget;
         }
@@ -16782,12 +16841,16 @@ fn lower_subject_predicate_ast(
             // is scope-agnostic. Rebind those nested `ScopedPlayer` refs to
             // the chosen-player index so the effect's filter enumerates the
             // chosen player's zone at resolution time. Skullwinder exercises
-            // this for `Effect::Bounce`; the rebind tree-walks the filter and
-            // is a no-op when the filter has no `ScopedPlayer` ref.
+            // this for explicit graveyard-to-hand `Effect::ChangeZone`; the
+            // rebind tree-walks the filter and is a no-op when the filter has
+            // no `ScopedPlayer` ref.
             if let TargetFilter::Typed(tf) = &subject.affected {
                 if let Some(ControllerRef::ChosenPlayer { index }) = tf.controller {
-                    if let Effect::Bounce { target, .. } = &mut clause.effect {
-                        rebind_owned_scope(target, ControllerRef::ChosenPlayer { index });
+                    match &mut clause.effect {
+                        Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => {
+                            rebind_owned_scope(target, ControllerRef::ChosenPlayer { index });
+                        }
+                        _ => {}
                     }
                 }
             }

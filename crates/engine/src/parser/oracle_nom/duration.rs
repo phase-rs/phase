@@ -3,9 +3,9 @@
 //! **Single authority for the phrase→`Duration` grammar** (oracle-parser
 //! SKILL §7). Parses: "until end of turn", "until end of combat", "until the
 //! end of your/their next turn", "until your/their next turn", "until your
-//! next end step", "until ~/this creature leaves the battlefield", "for the
-//! rest of the game", "for as long as [condition]", "this turn", "this/that
-//! combat".
+//! next end step", "until ~/this creature leaves the battlefield", "until you
+//! exile another card with ~/this ability", "for the rest of the game", "for
+//! as long as [condition]", "this turn", "this/that combat".
 //!
 //! Positional wrappers (`strip_trailing_duration` / `strip_leading_duration`
 //! in `oracle_effect/lower.rs`, the clause shell, and the combat-grant
@@ -69,8 +69,28 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
                 tag(" leaves the battlefield"),
             ),
         ),
+        // CR 607.2a + CR 611.2a: source-linked impulse grants such as
+        // Furious Rise last until the same source exiles another card.
+        value(
+            Duration::UntilSourceExilesAnotherCard,
+            parse_until_source_exiles_another_card_body,
+        ),
     ))
     .parse(input)
+}
+
+pub(crate) fn parse_until_source_exiles_another_card_body(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("you exile another card with ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("~"),
+        tag("this ability"),
+        tag("this enchantment"),
+        tag("this artifact"),
+        tag("this creature"),
+        tag("this permanent"),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
 }
 
 /// Alternatives after the shared "for " prefix.
@@ -447,6 +467,23 @@ mod tests {
         ] {
             let (rest, d) = parse_duration(text).unwrap();
             assert_eq!(d, Duration::UntilHostLeavesPlay, "failed for {text:?}");
+            assert_eq!(rest, "");
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_until_source_exiles_another_card() {
+        for text in [
+            "until you exile another card with ~",
+            "until you exile another card with this ability",
+            "until you exile another card with this enchantment",
+        ] {
+            let (rest, d) = parse_duration(text).unwrap();
+            assert_eq!(
+                d,
+                Duration::UntilSourceExilesAnotherCard,
+                "failed for {text:?}"
+            );
             assert_eq!(rest, "");
         }
     }
