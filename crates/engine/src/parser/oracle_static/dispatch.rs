@@ -986,7 +986,7 @@ pub(crate) fn parse_static_line_inner(
     // because the restriction applies to whoever is the active player, not
     // the source's controller. See `parse_max_untap_per_type_static` for the
     // trailing-condition tolerance shared with `parse_continuous_gets_has`.
-    if let Some(def) = parse_max_untap_per_type_static(&tp, &text) {
+    if let Some(def) = parse_max_untap_per_type_static(&tp, text.as_str()) {
         return Some(def);
     }
 
