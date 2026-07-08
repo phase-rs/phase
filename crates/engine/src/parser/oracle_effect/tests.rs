@@ -42135,9 +42135,9 @@ fn target_filter_tree_has_property(
     }
 }
 
-fn target_filter_tree_has_controller(filter: &TargetFilter, controller: ControllerRef) -> bool {
+fn target_filter_tree_has_controller(filter: &TargetFilter, controller: &ControllerRef) -> bool {
     match filter {
-        TargetFilter::Typed(typed) => typed.controller == Some(controller),
+        TargetFilter::Typed(typed) => typed.controller.as_ref() == Some(controller),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
             .any(|filter| target_filter_tree_has_controller(filter, controller)),
@@ -42207,7 +42207,7 @@ fn return_from_graveyard_to_hand_lowers_to_change_zone() {
         "target must be constrained to graveyard, got {target:?}"
     );
     assert!(
-        target_filter_tree_has_controller(target, ControllerRef::You)
+        target_filter_tree_has_controller(target, &ControllerRef::You)
             || target_filter_tree_has_property(target, |prop| matches!(
                 prop,
                 FilterProp::Owned {
