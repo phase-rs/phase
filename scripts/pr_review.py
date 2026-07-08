@@ -2297,7 +2297,7 @@ SCAN_PR_QUERY = (
     "nodes{"
     + pr_node_fields(
         comments_last=15,
-        include_full_reviews=False,
+        include_full_reviews=True,
         include_pr_body=True,
         include_review_body=False,
         include_comment_body=True,
