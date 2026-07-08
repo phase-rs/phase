@@ -3849,18 +3849,21 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
     static_definitions: &[StaticDefinition],
 ) -> Vec<ActiveCombatAssignmentRuleEffect> {
     let mut effects = Vec::new();
-    let source_zone = state.objects.get(&source_id).map(|o| o.zone);
+    let Some(source_obj) = state.objects.get(&source_id) else {
+        return effects;
+    };
 
     for def in static_definitions {
         if def.mode != StaticMode::Continuous {
             continue;
         }
 
-        if !def.active_zones.is_empty() {
-            let Some(zone) = source_zone else { continue };
-            if !def.active_zones.contains(&zone) {
-                continue;
-            }
+        // CR 113.6 + CR 113.6b: shared zone-of-function gate, matching
+        // `active_static_definitions`. Combat-assignment-rule effects are
+        // `StaticMode::Continuous`-only (checked above), so the CR 113.6g
+        // stack exception is irrelevant here.
+        if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
+            continue;
         }
 
         let retained_condition = if let Some(condition) = &def.condition {
@@ -6092,6 +6095,71 @@ mod tests {
             target.assigns_damage_from_toughness,
             "post-layer rule effect must match the target after layer 7c toughness changes"
         );
+    }
+
+    /// CR 113.6 + CR 113.6b + CR 613.11: combat-assignment rule effects use the
+    /// same zone-of-function gate as other statics. A graveyard object can be
+    /// visited by the static-source gather because it has some other
+    /// opt-in-zone static; an empty-`active_zones` combat-assignment static on
+    /// that same object still defaults to battlefield-only and must not leak.
+    #[test]
+    fn combat_assignment_rule_effects_respect_zone_of_function_active_zones() {
+        fn add_graveyard_source(state: &mut GameState, combat_active_zones: Vec<Zone>) -> ObjectId {
+            let source_id = create_object(
+                state,
+                CardId(0),
+                PlayerId(0),
+                "Graveyard Combat Rule Source".to_string(),
+                Zone::Graveyard,
+            );
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+                    .active_zones(combat_active_zones),
+            );
+            state.players[0].graveyard.push_back(source_id);
+            source_id
+        }
+
+        {
+            let mut state = setup();
+            let _source_id = add_graveyard_source(&mut state, vec![]);
+            let target_id = make_creature(&mut state, "Battlefield Bear", 2, 3, PlayerId(0));
+
+            evaluate_layers(&mut state);
+
+            assert!(
+                !state.objects[&target_id].assigns_damage_from_toughness,
+                "empty active_zones defaults to battlefield-only and must not \
+                 leak a combat-assignment rule from the graveyard"
+            );
+        }
+
+        {
+            let mut state = setup();
+            let _source_id = add_graveyard_source(&mut state, vec![Zone::Graveyard]);
+            let target_id = make_creature(&mut state, "Battlefield Bear", 2, 3, PlayerId(0));
+
+            evaluate_layers(&mut state);
+
+            assert!(
+                state.objects[&target_id].assigns_damage_from_toughness,
+                "a combat-assignment rule that explicitly opts into the \
+                 graveyard still functions from the graveyard"
+            );
+        }
     }
 
     /// Helper: creatures you control filter
