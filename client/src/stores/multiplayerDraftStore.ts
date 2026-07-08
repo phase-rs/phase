@@ -642,7 +642,7 @@ export const useMultiplayerDraftStore = create<
             resolveRoomFull();
           }
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.state, event.events, event.legalResult);
+            void processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
           }
           if (event.type === "stateChanged") {
             const wf = event.state?.waiting_for;
@@ -715,7 +715,7 @@ export const useMultiplayerDraftStore = create<
 
         matchAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.state, event.events, event.legalResult);
+            void processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
           }
           if (event.type === "stateChanged") {
             const wf = event.state?.waiting_for;

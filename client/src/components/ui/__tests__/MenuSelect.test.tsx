@@ -91,7 +91,7 @@ describe("MenuSelect", () => {
 
     const listbox = screen.getByRole("listbox");
     expect(listbox).toBeInTheDocument();
-    expect(listbox.className).toContain("rounded-xl");
+    expect(listbox.className).toContain("rounded-[8px]");
     expect(listbox.className).not.toContain("rounded-t-2xl");
     expect(screen.queryByRole("button", { name: "All types" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "All types" })).toHaveLength(1);

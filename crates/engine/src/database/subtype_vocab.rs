@@ -263,6 +263,7 @@ mod tests {
                     scryfall_oracle_id: None,
                 },
                 foreign_data: vec![],
+                related_cards: crate::database::mtgjson::SetRelatedCards::default(),
             }],
         );
         let atomic = crate::database::mtgjson::AtomicCardsFile { data: atomic_data };
@@ -309,6 +310,7 @@ mod tests {
                     scryfall_oracle_id: None,
                 },
                 foreign_data: vec![],
+                related_cards: crate::database::mtgjson::SetRelatedCards::default(),
             }],
         );
         atomic_data.insert(
@@ -342,6 +344,7 @@ mod tests {
                     scryfall_oracle_id: None,
                 },
                 foreign_data: vec![],
+                related_cards: crate::database::mtgjson::SetRelatedCards::default(),
             }],
         );
         let atomic = crate::database::mtgjson::AtomicCardsFile { data: atomic_data };

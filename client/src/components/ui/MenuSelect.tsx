@@ -414,8 +414,8 @@ export function MenuSelect({
   );
 
   const triggerClassName = [
-    "flex w-full items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-left text-sm text-white transition-colors",
-    "hover:bg-white/6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20",
+    "flex w-full items-center justify-between gap-2 rounded-[8px] border border-white/10 bg-slate-950/82 px-3 py-1.5 text-left text-sm text-white transition-colors",
+    "hover:bg-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20",
     disabled ? "cursor-not-allowed opacity-40" : "",
     className,
   ]
@@ -467,10 +467,10 @@ export function MenuSelect({
               role="listbox"
               aria-label={ariaLabel ?? label}
               className={[
-                `fixed ${menuZClassName} flex flex-col overflow-x-hidden overflow-y-auto overscroll-contain border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar`,
+                `fixed ${menuZClassName} flex flex-col overflow-x-hidden overflow-y-auto overscroll-contain border border-white/10 bg-[#0a0f1b] py-1 shadow-xl thin-scrollbar`,
                 useBottomSheet
-                  ? "inset-x-0 bottom-[calc(76px+env(safe-area-inset-bottom))] max-h-[min(70dvh,calc(100dvh-76px-env(safe-area-inset-bottom)-1rem))] rounded-t-2xl rounded-b-none border-b-0"
-                  : "rounded-xl",
+                  ? "inset-x-2 bottom-[calc(76px+env(safe-area-inset-bottom))] max-h-[min(70dvh,calc(100dvh-76px-env(safe-area-inset-bottom)-1rem))] rounded-[10px]"
+                  : "rounded-[8px]",
                 menuClassName,
               ].join(" ")}
               onWheel={(event) => event.stopPropagation()}

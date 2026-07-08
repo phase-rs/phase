@@ -55,6 +55,17 @@ pub struct CardMetadata {
     /// `spellbook` so the `DraftFromSpellbook` resolver can present the list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spellbook: Vec<String>,
+    /// CR 202.3d + CR 709.4b: The card's OFF-STACK mana value when it differs from
+    /// this face's own `mana_cost.mana_value()` — i.e. the COMBINED mana value of
+    /// both halves for a SPLIT card (Fire // Ice is MV 4, not one half's 2).
+    /// Precomputed at deck-load time (`deck_loading::resolve_names`, where the
+    /// `CardDatabase` is available) so runtime deck checks that have only a single
+    /// `CardFace` — notably companion validation, which has no database — can read
+    /// the rules-correct combined value. `None` means "use this face's own mana
+    /// value"; the field lives on the already-`Default`-constructed `CardMetadata`
+    /// so no `CardFace`/`DeckEntry` construction site needs to change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_stack_mana_value_override: Option<u32>,
 }
 
 impl CardMetadata {
@@ -66,6 +77,7 @@ impl CardMetadata {
             && self.related_token_ids.is_empty()
             && self.source_printing_ids.is_empty()
             && self.spellbook.is_empty()
+            && self.off_stack_mana_value_override.is_none()
     }
 }
 

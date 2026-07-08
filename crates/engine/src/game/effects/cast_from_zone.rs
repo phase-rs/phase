@@ -670,6 +670,28 @@ fn cast_from_zone_enters_with_counter(
     }
 }
 
+/// CR 205.1b + CR 613.1d: The Tomb of Aclazotz class — extract the enters-with
+/// continuous modifications ("… is a Vampire in addition to its other types")
+/// the cast-this-way creature gains. The `AddPendingEntersModifications` rider
+/// sits at depth 0 (a type-only grant, `CastFromZone.sub_ability`) or depth 1
+/// (nested under the enters-with-counter rider, as Tomb produces: the counter
+/// clause's own `sub_ability`). Walks the sub-ability chain and returns the
+/// first rider's modifications, or an empty `Vec` if none is present. Consumed
+/// as permission metadata (never resolved in place), mirroring
+/// `cast_from_zone_enters_with_counter`.
+fn cast_from_zone_enters_with_modifications(
+    ability: &ResolvedAbility,
+) -> Vec<crate::types::ability::ContinuousModification> {
+    let mut cursor = ability.sub_ability.as_deref();
+    while let Some(sub) = cursor {
+        if let Effect::AddPendingEntersModifications { modifications } = &sub.effect {
+            return modifications.clone();
+        }
+        cursor = sub.sub_ability.as_deref();
+    }
+    Vec::new()
+}
+
 /// CR 118.9: Stamp `ExileWithAltCost` / `ExileWithAltAbilityCost` on resolved
 /// targets. Shared by the direct resolve path and the `EffectZoneChoice` resume
 /// path (Electrodominance hand pick).
@@ -711,6 +733,11 @@ pub(crate) fn grant_lingering_permissions(
     // finalization (`casting_costs::finalize`) registers a pending ETB counter
     // on the cast object (Osteomancer Adept, The Tomb of Aclazotz).
     let enters_with_counter = cast_from_zone_enters_with_counter(ability);
+    // CR 205.1b + CR 613.1d: "… is a [type] in addition to its other types" —
+    // the additive type grant recorded on the granted permission so the cast
+    // finalization applies it as a Permanent continuous effect on the cast
+    // object (The Tomb of Aclazotz).
+    let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
 
     for &obj_id in target_ids {
         // CR 601.2a: Impulse-draw and similar grants move non-exile cards to
@@ -785,6 +812,7 @@ pub(crate) fn grant_lingering_permissions(
                     }),
                     graveyard_replacement: graveyard_replacement.clone(),
                     enters_with_counter: enters_with_counter.clone(),
+                    enters_with_modifications: enters_with_modifications.clone(),
                     // CR 609.4b: Forward "mana of any type can be spent to cast
                     // that spell" (Quistis Trepe, Tinybones the Pickpocket) onto
                     // the grant so the concession is scoped to this specific

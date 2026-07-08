@@ -23,8 +23,9 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastingVariant, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::{FlashbackCost, Keyword};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -456,6 +457,83 @@ fn cancel_after_type_choice_rewinds_and_recast_reprompts() {
     assert!(
         saw_cost_type_choice,
         "REVERT-PROOF (b): re-cast must re-present CostTypeChoice, not skip to behold with the stale type"
+    );
+}
+
+/// Issue #5051: after a resolved behold pre-cost spell sits in the graveyard with
+/// a stale `ChosenAttribute::CreatureType`, a later cast from that zone must
+/// re-prompt for the type (CR 400.7 — new object, no memory of prior choices).
+#[test]
+fn resolve_then_flashback_recast_reprompts_creature_type() {
+    let mut s = setup();
+    let card_id = s.runner.state().objects[&s.spell].card_id;
+    let lib_elf = s.lib_elf;
+    drive(&mut s, true, "Elf", Some(lib_elf));
+
+    assert_eq!(
+        zone_of(&s, s.spell),
+        Zone::Graveyard,
+        "resolved sorcery must be in the graveyard"
+    );
+    assert!(
+        s.runner.state().objects[&s.spell]
+            .chosen_attributes
+            .iter()
+            .any(|a| matches!(
+                a,
+                engine::types::ability::ChosenAttribute::CreatureType(t) if t == "Elf"
+            )),
+        "precondition: the prior cast left the chosen creature type on the spell object"
+    );
+
+    let flashback = Keyword::Flashback(FlashbackCost::Mana(ManaCost::generic(2)));
+    {
+        let obj = s.runner.state_mut().objects.get_mut(&s.spell).unwrap();
+        obj.base_keywords.push(flashback.clone());
+        obj.keywords.push(flashback);
+    }
+
+    add_mana(&mut s.runner, 4);
+    s.runner
+        .act(GameAction::CastSpell {
+            object_id: s.spell,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("flashback cast accepted");
+
+    let mut saw_cost_type_choice = false;
+    for _ in 0..16 {
+        match s.runner.state().waiting_for.clone() {
+            WaitingFor::CastingVariantChoice { options, .. } => {
+                let index = options
+                    .iter()
+                    .position(|o| o.variant == CastingVariant::Flashback)
+                    .expect("flashback casting variant");
+                s.runner
+                    .act(GameAction::ChooseCastingVariant { index })
+                    .unwrap();
+            }
+            WaitingFor::ChooseXValue { .. } => {
+                s.runner.act(GameAction::ChooseX { value: 3 }).unwrap();
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                s.runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .unwrap();
+            }
+            WaitingFor::CostTypeChoice { .. } => {
+                saw_cost_type_choice = true;
+                break;
+            }
+            WaitingFor::PayCost { .. } => break,
+            other => panic!("unexpected prompt on flashback re-cast: {other:?}"),
+        }
+    }
+    assert!(
+        saw_cost_type_choice,
+        "re-cast from graveyard must re-present CostTypeChoice, not reuse the stale Elf type (#5051)"
     );
 }
 

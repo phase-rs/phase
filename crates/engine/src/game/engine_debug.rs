@@ -17,6 +17,7 @@ use super::effects::change_zone::shuffle_library;
 use super::engine::EngineError;
 use super::game_object::AttachTarget;
 use super::zones;
+use crate::game::token_presets::TokenPtProvenance;
 
 pub fn apply_debug_action(
     state: &mut GameState,
@@ -439,6 +440,8 @@ pub fn apply_debug_action(
                 DebugTokenRequest::Preset {
                     preset_id,
                     owner,
+                    power_override,
+                    toughness_override,
                     enter_with_counters,
                 } => {
                     let preset = crate::game::token_presets::known_token_preset_by_id(&preset_id)
@@ -447,9 +450,31 @@ pub fn apply_debug_action(
                             "Debug: unknown token preset id {preset_id}"
                         ))
                     })?;
+                    let mut characteristics = preset.body.clone();
+                    match (&preset.pt_provenance, power_override, toughness_override) {
+                        (
+                            TokenPtProvenance::SourceDefinedOrDynamic { .. },
+                            Some(power),
+                            Some(toughness),
+                        ) => {
+                            characteristics.power = Some(power);
+                            characteristics.toughness = Some(toughness);
+                        }
+                        (TokenPtProvenance::SourceDefinedOrDynamic { .. }, _, _) => {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Debug: token preset {preset_id} requires both power_override and toughness_override"
+                            )));
+                        }
+                        (TokenPtProvenance::FixedOrAbsent, None, None) => {}
+                        (TokenPtProvenance::FixedOrAbsent, _, _) => {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Debug: token preset {preset_id} has fixed or absent P/T and does not accept overrides"
+                            )));
+                        }
+                    }
                     (
                         owner,
-                        preset.body.clone(),
+                        characteristics,
                         enter_with_counters,
                         preset.token_image_ref.clone(),
                     )
@@ -876,6 +901,8 @@ mod tests {
             request: DebugTokenRequest::Preset {
                 preset_id: sos_pest_preset_id.to_string(),
                 owner: PlayerId(0),
+                power_override: None,
+                toughness_override: None,
                 enter_with_counters: Vec::new(),
             },
             run_etb: true,
@@ -913,6 +940,76 @@ mod tests {
                 .any(|bucket| bucket.contains(&token_id)),
             "catalog trigger must be registered in the trigger index"
         );
+    }
+
+    #[test]
+    fn debug_create_source_defined_preset_requires_both_pt_overrides() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: "1545ee29-d9c1-57ff-acae-431cfd6d60cf".to_string(),
+                owner: PlayerId(0),
+                power_override: Some(4),
+                toughness_override: None,
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+
+        let err = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect_err("source-defined preset must reject incomplete P/T overrides");
+
+        assert!(format!("{err:?}").contains("requires both power_override and toughness_override"));
+    }
+
+    #[test]
+    fn debug_create_source_defined_preset_accepts_pt_overrides() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: "1545ee29-d9c1-57ff-acae-431cfd6d60cf".to_string(),
+                owner: PlayerId(0),
+                power_override: Some(4),
+                toughness_override: Some(5),
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("complete source-defined P/T overrides should create token");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+        let token = state.objects.get(&token_id).expect("token remains live");
+
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(5));
+    }
+
+    #[test]
+    fn debug_create_fixed_preset_rejects_pt_overrides() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: "25b62fd5-b036-5c64-88fd-8f50d0675e4d".to_string(),
+                owner: PlayerId(0),
+                power_override: Some(4),
+                toughness_override: Some(5),
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+
+        let err = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect_err("fixed preset must reject P/T overrides");
+
+        assert!(format!("{err:?}").contains("does not accept overrides"));
     }
 
     #[test]

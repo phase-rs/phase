@@ -9,6 +9,11 @@ rules_domain = "mtg-cr"
 
 [labels]
 frontend_deferred = "defer-fe"
+quality = "quality"
+
+[requested_changes]
+warning_after_days = 7
+close_after_warning_days = 7
 
 [hard_stops]
 patterns = [

@@ -523,6 +523,11 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 305.6 + CR 607.2d: land-axis counterpart — "Lands you control are the
+    // chosen type in addition to their other types" (Realmwright).
+    if let Some(def) = parse_chosen_land_type_static(&tp, &text) {
+        return Some(def);
+    }
     // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
     if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
         return Some(def);
@@ -1043,10 +1048,33 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 205.1a + CR 613.1f: Imprisoned-in-the-Moon — "Enchanted <subject> is a
+    // colorless [<subtype>...] <type> with "<ability>" and loses all other card
+    // types and abilities." Must precede parse_enchanted_is_type, whose base-P/T
+    // split does not model the with-"<ability>" clause (issue #4770).
+    if let Some(def) = parse_enchanted_becomes_type_with_ability(&tp, &text) {
+        return Some(def);
+    }
+    // CR 205.1a + CR 702.6: "Each <subject> is an Equipment with equip {N} and
+    // "<ability>"" — the become-Equipment anthem (Bram, Bludgeon Brawl). Grants
+    // the Equipment subtype + Equip keyword + the quoted static ability.
+    if let Some(def) = parse_becomes_equipment_with_ability(&tp, &text) {
+        return Some(def);
+    }
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.
     if let Some(def) = parse_enchanted_is_type(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 613.1d (Layer 4) + CR 205.1b: "[Enchanted|Equipped] <subject> isn't a
+    // <type> and is a <type> in addition to its other types" — attached-permanent
+    // type SWAP (Luxior: equipped planeswalker loses Planeswalker, gains
+    // Creature). Placed after `parse_enchanted_is_type` (whose "is a" copula
+    // parse rejects the "isn't a ..." lead) and before the generic
+    // enchanted/equipped predicate arms so the type-removal clause is preserved.
+    if let Some(def) = parse_attached_isnt_and_is_type(&tp, &text) {
         return Some(def);
     }
 
@@ -1492,6 +1520,32 @@ pub(crate) fn parse_static_line_inner(
         if let Some(result) = parse_typed_you_control(tp.original, tp.lower, false) {
             return Some(result);
         }
+    }
+
+    // CR 611.3 + CR 613.1 + CR 613.4b: "All <X> and all <Y> are <predicate>" —
+    // a compound-subject animation where one predicate applies to every object
+    // matching either subject (Life and Limb). Must precede parse_land_animation
+    // (which splits on "are" and would claim only the first subject with an
+    // incomplete predicate); the " and all " conjunction + Or-subject guard keep
+    // single-subject animation lines falling through to parse_land_animation.
+    if let Some(def) = parse_compound_all_subjects_type_change(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 611.3 + CR 205.1a + CR 613.4b: non-additive compound-subject animation
+    // ("All Elves and all Goblins are 2/2 Zombie creatures") — replacement
+    // subtype semantics via animation_modifications_with_replacement. Must follow
+    // the additive compound handler so the CR 205.1b gate stays authoritative.
+    if let Some(def) = parse_compound_all_subjects_type_replacement(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 611.3 + CR 305.7: "All <X> and all <Y> are <basic land type>" — compound-
+    // subject land type replacement/addition. Must follow the animation compound
+    // handlers (creature-gated) and precede parse_land_animation /
+    // parse_land_type_change, which only resolve single-subject land filters.
+    if let Some(def) = parse_compound_all_subjects_land_type_change(&tp, &text) {
+        return Some(def);
     }
 
     // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
@@ -2151,7 +2205,7 @@ pub(crate) fn parse_static_line_inner(
     // being activated. The self-reference case: `who = AllPlayers, source_filter = SelfRef`.
     // Global filter-scoped variants (Clarion/Karn) are handled by parse_filter_scoped_cant_be_activated
     // which runs earlier via the "activated abilities of " prefix dispatch.
-    if nom_primitives::scan_contains(tp.lower, "activated abilities can't be activated") {
+    if super::shared::contains_activated_abilities_cant_be_activated(tp.lower) {
         let exemption = parse_cant_be_activated_exemption_in_text(tp.lower);
         let mut def = StaticDefinition::new(StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
@@ -2828,7 +2882,9 @@ pub(crate) fn parse_static_line_inner(
                 value(CostModifyMode::Raise, tag("more to activate")),
             ))
             .parse(i)?;
-            let (i, suffix_exempt) = opt(tag(" unless they're mana abilities")).parse(i)?;
+            // CR 605.1a: dual-apostrophe exemption suffix (Suppression Field class).
+            let (i, suffix_exempt) =
+                opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
             let exemption = if prefix_exempt || suffix_exempt.is_some() {
                 ActivationExemption::ManaAbilities
             } else {
@@ -2990,6 +3046,14 @@ pub(crate) fn parse_static_line_inner(
     // E.g., "Creature spells you cast have convoke."
     // Also: "Creature cards you own that aren't on the battlefield have flash."
     if let Some(def) = parse_spells_have_keyword(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "<type> cards in your hand [without <kw>] have <kw>. Its <kw> cost is
+    // equal to its mana cost reduced by {N}." (CR 702.143d + CR 702 alt-cost
+    // off-zone family) — Singing Towers of Darillium grants foretell with a
+    // per-recipient derived cost.
+    if let Some(def) = parse_hand_cards_have_derived_cost_keyword(&text) {
         return Some(def);
     }
 

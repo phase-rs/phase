@@ -577,10 +577,11 @@ fn breeches_lost_flip_damage_goes_on_stack_and_uses_spell_mana_value() {
 /// assert the reflexive neither fired on the lost flip nor lingered to fire on
 /// the later won flip.
 ///
-/// Revert-discriminating: without the `reflexive_coin_flip_resolved_without_match`
-/// discard, the one-shot `WhenNextEvent` would survive the lost flip and fire on
-/// the subsequent won flip — `state.delayed_triggers` would be non-empty after
-/// the lost flip and the won flip would push a spurious reflexive trigger.
+/// Revert-discriminating: without the general reflexive-discard rule (an
+/// unmatched `Reflexive` `WhenNextEvent` discarded on its creation-batch check),
+/// the one-shot would survive the lost flip and fire on the subsequent won flip —
+/// `state.delayed_triggers` would be non-empty after the lost flip and the won
+/// flip would push a spurious reflexive trigger.
 #[test]
 fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
     use engine::game::triggers::check_delayed_triggers;
@@ -614,7 +615,10 @@ fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
     let condition = DelayedTriggerCondition::WhenNextEvent {
         trigger: Box::new(trigger_def),
         or_trigger: None,
-        lifetime: engine::types::ability::DelayedTriggerLifetime::ThisTurn,
+        // CR 603.12: a reflexive coin-flip trigger carries the `Reflexive`
+        // lifetime (the parser emits it via `build_reflexive_coin_flip_trigger`);
+        // the general reflexive-discard rule keys on this lifetime.
+        lifetime: engine::types::ability::DelayedTriggerLifetime::Reflexive,
     };
     state.delayed_triggers.push(DelayedTrigger {
         condition,

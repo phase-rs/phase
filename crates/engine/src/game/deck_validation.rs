@@ -1340,11 +1340,16 @@ fn basic_land_type_colors(face: &CardFace) -> Vec<ManaColor> {
 fn tiny_leaders_cost_identity_ok(db: &CardDatabase, name: &str) -> bool {
     tiny_leaders_cost_faces(db, name)
         .into_iter()
-        .all(tiny_leaders_face_cost_identity_ok)
+        .all(|face| tiny_leaders_face_cost_identity_ok(db, face))
 }
 
-fn tiny_leaders_face_cost_identity_ok(face: &CardFace) -> bool {
-    face.mana_cost.mana_value() <= 3
+fn tiny_leaders_face_cost_identity_ok(db: &CardDatabase, face: &CardFace) -> bool {
+    // CR 202.3d + CR 709.4b: off the stack a split card's mana value is the COMBINED
+    // value of both halves, so the Tiny Leaders MV <= 3 cap must use the combined
+    // value (a Fire // Ice-style card is MV 4, not 2). `off_stack_mana_value_for_face`
+    // combines for split cards and is the face's own value for every other layout,
+    // preserving the per-face check for DFC/MDFC/Adventure cards.
+    db.off_stack_mana_value_for_face(face) <= 3
         && face.keywords.iter().all(|keyword| match keyword {
             Keyword::Prototype { cost, .. } => cost.mana_value() <= 3,
             _ => true,

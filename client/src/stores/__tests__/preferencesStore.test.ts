@@ -351,6 +351,34 @@ describe("preferencesStore", () => {
     ]);
   });
 
+  it("migrates v22 bare phaseStops into scoped { phase, scope: 'AllTurns' }", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { phaseStops: ["PreCombatMain"] }, version: 22 }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "PreCombatMain", scope: "AllTurns" },
+    ]);
+  });
+
+  it("migrates non-array v22 phaseStops to []", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { phaseStops: "garbage" }, version: 22 }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([]);
+  });
+
   // --- Audio preferences ---
 
   it("has correct audio defaults", () => {

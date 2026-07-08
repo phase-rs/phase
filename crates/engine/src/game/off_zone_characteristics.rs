@@ -1,10 +1,12 @@
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::{
+    matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
+};
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, collect_shared_active_continuous_effects,
     evaluate_condition_with_recipient, order_active_continuous_effects,
 };
 use crate::game::quantity::resolve_quantity;
-use crate::types::ability::ContinuousModification;
+use crate::types::ability::{ContinuousModification, TargetFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -99,7 +101,7 @@ pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Ve
     let ordered = order_active_continuous_effects(Layer::Ability, &effects, state);
 
     for effect in ordered {
-        apply_keyword_modification(state, &mut keywords, &effect);
+        apply_keyword_modification(state, object_id, &mut keywords, &effect);
     }
 
     keywords
@@ -141,16 +143,16 @@ fn collect_applicable_off_zone_keyword_effects(
     effects
         .into_iter()
         .filter(|effect| {
+            let ctx =
+                FilterContext::from_source_with_controller(effect.source_id, effect.controller);
             effect.layer == Layer::Ability
                 && supports_off_zone_keyword_query(&effect.modification)
-                && matches_target_filter(
+                && matches_off_zone_keyword_recipient(
                     state,
                     object_id,
+                    obj.zone,
                     &effect.affected_filter,
-                    &FilterContext::from_source_with_controller(
-                        effect.source_id,
-                        effect.controller,
-                    ),
+                    &ctx,
                 )
                 && effect.condition.as_ref().is_none_or(|condition| {
                     evaluate_condition_with_recipient(
@@ -165,12 +167,37 @@ fn collect_applicable_off_zone_keyword_effects(
         .collect()
 }
 
+fn matches_off_zone_keyword_recipient(
+    state: &GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if is_owner_scoped_zone(zone) {
+        matches_target_filter_in_owner_zone(state, object_id, filter, ctx)
+    } else {
+        matches_target_filter(state, object_id, filter, ctx)
+    }
+}
+
+fn is_owner_scoped_zone(zone: Zone) -> bool {
+    // CR 109.5 + CR 400.3: "your" cards in hand/library/graveyard are scoped
+    // by owner, not stale object controller/LKI.
+    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+}
+
 fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> bool {
     matches!(
         modification,
         ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::AddDynamicKeyword { .. }
+            // CR 702.143d: derived-cost cast-from-off-zone keyword grants are
+            // realized exclusively through this path (the recipient lives in a
+            // non-battlefield zone), so they must be retained by the off-zone
+            // collector.
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::RemoveAllAbilities
             // CR 608.2d + CR 613.1f: `RemoveChosenKeyword` strips by
             // discriminant the keyword stored in the source's
@@ -187,11 +214,26 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
 
 fn apply_keyword_modification(
     state: &GameState,
+    object_id: ObjectId,
     keywords: &mut Vec<Keyword>,
     effect: &ActiveContinuousEffect,
 ) {
     match &effect.modification {
         ContinuousModification::AddKeyword { keyword } => upsert_keyword(keywords, keyword.clone()),
+        // CR 702.143d + CR 702 (alt-cost off-zone family): grant a cost-bearing
+        // keyword whose cost is DERIVED from the recipient's mana cost. The
+        // "without foretell" clause is enforced per-recipient here: if the
+        // recipient already carries a keyword of this family (printed or granted),
+        // no-op so its existing cost is preserved (Singing Towers of Darillium).
+        ContinuousModification::AddKeywordWithDerivedCost { kind, derivation } => {
+            if keywords.iter().any(|k| kind.matches_keyword(k)) {
+                return;
+            }
+            if let Some(recipient) = state.objects.get(&object_id) {
+                let derived = derivation.derive(&recipient.mana_cost);
+                upsert_keyword(keywords, kind.with_cost(derived));
+            }
+        }
         ContinuousModification::RemoveKeyword { keyword } => {
             keywords.retain(|existing| {
                 std::mem::discriminant(existing) != std::mem::discriminant(keyword)
@@ -268,11 +310,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, Duration, QuantityExpr, StaticCondition, StaticDefinition,
-        TargetFilter,
+        ContinuousModification, ControllerRef, CostDerivation, Duration, FilterProp, QuantityExpr,
+        StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::identifiers::CardId;
-    use crate::types::keywords::{DynamicKeywordKind, FlashbackCost, Keyword, KeywordKind};
+    use crate::types::keywords::{
+        CostBearingKeywordKind, DynamicKeywordKind, FlashbackCost, Keyword, KeywordKind,
+    };
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -682,6 +726,54 @@ mod tests {
             target_id,
             KeywordKind::Flashback
         ));
+    }
+
+    #[test]
+    fn off_zone_keyword_static_matches_owner_scoped_hand_card_with_stale_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Singing Towers Source",
+            Zone::Battlefield,
+        );
+        let target_id = create_card(&mut state, PlayerId(0), "Expensive Spell", Zone::Hand);
+        {
+            let target = state.objects.get_mut(&target_id).unwrap();
+            target.controller = PlayerId(1);
+            target.mana_cost = ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Blue],
+            };
+        }
+
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Hand],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeywordWithDerivedCost {
+                        kind: CostBearingKeywordKind::Foretell,
+                        derivation: CostDerivation::ManaCostReducedBy(ManaCost::generic(2)),
+                    }]),
+            );
+
+        assert_eq!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Foretell),
+            Some(Keyword::Foretell(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Blue],
+            }))
+        );
     }
 
     #[test]
