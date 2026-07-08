@@ -18356,6 +18356,35 @@ fn static_activated_ability_cost_increase_chosen_name() {
 }
 
 #[test]
+fn static_loyalty_ability_cost_increase_eidolon_of_obstruction() {
+    // CR 606.1: Loyalty abilities are activated abilities, so Eidolon of
+    // Obstruction's "Loyalty abilities of planeswalkers your opponents control
+    // cost {1} more to activate" shares the "<Activated/Loyalty> abilities of
+    // [subject]" grammar, emitting `ReduceAbilityCost { keyword: "loyalty" }` so
+    // the runtime gate can target loyalty-cost abilities specifically.
+    let def = parse_static_line(
+        "Loyalty abilities of planeswalkers your opponents control cost {1} more to activate.",
+    )
+    .expect("Eidolon loyalty cost-increase static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "loyalty".to_string(),
+            amount: 1,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
+        }
+    );
+    assert!(
+        def.affected.is_some(),
+        "Eidolon must scope the increase to opponents' planeswalkers"
+    );
+}
+
+#[test]
 fn static_activated_ability_cost_generic_reduce_vs_raise_discriminates() {
     // CR 118.7: the same grammar with only the direction word changed must yield
     // opposite `CostModifyMode`s. Pins reduce ≠ increase at the parser layer.
