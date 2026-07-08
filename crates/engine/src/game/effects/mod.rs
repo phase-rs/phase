@@ -1866,6 +1866,10 @@ fn apply_parent_chain_context(
         child.dig_found_nothing_for_parent_target = true;
         state.last_dig_found_nothing = false;
     }
+    if state.last_choose_from_zone_found_nothing {
+        child.choose_from_zone_found_nothing_for_parent_target = true;
+        state.last_choose_from_zone_found_nothing = false;
+    }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
     // its parent; its instructions are followed in order during a single
     // resolution. Propagate the parent's `ability_index` so chain-level
@@ -5440,6 +5444,7 @@ pub fn resolve_ability_chain(
         // (e.g. Avenging Angel's LTB self-return). Reset at every fresh
         // resolution so that can never happen.
         state.last_dig_found_nothing = false;
+        state.last_choose_from_zone_found_nothing = false;
         // CR 701.20e: A new top-level resolution ends any prior private "look at"
         // peek window — the looked-at card from an unrelated resolution must not
         // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
