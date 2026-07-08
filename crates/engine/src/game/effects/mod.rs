@@ -7815,33 +7815,27 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
             // CR 115.6 + CR 608.2c (issue #5281): Inherit the parent instruction's
-            // targets, but for a sub-effect that carries its OWN independent object
-            // filter, keep only the inherited OBJECT targets that are actually legal
-            // for that filter. Player targets are shared across the chain (Paradigm's
-            // "that player" draw + lose-life; relative-controller change-zone) and
-            // are always inherited. Cruel Revival's "Return up to one target Zombie
-            // card from your graveyard ..." was given its own target slot, so the
-            // parent's destroy target (a battlefield creature) is illegal for it and
-            // is dropped — the declined optional bounce resolves as a no-op (CR 115.6)
-            // instead of bouncing the creature the spell just destroyed.
-            let own_object_filter =
-                crate::game::triggers::extract_target_filter_from_effect(&sub.effect)
-                    .filter(|_| !effect_refs_parent_target(&sub.effect));
+            // targets, but NEVER hand a parent OBJECT target to a sub-effect that
+            // carries its OWN independent object-target slot. Player targets are
+            // shared across the chain (Paradigm's "that player" draw + lose-life;
+            // relative-controller change-zone) and are always inherited. A sub with
+            // an INDEPENDENT target filter (Cruel Revival's "Return up to one target
+            // Zombie card from your graveyard ...") was given its own slot; an empty
+            // `sub.targets` therefore means its optional target was legally declined
+            // (CR 115.6), so it must resolve as a no-op — it must not steal the
+            // parent's destroy target even if that object happens to satisfy the
+            // sub's filter. Only an anaphoric sub (no own filter — "It can't be
+            // regenerated" — or a `ParentTarget`/relative-controller ref) inherits
+            // the parent's object targets.
+            let has_independent_filter =
+                crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
+                    && !effect_refs_parent_target(&sub.effect);
             sub_with_targets.targets = ability
                 .targets
                 .iter()
-                .filter(|target_ref| match (target_ref, own_object_filter) {
-                    (TargetRef::Player(_), _) => true,
-                    (TargetRef::Object(_), None) => true,
-                    (obj @ TargetRef::Object(_), Some(filter)) => {
-                        !crate::game::targeting::validate_targets_for_ability(
-                            state,
-                            std::slice::from_ref(obj),
-                            filter,
-                            ability,
-                        )
-                        .is_empty()
-                    }
+                .filter(|target_ref| match target_ref {
+                    TargetRef::Player(_) => true,
+                    TargetRef::Object(_) => !has_independent_filter,
                 })
                 .cloned()
                 .collect();
