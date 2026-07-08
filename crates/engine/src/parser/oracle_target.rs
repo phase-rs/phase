@@ -6204,6 +6204,10 @@ fn parse_except_for_type_list_suffix(
     let mut props = Vec::new();
 
     loop {
+        let trimmed = rest.trim_start();
+        consumed += rest.len() - trimmed.len();
+        rest = trimmed;
+
         let (after_word, word) =
             take_till1::<_, _, OracleError<'_>>(|c: char| !c.is_ascii_alphabetic())
                 .parse(rest)
@@ -7209,7 +7213,9 @@ mod tests {
         let tf = typed_leg(&filter).expect("expected typed filter");
         assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
         assert!(
-            rest.trim().starts_with("except for"),
+            tag::<_, _, OracleError<'_>>("except for")
+                .parse(rest.trim_start())
+                .is_ok(),
             "the unrecognized exception clause must be left unconsumed, got rest={rest:?}"
         );
     }
