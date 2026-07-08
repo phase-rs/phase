@@ -36,10 +36,9 @@ use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
-    parse_basic_land_type_plural, parse_cant_be_activated_exemption_in_text,
-    parse_chosen_qualifier_subject, parse_continuous_modifications,
-    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
-    peel_compound_all_quantified_conjuncts,
+    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
+    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
+    parse_static_line_multi, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
@@ -3458,6 +3457,52 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
     (text.to_string(), None)
 }
 
+/// CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): Lower a "become[s] [a[n]] `<basic
+/// land type>`" predicate to its land-subtype modification(s). Non-additive
+/// replaces the object's land subtypes (`SetBasicLandType`, CR 305.7 — the land
+/// gains only the named type's intrinsic mana ability); the "in addition to
+/// {their|its} other types" form retains existing land types and adds the subtype
+/// (`AddSubtype`, CR 205.1b). Composed along its axes — optional article, the
+/// basic-land-type word (singular or plural via `parse_basic_land_type_plural`),
+/// and the optional additive marker. Declines any predicate that does not name
+/// exactly a basic land type (optionally with the additive marker), so non-land
+/// becomes fall through to `parse_animation_spec`.
+fn try_parse_become_basic_land_type_modifications(
+    become_text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = become_text
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_lowercase();
+    let (rest, _) = opt(alt((tag::<_, _, VE>("a "), tag::<_, _, VE>("an "))))
+        .parse(lower.as_str())
+        .ok()?;
+    // Extract the candidate basic-land word with a nom combinator (not manual
+    // scanning), then classify it via the shared `parse_basic_land_type_plural`.
+    let (after, word) = nom::character::complete::alpha1::<_, VE>(rest).ok()?;
+    let land_type = crate::parser::oracle_static::parse_basic_land_type_plural(word)?;
+    let after = after.trim();
+    // CR 205.1b: only a bare type word (replacement) or the "in addition to their/
+    // its other types" additive marker may follow; anything else is a mixed
+    // predicate that must fall through to the animation parser.
+    let additive = if after.is_empty() {
+        false
+    } else if nom_primitives::scan_contains(after, "in addition to") {
+        true
+    } else {
+        return None;
+    };
+    Some(if additive {
+        vec![ContinuousModification::AddSubtype {
+            subtype: land_type.as_subtype_str().to_string(),
+        }]
+    } else {
+        vec![ContinuousModification::SetBasicLandType { land_type }]
+    })
+}
+
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -3529,16 +3574,18 @@ fn build_become_clause(
         });
     }
 
-    // CR 305.7: bare "become Swamps/Plains/…" — basic land type replacement
-    // (Nightcreep: "all lands become Swamps"). Must intercept before
-    // `parse_animation_spec`, which mis-tokenizes land type names as creature
-    // subtypes (`AddSubtype("Swamps")`).
-    if let Some(modification) = try_parse_become_basic_land_type_modification(become_text) {
+    // CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): "become[s] [a] <basic land type>"
+    // (Nightcreep's "all lands become Swamps") is a LAND-subtype change, not a
+    // creature subtype. `parse_animation_spec` below mis-tokenizes the basic-land
+    // word — notably the plural "Swamps" — as a creature subtype (`AddSubtype` +
+    // `RemoveAllSubtypes{Creature}`), so the land never gains the type's intrinsic
+    // mana ability. Intercept it here and emit the correct land-type modification.
+    if let Some(modifications) = try_parse_become_basic_land_type_modifications(become_text) {
         let affected = static_affected_for_application(&application);
         let effect = Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
-                .modifications(vec![modification])
+                .modifications(modifications)
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
@@ -4081,14 +4128,6 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
         return Some(ContinuousModification::AddChosenColor);
     }
     None
-}
-
-/// CR 305.7: A bare basic land type name after "become" — "Swamps", "Plains", etc.
-fn try_parse_become_basic_land_type_modification(
-    become_text: &str,
-) -> Option<ContinuousModification> {
-    parse_basic_land_type_plural(become_text.trim())
-        .map(|land_type| ContinuousModification::SetBasicLandType { land_type })
 }
 
 /// True when `lower` ends with the "of your choice" anchor. Pattern 2 (whole
@@ -5648,13 +5687,13 @@ mod tests {
         ));
         // Unrelated predicates still fall through (the animation path handles them).
         assert!(try_parse_become_color_modification("a giant lizard").is_none());
-        assert!(matches!(
-            try_parse_become_basic_land_type_modification("Swamps"),
-            Some(ContinuousModification::SetBasicLandType {
+        assert_eq!(
+            try_parse_become_basic_land_type_modifications("Swamps"),
+            Some(vec![ContinuousModification::SetBasicLandType {
                 land_type: BasicLandType::Swamp,
-            })
-        ));
-        assert!(try_parse_become_basic_land_type_modification("black").is_none());
+            }])
+        );
+        assert!(try_parse_become_basic_land_type_modifications("black").is_none());
     }
 
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"

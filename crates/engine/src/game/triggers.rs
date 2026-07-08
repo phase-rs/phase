@@ -12942,6 +12942,92 @@ pub mod tests {
         let _ = (gy1, gy2, gy3);
     }
 
+    /// CR 115.1d: Armory Automaton — "you may attach any number of target
+    /// Equipment" must surface one optional slot per eligible Equipment so the
+    /// controller can choose zero at stack time (issue #5339).
+    #[test]
+    fn attach_any_number_multi_target_surfaces_optional_equipment_slots() {
+        use crate::types::ability::TypeFilter;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let equipment_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        let equipment_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Skullclamp".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [equipment_a, equipment_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Armory Automaton".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Attach {
+                    attachment: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .subtype("Equipment".to_string())
+                            .controller(ControllerRef::You),
+                    ),
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            execute.optional = true;
+            execute.multi_target = Some(MultiTargetSpec::unlimited(0));
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::EntersOrAttacks)
+                    .execute(execute)
+                    .valid_card(TargetFilter::SelfRef),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Artifact, CoreType::Creature],
+            vec!["Construct"],
+        )];
+        process_triggers(&mut state, &events);
+
+        let pending = state.pending_trigger.as_ref().expect("pending_trigger set");
+        let slots = super::super::ability_utils::build_target_slots(&state, &pending.ability)
+            .expect("slot build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "two eligible Equipment must surface two target slots, got {}",
+            slots.len()
+        );
+        for slot in &slots {
+            assert!(slot.optional, "any-number attach slots must be optional");
+            assert_eq!(slot.legal_targets.len(), 2);
+        }
+    }
+
     #[test]
     fn damage_trigger_dynamic_multi_target_uses_trigger_event_amount() {
         let mut state = setup();
