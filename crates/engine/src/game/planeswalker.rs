@@ -179,31 +179,56 @@ pub fn handle_activate_loyalty(
         ));
     }
 
-    let obj = state
-        .objects
-        .get(&pw_id)
-        .ok_or_else(|| EngineError::InvalidAction("Planeswalker not found".to_string()))?;
-
-    if ability_index >= obj.abilities.len() {
-        return Err(EngineError::InvalidAction(
-            "Invalid ability index".to_string(),
-        ));
-    }
-
-    let ability_def = &obj.abilities[ability_index];
-    let loyalty_cost = parse_loyalty_cost(ability_def);
-    let current_loyalty = obj.loyalty.unwrap_or(0) as i32;
+    // Extract the loyalty cost + counters and clone the definition so the
+    // immutable object borrow ends before any `&mut state` path below (the
+    // tax-delegation branch calls `handle_activate_ability`).
+    let (loyalty_cost, current_loyalty, ability_def) = {
+        let obj = state
+            .objects
+            .get(&pw_id)
+            .ok_or_else(|| EngineError::InvalidAction("Planeswalker not found".to_string()))?;
+        if ability_index >= obj.abilities.len() {
+            return Err(EngineError::InvalidAction(
+                "Invalid ability index".to_string(),
+            ));
+        }
+        let ability_def = &obj.abilities[ability_index];
+        (
+            parse_loyalty_cost(ability_def),
+            obj.loyalty.unwrap_or(0) as i32,
+            ability_def.clone(),
+        )
+    };
 
     // CR 606.6: A loyalty ability with a negative loyalty cost can't be activated unless the
-    // permanent has at least that many loyalty counters on it.
+    // permanent has at least that many loyalty counters on it. Checked here for
+    // BOTH the fast path and the tax-delegation branch below, so a `[−N]` ability
+    // the planeswalker can't afford is refused before either path proceeds.
     if loyalty_cost < 0 && current_loyalty + loyalty_cost < 0 {
         return Err(EngineError::ActionNotAllowed(
             "Not enough loyalty to activate ability".to_string(),
         ));
     }
 
+    // CR 118.7 + CR 601.2f + CR 606.1: When a cost-raise static (Eidolon of
+    // Obstruction) adds a mana component to this loyalty ability, the mana-free
+    // loyalty fast path can't pay it. Defer to the general activated-ability
+    // flow, which applies the tax (`apply_cost_reduction`), prompts for the added
+    // mana, pays the loyalty counters, records the CR 606.3 activation, and
+    // re-enforces the once-per-turn gate. Untaxed loyalty abilities fall through
+    // to the unchanged fast path.
+    if super::casting::loyalty_ability_gains_mana_tax(state, &ability_def, player, pw_id) {
+        return super::casting::handle_activate_ability(
+            state,
+            player,
+            pw_id,
+            ability_index,
+            events,
+        );
+    }
+
     // Build a ResolvedAbility for the stack from the typed definition
-    let resolved = build_pw_resolved(ability_def, pw_id, player);
+    let resolved = build_pw_resolved(&ability_def, pw_id, player);
 
     // CR 602.2b + CR 601.2c: Targets are announced before costs are paid.
     // If this ability requires targets, prompt for selection first.
