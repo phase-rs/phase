@@ -8,8 +8,9 @@
 //! parsed from the real verbatim Oracle text, driven through the real
 //! `GameRunner` turn/upkeep machinery — not the unrelated "Counter target
 //! spell" head effect, which is well-tested elsewhere and isn't in dispute
-//! for this issue. CR 107.1c ("any number... zero") + CR 608.2c (order of
-//! instructions) + CR 603.7a (delayed triggered abilities).
+//! for this issue. CR 118.12 (resolution-time cost) + CR 118.3 (can't pay an
+//! incomplete cost) + CR 608.2c (order of instructions) + CR 603.7a (delayed
+//! triggered abilities).
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
