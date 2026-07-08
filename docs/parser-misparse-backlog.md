@@ -5101,7 +5101,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (17 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (15 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -5114,14 +5114,12 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Goremand
 - Grizzled Wolverine
 - Hermit of the Natterknolls
-- Hidden Lair
 - Highspire Bell-Ringer
 - Hurkyl's Final Meditation
 - Ichneumon Druid
 - MACH-1, Swooping Scoundrel
 - Shadowheart, Sharran Cleric
 - Skarrgan Hellkite
-- Skyblade's Boon
 - Tomb Tyrant
 - Trade Caravan
 - Uthros Research Craft
