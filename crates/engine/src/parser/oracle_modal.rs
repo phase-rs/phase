@@ -1119,6 +1119,7 @@ fn lower_as_enters_anchor_word_modal(
             description: Some(format!("CR 614.12c [{label}]: {body}")),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         };
         result.statics.push(placeholder);
     }

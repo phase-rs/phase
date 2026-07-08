@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "Lecteur de replay",
+    "eyebrow": "Regarder une partie enregistrée",
+    "chooseFile": "Choisir un fichier de replay",
+    "loading": "Chargement du replay…",
+    "errorGeneric": "Impossible de charger ce fichier de replay.",
+    "backToMenu": "Retour au menu"
+  },
+  "controls": {
+    "play": "Lecture",
+    "pause": "Pause",
+    "stepBack": "Reculer",
+    "stepForward": "Avancer",
+    "actionOf": "Action {{current}} / {{total}}",
+    "speed": "Vitesse",
+    "speedValue": "{{value}}x",
+    "seekError": "Impossible de reconstruire ce point du replay : {{message}}"
+  },
+  "export": {
+    "button": "Exporter le replay",
+    "success": "Replay enregistré sous {{filename}}",
+    "noRecording": "Aucun enregistrement de replay n'est disponible pour cette partie.",
+    "error": "Impossible d'exporter le replay."
+  }
+}

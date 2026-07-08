@@ -269,6 +269,34 @@ function CoverageCard() {
   );
 }
 
+/**
+ * Slim entry point to the Replay Viewer (`/replay`). Uses an inline SVG
+ * rather than a `/icons/sections/*.png` asset — those are curated section
+ * icons and this is a lightweight secondary link, not a primary bento tile.
+ */
+function ReplayLinkButton() {
+  const { t } = useTranslation("replay");
+  const navigate = useNavigate();
+  return (
+    <button
+      type="button"
+      onClick={() => navigate("/replay")}
+      className={`${INFO_CARD} flex w-full cursor-pointer items-center gap-2 text-left transition-colors hover:border-hairline-hover`}
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        aria-hidden="true"
+        className="h-3.5 w-3.5 shrink-0 opacity-70"
+      >
+        <path d="M3 4a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4Zm5 2.5v7l6-3.5-6-3.5Z" />
+      </svg>
+      <span className={SECTION_LABEL}>{t("viewer.title")}</span>
+    </button>
+  );
+}
+
 /* ------------------------------------------------------------- dashboard --- */
 export function HomeDashboard() {
   const { t } = useTranslation("menu");
@@ -304,6 +332,7 @@ export function HomeDashboard() {
           <ActiveDeckCard />
           <CoverageCard />
         </div>
+        <ReplayLinkButton />
       </div>
     </MenuShell>
   );

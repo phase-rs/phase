@@ -5,13 +5,16 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
-/// CR 702.11b + CR 702.21a: Parse the "[subject] can be the targets of spells
-/// and abilities as though they didn't have hexproof[. Ward abilities of those
-/// creatures don't trigger]" static pair (Nowhere to Run).
+/// CR 702.11e + CR 609.4 + CR 702.21a: Parse the "[subject] can be the targets
+/// of spells and abilities[ you control] as though they didn't have hexproof[.
+/// Ward abilities of those creatures don't trigger]" static pair (Nowhere to
+/// Run, Glaring Spotlight).
 ///
 /// Sentence 1 → `StaticMode::IgnoreHexproof` scoped to `<subject>` via the
-/// definition's `affected` filter (CR 702.11b — the bypass lets the matched
-/// permanents be targeted as though they had no hexproof). Optional sentence 2
+/// definition's `affected` filter (CR 702.11e — the bypass lets the matched
+/// permanents be targeted as though they had no hexproof). The optional "you
+/// control" qualifier restricts the beneficiary (`bypass_beneficiary`). Optional
+/// sentence 2
 /// → `StaticMode::SuppressTriggers { source_filter: <same subject>, events:
 /// [BecomesTargeted] }` (CR 702.21a — "those creatures" anaphors sentence 1's
 /// subject, so the parsed filter is reused rather than re-derived).
@@ -28,21 +31,32 @@ pub(crate) fn parse_ignore_hexproof_static(
     let (after_subject, subject) = take_until::<_, _, OracleError<'_>>(" can be the target")
         .parse(tp.lower)
         .ok()?;
-    let bypass: OracleResult<'_, ()> = (|| {
+    let bypass: OracleResult<'_, bool> = (|| {
         let (i, _) = tag::<_, _, OracleError<'_>>(" can be the target").parse(after_subject)?;
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(i)?;
-        let (i, _) =
-            tag::<_, _, OracleError<'_>>(" of spells and abilities as though ").parse(i)?;
-        // CR 702.11b: plural ("they") or singular ("it") subject pronoun.
+        let (i, _) = tag::<_, _, OracleError<'_>>(" of spells and abilities").parse(i)?;
+        // CR 702.11e + CR 609.4: an optional "you control" qualifier restricts
+        // which spells and abilities bypass hexproof to the static controller's
+        // (Glaring Spotlight — "spells and abilities you control"). Its presence
+        // is semantically load-bearing in multiplayer: without it (Nowhere to
+        // Run) every player's spells and abilities gain the bypass; with it, only
+        // the controller's do. The flag drives `bypass_beneficiary` below.
+        let (i, you_control) = opt(tag::<_, _, OracleError<'_>>(" you control")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" as though ").parse(i)?;
+        // CR 702.11e: plural ("they") or singular ("it") subject pronoun.
         let (i, _) = alt((
             tag::<_, _, OracleError<'_>>("they didn't"),
             tag::<_, _, OracleError<'_>>("it didn't"),
         ))
         .parse(i)?;
         let (i, _) = tag::<_, _, OracleError<'_>>(" have hexproof").parse(i)?;
-        Ok((i, ()))
+        Ok((i, you_control.is_some()))
     })();
-    let (rest, ()) = bypass.ok()?;
+    let (rest, you_control) = bypass.ok()?;
+    // CR 109.5: "you control" resolves relative to the static's source
+    // controller, so the beneficiary is `ControllerRef::You`; absent, the bypass
+    // benefits every player (`None`).
+    let beneficiary = you_control.then_some(ControllerRef::You);
 
     // Map the subject phrase to a typed filter; require it to fully consume so a
     // partial parse never silently scopes the bypass wider than written.
@@ -53,6 +67,7 @@ pub(crate) fn parse_ignore_hexproof_static(
 
     let mut defs = vec![StaticDefinition::new(StaticMode::IgnoreHexproof)
         .affected(filter.clone())
+        .bypass_beneficiary(beneficiary)
         .description(text.to_string())];
 
     // Optional sentence 2: ward suppression for the same subject.
@@ -1222,6 +1237,29 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         if !defs.is_empty() {
             return defs;
         }
+        // CR 702.11 + CR 702.18 + CR 611.3a: Inverted player+object compound
+        // keyword grants ("As long as <cond>, you and <objects> have hexproof")
+        // must decompose into TWO defs (object Continuous + player Hexproof/
+        // Shroud/PlayerProtection). The single-return inverted rewrite can only
+        // keep one def, so rewrite to the canonical trailing-gate form and
+        // re-enter through the multi compound-keyword splitter here.
+        let canon_lower = split.canonical.to_lowercase();
+        if let Some(mut defs) =
+            parse_compound_subject_keyword_static(&split.canonical, &canon_lower)
+        {
+            let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
+                    text: split.condition_text.clone(),
+                },
+            );
+            for def in &mut defs {
+                if def.condition.is_none() {
+                    def.condition = Some(condition.clone());
+                }
+                def.description = Some(stripped.to_string());
+            }
+            return defs;
+        }
     }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
@@ -1241,6 +1279,13 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: "You and <objects> have
+    // <player-applicable keyword>" (Sigarda / Serra's Emissary / Gruul
+    // Spellbreaker), or the Oxford-comma N-item form "You, <objects>, …, and
+    // <objects> have <keyword>" (Shalai, Voice of Plenty). Must claim before
+    // the single-return fallback, which otherwise emits one bogus Continuous
+    // Or{empty-typed You, objects} that grants the keyword to every permanent
+    // you control.
     if let Some(defs) = parse_compound_subject_keyword_static(&stripped, &lower) {
         return defs;
     }

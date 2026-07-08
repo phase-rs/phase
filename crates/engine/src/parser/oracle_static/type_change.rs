@@ -547,11 +547,6 @@ pub(crate) fn try_parse_self_is_also_subtypes(
     )
 }
 
-/// CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a/an [type] [with base P/T N/N]
-/// [in addition to its other types]"
-///
-/// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
-/// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
 /// CR 205.1a + CR 613.1d (Layer 4) + CR 613.1f (Layer 6): Imprisoned-in-the-Moon
 /// class — an Aura that turns the enchanted permanent into a colorless permanent
 /// of a single card type (optionally with subtype[s]) carrying a granted ability
@@ -825,6 +820,11 @@ fn core_type_subtype_set(
     }
 }
 
+/// CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a/an [type] [with base P/T N/N]
+/// [in addition to its other types]"
+///
+/// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
+/// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
 pub(crate) fn parse_enchanted_is_type(
     tp: &TextPair,
     description: &str,
@@ -885,14 +885,9 @@ pub(crate) fn parse_enchanted_is_type(
             type_part.rsplit_once(" with base power and toughness ")
         // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         {
-            if let Some((p, t)) = parse_pt_mod(pt_part) {
-                // Locate the end of the "N/N" token to capture the remainder.
-                let slash_pos = pt_part.find('/').unwrap_or(0);
-                let after_slash = &pt_part[slash_pos + 1..];
-                let t_end = after_slash
-                    .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-                    .unwrap_or(after_slash.len());
-                let remainder = after_slash[t_end..].trim();
+            let pt_tail = pt_part.trim().trim_end_matches('.');
+            if let Ok((remainder, (p, t))) = parse_pt_mod_with_remainder(pt_tail) {
+                let remainder = remainder.trim().trim_end_matches('.').trim();
                 let clause = (!remainder.is_empty()).then_some(remainder);
                 (before_pt.trim(), Some((p, t)), clause)
             } else {
@@ -904,15 +899,9 @@ pub(crate) fn parse_enchanted_is_type(
 
     // Parse "N/N [color] [type] [subtype]" patterns for Darksteel Mutation style
     // e.g., "0/1 green Insect creature"
-    let (type_part, inline_pt) = if let Some((p, t)) = parse_pt_mod(type_part) {
-        // parse_pt_mod trims and finds the slash — get remainder after P/T
-        let slash_pos = type_part.find('/').unwrap_or(0);
-        let after_slash = &type_part[slash_pos + 1..];
-        let t_end = after_slash
-            .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-            .unwrap_or(after_slash.len());
-        let rest = after_slash[t_end..].trim();
-        (rest, Some((p, t)))
+    let (type_part, inline_pt) = if let Ok((rest, (p, t))) = parse_pt_mod_with_remainder(type_part)
+    {
+        (rest.trim(), Some((p, t)))
     } else {
         (type_part, None)
     };
@@ -2275,20 +2264,11 @@ pub(crate) fn parse_compound_all_subjects_land_type_change(
 /// distinguishes this compound animation subject from an incidental " and "
 /// inside a lone subject phrase.
 fn parse_compound_all_subjects_filter(subject: &str) -> Option<TargetFilter> {
-    let lower = subject.to_lowercase();
-    let mut filters: Vec<TargetFilter> = Vec::new();
-    let mut remaining: &str = lower.as_str();
-    // Each " and all " seam ends one conjunct and drops the next conjunct's
-    // `all ` quantifier; the shared parser strips a leading `all ` itself, so the
-    // leading conjunct's own quantifier is harmless.
-    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
-        filters.push(parse_compound_subject_conjunct(conjunct.trim())?);
-        remaining = rest;
-    }
-    filters.push(parse_compound_subject_conjunct(remaining.trim())?);
-    if filters.len() < 2 {
-        return None;
-    }
+    let conjuncts = super::static_helpers::peel_compound_all_quantified_conjuncts(subject)?;
+    let filters: Vec<TargetFilter> = conjuncts
+        .iter()
+        .map(|conjunct| parse_compound_subject_conjunct(conjunct.trim()))
+        .collect::<Option<_>>()?;
     Some(TargetFilter::Or { filters })
 }
 
@@ -2308,17 +2288,11 @@ fn parse_compound_subject_conjunct(conjunct: &str) -> Option<TargetFilter> {
 /// Limb's "Forests and Saprolings") return `None` so animation handlers keep
 /// ownership.
 fn parse_compound_all_subjects_land_filter(subject: &str) -> Option<TargetFilter> {
-    let lower = subject.to_lowercase();
-    let mut filters: Vec<TargetFilter> = Vec::new();
-    let mut remaining: &str = lower.as_str();
-    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
-        filters.push(parse_land_type_change_subject(conjunct.trim())?);
-        remaining = rest;
-    }
-    filters.push(parse_land_type_change_subject(remaining.trim())?);
-    if filters.len() < 2 {
-        return None;
-    }
+    let conjuncts = super::static_helpers::peel_compound_all_quantified_conjuncts(subject)?;
+    let filters: Vec<TargetFilter> = conjuncts
+        .iter()
+        .map(|conjunct| parse_land_type_change_subject(conjunct.trim()))
+        .collect::<Option<_>>()?;
     Some(TargetFilter::Or { filters })
 }
 

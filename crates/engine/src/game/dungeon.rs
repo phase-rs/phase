@@ -862,6 +862,7 @@ pub fn room_effects(
                         ),
                         attack_defended: None,
                         source_controller: None,
+                        bypass_beneficiary: None,
                     }],
                     triggers: Vec::new(),
                 },
