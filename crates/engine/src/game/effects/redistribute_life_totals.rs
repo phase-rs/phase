@@ -144,9 +144,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, QuantityExpr, StaticDefinition, TargetFilter, TypedFilter,
+        ControllerRef, Effect, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        StaticDefinition, TargetFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
 
@@ -176,6 +179,26 @@ mod tests {
                 StaticDefinition::new(StaticMode::CantGainLife).affected(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
+            );
+    }
+
+    fn optional_life_reduced_replacement(state: &mut GameState, controller: PlayerId) {
+        let shield = create_object(
+            state,
+            CardId(902),
+            controller,
+            "Life Shield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&shield)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::LifeReduced)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Life Shield".to_string()),
             );
     }
 
@@ -314,7 +337,6 @@ mod tests {
     fn chained_sub_ability_pauses_and_resumes_after_submit() {
         use crate::game::effects::resolve_ability_chain;
         use crate::game::engine_resolution_choices::handle_resolution_choice;
-        use crate::types::actions::GameAction;
 
         let mut state = GameState::new_two_player(7);
         state.players[0].life = 20;
@@ -365,12 +387,92 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
+    /// CR 608.2c + CR 616.1: if submitting a redistribution option pauses on a
+    /// life-gain/loss replacement choice, the real `ChooseReplacement` resume
+    /// path must finish the assignment and then drain the original chained
+    /// continuation.
+    #[test]
+    fn replacement_choice_during_submit_resumes_chained_continuation() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply_as_current;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+
+        let mut state = GameState::new_two_player(8);
+        state.players[0].life = 20;
+        state.players[1].life = 5;
+        optional_life_reduced_replacement(&mut state, PlayerId(0));
+
+        let sub = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RedistributeLifeTotals,
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RedistributeLifeTotals { .. }
+        ));
+        assert!(
+            state.pending_continuation.is_some(),
+            "sub-ability must be stashed while redistribution waits"
+        );
+
+        let waiting = state.waiting_for.clone();
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitLifeRedistribution { option_index: 1 },
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 5);
+        assert!(
+            state.pending_life_total_assignment.is_some(),
+            "remaining redistribution deltas must survive the replacement prompt"
+        );
+
+        let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
+            panic!("expected replacement choice");
+        };
+        state.active_player = player;
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept life-loss replacement");
+
+        assert_eq!(state.players[0].life, 7, "swap to 5, then chained +2");
+        assert_eq!(state.players[1].life, 20);
+        assert!(state.pending_life_total_assignment.is_none());
+        assert!(state.pending_continuation.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
     /// An out-of-range option index is rejected.
     #[test]
     fn out_of_range_index_is_rejected() {
         use crate::game::engine::EngineError;
         use crate::game::engine_resolution_choices::handle_resolution_choice;
-        use crate::types::actions::GameAction;
 
         let mut state = GameState::new_two_player(6);
         state.players[0].life = 20;
