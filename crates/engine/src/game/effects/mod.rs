@@ -7814,7 +7814,37 @@ fn resolve_chain_body(
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
-            sub_with_targets.targets = ability.targets.clone();
+            // CR 115.6 + CR 608.2c (issue #5281): Inherit the parent instruction's
+            // targets, but for a sub-effect that carries its OWN independent object
+            // filter, keep only the inherited OBJECT targets that are actually legal
+            // for that filter. Player targets are shared across the chain (Paradigm's
+            // "that player" draw + lose-life; relative-controller change-zone) and
+            // are always inherited. Cruel Revival's "Return up to one target Zombie
+            // card from your graveyard ..." was given its own target slot, so the
+            // parent's destroy target (a battlefield creature) is illegal for it and
+            // is dropped — the declined optional bounce resolves as a no-op (CR 115.6)
+            // instead of bouncing the creature the spell just destroyed.
+            let own_object_filter =
+                crate::game::triggers::extract_target_filter_from_effect(&sub.effect)
+                    .filter(|_| !effect_refs_parent_target(&sub.effect));
+            sub_with_targets.targets = ability
+                .targets
+                .iter()
+                .filter(|target_ref| match (target_ref, own_object_filter) {
+                    (TargetRef::Player(_), _) => true,
+                    (TargetRef::Object(_), None) => true,
+                    (obj @ TargetRef::Object(_), Some(filter)) => {
+                        !crate::game::targeting::validate_targets_for_ability(
+                            state,
+                            std::slice::from_ref(obj),
+                            filter,
+                            ability,
+                        )
+                        .is_empty()
+                    }
+                })
+                .cloned()
+                .collect();
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,
