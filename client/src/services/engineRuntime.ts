@@ -2,6 +2,7 @@ import type {
   GameFormat,
   TokenCharacteristics,
   TokenImageRef,
+  TokenPtProvenance,
 } from "../adapter/types";
 import {
   buildLocalSearchCard,
@@ -309,6 +310,7 @@ export interface TokenPreset {
   id: string;
   category: TokenCategory;
   fidelity: PresetFidelity;
+  pt_provenance?: TokenPtProvenance;
   body: TokenCharacteristics;
   source_card_names?: string[];
   source_card_refs?: Array<{

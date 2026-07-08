@@ -36,9 +36,11 @@ vi.mock("../../../stores/gameStore", () => ({
   },
 }));
 
+let animationSpeedMultiplier = 1.0;
+
 vi.mock("../../../stores/preferencesStore", () => ({
   usePreferencesStore: {
-    getState: () => ({ aiSeats: [] }),
+    getState: () => ({ aiSeats: [], animationSpeedMultiplier }),
   },
 }));
 
@@ -71,6 +73,7 @@ describe("gameLoopController auto-pass authorization", () => {
     dispatchAction.mockReset();
     dispatchResolveAll.mockReset();
     waitingForSubscriber = null;
+    animationSpeedMultiplier = 1.0;
   });
 
   afterEach(() => {
@@ -142,7 +145,11 @@ describe("gameLoopController auto-pass authorization", () => {
     controller.dispose();
   });
 
-  it("re-checks phase stops before firing a delayed auto-pass", async () => {
+  it("re-checks the engine auto-pass recommendation before firing a delayed auto-pass", async () => {
+    // Phase-stop gating now lives in the engine, surfaced via `autoPassRecommended`
+    // (a phase stop on the new phase flips it to false). The controller must
+    // re-read the latest recommendation at fire time and cancel the delayed
+    // auto-pass when the engine no longer recommends it.
     const waitingFor = priority(0);
     storeState = {
       waitingFor,
@@ -161,14 +168,55 @@ describe("gameLoopController auto-pass authorization", () => {
       gameState: {
         ...stateFor(waitingFor, 0),
         phase: "PreCombatMain",
-        phase_stops: { 0: ["PreCombatMain"] },
       },
-      autoPassRecommended: true,
+      // Engine now recommends against auto-pass (phase stop on PreCombatMain).
+      autoPassRecommended: false,
     };
 
     await vi.advanceTimersByTimeAsync(200);
 
     expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("scales the auto-pass beat by the animation-speed multiplier (2x doubles the wait)", async () => {
+    animationSpeedMultiplier = 2.0;
+    const waitingFor = priority(1);
+    storeState = {
+      waitingFor,
+      gameState: stateFor(waitingFor, 0),
+      autoPassRecommended: true,
+    };
+
+    const controller = createGameLoopController({ mode: "local" });
+    controller.start();
+
+    // At the un-scaled 200ms beat the pass must NOT have fired yet — proves the
+    // multiplier actually stretched the beat (reach-guard against a vacuous 0-beat).
+    await vi.advanceTimersByTimeAsync(200);
+    expect(dispatchAction).not.toHaveBeenCalled();
+
+    // The doubled 400ms beat elapses and the pass dispatches.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(dispatchAction).toHaveBeenCalledWith({ type: "PassPriority" });
+    controller.dispose();
+  });
+
+  it("passes immediately (0ms beat) when the animation-speed multiplier is 0 without skipping the dispatch", async () => {
+    animationSpeedMultiplier = 0;
+    const waitingFor = priority(1);
+    storeState = {
+      waitingFor,
+      gameState: stateFor(waitingFor, 0),
+      autoPassRecommended: true,
+    };
+
+    const controller = createGameLoopController({ mode: "local" });
+    controller.start();
+
+    // Zero multiplier collapses the beat to 0ms but must still dispatch the pass.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dispatchAction).toHaveBeenCalledWith({ type: "PassPriority" });
     controller.dispose();
   });
 });

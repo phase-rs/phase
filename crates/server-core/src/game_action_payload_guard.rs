@@ -286,6 +286,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::ChooseCounterMoveDistribution { selections } => {
             bound_list("ChooseCounterMoveDistribution.selections", selections.len())?;
         }
+        GameAction::ChooseCountersToRemove { selections } => {
+            bound_list("ChooseCountersToRemove.selections", selections.len())?;
+        }
         GameAction::CrewVehicle { creature_ids, .. } => {
             bound_list("CrewVehicle.creature_ids", creature_ids.len())?;
         }
@@ -445,6 +448,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::PassParadigmOffer
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
+        | GameAction::SetPriorityYield { .. }
         | GameAction::Concede { .. } => {}
     }
     Ok(())

@@ -528,7 +528,16 @@ fn handle_triggered_mode_choice(
             // pause-time); mutate its ability with the resolved mode so the
             // target prompt operates on the chosen mode. `pending_trigger_entry`
             // stays set — construction continues through target selection.
-            triggers::mutate_pending_trigger_entry(state, &trigger.ability);
+            if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
+                // Unexpected dangling cursor: the entry is gone before the target
+                // prompt could open. Recover per CR 608.2b / CR 800.4a (a stack
+                // object that has left the stack does not resolve) — record the
+                // diagnostic, abandon, return priority (re-normalized next pass;
+                // CR 117.3b would give the active player).
+                triggers::restore_trigger_event_context(state, mode_context_snapshot);
+                triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+                return Ok(WaitingFor::Priority { player });
+            }
             let description = trigger.description.clone();
             state.pending_trigger = Some(trigger);
             let pending_trigger = state
@@ -591,7 +600,16 @@ fn handle_triggered_mode_choice(
         // on the stack (pushed at modal pause-time); mutate its ability with
         // the resolved mode and clear `pending_trigger_entry` so the resolver
         // may fire this entry.
-        triggers::finalize_pending_trigger_entry(state, &trigger.ability);
+        if !triggers::finalize_pending_trigger_entry(state, &trigger.ability) {
+            // Unexpected dangling cursor: the entry is no longer on the stack.
+            // Recover per CR 608.2b / CR 800.4a (a stack object that has left the
+            // stack does not resolve) — record the diagnostic, abandon, and hand
+            // back priority instead of panicking (re-normalized next pass; CR
+            // 117.3b would give the active player).
+            triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+            priority::clear_priority_passes(state);
+            return Ok(WaitingFor::Priority { player });
+        }
         priority::clear_priority_passes(state);
         // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind this
         // modal trigger so each independent instance reaches the stack

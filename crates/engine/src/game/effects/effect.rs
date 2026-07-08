@@ -510,7 +510,7 @@ fn transient_bound_filters(
         .collect()
 }
 
-fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
+pub(super) fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
     matches!(
         filter,
         TargetFilter::TriggeringSource | TargetFilter::ParentTarget | TargetFilter::CostPaidObject
@@ -523,7 +523,7 @@ fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool
 /// Inherited-reference `affected` values (`ParentTarget`, …) win over the
 /// targeting descriptor so a `target: Typed(Creature)` + `affected:
 /// ParentTarget` pair binds to the chosen creature, not every creature.
-fn generic_effect_application_filter<'a>(
+pub(super) fn generic_effect_application_filter<'a>(
     target_filter: Option<&'a TargetFilter>,
     static_affected: Option<&'a TargetFilter>,
 ) -> Option<&'a TargetFilter> {
@@ -3186,6 +3186,111 @@ mod tests {
                 .unwrap()
                 .has_keyword(&Keyword::Shroud),
             "shroud must be gone after cleanup (until end of turn expiry)"
+        );
+    }
+
+    /// Finding 1 (Ood Sphere): the Red-Eye sub-ability grants `CantTap` to the
+    /// goaded creatures via `GenericEffect { affected: ParentTarget, target:
+    /// ParentTarget }`. With MULTIPLE chosen object targets (one goaded creature
+    /// per opponent, as the `repeat_for: PlayerCount(Opponent)` machinery
+    /// aggregates), the inherited-object-target binding (effect.rs) must register
+    /// ONE `SpecificObject` CantTap TCE per target — so EVERY goaded creature gets
+    /// the restriction, and a non-goaded creature does not. This is the
+    /// binding-side proof for the multi-opponent aggregation.
+    #[test]
+    fn generic_effect_cant_tap_binds_every_parent_target_object() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::restrictions::object_cant_tap;
+        use crate::types::ability::TargetRef;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ood Sphere".to_string(),
+            Zone::Command,
+        );
+        let goaded_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Goaded Bear A".to_string(),
+            Zone::Battlefield,
+        );
+        let goaded_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Goaded Bear B".to_string(),
+            Zone::Battlefield,
+        );
+        let untouched = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Untouched Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for cid in [goaded_a, goaded_b, untouched] {
+            state
+                .objects
+                .get_mut(&cid)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // The sub-ability shape emitted by the parser: grant CantTap (on SelfRef)
+        // to the ParentTarget set, until the controller's next turn.
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(
+                    StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef),
+                ),
+            }]);
+        let duration = Duration::UntilNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(duration.clone()),
+                target: Some(TargetFilter::ParentTarget),
+            },
+            vec![TargetRef::Object(goaded_a), TargetRef::Object(goaded_b)],
+            source,
+            PlayerId(0),
+        )
+        .duration(duration);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // One SpecificObject TCE per goaded creature (the inherited-object-target
+        // binding), NOT a single ParentTarget/tracked-set fallback.
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            2,
+            "one CantTap grant per goaded creature: {:?}",
+            state.transient_continuous_effects
+        );
+
+        evaluate_layers(&mut state);
+        assert!(
+            object_cant_tap(&state, goaded_a),
+            "first goaded creature must be can't-become-tapped"
+        );
+        assert!(
+            object_cant_tap(&state, goaded_b),
+            "second goaded creature must be can't-become-tapped"
+        );
+        assert!(
+            !object_cant_tap(&state, untouched),
+            "a non-goaded creature must NOT be restricted"
         );
     }
 }

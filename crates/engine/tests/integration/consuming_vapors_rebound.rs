@@ -218,7 +218,7 @@ fn rebound_offers_recast_at_upkeep_and_resolves() {
     );
     let trig = &state.delayed_triggers[0];
     match &trig.condition {
-        DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player } => {
+        DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player, .. } => {
             assert_eq!(
                 *phase,
                 Phase::Upkeep,
@@ -296,6 +296,7 @@ fn rebound_declined_at_upkeep_leaves_card_in_exile_with_no_permission() {
 
             graveyard_replacement: None,
             enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
             mana_spend_permission: None,
         });
     engine::game::layers::prune_end_of_turn_casting_permissions(&mut state);

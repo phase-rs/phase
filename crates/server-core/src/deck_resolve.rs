@@ -32,10 +32,13 @@ fn resolve_entries(
     for name in order {
         match db.get_face_by_name(name) {
             Some(face) => {
-                entries.push(DeckEntry {
-                    card: face.clone(),
-                    count: counts[name],
-                });
+                // CR 202.3d + CR 709.4b: build through the engine's single
+                // authority so a split card in a server-resolved deck carries the
+                // combined off-stack mana value override, matching the in-engine
+                // resolver. A direct `DeckEntry { card: face.clone(), .. }` here
+                // skipped the override, so server-side companion checks
+                // (Keruga / Lurrus / Obosh) read only the submitted face's value.
+                entries.push(DeckEntry::from_resolved_face(db, face, counts[name]));
             }
             None => {
                 missing.push(format!("{section}:{name}"));
@@ -151,6 +154,77 @@ mod tests {
             .map(|name| (name.to_lowercase(), card(name)))
             .collect();
         CardDatabase::from_json_str(&Value::Object(entries).to_string()).unwrap()
+    }
+
+    /// One half of a split card: the shared `scryfall_oracle_id` and the
+    /// `"layout": "split"` discriminant make `CardDatabase` fold the two faces
+    /// into a single split card for off-stack characteristic queries.
+    fn split_face(name: &str, oracle_id: &str, generic: u32) -> Value {
+        json!({
+            "name": name,
+            "mana_cost": { "type": "Cost", "shards": [], "generic": generic },
+            "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "color_identity": [],
+            "scryfall_oracle_id": oracle_id,
+            "layout": "split",
+        })
+    }
+
+    fn db_from_values(cards: &[(&str, Value)]) -> CardDatabase {
+        let entries: serde_json::Map<String, Value> = cards
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect();
+        CardDatabase::from_json_str(&Value::Object(entries).to_string()).unwrap()
+    }
+
+    /// CR 202.3d + CR 709.4b: a split card resolved through the SERVER transport
+    /// resolver must carry the combined off-stack mana value, not just the
+    /// submitted front face's. Regression for the fix that routes
+    /// `resolve_entries` through `DeckEntry::from_resolved_face`: before it, the
+    /// server cloned the face directly and server-side companion checks
+    /// (Keruga / Lurrus / Obosh) saw only the front half's mana value.
+    #[test]
+    fn resolve_entries_stamps_split_card_off_stack_mana_value_override() {
+        // Commit // Memory analog: front half MV 3, back half MV 4 → combined
+        // off-stack MV 7. A deck holding only the "Commit" face must expose 7.
+        let db = db_from_values(&[
+            ("commit", split_face("Commit", "o-commit-memory", 3)),
+            ("memory", split_face("Memory", "o-commit-memory", 4)),
+        ]);
+
+        let (entries, missing) = resolve_entries(&db, &["Commit".to_string()], "main");
+        assert!(missing.is_empty(), "split face resolves: {missing:?}");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+
+        // The submitted face's own mana value is only 3 …
+        assert_eq!(
+            entry.card.mana_cost.mana_value(),
+            3,
+            "front face raw mana value"
+        );
+        // … but the server-resolved entry must expose the COMBINED off-stack MV.
+        assert_eq!(
+            entry.off_stack_mana_value(),
+            7,
+            "server-resolved split card must report the combined off-stack mana value \
+             (CR 202.3d/709.4b), not the front face's — otherwise companion eligibility \
+             is evaluated against the wrong value"
+        );
     }
 
     #[test]

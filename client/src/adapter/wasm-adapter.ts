@@ -11,7 +11,7 @@ import type {
   ViewerSnapshot,
   WaitingFor,
 } from "./types";
-import { AdapterError, AdapterErrorCode, isStateLostMessage } from "./types";
+import { AdapterError, AdapterErrorCode, isStaleActionMessage, isStateLostMessage } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
@@ -76,6 +76,11 @@ async function classifyEngineErrorAsync(
   // always narrow control flow through an awaited `Promise<never>`, so
   // making the throw explicit keeps the surrounding methods type-clean.
   const message = err instanceof Error ? err.message : String(err);
+  // Actor-authorization rejection (stale action after a priority/turn shift).
+  // Typed so dispatch can treat it as a benign no-op rather than a crash.
+  if (isStaleActionMessage(message)) {
+    return new AdapterError(AdapterErrorCode.STALE_ACTION, message, false);
+  }
   if (isStateLostMessage(message)) {
     let panic: string | null = null;
     try {

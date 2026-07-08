@@ -30,7 +30,7 @@ export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
       // exceeds the viewport (e.g. landscape phones ~390px tall). At short heights
       // it also compacts (icon-only, tighter spacing) so scrolling is rarely
       // needed; `overflow-y-auto` is the safety net for the very shortest devices.
-      className="sticky top-0 z-30 hidden h-[100dvh] w-[92px] shrink-0 self-start flex-col items-center gap-2 overflow-y-auto border-r border-hairline-strong bg-[rgba(6,10,22,0.72)] px-2 py-[18px] backdrop-blur-xl min-[820px]:flex [@media(max-height:540px)]:gap-1 [@media(max-height:540px)]:py-2"
+      className="sticky top-0 z-30 hidden h-[100dvh] w-[92px] shrink-0 self-start flex-col items-center gap-2 overflow-y-auto border-r border-hairline-strong bg-[rgba(6,10,22,0.94)] px-2 py-[18px] min-[820px]:flex [@media(max-height:540px)]:gap-1 [@media(max-height:540px)]:py-2"
       aria-label={t("nav.label")}
     >
       <button
@@ -41,7 +41,7 @@ export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
         <img
           src="/logo_only.webp"
           alt="phase.rs"
-          className="w-11 drop-shadow-[0_0_14px_rgba(251,146,60,0.45)] [@media(max-height:540px)]:w-8"
+          className="w-11 [@media(max-height:540px)]:w-8"
         />
       </button>
 
@@ -53,30 +53,17 @@ export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
               key={key}
               to={path}
               aria-current={on ? "page" : undefined}
-              className={`group relative flex flex-col items-center gap-1.5 rounded-[14px] px-1 py-[11px] transition-colors duration-150 [@media(max-height:540px)]:gap-0.5 [@media(max-height:540px)]:py-1.5 ${
+              className={`group relative flex flex-col items-center gap-1.5 rounded-[8px] border px-1 py-[11px] transition-colors duration-150 [@media(max-height:540px)]:gap-0.5 [@media(max-height:540px)]:py-1.5 ${
                 on
-                  ? "bg-white/[0.07] text-white"
-                  : "text-fg-meta hover:bg-white/[0.04] hover:text-slate-300"
+                  ? "border-white/15 bg-slate-900 text-white"
+                  : "border-transparent text-fg-meta hover:border-white/10 hover:bg-slate-950 hover:text-slate-300"
               }`}
             >
-              {on && (
-                <span
-                  aria-hidden
-                  className="absolute left-0 top-3.5 bottom-3.5 w-[3px] rounded-r-[3px] bg-white/70"
-                />
-              )}
-              {/* Ember glow behind the icon, revealed on hover — brand-amber halo
-                  to match the logo's drop-shadow. Lives per-item (its own group)
-                  so every rail destination lights up independently. */}
-              <span
-                aria-hidden
-                className="pointer-events-none absolute left-1/2 top-[7px] -z-10 h-10 w-10 -translate-x-1/2 rounded-full bg-[radial-gradient(circle,rgba(251,146,60,0.5),transparent_70%)] opacity-0 blur-md transition-opacity duration-200 group-hover:opacity-100"
-              />
               <Icon
-                className={`h-7 w-7 transition-[opacity,transform,filter] duration-200 ${
+                className={`h-7 w-7 transition-opacity duration-150 ${
                   on
                     ? "opacity-100"
-                    : "opacity-50 group-hover:scale-110 group-hover:opacity-100 group-hover:[filter:drop-shadow(0_0_6px_rgba(251,146,60,0.55))]"
+                    : "opacity-50 group-hover:opacity-100"
                 }`}
               />
               <span className="text-[10.5px] font-semibold tracking-[0.02em]">
@@ -90,7 +77,7 @@ export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
       <div className="mt-auto flex w-full flex-col items-center gap-2 border-t border-hairline-strong pt-2.5 [@media(max-height:540px)]:gap-1 [@media(max-height:540px)]:pt-1.5">
         <button
           onClick={onWhatsNew}
-          className="relative flex w-full flex-col items-center gap-1 rounded-[14px] px-1 py-2 text-fg-meta transition-colors hover:bg-white/[0.04] hover:text-slate-300 [@media(max-height:540px)]:py-1"
+          className="relative flex w-full flex-col items-center gap-1 rounded-[8px] border border-transparent px-1 py-2 text-fg-meta transition-colors hover:border-white/10 hover:bg-slate-950 hover:text-slate-300 [@media(max-height:540px)]:py-1"
         >
           <span className="relative">
             <SparkleIcon className="h-6 w-6 opacity-50" />
@@ -105,7 +92,7 @@ export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
 
         <button
           onClick={onSettings}
-          className="flex w-full flex-col items-center gap-1 rounded-[14px] px-1 py-2 text-fg-meta transition-colors hover:bg-white/[0.04] hover:text-slate-300 [@media(max-height:540px)]:py-1"
+          className="flex w-full flex-col items-center gap-1 rounded-[8px] border border-transparent px-1 py-2 text-fg-meta transition-colors hover:border-white/10 hover:bg-slate-950 hover:text-slate-300 [@media(max-height:540px)]:py-1"
         >
           <img src="/icons/sections/settings.png" alt="" aria-hidden="true" draggable={false} className="h-6 w-6 opacity-50" />
           <span className="text-[10.5px] font-semibold tracking-[0.02em]">{t("nav.settings")}</span>

@@ -219,6 +219,7 @@ describe("TargetingOverlay", () => {
           vehicle_id: 20,
           crew_power: 4,
           eligible_creatures: [21, 22],
+          contributions: [2, 3],
         },
       },
     });
@@ -243,6 +244,47 @@ describe("TargetingOverlay", () => {
       type: "CrewVehicle",
       data: { vehicle_id: 20, creature_ids: [21, 22] },
     });
+  });
+
+  it("cancels crew selection back to priority", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Artifact"], {
+          id: 20,
+          name: "Vehicle",
+        }),
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Pilot One",
+          power: 2,
+        }),
+      ),
+      waiting_for: {
+        type: "CrewVehicle",
+        data: {
+          player: 0,
+          vehicle_id: 20,
+          crew_power: 2,
+          eligible_creatures: [21],
+          contributions: [2],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 
   it("informs the player when the target slot is a spell on the stack", () => {

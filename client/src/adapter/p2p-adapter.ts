@@ -6,6 +6,7 @@ import type {
   FormatConfig,
   GameAction,
   GameEvent,
+  GameLogEntry,
   GameState,
   LegalActionsResult,
   MatchConfig,
@@ -64,6 +65,7 @@ export type P2PAdapterEvent =
       state: GameState;
       events: GameEvent[];
       legalResult: LegalActionsResult;
+      logEntries?: GameLogEntry[];
     }
   // 3-4p multiplayer additions:
   | {
@@ -185,7 +187,6 @@ function aiActorFromWaitingFor(
 ): PlayerId | null {
   if (
     waitingFor.type === "MulliganDecision" ||
-    waitingFor.type === "MulliganBottomCards" ||
     waitingFor.type === "OpeningHandBottomCards"
   ) {
     return (
@@ -728,7 +729,7 @@ export class P2PHostAdapter implements EngineAdapter {
         return;
       }
       const result = await this.wasm.submitAction(action, actor);
-      await this.broadcastStateUpdate(result.events);
+      await this.broadcastStateUpdate(result.events, result.log_entries);
       const nextState = await this.wasm.getState();
       const legalResult = await this.wasm.getLegalActions();
       this.emit({
@@ -736,6 +737,7 @@ export class P2PHostAdapter implements EngineAdapter {
         state: nextState,
         events: result.events,
         legalResult,
+        logEntries: result.log_entries,
       });
     }
   }
@@ -1071,7 +1073,7 @@ export class P2PHostAdapter implements EngineAdapter {
       );
     }
     const result = await this.wasm.submitAction(action, actor);
-    await this.broadcastStateUpdate(result.events);
+    await this.broadcastStateUpdate(result.events, result.log_entries);
     await this.runAiLoop();
     return result;
   }
@@ -1084,7 +1086,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * actions from the engine-side viewer gate (`legal_actions_for_viewer`).
    * Skips disconnected seats (their state is delivered via `reconnect_ack`).
    */
-  private async broadcastStateUpdate(events: GameEvent[]): Promise<void> {
+  private async broadcastStateUpdate(events: GameEvent[], logEntries?: GameLogEntry[]): Promise<void> {
     const sends: Array<Promise<void>> = [];
     for (const [pid, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(pid)) continue;
@@ -1093,6 +1095,7 @@ export class P2PHostAdapter implements EngineAdapter {
         type: "state_update",
         state: snapshot.state,
         events,
+        logEntries,
         ...legalActionsToWire(snapshot),
       }));
     }
@@ -1254,7 +1257,7 @@ export class P2PHostAdapter implements EngineAdapter {
           // is untrusted. This is the defense-in-depth that makes the engine
           // guard meaningful for P2P.
           const result = await this.wasm.submitAction(msg.action, pid);
-          await this.broadcastStateUpdate(result.events);
+          await this.broadcastStateUpdate(result.events, result.log_entries);
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
@@ -1267,6 +1270,7 @@ export class P2PHostAdapter implements EngineAdapter {
             state,
             events: result.events,
             legalResult,
+            logEntries: result.log_entries,
           });
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
@@ -1456,7 +1460,7 @@ export class P2PHostAdapter implements EngineAdapter {
       // the seat being conceded and the authenticated identity we're acting
       // on behalf of (e.g. grace-expiry or kick).
       const result = await this.wasm.submitAction(concedeAction, pid);
-      await this.broadcastStateUpdate(result.events);
+      await this.broadcastStateUpdate(result.events, result.log_entries);
       await this.runAiLoop();
       const state = await this.wasm.getState();
       const legalResult = await this.wasm.getLegalActions();
@@ -1465,6 +1469,7 @@ export class P2PHostAdapter implements EngineAdapter {
         state,
         events: result.events,
         legalResult,
+        logEntries: result.log_entries,
       });
       this.emit(
         origin === "kick"
@@ -1855,7 +1860,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.gameState = msg.state;
         this.legalActions = legalActionsFromWire(msg);
         if (this.pendingResolve) {
-          this.pendingResolve({ events: msg.events });
+          this.pendingResolve({ events: msg.events, log_entries: msg.logEntries });
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {
@@ -1864,6 +1869,7 @@ export class P2PGuestAdapter implements EngineAdapter {
             state: msg.state,
             events: msg.events,
             legalResult: this.legalActions,
+            logEntries: msg.logEntries,
           });
         }
         break;

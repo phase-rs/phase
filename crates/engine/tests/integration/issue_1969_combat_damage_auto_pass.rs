@@ -4,7 +4,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{AutoPassRequest, WaitingFor};
+use engine::types::game_state::{AutoPassRequest, TurnBoundary, WaitingFor};
 use engine::types::phase::Phase;
 
 #[test]
@@ -52,7 +52,9 @@ fn until_end_of_turn_auto_pass_still_deals_combat_damage() {
 
     runner
         .act(GameAction::SetAutoPass {
-            mode: AutoPassRequest::UntilEndOfTurn,
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
         })
         .expect("enable pass-to-end");
 

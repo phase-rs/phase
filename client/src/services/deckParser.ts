@@ -168,14 +168,28 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
 
 function normalizeCardName(name: string): string {
   const trimmed = name.trim();
-  if (!trimmed.includes("/")) return trimmed;
 
-  const slashParts = trimmed.split("/").map((part) => part.trim()).filter(Boolean);
-  if (slashParts.length === 2) {
-    return `${slashParts[0]} // ${slashParts[1]}`;
+  // The canonical MTG split/DFC separator is " // " (double slash, spaced).
+  // Whitespace adjacent to a "//" is the tell that it's a separator: normalize
+  // irregular spacing ("Fire// Ice", "Wear //Tear") to the canonical " // ".
+  // A "//" with NO adjacent whitespace is part of a printed name — e.g.
+  // "SP//dr, Piloted by Peni" — and must be left verbatim, or the engine's
+  // exact-name lookup (keyed on the real "//"-glued name) fails to resolve it.
+  if (trimmed.includes("//")) {
+    return /\s\/\/|\/\/\s/.test(trimmed)
+      ? trimmed.replace(/\s*\/\/+\s*/g, " // ")
+      : trimmed;
   }
 
-  return trimmed.replace(/\s*\/{2,}\s*/g, " // ");
+  // Single-slash exporter forms upgrade to canonical. Split on each "/" so both
+  // two-part ("Revival/Revenge") and multi-part
+  // ("Who / What / When / Where / Why") split cards collapse to " // " joins.
+  if (!trimmed.includes("/")) return trimmed;
+  return trimmed
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" // ");
 }
 
 function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {

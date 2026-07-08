@@ -1112,6 +1112,7 @@ fn fire_combat_prevention_riders(
             continue;
         };
         state.last_effect_count = Some(total_prevented);
+        state.post_replacement_applied.clear();
         state.post_replacement_continuation =
             Some(crate::types::ability::PostReplacementContinuation::Resolved(runtime));
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(

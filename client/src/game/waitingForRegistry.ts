@@ -101,6 +101,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "SearchPartitionChoice",
     "OutsideGameChoice",
     "ChooseFromZoneChoice",
+    // CR 701.4a: behold a [quality] — single-pick from a mixed-zone candidate
+    // list (BeholdChoiceModal, rendered via CardChoiceModal).
+    "BeholdChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
@@ -120,9 +123,13 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "TimeTravelChoice",
     "ChooseObjectsSelection",
     "CategoryChoice",
+    "EachPlayerCopyChosenSelection",
     "KeepWithinTotalPowerChoice",
     "DistributeAmong",
     "MoveCountersDistribution",
+    // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) — rendered by
+    // MoveCountersDistributionModal in no-destination removal mode.
+    "RemoveCountersChoice",
     "RetargetChoice",
     "CopyRetarget",
     "DamageSourceChoice",
@@ -152,6 +159,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "CommanderZoneChoice",
     "BattleProtectorChoice",
     "NamedChoice",
+    "OpponentGuess",
     "CostTypeChoice",
     "UntapChoice",
     "ChooseUntapSubset",
@@ -161,7 +169,6 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Game lifecycle
     "GameOver",
     "MulliganDecision",
-    "MulliganBottomCards",
     "OpeningHandBottomCards",
     "BetweenGamesSideboard",
     "BetweenGamesChoosePlayDraw",
@@ -226,7 +233,6 @@ export function waitingForReason(
     case "UnlessPayment":
       return { key: "status.reason.payingCost" };
     case "MulliganDecision":
-    case "MulliganBottomCards":
     case "OpeningHandBottomCards":
       return { key: "status.reason.mulligan" };
     case "DiscardToHandSize":

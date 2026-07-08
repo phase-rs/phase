@@ -52,6 +52,7 @@ import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.t
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
+import { EachPlayerCopyChosenModal } from "./EachPlayerCopyChosenModal.tsx";
 import {
   CoinFlipKeepModal,
   DigModal,
@@ -108,6 +109,7 @@ type RepeatDecision = Extract<WaitingFor, { type: "RepeatDecision" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
+type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -164,6 +166,9 @@ export function CardChoiceModal() {
           data={waitingFor.data}
         />
       );
+    case "BeholdChoice":
+      if (!canActForWaitingState) return null;
+      return <BeholdChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -172,6 +177,11 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return <DrawnThisTurnTopdeckModal data={waitingFor.data} />;
     case "NamedChoice":
+      if (!canActForWaitingState) return null;
+      return <NamedChoiceModal data={waitingFor.data} />;
+    case "OpponentGuess":
+      // CR 608.2d: the guesser picks one of the offered options. Display-only —
+      // reuses the generic option picker; the engine computes correctness.
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
     // Pre-choice behold ("choose a creature type and behold N of that type"):
@@ -294,7 +304,12 @@ export function CardChoiceModal() {
       return <DistributeAmongModal data={waitingFor.data} />;
     case "MoveCountersDistribution":
       if (!canActForWaitingState) return null;
-      return <MoveCountersDistributionModal data={waitingFor.data} />;
+      return <MoveCountersDistributionModal waitingFor={waitingFor} />;
+    // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) reuses the
+    // counter-distribution modal in no-destination removal mode.
+    case "RemoveCountersChoice":
+      if (!canActForWaitingState) return null;
+      return <MoveCountersDistributionModal waitingFor={waitingFor} />;
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       // CR 115.7: Single-target retargets are picked directly on the board via
@@ -324,6 +339,9 @@ export function CardChoiceModal() {
     case "CategoryChoice":
       if (!canActForWaitingState) return null;
       return <CategoryChoiceModal data={waitingFor.data} />;
+    case "EachPlayerCopyChosenSelection":
+      if (!canActForWaitingState) return null;
+      return <EachPlayerCopyChosenModal data={waitingFor.data} />;
     case "ManifestDreadChoice":
       if (!canActForWaitingState) return null;
       return <ManifestDreadModal data={waitingFor.data} />;
@@ -885,6 +903,60 @@ function ChooseFromZoneModal({ data }: { data: ChooseFromZoneChoice["data"] }) {
                   </span>
                 </div>
               )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// CR 701.4a: Behold a [quality] — the controller picks exactly ONE beholdable
+// object from the engine-provided mixed-zone candidate list (permanents they
+// control ∪ matching hand cards). Display-only: the engine supplies `choices`
+// and enforces legality; clicking a card dispatches a single-object SelectCards.
+// A chosen hand card is publicly revealed by the engine; a chosen permanent is
+// already public. This modal never filters or derives eligibility.
+function BeholdChoiceModal({ data }: { data: BeholdChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  const handleChoose = useCallback(
+    (id: ObjectId) => {
+      dispatch({ type: "SelectCards", data: { cards: [id] } });
+    },
+    [dispatch],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.behold.title")}
+      subtitle={t("cardChoice.behold.subtitleChoose")}
+    >
+      <ScrollableCardStrip>
+        {data.choices.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: 0.85, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6, opacity: 1 }}
+              onClick={() => handleChoose(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
             </motion.button>
           );
         })}
@@ -2595,9 +2667,9 @@ function CommanderZoneChoiceModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+      <div className="absolute inset-0 bg-black/68" />
       <motion.div
-        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[22px] border border-white/10 bg-[#0b1020]/94 shadow-[0_28px_70px_rgba(0,0,0,0.5)] backdrop-blur-md"
+        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[12px] border border-white/10 bg-[#0b1020] shadow-[0_18px_48px_rgba(0,0,0,0.48)]"
         data-testid="commander-zone-choice-dialog"
         initial={{ opacity: 0, y: 18, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}

@@ -611,6 +611,7 @@ fn parse_timing_restriction(
     alt((
         preceded(tag("during "), parse_during_phrase),
         preceded(tag("before "), parse_before_phrase),
+        preceded(tag("after "), parse_after_phrase),
         preceded(
             tag("on "),
             alt((
@@ -618,7 +619,6 @@ fn parse_timing_restriction(
                 value(CastingRestriction::DuringYourTurn, tag("your turn")),
             )),
         ),
-        value(CastingRestriction::AfterCombat, tag("after combat")),
         value(CastingRestriction::AsSorcery, tag("as a sorcery")),
     ))
     .parse(input)
@@ -708,6 +708,24 @@ fn parse_before_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, Or
             CastingRestriction::BeforeCombatDamage,
             alt((tag("the combat damage step"), tag("combat damage"))),
         ),
+    ))
+    .parse(input)
+}
+
+/// Sub-dispatch for "after [rest]" — blockers declared, combat. Mirror of
+/// `parse_before_phrase`: `after blockers are declared` opens the post-blockers
+/// combat window (CR 509.1, CR 510.1, and CR 511.1), while `after combat` (folded in from
+/// the former standalone leaf) is the post-combat-phase window. Backs the class
+/// printing "Cast this spell only during combat after blockers are declared."
+/// (Aleatory, Chaotic Strike, Curtain of Light, Flash Foliage) alongside the
+/// separately-scanned `DuringCombat`.
+fn parse_after_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
+    alt((
+        value(
+            CastingRestriction::AfterBlockersDeclared,
+            tag("blockers are declared"),
+        ),
+        value(CastingRestriction::AfterCombat, tag("combat")),
     ))
     .parse(input)
 }
@@ -939,6 +957,34 @@ mod tests {
         assert!(restrictions.contains(&CastingRestriction::DuringCombat));
         assert!(restrictions.contains(&CastingRestriction::DuringYourTurn));
         assert!(restrictions.contains(&CastingRestriction::BeforeBlockersDeclared));
+    }
+
+    /// CR 509.1 + CR 510.1 + CR 511.1: the "after blockers are declared" window
+    /// used to be dropped — `during combat` matched and stranded the remainder,
+    /// leaving the spell castable during all of combat. The line must now emit
+    /// both `DuringCombat` and `AfterBlockersDeclared` (and NOT the opposite
+    /// `BeforeBlockersDeclared` window). Backs Aleatory, Chaotic Strike, Curtain
+    /// of Light, and Flash Foliage, which all print this exact line.
+    #[test]
+    fn spell_cast_restriction_handles_combat_after_blockers() {
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only during combat after blockers are declared.",
+        )
+        .expect("restrictions should parse");
+        assert!(restrictions.contains(&CastingRestriction::DuringCombat));
+        assert!(restrictions.contains(&CastingRestriction::AfterBlockersDeclared));
+        assert!(!restrictions.contains(&CastingRestriction::BeforeBlockersDeclared));
+    }
+
+    /// Regression: folding the former standalone `after combat` leaf into the
+    /// `after` prefix sub-dispatch (`parse_after_phrase`) must preserve the
+    /// post-combat-phase window.
+    #[test]
+    fn spell_cast_restriction_after_combat_still_parses() {
+        let restrictions =
+            parse_casting_restriction_line("Cast this spell only after combat on your turn.")
+                .expect("restrictions should parse");
+        assert!(restrictions.contains(&CastingRestriction::AfterCombat));
     }
 
     #[test]

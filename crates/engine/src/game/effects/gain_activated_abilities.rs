@@ -1,7 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityKind, ContinuousModification, Duration, Effect, EffectError, EffectKind,
-    ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, EffectError,
+    EffectKind, GrantedAbilityScope, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -33,55 +34,60 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (recipient, duration) = match &ability.effect {
+    let (donor_filter, recipient, scope, duration) = match &ability.effect {
         Effect::GainActivatedAbilitiesOfTarget {
+            target,
             recipient,
+            scope,
             duration,
-            ..
         } => (
+            target.clone(),
             recipient.clone(),
+            *scope,
             duration
                 .clone()
                 .or(ability.duration.clone())
                 .unwrap_or(Duration::UntilEndOfTurn),
         ),
         _ => (
+            TargetFilter::Any,
             TargetFilter::SelfRef,
+            GrantedAbilityScope::ActivatedOnly,
             ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn),
         ),
     };
 
-    // The donor is the single declared object target (BecomeCopy-style).
-    let donor_id = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .ok_or_else(|| {
-            EffectError::MissingParam(
-                "GainActivatedAbilitiesOfTarget requires a target".to_string(),
-            )
-        })?;
+    // The donor id depends on the donor filter. Quicksilver/Grell target the
+    // donor, so it is the single declared object target (BecomeCopy-style).
+    // Symbiote's donor is "this card" (`SelfRef`) — read the source directly
+    // (its Find New Host ability is activated from the graveyard and exiles the
+    // source as a cost, but `move_to_zone` preserves the ObjectId and the exiled
+    // object keeps its printed `abilities`/`trigger_definitions`, so the source
+    // remains readable at resolution — GATE #1, proven by the runtime test).
+    let donor_id = match donor_filter {
+        TargetFilter::SelfRef => ability.source_id,
+        _ => ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .ok_or_else(|| {
+                EffectError::MissingParam(
+                    "GainActivatedAbilitiesOfTarget requires a target".to_string(),
+                )
+            })?,
+    };
 
-    // CR 611.2c: snapshot the donor's activated abilities exactly once, now.
+    // CR 611.2c: snapshot the donor's granted abilities exactly once, now.
     // Read the donor's CURRENT abilities (post-layer) so abilities the donor
     // itself has gained by this point are included, but never re-read after
-    // this point — the resulting `GrantAbility` set is frozen.
+    // this point — the resulting modification set is frozen.
     let modifications: Vec<ContinuousModification> = state
         .objects
         .get(&donor_id)
-        .map(|donor| {
-            donor
-                .abilities
-                .iter()
-                .filter(|a| a.kind == AbilityKind::Activated)
-                .map(|a| ContinuousModification::GrantAbility {
-                    definition: Box::new(a.clone()),
-                })
-                .collect()
-        })
+        .map(|donor| snapshot_granted_modifications(donor, scope))
         .unwrap_or_default();
 
     // CR 611.2b: a grant that affects zero abilities (donor has none) is not an
@@ -100,6 +106,25 @@ pub fn resolve(
                     modifications,
                     None,
                 );
+            }
+            // Symbiote Spider-Man: the recipient is "It" — the object targeted by
+            // the parent PutCounter (`ParentTarget`), inherited into
+            // `ability.targets`. Register directly on that object rather than
+            // routing `ParentTarget` through the battlefield filter scan.
+            TargetFilter::ParentTarget => {
+                if let Some(recipient_id) = ability.targets.iter().find_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                }) {
+                    state.add_transient_continuous_effect(
+                        ability.source_id,
+                        ability.controller,
+                        duration,
+                        TargetFilter::SpecificObject { id: recipient_id },
+                        modifications,
+                        None,
+                    );
+                }
             }
             // Grell Philosopher: "each Horror you control" — resolve the
             // recipient filter against the battlefield at resolution time and
@@ -150,6 +175,81 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 611.2c: Snapshot the donor's abilities into concrete grant modifications
+/// according to `scope`.
+///
+/// - `ActivatedOnly` (Quicksilver Elemental / Grell / Havengul): only the
+///   donor's activated abilities (CR 602.1, `obj.abilities`) become
+///   `GrantAbility`.
+/// - `AllOther` (Symbiote Spider-Man "this card's OTHER abilities"): every
+///   ability of the donor EXCEPT the granting ability itself — activated
+///   abilities become `GrantAbility`, and triggered abilities (CR 603.1, the
+///   separate `obj.trigger_definitions` store the activated loop never reads)
+///   become `GrantTrigger`. Static abilities are not in the corpus for this
+///   scope and are intentionally not snapshotted (Symbiote has none).
+fn snapshot_granted_modifications(
+    donor: &GameObject,
+    scope: GrantedAbilityScope,
+) -> Vec<ContinuousModification> {
+    let mut mods = Vec::new();
+    for a in donor.abilities.iter() {
+        match scope {
+            GrantedAbilityScope::ActivatedOnly => {
+                if a.kind != AbilityKind::Activated {
+                    continue;
+                }
+            }
+            GrantedAbilityScope::AllOther => {
+                // "OTHER abilities" — self-identify and exclude the granting
+                // ability (the one carrying this `AllOther` grant), so the
+                // recipient never re-gains Find New Host itself.
+                if ability_contains_all_other_grant(a) {
+                    continue;
+                }
+            }
+        }
+        mods.push(ContinuousModification::GrantAbility {
+            definition: Box::new(a.clone()),
+        });
+    }
+    // CR 603.1: triggered abilities live in a separate store the activated-only
+    // path never reads. `AllOther` grants them too, as `GrantTrigger`.
+    if scope == GrantedAbilityScope::AllOther {
+        for trigger in donor.trigger_definitions.iter_all() {
+            mods.push(ContinuousModification::GrantTrigger {
+                trigger: Box::new(trigger.clone()),
+            });
+        }
+    }
+    mods
+}
+
+/// True when `def` (or any clause in its `sub_ability`/`else_ability` chain)
+/// carries an `AllOther`-scope `GainActivatedAbilitiesOfTarget`. Used to exclude
+/// the granting ability itself from an `AllOther` snapshot without needing an
+/// ability index (`ResolvedAbility` carries none) — robust to reordering.
+fn ability_contains_all_other_grant(def: &AbilityDefinition) -> bool {
+    if matches!(
+        def.effect.as_ref(),
+        Effect::GainActivatedAbilitiesOfTarget {
+            scope: GrantedAbilityScope::AllOther,
+            ..
+        }
+    ) {
+        return true;
+    }
+    if def
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_contains_all_other_grant)
+    {
+        return true;
+    }
+    def.else_ability
+        .as_deref()
+        .is_some_and(ability_contains_all_other_grant)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -161,12 +261,13 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, ControllerRef, QuantityExpr, SacrificeCost, TargetFilter,
-        TargetRef, TypedFilter,
+        TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     const P0: PlayerId = PlayerId(0);
@@ -237,9 +338,92 @@ mod tests {
             Effect::GainActivatedAbilitiesOfTarget {
                 target: TargetFilter::Any,
                 recipient,
+                scope: GrantedAbilityScope::ActivatedOnly,
                 duration,
             },
             vec![TargetRef::Object(donor_id)],
+            source_id,
+            player,
+        )
+    }
+
+    /// A "Whenever ~ deals combat damage, draw a card" TRIGGERED ability. It
+    /// lives only in `trigger_definitions`, never `obj.abilities` — the
+    /// load-bearing donor ability for the scope discriminator test S2.
+    fn combat_damage_trigger() -> TriggerDefinition {
+        TriggerDefinition::new(TriggerMode::DamageDone)
+            .valid_source(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ))
+    }
+
+    /// Build a grant with an explicit `scope`, donor-as-target and recipient =
+    /// `SelfRef` (the source). Used to isolate the scope axis in the S2
+    /// discriminator (same donor, only `scope` differs).
+    fn make_scoped_grant(
+        donor_id: ObjectId,
+        source_id: ObjectId,
+        scope: GrantedAbilityScope,
+        player: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainActivatedAbilitiesOfTarget {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
+                scope,
+                duration: Some(Duration::UntilEndOfTurn),
+            },
+            vec![TargetRef::Object(donor_id)],
+            source_id,
+            player,
+        )
+    }
+
+    /// A Symbiote "Find New Host" analog: an activated ability whose chain
+    /// contains the `AllOther`-scope grant in its `sub_ability` (as Symbiote's
+    /// PutCounter carries the grant). `ability_contains_all_other_grant` must
+    /// self-identify and EXCLUDE this ability from the snapshot.
+    fn find_new_host_analog() -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainActivatedAbilitiesOfTarget {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::ParentTarget,
+                scope: GrantedAbilityScope::AllOther,
+                duration: Some(Duration::Permanent),
+            },
+        )));
+        def
+    }
+
+    /// Build an `AllOther`-scope grant: donor = `SelfRef` (the source itself),
+    /// recipient = `ParentTarget` (the parent target carried in `ability.targets`).
+    /// Mirrors Symbiote's shipped effect shape.
+    fn make_all_other_grant(
+        recipient_target: ObjectId,
+        source_id: ObjectId,
+        player: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainActivatedAbilitiesOfTarget {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::ParentTarget,
+                scope: GrantedAbilityScope::AllOther,
+                duration: Some(Duration::Permanent),
+            },
+            vec![TargetRef::Object(recipient_target)],
             source_id,
             player,
         )
@@ -762,6 +946,190 @@ mod tests {
         assert!(
             state.objects[&horror_p1].abilities.is_empty(),
             "the grant must NOT follow the source's new controller (P1)"
+        );
+    }
+
+    // ── S2 (load-bearing scope discriminator): a donor with ONLY a triggered
+    // ability MUST transfer it under `AllOther` but MUST NOT under
+    // `ActivatedOnly`. Two-authority proof that `scope` actually branches. ──
+    #[test]
+    fn all_other_scope_grants_triggered_ability_but_activated_only_does_not() {
+        let mut state = GameState::new_two_player(42);
+        // Donor has NO activated abilities — only a triggered ability, which
+        // lives in the separate `trigger_definitions` store.
+        let donor = create_creature(&mut state, 1, P0, "Trigger Donor");
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.base_abilities = Arc::new(vec![]);
+            obj.abilities = Arc::new(vec![]);
+            obj.base_trigger_definitions = Arc::new(vec![combat_damage_trigger()]);
+            obj.trigger_definitions = vec![combat_damage_trigger()].into();
+        }
+        let recip_activated_only = create_creature(&mut state, 2, P0, "Recipient AO");
+        let recip_all_other = create_creature(&mut state, 3, P0, "Recipient AllOther");
+        evaluate_layers(&mut state);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_scoped_grant(
+                donor,
+                recip_activated_only,
+                GrantedAbilityScope::ActivatedOnly,
+                P0,
+            ),
+            &mut events,
+        )
+        .unwrap();
+        resolve(
+            &mut state,
+            &make_scoped_grant(donor, recip_all_other, GrantedAbilityScope::AllOther, P0),
+            &mut events,
+        )
+        .unwrap();
+        evaluate_layers(&mut state);
+
+        // AllOther transfers the triggered ability (CR 603.1 store snapshot).
+        assert!(
+            state.objects[&recip_all_other]
+                .trigger_definitions
+                .iter_all()
+                .any(|t| *t == combat_damage_trigger()),
+            "AllOther must transfer the donor's triggered ability"
+        );
+        // ActivatedOnly must NOT transfer it — this is the discriminator. If the
+        // AllOther trigger snapshot is reverted, the assert above fails; if
+        // ActivatedOnly is made to snapshot triggers too, the assert below fails.
+        assert!(
+            state.objects[&recip_activated_only]
+                .trigger_definitions
+                .iter_all()
+                .all(|t| *t != combat_damage_trigger()),
+            "ActivatedOnly must NOT transfer a triggered ability"
+        );
+        assert!(
+            state.objects[&recip_activated_only].abilities.is_empty(),
+            "ActivatedOnly donor with no activated abilities grants nothing"
+        );
+    }
+
+    // ── S1 (GATE #1: donor-in-exile readability) + S4 (the "OTHER" exclusion) ──
+    //
+    // Symbiote's Find New Host exiles the source as a cost, so at resolution the
+    // donor (`SelfRef`) is in EXILE. Prove the resolver reads the exiled source's
+    // abilities + triggers, transfers the non-granting ones to the ParentTarget
+    // recipient, and EXCLUDES the granting ability itself.
+    #[test]
+    fn all_other_grant_from_exiled_source_transfers_and_excludes_granting_ability() {
+        let mut state = GameState::new_two_player(42);
+        // Donor sits in EXILE (as after Find New Host's self-exile cost).
+        let donor = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Symbiote Spider-Man".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            // Two activated abilities: the granting ability (to exclude) and a
+            // plain draw ability (to transfer), plus a combat-damage trigger.
+            let abilities = vec![find_new_host_analog(), draw_ability()];
+            obj.base_abilities = Arc::new(abilities.clone());
+            obj.abilities = Arc::new(abilities);
+            obj.base_trigger_definitions = Arc::new(vec![combat_damage_trigger()]);
+            obj.trigger_definitions = vec![combat_damage_trigger()].into();
+        }
+        let recipient = create_creature(&mut state, 2, P0, "Recipient");
+        evaluate_layers(&mut state);
+
+        // AllOther grant: donor = SelfRef (source = the exiled donor), recipient
+        // = ParentTarget (the target carried in ability.targets).
+        let ability = make_all_other_grant(recipient, donor, P0);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // GATE #1: the exiled source's TRIGGERED ability transferred — proving
+        // its abilities were readable in exile. Revert the trigger snapshot and
+        // this fails.
+        assert!(
+            state.objects[&recipient]
+                .trigger_definitions
+                .iter_all()
+                .any(|t| *t == combat_damage_trigger()),
+            "the exiled donor's triggered ability must transfer to the recipient"
+        );
+        // The plain (non-granting) activated ability transferred.
+        assert!(
+            state.objects[&recipient]
+                .abilities
+                .iter()
+                .any(|a| *a == draw_ability()),
+            "the donor's non-granting activated ability must transfer"
+        );
+        // S4: the granting ability itself is EXCLUDED ("OTHER abilities").
+        assert!(
+            state.objects[&recipient]
+                .abilities
+                .iter()
+                .all(|a| *a != find_new_host_analog()),
+            "the recipient must NOT gain the granting ability itself"
+        );
+    }
+
+    // ── S3 (CR 611.2c snapshot-once, AllOther/trigger axis): a trigger the donor
+    // gains AFTER the grant resolves is NOT retroactively granted. ──
+    #[test]
+    fn all_other_snapshot_is_fixed_and_excludes_post_grant_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let donor = create_creature(&mut state, 1, P0, "Trigger Donor");
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            obj.base_abilities = Arc::new(vec![]);
+            obj.abilities = Arc::new(vec![]);
+            obj.base_trigger_definitions = Arc::new(vec![combat_damage_trigger()]);
+            obj.trigger_definitions = vec![combat_damage_trigger()].into();
+        }
+        let recipient = create_creature(&mut state, 2, P0, "Recipient");
+        evaluate_layers(&mut state);
+
+        let ability = make_scoped_grant(donor, recipient, GrantedAbilityScope::AllOther, P0);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        let granted_after = state.objects[&recipient]
+            .trigger_definitions
+            .iter_all()
+            .filter(|t| **t == combat_damage_trigger())
+            .count();
+        assert_eq!(granted_after, 1, "the one snapshotted trigger was granted");
+
+        // Give the donor a SECOND triggered ability AFTER the grant resolved.
+        {
+            let obj = state.objects.get_mut(&donor).unwrap();
+            let second =
+                TriggerDefinition::new(TriggerMode::Attacks).execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ));
+            obj.base_trigger_definitions = Arc::new(vec![combat_damage_trigger(), second.clone()]);
+            obj.trigger_definitions = vec![combat_damage_trigger(), second].into();
+        }
+        evaluate_layers(&mut state);
+
+        // CR 611.2c: the recipient's granted set was frozen at resolution — it
+        // must NOT pick up the donor's newly added trigger.
+        assert_eq!(
+            state.objects[&recipient]
+                .trigger_definitions
+                .iter_all()
+                .count(),
+            1,
+            "snapshot-once: recipient must not gain the donor's later-added trigger"
         );
     }
 }
