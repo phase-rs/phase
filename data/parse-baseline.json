@@ -19970,9 +19970,9 @@
     "gap_count": 0
   },
   "brine elemental": {
-    "ast_hash": "6aeb32d4dd1d5b28",
-    "supported": false,
-    "gap_count": 1
+    "ast_hash": "b93772b46dee64c6",
+    "supported": true,
+    "gap_count": 0
   },
   "brine giant": {
     "ast_hash": "65a00cb0c7603972",
@@ -22590,7 +22590,7 @@
     "gap_count": 0
   },
   "captain america, super-soldier": {
-    "ast_hash": "7703e3510a640e58",
+    "ast_hash": "bdb01f3b9548899a",
     "supported": true,
     "gap_count": 0
   },
@@ -33010,9 +33010,9 @@
     "gap_count": 1
   },
   "curse of hospitality": {
-    "ast_hash": "f35814234f746bf3",
-    "supported": false,
-    "gap_count": 1
+    "ast_hash": "17e243b3f68197e3",
+    "supported": true,
+    "gap_count": 0
   },
   "curse of inertia": {
     "ast_hash": "d70272b3df9be484",
@@ -35575,7 +35575,7 @@
     "gap_count": 0
   },
   "death's presence": {
-    "ast_hash": "1d8790cc35a3265d",
+    "ast_hash": "a1167f6248552103",
     "supported": true,
     "gap_count": 0
   },
@@ -41485,7 +41485,7 @@
     "gap_count": 0
   },
   "dreadhorde invasion": {
-    "ast_hash": "b5b3245b69895ba7",
+    "ast_hash": "5d9661107e017994",
     "supported": true,
     "gap_count": 0
   },
@@ -65515,7 +65515,7 @@
     "gap_count": 0
   },
   "gruul spellbreaker": {
-    "ast_hash": "14de625156059225",
+    "ast_hash": "fe8e6d5012729a80",
     "supported": true,
     "gap_count": 0
   },
@@ -72705,7 +72705,7 @@
     "gap_count": 0
   },
   "i am untouchable": {
-    "ast_hash": "a73f14080b599109",
+    "ast_hash": "3d7481643aac6a23",
     "supported": true,
     "gap_count": 0
   },
@@ -134320,7 +134320,7 @@
     "gap_count": 0
   },
   "sigarda, heron's grace": {
-    "ast_hash": "457a5c0bccccd2c1",
+    "ast_hash": "43a42788e87bec28",
     "supported": true,
     "gap_count": 0
   },
