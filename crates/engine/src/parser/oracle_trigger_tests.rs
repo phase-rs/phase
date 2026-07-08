@@ -5358,6 +5358,81 @@ fn etb_token_copier_exile_anaphor_binds_created_token() {
         }
 }
 
+/// Molten Echoes (GitHub #4709/#4708): "Whenever a nontoken creature you
+/// control of the chosen type enters, create a token that's a copy of that
+/// creature. That token gains haste. Exile it at the beginning of the next
+/// end step." Distinct from the Flameshadow Conjuring/Inalla analogs above:
+/// the trigger filter carries an extra `IsChosenCreatureType` predicate
+/// (CR 205.3m creature-type restriction resolved against a stored ETB
+/// choice). This asserts the chosen-type filter on the trigger condition
+/// does not disturb the "that token"/"it" anaphor rewriting that binds the
+/// haste grant and delayed exile to `TargetFilter::LastCreated` (the
+/// created token), not to the entering creature that matched the filter.
+#[test]
+fn molten_echoes_chosen_type_filter_preserves_last_created_anaphors() {
+    fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&def.effect);
+        if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+            collect(inner, out);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            collect(els, out);
+        }
+    }
+    fn copy_source(effs: &[&Effect]) -> Option<TargetFilter> {
+        effs.iter().find_map(|e| match e {
+            Effect::CopyTokenOf { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+    }
+    fn exile_target(effs: &[&Effect]) -> Option<TargetFilter> {
+        effs.iter().find_map(|e| match e {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => Some(target.clone()),
+            _ => None,
+        })
+    }
+
+    let text = "Whenever a nontoken creature you control of the chosen type enters, create a token that's a copy of that creature. That token gains haste. Exile it at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Molten Echoes");
+
+    match &def.valid_card {
+        Some(TargetFilter::Typed(typed)) => {
+            assert!(
+                typed.properties.contains(&FilterProp::IsChosenCreatureType),
+                "expected IsChosenCreatureType prop on the trigger filter, got {:?}",
+                typed.properties
+            );
+            assert!(
+                typed.properties.contains(&FilterProp::NonToken),
+                "expected NonToken prop on the trigger filter, got {:?}",
+                typed.properties
+            );
+        }
+        other => panic!("expected Typed trigger filter, got {other:?}"),
+    }
+
+    let exec = def.execute.as_ref().expect("execute must be Some");
+    let mut effs = Vec::new();
+    collect(exec, &mut effs);
+    assert_eq!(
+        copy_source(&effs),
+        Some(TargetFilter::TriggeringSource),
+        "CopyTokenOf source must stay TriggeringSource (copy the entering creature that matched the chosen-type filter)"
+    );
+    assert_eq!(
+        exile_target(&effs),
+        Some(TargetFilter::LastCreated),
+        "delayed exile must bind the created token (LastCreated), not the entering creature"
+    );
+}
+
 /// CR 603.7a + CR 118.12a (issue #4369): Ashling, the Limitless — "Whenever
 /// you sacrifice a nontoken Elemental, create a token that's a copy of it.
 /// The token gains haste until end of turn. At the beginning of your next
