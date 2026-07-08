@@ -116,7 +116,7 @@ describe("ActionButton", () => {
 
     render(<ActionButton />);
 
-    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeInTheDocument();
   });
 
   it("disables resolve controls while Resolve All is draining", () => {
@@ -136,9 +136,9 @@ describe("ActionButton", () => {
 
     render(<ActionButton />);
 
-    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resolve All" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resolve All" })).toHaveAttribute("aria-busy", "true");
   });
 
   it("passes an empty AI-seat list in local hotseat so Resolve All auto-yields instead of AI-driving human seats (#4978)", () => {
