@@ -121555,9 +121555,9 @@
     "gap_count": 0
   },
   "reverse the sands": {
-    "ast_hash": "e9929d7e662820ff",
-    "supported": false,
-    "gap_count": 1
+    "ast_hash": "cd11f4334917f980",
+    "supported": true,
+    "gap_count": 0
   },
   "revitalize": {
     "ast_hash": "2ca5984654a27c8f",
@@ -152845,9 +152845,9 @@
     "gap_count": 1
   },
   "the doctor's tomb": {
-    "ast_hash": "128054c073a4fa28",
-    "supported": false,
-    "gap_count": 1
+    "ast_hash": "751d3faec71623c9",
+    "supported": true,
+    "gap_count": 0
   },
   "the dogronmaster": {
     "ast_hash": "4c49a2fe3779a004",
@@ -175530,9 +175530,9 @@
     "gap_count": 0
   },
   "you live only because i will it": {
-    "ast_hash": "91f47b54f3fa2569",
-    "supported": false,
-    "gap_count": 1
+    "ast_hash": "ee633bc23b713305",
+    "supported": true,
+    "gap_count": 0
   },
   "you look upon the tarrasque": {
     "ast_hash": "8bc86f1ce47578a2",
