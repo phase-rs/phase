@@ -36,9 +36,10 @@ use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
-    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
-    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
-    parse_static_line_multi, peel_compound_all_quantified_conjuncts,
+    parse_basic_land_type_plural, parse_cant_be_activated_exemption_in_text,
+    parse_chosen_qualifier_subject, parse_continuous_modifications,
+    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
+    peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
@@ -3528,6 +3529,32 @@ fn build_become_clause(
         });
     }
 
+    // CR 305.7: bare "become Swamps/Plains/…" — basic land type replacement
+    // (Nightcreep: "all lands become Swamps"). Must intercept before
+    // `parse_animation_spec`, which mis-tokenizes land type names as creature
+    // subtypes (`AddSubtype("Swamps")`).
+    if let Some(modification) = try_parse_become_basic_land_type_modification(become_text) {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![modification])
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
     // CR 205.3e + CR 607.2d: "becomes that type" applies the creature type chosen
     // by the preceding "Choose a creature type" instruction in the same ability
     // (Imagecrafter, Unnatural Selection, Mistform Mutant, Standardize). Unlike
@@ -4054,6 +4081,14 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
         return Some(ContinuousModification::AddChosenColor);
     }
     None
+}
+
+/// CR 305.7: A bare basic land type name after "become" — "Swamps", "Plains", etc.
+fn try_parse_become_basic_land_type_modification(
+    become_text: &str,
+) -> Option<ContinuousModification> {
+    parse_basic_land_type_plural(become_text.trim())
+        .map(|land_type| ContinuousModification::SetBasicLandType { land_type })
 }
 
 /// True when `lower` ends with the "of your choice" anchor. Pattern 2 (whole
@@ -5588,7 +5623,7 @@ fn add_another_property(filter: TargetFilter) -> TargetFilter {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, ContinuousModification, ControllerRef, Effect, TypeFilter,
+        AbilityKind, BasicLandType, ContinuousModification, ControllerRef, Effect, TypeFilter,
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
@@ -5613,6 +5648,13 @@ mod tests {
         ));
         // Unrelated predicates still fall through (the animation path handles them).
         assert!(try_parse_become_color_modification("a giant lizard").is_none());
+        assert!(matches!(
+            try_parse_become_basic_land_type_modification("Swamps"),
+            Some(ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Swamp,
+            })
+        ));
+        assert!(try_parse_become_basic_land_type_modification("black").is_none());
     }
 
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
