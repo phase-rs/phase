@@ -153,8 +153,8 @@ pub async fn p2p_backup_get(
     }
     match app_state.game_db.load_p2p_backup(&code) {
         Ok(Some((existing_peer, snapshot_json, updated_at))) => {
-            if let Err(reason) = guard_p2p_backup_overwrite(&existing_peer, &query.host_peer_id) {
-                return (StatusCode::FORBIDDEN, reason).into_response();
+            if guard_p2p_backup_overwrite(&existing_peer, &query.host_peer_id).is_err() {
+                return (StatusCode::NOT_FOUND, "No backup found").into_response();
             }
             let snapshot_json = match redact_p2p_backup_snapshot_secrets(&snapshot_json) {
                 Ok(json) => json,
