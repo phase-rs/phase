@@ -3161,10 +3161,14 @@ fn trigger_enters_or_creature_it_haunts_dies_stays_compound() {
     assert_eq!(triggers[0].mode, TriggerMode::EntersOrHauntedCreatureDies);
     assert_eq!(triggers[0].destination, Some(Zone::Battlefield));
     assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
-    assert!(triggers[0]
-        .execute
-        .as_ref()
-        .is_some_and(|a| matches!(a.effect.as_ref(), Effect::Bounce { .. })));
+    assert!(triggers[0].execute.as_ref().is_some_and(|a| matches!(
+        a.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -12574,10 +12578,11 @@ fn trigger_you_fully_unlock_room_self_return_uses_graveyard_zone() {
         def.execute
             .as_deref()
             .map(|ability| ability.effect.as_ref()),
-        Some(Effect::Bounce {
+        Some(Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
             target: TargetFilter::SelfRef,
-            destination: None,
-            selection: BounceSelection::Targeted,
+            ..
         })
     ));
 }
@@ -12594,10 +12599,11 @@ fn trigger_card_name_self_return_uses_graveyard_zone() {
         def.execute
             .as_deref()
             .map(|ability| ability.effect.as_ref()),
-        Some(Effect::Bounce {
+        Some(Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
             target: TargetFilter::SelfRef,
-            destination: None,
-            selection: BounceSelection::Targeted,
+            ..
         })
     ));
 }

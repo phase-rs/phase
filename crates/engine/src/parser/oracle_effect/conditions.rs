@@ -3208,6 +3208,11 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         return Some(condition);
     }
 
+    let lower = text.to_ascii_lowercase();
+    if let Some(condition) = parse_cost_paid_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     let (lhs_text, comparator_rhs) = text.split_once(" is ")?;
     let lhs = parse_cda_quantity(lhs_text)?;
     let (comparator, rhs) = parse_quantity_comparison(comparator_rhs)?;

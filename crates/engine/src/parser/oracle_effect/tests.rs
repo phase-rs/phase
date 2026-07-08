@@ -15865,7 +15865,7 @@ fn one_two_or_three_target_creatures_each_pump() {
 
 /// CR 115.1d + CR 700.2: Trystan's Command mode 2 — "return one or two
 /// target permanent cards from your graveyard to your hand" must attach
-/// `MultiTargetSpec { min: 1, max: 2 }` on the bounce/return effect.
+/// `MultiTargetSpec { min: 1, max: 2 }` on the graveyard-to-hand return effect.
 #[test]
 fn return_one_or_two_target_permanents_from_graveyard_is_multi_targeted() {
     let clause = parse_effect_clause(
@@ -15873,8 +15873,15 @@ fn return_one_or_two_target_permanents_from_graveyard_is_multi_targeted() {
         &mut ParseContext::default(),
     );
     assert!(
-        matches!(clause.effect, Effect::Bounce { .. }),
-        "expected Bounce, got {:?}",
+        matches!(
+            clause.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "expected graveyard-to-hand ChangeZone, got {:?}",
         clause.effect
     );
     assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)));
@@ -42128,6 +42135,17 @@ fn target_filter_tree_has_property(
     }
 }
 
+fn target_filter_tree_has_controller(filter: &TargetFilter, controller: ControllerRef) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller == Some(controller),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_tree_has_controller(filter, controller)),
+        TargetFilter::Not { filter } => target_filter_tree_has_controller(filter, controller),
+        _ => false,
+    }
+}
+
 fn find_change_zone_to(
     ability: &AbilityDefinition,
     destination: Zone,
@@ -42189,12 +42207,13 @@ fn return_from_graveyard_to_hand_lowers_to_change_zone() {
         "target must be constrained to graveyard, got {target:?}"
     );
     assert!(
-        target_filter_tree_has_property(target, |prop| matches!(
-            prop,
-            FilterProp::Owned {
-                controller: ControllerRef::You
-            }
-        )),
+        target_filter_tree_has_controller(target, ControllerRef::You)
+            || target_filter_tree_has_property(target, |prop| matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                }
+            )),
         "target must be constrained to your graveyard, got {target:?}"
     );
 }

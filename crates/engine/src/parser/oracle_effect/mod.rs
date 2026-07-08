@@ -15552,13 +15552,18 @@ fn replace_definition_targets_with_parent(def: &mut AbilityDefinition) {
 /// must not collapse such recipients to `ParentTarget` just because the
 /// attachment side uses a set anaphor ("one of them").
 fn attach_recipient_is_explicitly_typed(target: &TargetFilter) -> bool {
+    target_filter_has_explicit_object_constraints(target)
+}
+
+fn target_filter_has_explicit_object_constraints(target: &TargetFilter) -> bool {
     match target {
         TargetFilter::Typed(tf) => {
             !tf.type_filters.is_empty() || tf.controller.is_some() || !tf.properties.is_empty()
         }
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(attach_recipient_is_explicitly_typed)
-        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(target_filter_has_explicit_object_constraints),
+        TargetFilter::Not { filter } => target_filter_has_explicit_object_constraints(filter),
         _ => false,
     }
 }
@@ -15667,7 +15672,8 @@ fn replace_target_with_parent(effect: &mut Effect) {
             .iter()
             .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)) => {}
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
-            if !matches!(target, TargetFilter::SelfRef) =>
+            if !matches!(target, TargetFilter::SelfRef)
+                && !target_filter_has_explicit_object_constraints(target) =>
         {
             *target = TargetFilter::ParentTarget;
         }
