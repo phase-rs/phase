@@ -7061,6 +7061,42 @@ fn trigger_you_cast_comma_subtype_disjunction_spell() {
     }
 }
 
+/// Issue #5324 (CR 205.3a + CR 601.2a): the comma type-list and the "from
+/// <zone>" cast origin are separate axes — "cast an Aura, Equipment, or Vehicle
+/// spell from exile" must keep BOTH the 3-leg `Or` valid_card AND the
+/// `Exile` cast-origin, not collapse to Aura-only (the list) or drop the origin.
+#[test]
+fn trigger_you_cast_comma_subtype_disjunction_with_cast_origin() {
+    let def = parse_trigger_line(
+        "Whenever you cast an Aura, Equipment, or Vehicle spell from exile, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.spell_cast_origin,
+        OriginConstraint::Equals(Zone::Exile),
+        "the from-exile cast origin must be captured as a separate axis"
+    );
+    match def.valid_card {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 3, "expected 3 subtype legs, got {filters:?}");
+            let rendered = format!("{filters:?}");
+            for subtype in ["Aura", "Equipment", "Vehicle"] {
+                assert!(
+                    rendered.contains(subtype),
+                    "missing {subtype} leg in {rendered}"
+                );
+            }
+            // The cast origin must NOT have been swept into the type filter.
+            assert!(
+                !rendered.contains("InZone") && !rendered.contains("Exile"),
+                "cast origin leaked into the type filter: {rendered}"
+            );
+        }
+        other => panic!("expected an Or valid_card, got {other:?}"),
+    }
+}
+
 /// CR 601.2 + CR 702.33d: "Whenever you cast a kicked spell" is a
 /// SpellCast trigger whose `valid_card` gates on the cast-time kicked
 /// snapshot, not an unrestricted any-spell trigger.

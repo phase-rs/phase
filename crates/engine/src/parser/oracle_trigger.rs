@@ -12359,35 +12359,62 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // CR 205.3a + CR 601.2a: a comma-separated card-type / subtype disjunction
         // ("Whenever you cast an Aura, Equipment, or Vehicle spell" — Sram, Senior
         // Edificer) spans the truncation ", " the same way the color disjunction
-        // above does. `parse_type_phrase` consumes the whole "<t1>, <t2>, or <tN>
-        // spell" list into a `TargetFilter::Or`, so recognize it on the untruncated
-        // remainder before the truncation below cuts it to the first leg (which
-        // dropped Equipment/Vehicle, leaving the trigger firing only on Auras).
-        // Guarded to fire only when the type phrase actually held a comma list (so
-        // comma-less "instant or sorcery spell" keeps its existing modifier-aware
-        // path), the remainder is only the effect clause (no post-spell modifier
-        // stranded after the list), and no cast-origin "from <zone>" qualifier was
-        // swept into the filter (which needs the separate `spell_cast_origin` gate).
+        // above does. Parse it — and an optional "from <zone>" cast origin — as
+        // SEPARATE axes before the truncation below cuts the list to its first leg
+        // (which dropped Equipment/Vehicle, leaving the trigger firing only on
+        // Auras). The `from <zone>` tail must be split off FIRST so it is routed to
+        // the `spell_cast_origin` gate (CR 601.2a) rather than swept into the type
+        // filter as a `FilterProp::InZone` (which is wrong for a stack-resident
+        // spell). Fail-safe: fires only when the type phrase is a genuine multi-leg
+        // comma list whose remainder is bare (a cast origin was cleanly consumed)
+        // or is only the effect clause; otherwise control falls through unchanged.
         {
             let trimmed = after.trim();
-            let (filter, remainder) = parse_type_phrase(trimmed);
-            let consumed = &trimmed[..trimmed.len() - remainder.len()];
+            // Split off a cast-origin "from <zone>" tail first. It is a genuine
+            // cast origin only when the text before it is exactly the type-list
+            // spell (see the emptiness guard below) — else the "from" belongs to
+            // the effect clause and this split is ignored.
+            let (type_part, cast_origin, origin_split) =
+                match nom_primitives::split_once_on(trimmed, " from ") {
+                    Ok((_, (before, from_tail))) => {
+                        let tail = format!("from {from_tail}");
+                        match parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone) {
+                            // A concrete zone is a genuine cast origin; `Any`
+                            // (unrecognized zone) means the "from" wasn't one.
+                            Ok((_, origin)) if origin != OriginConstraint::Any => {
+                                (before, origin, true)
+                            }
+                            _ => (trimmed, OriginConstraint::Any, false),
+                        }
+                    }
+                    Err(_) => (trimmed, OriginConstraint::Any, false),
+                };
+            let type_part = type_part.trim();
+            let (filter, remainder) = parse_type_phrase(type_part);
+            let consumed = &type_part[..type_part.len() - remainder.len()];
             let is_comma_type_list = matches!(
                 &filter,
                 TargetFilter::Or { filters } if filters.len() >= 2
-            ) && nom_primitives::scan_contains(consumed, ", ")
-                && !nom_primitives::scan_contains(consumed, " from ");
-            let remainder_is_effect_only = {
+            ) && nom_primitives::scan_contains(consumed, ", ");
+            let remainder_ok = if origin_split {
+                // A cast origin was peeled, so the type phrase must be JUST the
+                // list (fully consumed); a non-empty remainder means the "from"
+                // was part of the effect, not a cast origin — decline.
+                remainder.trim().is_empty()
+            } else {
                 let rest = remainder.trim_start();
                 rest.is_empty() || tag::<_, _, OracleError<'_>>(",").parse(rest).is_ok()
             };
-            if is_comma_type_list && remainder_is_effect_only {
+            if is_comma_type_list && remainder_ok {
                 let filter = if is_another {
                     add_another_prop(filter)
                 } else {
                     filter
                 };
                 def.valid_card = Some(filter);
+                if origin_split {
+                    def.spell_cast_origin = cast_origin;
+                }
                 return Some((TriggerMode::SpellCast, def));
             }
         }
