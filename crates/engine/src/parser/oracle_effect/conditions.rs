@@ -5727,7 +5727,7 @@ fn parse_cost_paid_object_possessive_pt_comparison(lower: &str) -> Option<Abilit
     let (rest, noun_filter) = parse_cost_paid_object_noun_prefix(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>("'s ").parse(rest).ok()?;
     let (rest, stat) = parse_reflexive_pt_stat(rest).ok()?;
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>(" was "), tag(" is ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("was "), tag("is ")))
         .parse(rest)
         .ok()?;
     let (rest, (comparator, value)) = parse_threshold_with_exactly(rest).ok()?;
