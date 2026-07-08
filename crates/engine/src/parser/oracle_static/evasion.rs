@@ -352,113 +352,91 @@ pub(crate) fn parse_compound_subject_rule_static(
     )
 }
 
-fn parse_compound_player_keyword_predicate(input: &str) -> OracleResult<'_, ()> {
-    let (after_verb, _) = alt((
-        nom::bytes::complete::tag_no_case::<_, _, OracleError<'_>>("have "),
-        nom::bytes::complete::tag_no_case("has "),
-        nom::bytes::complete::tag_no_case("gain "),
-        nom::bytes::complete::tag_no_case("gains "),
-    ))
-    .parse(input)?;
-    let (remaining, _) = alt((
-        nom::bytes::complete::tag_no_case::<_, _, OracleError<'_>>("hexproof"),
-        nom::bytes::complete::tag_no_case("shroud"),
-        recognize((
-            nom::bytes::complete::tag_no_case("protection from "),
-            nom::combinator::rest,
-        )),
-    ))
-    .parse(after_verb)?;
-    Ok((remaining, ()))
-}
-
-fn player_static_mode_for_granted_keyword(keyword: &Keyword) -> Option<StaticMode> {
-    match keyword {
-        Keyword::Protection(target) => Some(StaticMode::PlayerProtection(target.clone())),
-        Keyword::Hexproof => Some(StaticMode::Hexproof),
-        Keyword::Shroud => Some(StaticMode::Shroud),
-        _ => None,
-    }
-}
-
-fn compound_keyword_body_with_condition<'a>(
-    text: &'a str,
-    lower: &'a str,
-) -> Option<(&'a str, &'a str, StaticCondition)> {
-    type VE<'a> = OracleError<'a>;
-    const DURING_YOUR_TURN_PREFIX: &str = "during your turn, ";
-    const DURING_TURNS_OTHER_THAN_YOURS_PREFIX: &str = "during turns other than yours, ";
-
-    if let Ok((body_lower, _)) = tag::<_, _, VE<'_>>(DURING_YOUR_TURN_PREFIX).parse(lower) {
-        let body = &text[DURING_YOUR_TURN_PREFIX.len()..];
-        return Some((body, body_lower, StaticCondition::DuringYourTurn));
-    }
-
-    if let Ok((body_lower, _)) =
-        tag::<_, _, VE<'_>>(DURING_TURNS_OTHER_THAN_YOURS_PREFIX).parse(lower)
-    {
-        let body = &text[DURING_TURNS_OTHER_THAN_YOURS_PREFIX.len()..];
-        return Some((
-            body,
-            body_lower,
-            StaticCondition::Not {
-                condition: Box::new(StaticCondition::DuringYourTurn),
-            },
-        ));
-    }
-
-    None
-}
-
-/// CR 611.3a + CR 702.11c + CR 702.16b + CR 702.18a:
-/// Compound-subject keyword-grant statics of the form `"You and <object
-/// subject> have <player-applicable keyword>"` — a single static effect bound
-/// to a player plus an object subset. A single `StaticDefinition` cannot carry
-/// both a player scope and an object scope, so decompose into two:
-///   - an object-half `Continuous` def whose `affected` is the object subset;
-///   - a player-half def whose `affected` is the controller.
+/// CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: Compound-subject keyword-grant
+/// statics of the form `"You and <object subject> have <keyword>"` — a single
+/// keyword grant bound to a player plus an object subset.
 ///
-/// Restricted to player-applicable keyword grants with implemented player
-/// statics: Protection, Hexproof, and Shroud. Returns `None` for other granted
-/// keywords because a player cannot meaningfully "have flying".
+/// A single `StaticDefinition` cannot carry both a player scope and an object
+/// scope, so decompose into two:
+///   - an object-half `Continuous` def whose `affected` is the object subset;
+///   - a player-half def whose mode is the player-applicable keyword mode
+///     (`PlayerProtection` / `Hexproof` / `Shroud`) and whose `affected` is the
+///     controller.
+///
+/// Object subjects reuse [`parse_rule_static_subject_filter`] so subtype scopes
+/// ("Humans you control"), self refs ("this creature"), and "other <subtype>
+/// you control" all resolve — not a hard-coded alt of three controller phrases.
+///
+/// Only player-applicable keywords claim this pattern (a player cannot
+/// meaningfully "have flying"). Leading `"During your turn, "` gates both
+/// halves with `DuringYourTurn` (Gruul Spellbreaker). Trailing `" as long as
+/// <cond>"` is applied by `parse_continuous_gets_has` on the object half and
+/// then copied onto the player half; inverted `"As long as <cond>, …"` forms
+/// are rewritten to that trailing shape by the multi-dispatch path before
+/// reaching here.
 pub(crate) fn parse_compound_subject_keyword_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {
-    type VE<'a> = OracleError<'a>;
+    let input = TextPair::new(text, lower);
 
-    if let Some((body, body_lower, condition)) = compound_keyword_body_with_condition(text, lower) {
-        let mut defs = parse_compound_subject_keyword_static(body, body_lower)?;
-        for def in &mut defs {
-            def.condition = Some(condition.clone());
-            def.description = Some(text.to_string());
-        }
-        return Some(defs);
+    // Optional leading turn window (Gruul Spellbreaker class).
+    let (body, turn_condition) = if let Some(rest) = nom_tag_tp(&input, "during your turn, ") {
+        (rest, Some(StaticCondition::DuringYourTurn))
+    } else {
+        (input, None)
+    };
+
+    // Subject: "you and <object subject phrase>".
+    let after_you = nom_tag_tp(&body, "you and ")?;
+
+    // Locate the continuous predicate verb ("have"/"has"/"gain"/"gains"/…) so
+    // the object subject can be any phrase `parse_rule_static_subject_filter`
+    // understands — not a hard-coded controller-phrase alt list.
+    let subject_end = find_continuous_predicate_start(after_you.lower)?;
+    let (object_subject, predicate) = after_you.split_at(subject_end);
+    let object_subject = object_subject.trim_start().trim_end();
+    let predicate = predicate.trim_start().trim_end();
+    if object_subject.is_empty() || predicate.is_empty() {
+        return None;
     }
 
-    // Subject: "you and <object subject phrase> ".
-    let (after_you, _) = nom::bytes::complete::tag_no_case::<_, _, VE<'_>>("you and ")
-        .parse(text)
-        .ok()?;
-    let (object_subject, (), _) =
-        nom_primitives::scan_preceded(after_you, parse_compound_player_keyword_predicate)?;
+    let affected = parse_rule_static_subject_filter(object_subject.original)?;
+    // Player half is reserved for the controller; refuse a second player scope
+    // ("you and each player have …") so we never emit two player defs.
+    if rule_static_affected_is_player_scope(&affected) {
+        return None;
+    }
 
-    let object_subject = object_subject.trim();
-    let predicate = after_you[object_subject.len()..].trim();
+    // Object-half: delegate the predicate to the shared keyword-grant builder
+    // (also peels trailing " as long as <cond>" onto `object_def.condition`).
+    let mut object_def = parse_continuous_gets_has(predicate.original, affected, text)?;
 
-    let affected = parse_rule_static_subject_filter(object_subject)?;
-
-    // Object-half: delegate the predicate to the shared keyword-grant builder.
-    let object_def = parse_continuous_gets_has(predicate, affected, text)?;
-
-    // Extract the granted player-applicable keyword. Any other keyword (or no
-    // keyword) means this is not a player+object compound static.
+    // Derive the player-half mode from the granted keyword. Only player-
+    // applicable keyword modes claim this pattern.
     let player_mode = object_def.modifications.iter().find_map(|m| match m {
-        ContinuousModification::AddKeyword { keyword } => {
-            player_static_mode_for_granted_keyword(keyword)
-        }
+        ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Protection(pt),
+        } => Some(StaticMode::PlayerProtection(pt.clone())),
+        ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Hexproof,
+        } => Some(StaticMode::Hexproof),
+        ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Shroud,
+        } => Some(StaticMode::Shroud),
         _ => None,
     })?;
+
+    // Propagate leading turn-window / trailing as-long-as gates onto both halves
+    // so the compound grant stays time-locked as one continuous effect (CR 611.3a).
+    object_def.condition = match (turn_condition, object_def.condition.take()) {
+        (Some(turn), Some(trailing)) => Some(StaticCondition::And {
+            conditions: vec![turn, trailing],
+        }),
+        (Some(turn), None) => Some(turn),
+        (None, Some(trailing)) => Some(trailing),
+        (None, None) => None,
+    };
 
     let mut player_def = StaticDefinition::new(player_mode)
         .affected(TargetFilter::Typed(

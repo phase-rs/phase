@@ -125,53 +125,6 @@ fn ability_word_prefix_is_stripped_from_subject_anchored_statics() {
     );
 }
 
-fn assert_compound_player_keyword_static<F>(
-    text: &str,
-    expected_keyword: Keyword,
-    expected_player_mode: StaticMode,
-    expected_condition: Option<StaticCondition>,
-    check_object_filter: F,
-) where
-    F: FnOnce(&TargetFilter),
-{
-    let defs = parse_static_line_multi(text);
-    assert_eq!(
-        defs.len(),
-        2,
-        "expected exactly two StaticDefinitions, got {defs:?}"
-    );
-
-    let object_def = &defs[0];
-    assert_eq!(object_def.mode, StaticMode::Continuous);
-    check_object_filter(
-        object_def
-            .affected
-            .as_ref()
-            .expect("object-half must carry an affected filter"),
-    );
-    assert!(
-        object_def
-            .modifications
-            .contains(&ContinuousModification::AddKeyword {
-                keyword: expected_keyword,
-            }),
-        "object-half must grant expected keyword, got {:?}",
-        object_def.modifications
-    );
-    assert_eq!(object_def.condition, expected_condition.clone());
-
-    let player_def = &defs[1];
-    assert_eq!(player_def.mode, expected_player_mode);
-    assert_eq!(
-        player_def.affected,
-        Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::You)
-        )),
-        "player-half must affect the controller"
-    );
-    assert_eq!(player_def.condition, expected_condition);
-}
-
 /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
 /// "You and creatures you control have protection from the chosen card
 /// type." must decompose into exactly TWO `StaticDefinition`s:
@@ -232,141 +185,204 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
     );
 }
 
-/// Sigarda's hexproof class uses the same player+object split as Serra's
-/// Emissary, but the player half is
-/// `StaticMode::Hexproof`, not `Continuous{AddKeyword(Hexproof)}` on an empty
-/// object filter.
+/// CR 702.11c + CR 702.11b + CR 611.3a: Sigarda, Heron's Grace —
+/// "You and Humans you control have hexproof." must decompose into two defs,
+/// NOT a single Continuous Or{empty-typed You, …} that grants hexproof to every
+/// permanent you control (the live Discord bug / #5322).
 #[test]
-fn compound_subject_keyword_static_splits_hexproof_human_subject() {
-    assert_compound_player_keyword_static(
-        "You and Humans you control have hexproof.",
-        Keyword::Hexproof,
-        StaticMode::Hexproof,
-        None,
-        |affected| match affected {
-            TargetFilter::Typed(tf) => {
-                assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(
-                    tf.type_filters
-                        .contains(&TypeFilter::Subtype("Human".to_string())),
-                    "object-half must affect Humans, got {:?}",
-                    tf.type_filters
-                );
-            }
-            other => {
-                panic!("object-half affected must be Typed(Humans you control), got {other:?}")
-            }
-        },
+fn compound_subject_keyword_static_splits_sigarda_hexproof() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi("You and Humans you control have hexproof.");
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected object Continuous + player Hexproof, got {defs:?}"
+    );
+
+    let object_def = &defs[0];
+    assert_eq!(object_def.mode, StaticMode::Continuous);
+    match &object_def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(
+                tf.get_subtype(),
+                Some("Human"),
+                "object-half must affect Humans, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.type_filters.is_empty() || tf.get_subtype().is_some(),
+                "object-half must not be the empty-typed You filter that layers treat as all permanents"
+            );
+        }
+        other => panic!("object-half affected must be Typed(Humans you control), got {other:?}"),
+    }
+    assert_eq!(
+        object_def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }],
+    );
+
+    let player_def = &defs[1];
+    assert_eq!(player_def.mode, StaticMode::Hexproof);
+    assert_eq!(
+        player_def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        )),
+    );
+    // The player half must NOT also grant Keyword::Hexproof via Continuous mods
+    // (that would again empty-typed-filter into all permanents).
+    assert!(
+        player_def.modifications.is_empty(),
+        "player Hexproof mode carries no AddKeyword mods, got {:?}",
+        player_def.modifications
     );
 }
 
+/// CR 702.11 + CR 611.3a: "You and permanents you control have hexproof."
+/// (I Am Untouchable / scheme static class).
 #[test]
-fn compound_subject_keyword_static_splits_hexproof_permanent_subject() {
-    assert_compound_player_keyword_static(
-        "You and permanents you control have hexproof.",
-        Keyword::Hexproof,
-        StaticMode::Hexproof,
-        None,
-        |affected| match affected {
-            TargetFilter::Typed(tf) => {
-                assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(
-                    tf.type_filters.contains(&TypeFilter::Permanent),
-                    "object-half must affect permanents, got {:?}",
-                    tf.type_filters
-                );
-            }
-            other => {
-                panic!("object-half affected must be Typed(permanents you control), got {other:?}")
-            }
-        },
-    );
+fn compound_subject_keyword_static_splits_permanents_hexproof() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi("You and permanents you control have hexproof.");
+    assert_eq!(defs.len(), 2, "expected two defs, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    match &defs[0].affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "object-half must affect permanents you control, got {tf:?}"
+            );
+            // Empty-typed + You is the PLAYER filter — refuse that for the object half.
+            assert!(
+                !(tf.type_filters.is_empty() && tf.properties.is_empty()),
+                "object-half must not be empty-typed You (player scope misfiled as object): {tf:?}"
+            );
+        }
+        other => panic!("expected Typed permanents filter, got {other:?}"),
+    }
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }));
+    assert_eq!(defs[1].mode, StaticMode::Hexproof);
 }
 
+/// CR 702.11 + CR 611.3a: Gruul Spellbreaker —
+/// "During your turn, you and this creature have hexproof."
 #[test]
-fn compound_subject_keyword_static_keeps_turn_window_on_both_halves() {
-    assert_compound_player_keyword_static(
-        "During your turn, you and this creature have hexproof.",
-        Keyword::Hexproof,
-        StaticMode::Hexproof,
+fn compound_subject_keyword_static_splits_gruul_spellbreaker_turn_gate() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi("During your turn, you and this creature have hexproof.");
+    assert_eq!(defs.len(), 2, "expected two defs, got {defs:?}");
+
+    let object_def = &defs[0];
+    assert_eq!(object_def.mode, StaticMode::Continuous);
+    assert_eq!(object_def.affected, Some(TargetFilter::SelfRef));
+    assert!(object_def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }));
+    assert_eq!(
+        object_def.condition,
         Some(StaticCondition::DuringYourTurn),
-        |affected| assert_eq!(affected, &TargetFilter::SelfRef),
+        "leading turn window must gate the object half"
+    );
+
+    let player_def = &defs[1];
+    assert_eq!(player_def.mode, StaticMode::Hexproof);
+    assert_eq!(
+        player_def.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "leading turn window must gate the player half"
     );
 }
 
+/// CR 702.11 + CR 611.3a: Captain America, Super-Soldier —
+/// "As long as Captain America has a shield counter on him, you and other Heroes
+/// you control have hexproof." Inverted gate must still emit the two-def split.
 #[test]
-fn compound_subject_keyword_static_keeps_inverted_condition_on_both_halves() {
+fn compound_subject_keyword_static_splits_inverted_as_long_as_heroes_hexproof() {
+    use crate::types::keywords::Keyword;
+
     let defs = parse_static_line_multi(
-        "As long as ~ has a shield counter on him, you and other Heroes you control have hexproof.",
+        "As long as Captain America has a shield counter on him, you and other Heroes you control have hexproof.",
     );
     assert_eq!(
         defs.len(),
         2,
-        "expected object and player defs, got {defs:?}"
+        "inverted compound hexproof must still split into two defs, got {defs:?}"
     );
-    assert_eq!(defs[0].mode, StaticMode::Continuous);
-    assert_eq!(defs[1].mode, StaticMode::Hexproof);
-    assert_eq!(
-        defs[0].condition, defs[1].condition,
-        "both halves must carry the same condition"
-    );
-    assert!(
-        matches!(
-            defs[0].condition,
-            Some(StaticCondition::HasCounters {
-                counters: CounterMatch::OfType(CounterType::Shield),
-                minimum: 1,
-                maximum: None,
-            })
-        ),
-        "expected shield-counter gate, got {:?}",
-        defs[0].condition
-    );
-    match defs[0]
-        .affected
-        .as_ref()
-        .expect("object-half must carry affected filter")
-    {
-        TargetFilter::Typed(tf) => {
+
+    let object_def = &defs[0];
+    assert_eq!(object_def.mode, StaticMode::Continuous);
+    match &object_def.affected {
+        Some(TargetFilter::Typed(tf)) => {
             assert_eq!(tf.controller, Some(ControllerRef::You));
-            assert!(
-                tf.type_filters
-                    .contains(&TypeFilter::Subtype("Hero".to_string())),
-                "object-half must affect Heroes, got {:?}",
-                tf.type_filters
-            );
+            assert_eq!(tf.get_subtype(), Some("Hero"));
             assert!(
                 tf.properties.contains(&FilterProp::Another),
-                "object-half must preserve other/another exclusion, got {:?}",
+                "other Heroes must carry FilterProp::Another, got {:?}",
                 tf.properties
             );
         }
-        other => {
-            panic!("object-half affected must be Typed(other Heroes you control), got {other:?}")
-        }
+        other => panic!("expected Typed(other Heroes you control), got {other:?}"),
     }
+    assert!(object_def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }));
+    assert!(
+        object_def.condition.is_some(),
+        "inverted as-long-as gate must land on the object half, got {:?}",
+        object_def.condition
+    );
+
+    let player_def = &defs[1];
+    assert_eq!(player_def.mode, StaticMode::Hexproof);
+    assert_eq!(
+        player_def.condition, object_def.condition,
+        "player half must share the object half's continuous gate"
+    );
 }
 
+/// CR 702.18a + CR 611.3a: Compound shroud sibling of the hexproof class.
 #[test]
-fn compound_subject_keyword_static_splits_shroud_player_keyword() {
-    assert_compound_player_keyword_static(
-        "You and creatures you control have shroud.",
-        Keyword::Shroud,
-        StaticMode::Shroud,
-        None,
-        |affected| match affected {
-            TargetFilter::Typed(tf) => {
-                assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(
-                    tf.type_filters.contains(&TypeFilter::Creature),
-                    "object-half must affect creatures, got {:?}",
-                    tf.type_filters
-                );
-            }
-            other => {
-                panic!("object-half affected must be Typed(creatures you control), got {other:?}")
-            }
-        },
+fn compound_subject_keyword_static_splits_you_and_creatures_shroud() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi("You and creatures you control have shroud.");
+    assert_eq!(defs.len(), 2, "expected two defs, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Shroud
+        }));
+    assert_eq!(defs[1].mode, StaticMode::Shroud);
+}
+
+/// Negative: a non-player-applicable keyword compound must NOT claim the
+/// compound-subject keyword splitter (a player cannot meaningfully "have flying").
+#[test]
+fn compound_subject_keyword_static_declines_flying_compound() {
+    let defs = parse_static_line_multi("You and creatures you control have flying.");
+    assert!(
+        defs.iter()
+            .all(|d| !matches!(d.mode, StaticMode::Hexproof | StaticMode::Shroud))
+            && !defs
+                .iter()
+                .any(|d| matches!(d.mode, StaticMode::PlayerProtection(_))),
+        "flying compound must not emit a player-scope keyword mode, got {defs:?}"
     );
 }
 

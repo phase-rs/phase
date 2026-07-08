@@ -7489,6 +7489,41 @@ fn trigger_you_cast_another_spell_keeps_another_filter() {
     );
 }
 
+/// CR 701.47a + CR 603.1 (issue #5341): Dreadhorde Invasion upkeep trigger —
+/// "you lose 1 life and amass Zombies 1" must keep Amass as a sub_ability.
+/// Coverage previously claimed support while only emitting LoseLife.
+#[test]
+fn dreadhorde_invasion_upkeep_lose_life_and_amass() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, you lose 1 life and amass Zombies 1.",
+        "Dreadhorde Invasion",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    let execute = def.execute.expect("execute");
+    assert!(
+        matches!(*execute.effect, Effect::LoseLife { .. }),
+        "expected LoseLife head, got {:?}",
+        execute.effect
+    );
+    let sub = execute
+        .sub_ability
+        .expect("amass conjunct must survive as a sub_ability");
+    match *sub.effect {
+        Effect::Amass {
+            ref subtype,
+            ref count,
+        } => {
+            assert_eq!(subtype, "Zombie");
+            assert!(
+                matches!(count, QuantityExpr::Fixed { value: 1 }),
+                "expected Amass count 1, got {count:?}"
+            );
+        }
+        other => panic!("expected Amass{{Zombie, 1}}, got {other:?}"),
+    }
+}
+
 /// CR 603.4 + CR 122.1: "at the beginning of your end step, if there are
 /// thirty or more counters among artifacts and creatures you control, ..."
 /// — intervening-if with counter-count condition that sums across every

@@ -8252,6 +8252,35 @@ fn effect_chain_lose_life_and_endure_keeps_both_clauses() {
     );
 }
 
+// CR 701.47a + CR 608.2c (issue #5341): "you lose 1 life and amass Zombies 1"
+// — Amass must survive as a SequentialSibling; previously the LoseLife half
+// greedily absorbed the whole clause and the upkeep trigger never amassed.
+#[test]
+fn effect_chain_lose_life_and_amass_keeps_both_clauses() {
+    let def = parse_effect_chain("you lose 1 life and amass Zombies 1", AbilityKind::Spell);
+    assert!(
+        matches!(*def.effect, Effect::LoseLife { .. }),
+        "expected LoseLife head, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .expect("amass conjunct must survive as a sub_ability");
+    match *sub.effect {
+        Effect::Amass {
+            ref subtype,
+            ref count,
+        } => {
+            assert_eq!(subtype, "Zombie");
+            assert!(
+                matches!(count, QuantityExpr::Fixed { value: 1 }),
+                "expected Amass count 1, got {count:?}"
+            );
+        }
+        other => panic!("expected chained Amass{{Zombie, 1}}, got {other:?}"),
+    }
+}
+
 // CR 701.63: Endure — every printed card prefixes a self-referential
 // subject ("it endures N", "this creature endures N", "~ endures N" after
 // card-name normalization). The subject layer must strip the subject so the
