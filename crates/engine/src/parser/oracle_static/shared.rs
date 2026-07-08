@@ -1265,10 +1265,12 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     }
 
     // CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: "You and <objects> have
-    // <player-applicable keyword>" (Sigarda / Serra's Emissary / Gruul Spellbreaker).
-    // Must claim before the single-return fallback, which otherwise emits one
-    // bogus Continuous Or{empty-typed You, objects} that grants the keyword to
-    // every permanent you control.
+    // <player-applicable keyword>" (Sigarda / Serra's Emissary / Gruul
+    // Spellbreaker), or the Oxford-comma N-item form "You, <objects>, …, and
+    // <objects> have <keyword>" (Shalai, Voice of Plenty). Must claim before
+    // the single-return fallback, which otherwise emits one bogus Continuous
+    // Or{empty-typed You, objects} that grants the keyword to every permanent
+    // you control.
     if let Some(defs) = parse_compound_subject_keyword_static(&stripped, &lower) {
         return defs;
     }
