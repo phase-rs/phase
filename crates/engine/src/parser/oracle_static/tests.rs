@@ -386,6 +386,103 @@ fn compound_subject_keyword_static_declines_flying_compound() {
     );
 }
 
+/// CR 702.11a + CR 702.11b + CR 611.3a: Shalai, Voice of Plenty — "You,
+/// planeswalkers you control, and other creatures you control have hexproof."
+/// The Oxford-comma N-item form of the compound-subject keyword splitter: the
+/// object half is an `Or` of two independently-resolved conjuncts (planeswalkers
+/// you control; other creatures you control — Shalai herself excluded by
+/// "other"), and the player half grants the controller `StaticMode::Hexproof`.
+#[test]
+fn compound_subject_keyword_static_splits_shalai_three_way() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi(
+        "You, planeswalkers you control, and other creatures you control have hexproof.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected object Continuous + player Hexproof, got {defs:?}"
+    );
+
+    let object_def = &defs[0];
+    assert_eq!(object_def.mode, StaticMode::Continuous);
+    match &object_def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 2, "expected a 2-way Or, got {filters:#?}");
+            assert!(
+                filters.contains(&TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You)
+                )),
+                "must include planeswalkers you control: {filters:#?}"
+            );
+            assert!(
+                filters.contains(&TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another])
+                )),
+                "must include other creatures you control: {filters:#?}"
+            );
+        }
+        other => panic!("object-half affected must be a 2-way Or, got {other:?}"),
+    }
+    assert_eq!(
+        object_def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }],
+    );
+
+    let player_def = &defs[1];
+    assert_eq!(player_def.mode, StaticMode::Hexproof);
+    assert_eq!(
+        player_def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        )),
+    );
+    assert!(
+        player_def.modifications.is_empty(),
+        "player Hexproof mode carries no AddKeyword mods, got {:?}",
+        player_def.modifications
+    );
+}
+
+/// Negative/boundary: an Oxford-list conjunct that can't be resolved must fail
+/// the WHOLE line closed (strict-fail), never silently drop the bad disjunct
+/// and emit a narrower-than-printed hexproof grant.
+#[test]
+fn compound_subject_keyword_static_declines_oxford_list_unresolvable_conjunct() {
+    let defs = parse_static_line_multi(
+        "You, blorptastic wobbling nonsense, and other creatures you control have hexproof.",
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::Hexproof | StaticMode::Shroud)),
+        "an unresolvable conjunct must not yield a partial hexproof grant, got {defs:?}"
+    );
+}
+
+/// General arity check: the Oxford-comma splitter is not hard-coded to exactly
+/// two object conjuncts (Shalai's arity) — a synthetic four-item list must
+/// split into a 3-way object Or the same way a three-item list splits into 2-way.
+#[test]
+fn compound_subject_keyword_static_splits_four_item_oxford_list() {
+    let defs = parse_static_line_multi(
+        "You, artifacts you control, enchantments you control, and lands you control have shroud.",
+    );
+    assert_eq!(defs.len(), 2, "expected two defs, got {defs:?}");
+    match &defs[0].affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 3, "expected a 3-way Or, got {filters:#?}");
+        }
+        other => panic!("object-half affected must be a 3-way Or, got {other:?}"),
+    }
+    assert_eq!(defs[1].mode, StaticMode::Shroud);
+}
+
 // CR 611.3a + CR 604.3 + CR 613.4a: Angry Mob — a two-clause turn-window CDA. "During
 // your turn, ~'s power and toughness are each equal to 2 plus the number of
 // Swamps your opponents control. During turns other than yours, ~'s power and
@@ -519,6 +616,41 @@ fn static_ignore_hexproof_without_ward_emits_single_static() {
     );
     assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
     assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    // CR 609.4: no "you control" qualifier → unrestricted bypass (any player).
+    assert_eq!(
+        defs[0].bypass_beneficiary, None,
+        "the unqualified Nowhere to Run form must leave the bypass unrestricted"
+    );
+}
+
+/// CR 702.11e / CR 609.4: Glaring Spotlight — "Creatures your opponents control
+/// with hexproof can be the targets of spells and abilities YOU CONTROL as
+/// though they didn't have hexproof." The "you control" qualifier between
+/// "spells and abilities" and "as though" is semantically load-bearing: it
+/// restricts the bypass beneficiary to the static controller
+/// (`bypass_beneficiary = Some(You)`), unlike the unqualified Nowhere to Run
+/// form (any player). Still one `IgnoreHexproof` scoped to opponents' creatures.
+#[test]
+fn static_ignore_hexproof_with_you_control_qualifier() {
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control with hexproof can be the targets of spells and abilities you control as though they didn't have hexproof.",
+    );
+    assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    assert_eq!(
+        defs[0].bypass_beneficiary,
+        Some(ControllerRef::You),
+        "the 'you control' qualifier must restrict the bypass to the controller, got {:?}",
+        defs[0].bypass_beneficiary
+    );
+    assert!(
+        matches!(
+            defs[0].affected,
+            Some(TargetFilter::Typed(ref tf)) if tf.controller == Some(ControllerRef::Opponent)
+        ),
+        "must scope the bypass to opponents' creatures, got {:?}",
+        defs[0].affected
+    );
 }
 
 /// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
@@ -8821,6 +8953,10 @@ fn static_max_untap_one_creature() {
             max: 1,
         }
     );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
+    );
 }
 
 // CR 502.3: Damping Field / Imi Statue — artifact form.
@@ -8835,6 +8971,10 @@ fn static_max_untap_one_artifact() {
             filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             max: 1,
         }
+    );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
     );
 }
 
@@ -8856,6 +8996,64 @@ fn static_max_untap_one_nonbasic_land() {
             ])),
             max: 1,
         }
+    );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
+    );
+}
+
+// CR 502.3 + CR 611.3a: Winter Orb. Verbatim Oracle text (Scryfall). Discriminating:
+// before this fix, parsed to a no-op Continuous with modifications: [] (the
+// effect was silently dropped).
+#[test]
+fn static_max_untap_winter_orb_conditional() {
+    let def = parse_static_line(
+        "As long as this artifact is untapped, players can't untap more than one land during their untap steps.",
+    )
+    .expect("Winter Orb must parse to a static definition");
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land()),
+            max: 1,
+        },
+        "Winter Orb must cap untapping at one land, not fall through to a no-op Continuous"
+    );
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped) ('as long as untapped'), got {:?}",
+        def.condition
+    );
+}
+
+// CR 502.3 + CR 611.3a: Static Orb — same template, N=2, "permanents" (no
+// subtype restriction). Verbatim Oracle text (Scryfall).
+#[test]
+fn static_max_untap_static_orb_conditional() {
+    let def = parse_static_line(
+        "As long as this artifact is untapped, players can't untap more than two permanents during their untap steps.",
+    )
+    .expect("Static Orb must parse to a static definition");
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::permanent()),
+            max: 2,
+        }
+    );
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
     );
 }
 
@@ -9405,6 +9603,190 @@ fn static_creatures_attacking_you_get_pump() {
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddPower { value: -1 }));
+}
+
+#[test]
+fn static_creatures_attacking_last_chosen_player_scope() {
+    // CR 508.1b + CR 613.1: Triarch Stalker / Beckoning Will-o'-Wisp scope the
+    // attacking axis by the source's persisted chosen player. Both "the last
+    // chosen player" and the shorter "the chosen player" phrasing map to
+    // `ControllerRef::SourceChosenPlayer`, reusing the same `FilterProp::Attacking`
+    // + `parse_continuous_gets_has` path as the you/opponents/enchanted scopes.
+    let menace =
+        parse_static_line("Creatures attacking the last chosen player have menace.").unwrap();
+    assert_eq!(menace.mode, StaticMode::Continuous);
+    assert_eq!(
+        menace.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+    assert!(menace
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Menace,
+        }));
+
+    let pump = parse_static_line("Creatures attacking the last chosen player get +1/+0.").unwrap();
+    assert_eq!(
+        pump.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+    assert!(pump
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+
+    // Shorter "the chosen player" phrasing resolves to the same scope.
+    let short = parse_static_line("Creatures attacking the chosen player have menace.").unwrap();
+    assert_eq!(
+        short.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+}
+
+#[test]
+fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
+    // CR 613.1 + CR 608.2c: the combat trigger "choose an opponent" must persist
+    // its choice durably (as `ChosenAttribute::Player`) BECAUSE a separate
+    // continuous static reads it via `ControllerRef::SourceChosenPlayer`. The
+    // `reconcile_persisted_player_choice_for_source_chosen_ref` pass flips the
+    // choice's `persist` to true when such a reference is present.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "Targeting Relay — At the beginning of combat on your turn, choose an opponent.\nCreatures attacking the last chosen player have menace.",
+        "Triarch Stalker",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Necron".to_string()],
+    );
+
+    // The static reads the source's persisted chosen player.
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer),
+            })
+        )),
+        "static must scope attackers by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    // The combat trigger's opponent choice must persist so the static can read it.
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "choose an opponent must persist when a SourceChosenPlayer static reads it, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn choose_opponent_without_source_chosen_reference_does_not_persist() {
+    // Targeted-pass regression: a "choose an opponent" trigger whose choice is
+    // consumed WITHIN the same resolution (Ruhan — the forced attack reads the
+    // resolution-scoped `ChosenPlayer { index }`) carries no durable
+    // `SourceChosenPlayer` reference, so the reconcile pass must leave it
+    // `persist: false`.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, choose an opponent at random. ~ attacks that player this combat if able.",
+        "Ruhan of the Fomori",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: false,
+                ..
+            }
+        ),
+        "a same-resolution opponent choice must NOT be flipped to persist, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn choose_persists_when_only_a_trigger_reads_the_chosen_player() {
+    // CR 613.1 + CR 503.1a: the durable `SourceChosenPlayer` reference can live in
+    // a TRIGGER (a phase trigger scoped to "the chosen player's upkeep", plus its
+    // effect targeting that player) rather than a static or activated ability. The
+    // reconcile pass must scan triggers as READERS, not only as writers, so the
+    // preceding "choose an opponent" is flipped to persist. LOAD-BEARING
+    // REGRESSION: without the `result.triggers` reader scan the choose stays
+    // `persist: false` and the chosen player is lost after the choice resolves.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "When this artifact enters the battlefield, choose an opponent.\nAt the beginning of the chosen player's upkeep, this artifact deals 1 damage to that player.",
+        "Chosen-Player Rack",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    // Sanity: the reference lives only in the phase trigger's `valid_target`.
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|t| t.valid_target == Some(TargetFilter::SourceChosenPlayer)),
+        "expected a phase trigger scoped to SourceChosenPlayer, got {:?}",
+        parsed.triggers
+    );
+    // The ETB choose must be flipped to persist by the trigger-reader scan.
+    let choose = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find(|a| matches!(&*a.effect, Effect::Choose { .. }))
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "a choose read only by a trigger must still persist, got {:?}",
+        choose.effect
+    );
 }
 
 #[test]

@@ -726,7 +726,7 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    collapsing to `SourceIsAttacking`.
 ///
 /// Returns the condition unchanged when neither guard matches.
-fn rewrite_self_pronoun_subject(condition: &str) -> String {
+pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
     let lower = condition.to_lowercase();
     if let Some(rest) =
         nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))

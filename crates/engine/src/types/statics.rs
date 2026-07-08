@@ -590,6 +590,17 @@ pub enum TriggerCause {
     /// `GameEvent::DamageDealt` whose target is a creature controlled by the
     /// doubler's controller.
     ControlledCreatureDealtDamage,
+    /// CR 601.2 + CR 707.10: Trigger was caused by the doubler's controller
+    /// casting or copying a spell (Veyran, Voice of Duality-class: "If you
+    /// casting or copying an instant or sorcery spell causes ..."). Matches
+    /// `GameEvent::SpellCast` and `GameEvent::SpellCopied` events whose
+    /// controller is the doubler's controller. The `core_types` list narrows
+    /// the spell's type — for Veyran this is `[Instant, Sorcery]`; an empty
+    /// list means any spell.
+    ControllerCastOrCopiedSpell {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+    },
     /// CR 309.4c: Trigger was caused by entering a dungeon room
     /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
     RoomEntered,
@@ -607,6 +618,10 @@ impl fmt::Display for TriggerCause {
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
             TriggerCause::ControlledCreatureDealtDamage => {
                 write!(f, "ControlledCreatureDealtDamage")
+            }
+            TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
+                let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
+                write!(f, "ControllerCastOrCopiedSpell([{}])", names.join(","))
             }
             TriggerCause::RoomEntered => write!(f, "RoomEntered"),
         }

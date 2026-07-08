@@ -1285,6 +1285,140 @@ fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 613.1 + CR 608.2c: A `choose a player` / `choose an opponent` instruction
+/// whose chosen player is later read by a CONTINUOUS ability must persist that
+/// choice durably on the source as a `ChosenAttribute::Player`; otherwise the
+/// resolution-scoped choice vanishes when the trigger finishes resolving and the
+/// static reads nothing. Triarch Stalker / Beckoning Will-o'-Wisp pair a combat
+/// trigger (`At the beginning of combat on your turn, choose an opponent`) with a
+/// separate static (`Creatures attacking the last chosen player ...`) that reads
+/// the choice via `ControllerRef::SourceChosenPlayer`.
+///
+/// The general path (`lower_choose_ast`) leaves player/opponent choices
+/// `persist: false` because most such choices are consumed within the same
+/// resolution (Ruhan's `choose an opponent. ~ attacks that player`, which reads
+/// the resolution-scoped `ChosenPlayer { index }`). This pass flips `persist` to
+/// `true` on those choices ONLY when the card also carries a durable
+/// `SourceChosenPlayer` reference — mirroring the "persist when referred back to"
+/// intent documented on `Effect::Choose`. The reference can live in a static
+/// (`Creatures attacking the last chosen player ...`), an activated ability, or a
+/// triggered ability — a phase trigger scoped to "the chosen player's" step
+/// (`oracle_trigger.rs`) or an effect keyed to the chosen player — so all three
+/// surfaces are scanned as readers.
+fn reconcile_persisted_player_choice_for_source_chosen_ref(result: &mut ParsedAbilities) {
+    let references_source_chosen_player = result
+        .statics
+        .iter()
+        .any(static_references_source_chosen_player)
+        || result
+            .abilities
+            .iter()
+            .any(ability_references_source_chosen_player)
+        || result
+            .triggers
+            .iter()
+            .any(trigger_references_source_chosen_player);
+    if !references_source_chosen_player {
+        return;
+    }
+    for ability in &mut result.abilities {
+        persist_player_choice_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            persist_player_choice_in_ability(execute);
+        }
+    }
+}
+
+/// Whether a static definition's `affected` filter reads the source's persisted
+/// chosen player (`ControllerRef::SourceChosenPlayer`).
+fn static_references_source_chosen_player(def: &StaticDefinition) -> bool {
+    def.affected
+        .as_ref()
+        .is_some_and(filter_references_source_chosen_player)
+}
+
+/// Whether a triggered ability reads the source's persisted chosen player —
+/// either via its own `valid_target` (a phase trigger scoped to "the chosen
+/// player's" step) or anywhere in its executed effect chain.
+fn trigger_references_source_chosen_player(trigger: &TriggerDefinition) -> bool {
+    trigger
+        .valid_target
+        .as_ref()
+        .is_some_and(filter_references_source_chosen_player)
+        || trigger
+            .execute
+            .as_deref()
+            .is_some_and(ability_references_source_chosen_player)
+}
+
+/// Whether an ability's effect targets the source's persisted chosen player, so
+/// a "choose a player" earlier in the same card must persist it. Recurses the
+/// sub-ability chain.
+fn ability_references_source_chosen_player(def: &AbilityDefinition) -> bool {
+    effect_targets_source_chosen_player(&def.effect)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_references_source_chosen_player)
+}
+
+/// Whether any target filter carried by `effect` reads the source's persisted
+/// chosen player. Uses the generic `Effect::target_filter` accessor so every
+/// player-targeting effect variant is covered (damage, life loss/gain, draw,
+/// discard, mill, ...), not a single hand-enumerated case.
+fn effect_targets_source_chosen_player(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(filter_references_source_chosen_player)
+}
+
+/// Tree-walks a `TargetFilter` for a durable `SourceChosenPlayer` reference —
+/// the bare player-target filter, a `TypedFilter` whose controller or attacking
+/// defender is the chosen player, or any of those nested under And/Or/Not.
+fn filter_references_source_chosen_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SourceChosenPlayer => true,
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
+            *controller == Some(ControllerRef::SourceChosenPlayer)
+                || properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::Attacking {
+                            defender: Some(ControllerRef::SourceChosenPlayer),
+                        }
+                    )
+                })
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_source_chosen_player)
+        }
+        TargetFilter::Not { filter } => filter_references_source_chosen_player(filter),
+        _ => false,
+    }
+}
+
+/// Flips a `choose a player` / `choose an opponent` effect (and any in its
+/// sub-ability chain) to `persist: true` so its choice is stored durably.
+fn persist_player_choice_in_ability(def: &mut AbilityDefinition) {
+    if let Effect::Choose {
+        choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+        persist,
+        ..
+    } = def.effect.as_mut()
+    {
+        *persist = true;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        persist_player_choice_in_ability(sub);
+    }
+}
+
 fn chain_contains_host_bound_tap_rider(def: &AbilityDefinition) -> bool {
     if is_host_bound_phase_in_tap_rider_node(def) {
         return true;
@@ -4649,6 +4783,7 @@ pub(crate) fn parse_oracle_ir(
     reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
     reconcile_self_chosen_type_statics(&mut result, types);
     reconcile_host_bound_phase_outs(&mut result);
+    reconcile_persisted_player_choice_for_source_chosen_ref(&mut result);
 
     // Architectural rule: the parser must never silently discard Oracle
     // text. Run the swallow audit against the parsed result so any unrep-

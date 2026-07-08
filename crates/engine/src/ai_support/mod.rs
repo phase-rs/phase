@@ -4488,6 +4488,7 @@ mod tests {
                 ),
                 attack_defended: None,
                 source_controller: None,
+                bypass_beneficiary: None,
             };
             obj.static_definitions = vec![def].into();
         }

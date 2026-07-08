@@ -5180,6 +5180,41 @@ fn trigger_cause_matches(
             // additional time when a dungeon room is entered.
             matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
+        TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
+            // CR 601.2 + CR 707.10: Veyran-class doublers fire only for
+            // triggers caused by the doubler's controller casting or copying
+            // a spell. Both event kinds qualify ("you casting or copying");
+            // a copy is not cast (CR 707.10), so `SpellCopied` is a distinct
+            // event and must be matched explicitly.
+            let (controller, object_id) = match event {
+                Some(GameEvent::SpellCast {
+                    controller,
+                    object_id,
+                    ..
+                })
+                | Some(GameEvent::SpellCopied {
+                    controller,
+                    object_id,
+                    ..
+                }) => (*controller, *object_id),
+                _ => return false,
+            };
+            if controller != doubler_controller {
+                return false;
+            }
+            if core_types.is_empty() {
+                return true;
+            }
+            // CR 603.2d: The spell's type is named in the qualifier ("an
+            // instant or sorcery spell") — the stack object's core types must
+            // intersect the predicate's list.
+            state.objects.get(&object_id).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .iter()
+                    .any(|ct| core_types.contains(ct))
+            })
+        }
     }
 }
 
@@ -12940,6 +12975,92 @@ pub mod tests {
         }
         // Silence unused-var warnings for the graveyard object IDs.
         let _ = (gy1, gy2, gy3);
+    }
+
+    /// CR 115.1d: Armory Automaton — "you may attach any number of target
+    /// Equipment" must surface one optional slot per eligible Equipment so the
+    /// controller can choose zero at stack time (issue #5339).
+    #[test]
+    fn attach_any_number_multi_target_surfaces_optional_equipment_slots() {
+        use crate::types::ability::TypeFilter;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let equipment_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        let equipment_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Skullclamp".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [equipment_a, equipment_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Armory Automaton".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Attach {
+                    attachment: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .subtype("Equipment".to_string())
+                            .controller(ControllerRef::You),
+                    ),
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            execute.optional = true;
+            execute.multi_target = Some(MultiTargetSpec::unlimited(0));
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::EntersOrAttacks)
+                    .execute(execute)
+                    .valid_card(TargetFilter::SelfRef),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Artifact, CoreType::Creature],
+            vec!["Construct"],
+        )];
+        process_triggers(&mut state, &events);
+
+        let pending = state.pending_trigger.as_ref().expect("pending_trigger set");
+        let slots = super::super::ability_utils::build_target_slots(&state, &pending.ability)
+            .expect("slot build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "two eligible Equipment must surface two target slots, got {}",
+            slots.len()
+        );
+        for slot in &slots {
+            assert!(slot.optional, "any-number attach slots must be optional");
+            assert_eq!(slot.legal_targets.len(), 2);
+        }
     }
 
     #[test]
