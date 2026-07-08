@@ -106,7 +106,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_you_have_conditions,
         parse_that_player_has_conditions,
         parse_there_are_conditions,
-        // CR 201.2 + CR 608.2c: Named-pair MUST precede the generic compound
+        // CR 201.2: Named-control clauses MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
         parse_control_named_pair,
@@ -557,7 +557,7 @@ fn parse_compound_control_presence(input: &str) -> OracleResult<'_, StaticCondit
     ))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ControlNamedConnector {
     And,
     Or,
@@ -572,11 +572,11 @@ impl ControlNamedConnector {
     }
 }
 
-/// CR 201.2 + CR 603.4: Parse "you control [type] named [Name1] and [Name2]"
-/// and "you control [type] named [Name1] or a [type] named [Name2]" as joined
-/// single-named presence checks. Each named card is its own control predicate;
-/// the connector in the source phrase joins the named objects, not the type
-/// word.
+/// CR 201.2: Parse "you control [type] named [Name1] and [Name2]",
+/// serial lists such as "[Name1], [Name2], and [Name3]", and repeated typed
+/// members such as "[Name1] or a [type] named [Name2]" as joined single-named
+/// presence checks. Each named card is its own control predicate; the connector
+/// in the source phrase joins the named objects, not the type word.
 ///
 /// Empires cycle canonical: Scepter of Empires' "if you control artifacts named
 /// Crown of Empires and Throne of Empires" — semantically requires you control
@@ -587,9 +587,6 @@ impl ControlNamedConnector {
 ///
 /// CR 201.2: Named-card conditions compare game objects by their English card
 /// names.
-/// CR 603.4: Intervening-if trigger conditions must end before the effect
-/// clause that follows them.
-///
 /// Must precede `parse_compound_control_presence` so the trailing " and "
 /// is bound to the names list, not interpreted as a second `you control` clause.
 fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -601,15 +598,15 @@ fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
     // Strip any FilterProp::Named that parse_type_phrase may have attached so the
     // synthesized per-name conjuncts carry exactly one Named property each.
     let filter_base = strip_filter_named_property(filter_base);
-    let (rest_after_pair, (first_filter, connector, second_filter)) =
+    let (rest_after_pair, (filters, connector)) =
         parse_control_named_pair_members(after_named, &filter_base)?;
-    let first = StaticCondition::IsPresent {
-        filter: Some(inject_controller_you(first_filter)),
-    };
-    let second = StaticCondition::IsPresent {
-        filter: Some(inject_controller_you(second_filter)),
-    };
-    Ok((rest_after_pair, connector.combine(vec![first, second])))
+    let conditions = filters
+        .into_iter()
+        .map(|filter| StaticCondition::IsPresent {
+            filter: Some(inject_controller_you(filter)),
+        })
+        .collect();
+    Ok((rest_after_pair, connector.combine(conditions)))
 }
 
 fn parse_control_named_type_filter<'a>(
@@ -630,23 +627,46 @@ fn parse_control_named_type_filter<'a>(
 fn parse_control_named_pair_members<'a>(
     input: &'a str,
     filter_base: &TargetFilter,
-) -> OracleResult<'a, (TargetFilter, ControlNamedConnector, TargetFilter)> {
-    if let Some((rest, first_name, connector, second_filter)) =
-        find_repeated_typed_control_named_pair(input)
+) -> OracleResult<'a, (Vec<TargetFilter>, ControlNamedConnector)> {
+    if let Some((mut rest, first_name, connector)) =
+        find_repeated_typed_control_named_connector(input)
     {
-        let first_filter = with_named_property(filter_base.clone(), first_name);
-        return Ok((rest, (first_filter, connector, second_filter)));
+        let first_name = first_name.trim();
+        if first_name.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        let mut filters = vec![with_named_property(filter_base.clone(), first_name)];
+        loop {
+            let (next_rest, (next_filter, next_connector)) =
+                parse_control_named_typed_member(rest)?;
+            filters.push(next_filter);
+            match next_connector {
+                Some(found_connector) if found_connector == connector => {
+                    rest = next_rest;
+                }
+                Some(_) => {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::Fail,
+                    )));
+                }
+                None => return Ok((next_rest, (filters, connector))),
+            }
+        }
     }
 
     parse_shared_type_control_named_pair(input, filter_base)
 }
 
-/// CR 201.2: A repeated typed "named" clause changes the object type for the
-/// second named card instead of extending the first card name.
-fn find_repeated_typed_control_named_pair(
+/// CR 201.2: A repeated typed "named" clause starts a new named object instead
+/// of extending the previous card name.
+fn find_repeated_typed_control_named_connector(
     input: &str,
-) -> Option<(&str, &str, ControlNamedConnector, TargetFilter)> {
-    let mut best: Option<(usize, &str, &str, ControlNamedConnector, TargetFilter)> = None;
+) -> Option<(&str, &str, ControlNamedConnector)> {
+    let mut best: Option<(usize, &str, &str, ControlNamedConnector)> = None;
     for (connector_tag, connector) in [
         (" and ", ControlNamedConnector::And),
         (" or ", ControlNamedConnector::Or),
@@ -657,29 +677,41 @@ fn find_repeated_typed_control_named_pair(
         {
             let candidate_index = input.len() - cursor.len() + before_connector.len();
             let right = &after_connector[connector_tag.len()..];
-            if let Ok((rest, second_filter)) = parse_control_named_typed_member(right) {
+            if parse_control_named_typed_member_head(right).is_ok() {
                 let first_name = input[..candidate_index].trim();
                 if !first_name.is_empty()
                     && best
                         .as_ref()
                         .is_none_or(|(best_index, ..)| candidate_index < *best_index)
                 {
-                    best = Some((candidate_index, rest, first_name, connector, second_filter));
+                    best = Some((candidate_index, right, first_name, connector));
                 }
             }
             cursor = right;
         }
     }
-    best.map(|(_, rest, first_name, connector, second_filter)| {
-        (rest, first_name, connector, second_filter)
-    })
+    best.map(|(_, rest, first_name, connector)| (rest, first_name, connector))
 }
 
-fn parse_control_named_typed_member(input: &str) -> OracleResult<'_, TargetFilter> {
+fn parse_control_named_typed_member_head(input: &str) -> OracleResult<'_, TargetFilter> {
     let (after_named, type_text) = take_until(" named ").parse(input)?;
     let (after_named, _) = tag(" named ").parse(after_named)?;
     let filter_base = parse_control_named_type_filter(type_text, input)?;
-    let (rest, name) = parse_control_named_final_name(after_named)?;
+    Ok((after_named, filter_base))
+}
+
+fn parse_control_named_typed_member(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, Option<ControlNamedConnector>)> {
+    let (after_named, filter_base) = parse_control_named_typed_member_head(input)?;
+    let (rest, name, next_connector) = if let Some((rest, name, connector)) =
+        find_repeated_typed_control_named_connector(after_named)
+    {
+        (rest, name, Some(connector))
+    } else {
+        let (rest, name) = parse_control_named_final_name(after_named)?;
+        (rest, name, None)
+    };
     let name = name.trim();
     if name.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -687,34 +719,132 @@ fn parse_control_named_typed_member(input: &str) -> OracleResult<'_, TargetFilte
             nom::error::ErrorKind::Fail,
         )));
     }
-    Ok((rest, with_named_property(filter_base, name)))
+    Ok((
+        rest,
+        (with_named_property(filter_base, name), next_connector),
+    ))
 }
 
 fn parse_shared_type_control_named_pair<'a>(
     input: &'a str,
     filter_base: &TargetFilter,
-) -> OracleResult<'a, (TargetFilter, ControlNamedConnector, TargetFilter)> {
-    // First name extends to " and "; second name extends to a guarded condition
-    // boundary. This preserves the existing Empires shared-type grammar.
-    let (after_first_name, first_name) = take_until(" and ").parse(input)?;
-    let (after_first_name, _) = tag(" and ").parse(after_first_name)?;
-    let (rest_after_pair, second_name) = parse_control_named_final_name(after_first_name)?;
-    let first_name = first_name.trim();
-    let second_name = second_name.trim();
-    if first_name.is_empty() || second_name.is_empty() {
+) -> OracleResult<'a, (Vec<TargetFilter>, ControlNamedConnector)> {
+    let (rest_after_list, names_text) = parse_control_named_final_name(input)?;
+    let (names, connector) = parse_shared_control_named_list(input, names_text)?;
+    let filters = names
+        .into_iter()
+        .map(|name| with_named_property(filter_base.clone(), name))
+        .collect();
+    Ok((rest_after_list, (filters, connector)))
+}
+
+fn parse_shared_control_named_list<'a>(
+    error_input: &'a str,
+    names_text: &'a str,
+) -> Result<(Vec<&'a str>, ControlNamedConnector), nom::Err<OracleError<'a>>> {
+    let Some((connector_index, connector_len, connector, serial_comma)) =
+        find_shared_control_named_final_connector(names_text)
+    else {
         return Err(nom::Err::Error(nom::error::Error::new(
-            input,
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    let before_final = names_text[..connector_index].trim();
+    let final_name = names_text[connector_index + connector_len..].trim();
+    if before_final.is_empty() || final_name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
             nom::error::ErrorKind::Fail,
         )));
     }
-    Ok((
-        rest_after_pair,
-        (
-            with_named_property(filter_base.clone(), first_name),
-            ControlNamedConnector::And,
-            with_named_property(filter_base.clone(), second_name),
-        ),
-    ))
+    let mut names = if serial_comma {
+        parse_shared_control_named_comma_members(error_input, before_final)?
+    } else {
+        vec![before_final]
+    };
+    names.push(final_name);
+    if names.len() < 2 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((names, connector))
+}
+
+fn find_shared_control_named_final_connector(
+    input: &str,
+) -> Option<(usize, usize, ControlNamedConnector, bool)> {
+    let mut best: Option<(usize, usize, ControlNamedConnector, bool)> = None;
+    for (connector_tag, connector, serial_comma) in [
+        (", and ", ControlNamedConnector::And, true),
+        (", or ", ControlNamedConnector::Or, true),
+        (" and ", ControlNamedConnector::And, false),
+        (" or ", ControlNamedConnector::Or, false),
+    ] {
+        let mut cursor = input;
+        while let Ok((after_connector, before_connector)) =
+            take_until::<_, _, OracleError<'_>>(connector_tag).parse(cursor)
+        {
+            let candidate_index = input.len() - cursor.len() + before_connector.len();
+            let overlaps_serial_comma = !serial_comma
+                && input[..candidate_index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| ch == ',');
+            if !overlaps_serial_comma
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_index, ..)| candidate_index > *best_index)
+            {
+                best = Some((
+                    candidate_index,
+                    connector_tag.len(),
+                    connector,
+                    serial_comma,
+                ));
+            }
+            cursor = &after_connector[connector_tag.len()..];
+        }
+    }
+    best
+}
+
+fn parse_shared_control_named_comma_members<'a>(
+    error_input: &'a str,
+    input: &'a str,
+) -> Result<Vec<&'a str>, nom::Err<OracleError<'a>>> {
+    let mut names = Vec::new();
+    let mut remaining = input;
+    while let Ok((after_comma, before_comma)) =
+        take_until::<_, _, OracleError<'_>>(", ").parse(remaining)
+    {
+        let name = before_comma.trim();
+        if name.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                error_input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        names.push(name);
+        remaining = &after_comma[", ".len()..];
+    }
+    let final_name = remaining.trim();
+    if final_name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    names.push(final_name);
+    if names.len() < 2 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(names)
 }
 
 /// Consume a named-card member up to a guarded condition boundary. Bare commas
@@ -748,35 +878,55 @@ fn parse_control_named_condition_terminator(
 ) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     alt((
         value((), tag(".")),
-        value(
-            (),
-            (
-                tag(", "),
-                alt((
-                    value((), eof),
-                    value((), tag("instead")),
-                    value((), tag("then")),
-                    value((), tag("do")),
-                    value((), tag("draw")),
-                    value((), tag("create")),
-                    value((), tag("put")),
-                    value((), tag("sacrifice")),
-                    value((), tag("transform")),
-                    value((), tag("you ")),
-                    value((), tag("target ")),
-                    value((), tag("exile ")),
-                    value((), tag("destroy ")),
-                    value((), tag("return ")),
-                    value((), tag("discard ")),
-                    value((), tag("it ")),
-                    value((), tag("its ")),
-                    value((), tag("their ")),
-                    value((), tag("each ")),
-                    value((), tag("all ")),
-                    value((), tag("choose ")),
-                )),
-            ),
-        ),
+        value((), (tag(", "), parse_control_named_condition_effect_lead)),
+    ))
+    .parse(input)
+}
+
+fn parse_control_named_condition_effect_lead(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), eof),
+        parse_control_named_condition_action_lead,
+        parse_control_named_condition_subject_lead,
+    ))
+    .parse(input)
+}
+
+fn parse_control_named_condition_action_lead(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), tag("instead")),
+        value((), tag("then")),
+        value((), tag("do")),
+        value((), tag("draw")),
+        value((), tag("create")),
+        value((), tag("put")),
+        value((), tag("sacrifice")),
+        value((), tag("transform")),
+        value((), tag("add ")),
+        value((), tag("exile ")),
+        value((), tag("destroy ")),
+        value((), tag("return ")),
+        value((), tag("discard ")),
+        value((), tag("choose ")),
+    ))
+    .parse(input)
+}
+
+fn parse_control_named_condition_subject_lead(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), tag("you ")),
+        value((), tag("target ")),
+        value((), tag("it ")),
+        value((), tag("its ")),
+        value((), tag("their ")),
+        value((), tag("each ")),
+        value((), tag("all ")),
     ))
     .parse(input)
 }
@@ -9331,7 +9481,7 @@ mod tests {
 
     #[test]
     fn test_you_control_named_pair() {
-        // CR 201.2 + CR 603.4: Scepter of Empires class — "you control [type]
+        // CR 201.2: Scepter of Empires class — "you control [type]
         // named [Name1] and [Name2]" requires both named cards under your
         // control, lowered to And { IsPresent(Named X1), IsPresent(Named X2) }.
         let (rest, c) = parse_inner_condition(
@@ -9373,6 +9523,65 @@ mod tests {
                 }
             }
             other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn you_control_shared_type_named_serial_list() {
+        // Helm of Kaldra class: one shared type applies to every named member in
+        // a serial list, not only the first two names.
+        let (rest, c) = parse_inner_condition(
+            "you control equipment named helm of kaldra, sword of kaldra, and shield of kaldra",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = c else {
+            panic!("expected And(IsPresent, IsPresent, IsPresent)");
+        };
+        assert_eq!(conditions.len(), 3);
+        assert_eq!(
+            named_presence_names(&conditions),
+            vec!["helm of kaldra", "sword of kaldra", "shield of kaldra"]
+        );
+        for cond in &conditions {
+            let tf = typed_presence(cond);
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Equipment".to_string())),
+                "expected Equipment subtype in {tf:?}"
+            );
+            assert!(tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
+        }
+    }
+
+    #[test]
+    fn you_control_named_pair_stops_before_add_effect() {
+        // Tower Worker class: the control condition ends before the mana effect.
+        let (rest, c) = parse_inner_condition(
+            "you control creatures named mine worker and power plant worker, add {c}{c}{c} instead",
+        )
+        .unwrap();
+        assert_eq!(rest, ", add {c}{c}{c} instead");
+        let StaticCondition::And { conditions } = c else {
+            panic!("expected And(IsPresent, IsPresent)");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(
+            named_presence_names(&conditions),
+            vec!["mine worker", "power plant worker"]
+        );
+        for cond in &conditions {
+            let tf = typed_presence(cond);
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
         }
     }
 
@@ -9461,6 +9670,7 @@ mod tests {
             ", each opponent loses 1 life",
             ", all creatures get +1/+1",
             ", choose one",
+            ", add {c}{c}{c}",
         ] {
             let input = format!("throne of empires{tail}");
             let (rest, name) = parse_control_named_final_name(&input).unwrap();
@@ -11216,6 +11426,22 @@ mod tests {
             } => tf,
             other => panic!("expected typed IsPresent, got {other:?}"),
         }
+    }
+
+    fn named_presence_names(conditions: &[StaticCondition]) -> Vec<&str> {
+        conditions
+            .iter()
+            .map(|cond| {
+                typed_presence(cond)
+                    .properties
+                    .iter()
+                    .find_map(|p| match p {
+                        FilterProp::Named { name } => Some(name.as_str()),
+                        _ => None,
+                    })
+            })
+            .collect::<Option<Vec<_>>>()
+            .expect("all conditions must have a Named property")
     }
 
     fn typed_presence_under_not(condition: &StaticCondition) -> &TypedFilter {
