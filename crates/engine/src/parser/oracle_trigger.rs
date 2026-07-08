@@ -25,7 +25,9 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
-use super::oracle_static::parse_commander_subject_filter_prefix;
+use super::oracle_static::{
+    parse_commander_subject_filter_prefix, parse_subtype_or_list_insensitive_prefix,
+};
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase,
     starts_with_type_word,
@@ -12399,10 +12401,14 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 let post_spell = post_spell.trim_start();
                 let post_spell_ok = post_spell.is_empty()
                     || tag::<_, _, OracleError<'_>>(",").parse(post_spell).is_ok();
-                // `parse_type_phrase` folds a comma list of card types into an
-                // `Or` but leaves a subtype list (Aura, Equipment, Vehicle) as
-                // only its first leg, so disjoin the legs explicitly.
-                let comma_list = parse_comma_type_list_disjunction(type_phrase.trim());
+                let (filter, remainder) = parse_cast_type_list_filter(type_phrase.trim());
+                let consumed = &type_phrase[..type_phrase.len() - remainder.len()];
+                let is_comma_type_list = matches!(
+                    &filter,
+                    TargetFilter::Or { filters } if filters.len() >= 2
+                ) && nom_primitives::scan_contains(consumed, ", ");
+                let remainder_ok = remainder.trim().is_empty();
+                let comma_list = is_comma_type_list.then_some(filter);
                 if let Some(filter) = comma_list.filter(|_| post_spell_ok && origin_rest_ok) {
                     let filter = if is_another {
                         add_another_prop(filter)
@@ -13850,51 +13856,13 @@ fn origin_zones_except(excluded: &[Zone]) -> Vec<Zone> {
     .collect()
 }
 
-/// Disjoins a comma-separated type/subtype list ("aura, equipment, or vehicle")
-/// into an `Or` of per-leg type filters (CR 205.3a — subtypes; CR 205.2 — card
-/// types).
-///
-/// `parse_type_phrase` folds a comma list of *card types* into an `Or`, but
-/// leaves a *subtype* list as only its first leg (it stops at the first
-/// subtype), so a cast trigger like Sram, Senior Edificer's "Aura, Equipment,
-/// or Vehicle spell" would fire on Auras alone. Build the disjunction
-/// explicitly: split on the `", "` connectors, drop a leading `"or "`/`"and "`
-/// from the final leg, and parse each leg with `parse_type_phrase`. Returns
-/// `None` unless every segment is a single clean typed leg and there are at
-/// least two of them, so single types and non-type text fall through unchanged.
-fn parse_comma_type_list_disjunction(input: &str) -> Option<TargetFilter> {
-    let mut legs: Vec<TargetFilter> = Vec::new();
-    let mut rest = input;
-    loop {
-        let (segment, more) = match nom_primitives::split_once_on(rest, ", ") {
-            Ok((_, (seg, after))) => (seg, Some(after)),
-            Err(_) => (rest, None),
-        };
-        let seg = segment.trim();
-        // Oxford-comma tail: "or vehicle" / "and vehicle" -> "vehicle".
-        let seg = opt(alt((
-            tag::<_, _, OracleError<'_>>("or "),
-            tag::<_, _, OracleError<'_>>("and "),
-        )))
-        .parse(seg)
-        .map(|(r, _)| r)
-        .unwrap_or(seg)
-        .trim();
-        let (leg, leg_rest) = parse_type_phrase(seg);
-        match &leg {
-            TargetFilter::Typed(tf)
-                if !tf.type_filters.is_empty() && leg_rest.trim().is_empty() =>
-            {
-                legs.push(leg);
-            }
-            _ => return None,
-        }
-        match more {
-            Some(after) => rest = after,
-            None => break,
-        }
+fn parse_cast_type_list_filter(type_phrase: &str) -> (TargetFilter, &str) {
+    let (filter, remainder) = parse_type_phrase(type_phrase);
+    if matches!(&filter, TargetFilter::Or { filters } if filters.len() >= 2) {
+        return (filter, remainder);
     }
-    (legs.len() >= 2).then_some(TargetFilter::Or { filters: legs })
+
+    parse_subtype_or_list_insensitive_prefix(type_phrase).unwrap_or((filter, remainder))
 }
 
 /// Parses an Oxford-comma tolerant enumeration of source zones using the
