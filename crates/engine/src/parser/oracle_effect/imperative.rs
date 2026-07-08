@@ -47,8 +47,8 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
     parse_event_context_ref, parse_fight_target, parse_mass_type_union, parse_target,
-    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, resolve_pronoun_target,
-    TargetSyntax,
+    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, parse_word_bounded,
+    resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -5159,12 +5159,37 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
     let (target, rest) = parse_target_with_ctx(text, ctx);
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();
-        let lower = trimmed.to_lowercase();
-        if matches!(lower.trim(), "her" | "him") {
+        let lower = trimmed.to_ascii_lowercase();
+        if parse_gendered_attach_self_recipient(lower.trim()).is_ok() {
             return (TargetFilter::SelfRef, &trimmed[lower.len()..]);
+        }
+        if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
+            && attach_neuter_recipient_resolves_via_subject(ctx)
+        {
+            return (resolve_it_pronoun(ctx), &trimmed[lower.len()..]);
         }
     }
     (target, rest)
+}
+
+fn attach_neuter_recipient_resolves_via_subject(ctx: &ParseContext) -> bool {
+    match &ctx.subject {
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => true,
+        Some(_) => !ctx.parent_target_is_chosen,
+        None => !ctx.parent_target_available,
+    }
+}
+
+fn parse_gendered_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(alt((
+        |i| parse_word_bounded(i, "her"),
+        |i| parse_word_bounded(i, "him"),
+    )))
+    .parse(input)
+}
+
+fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(|i| parse_word_bounded(i, "it")).parse(input)
 }
 
 /// CR 608.2c + CR 301.5: Resolve an Attach effect's `attachment` argument.
@@ -12869,30 +12894,68 @@ mod tests {
 
     #[test]
     fn parse_attach_target_equipment_to_self_pronoun() {
-        let input = "attach up to one target Equipment you control to her";
+        for input in [
+            "attach up to one target Equipment you control to her",
+            "attach up to one target Equipment you control to it",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+            let Some(UtilityImperativeAst::Attach {
+                attachment,
+                target,
+                multi_target,
+            }) = result
+            else {
+                panic!("{input}: expected Attach, got {result:?}");
+            };
+            assert_eq!(
+                attachment,
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You)
+                ),
+                "{input}"
+            );
+            assert_eq!(target, TargetFilter::SelfRef, "{input}");
+            assert_eq!(
+                multi_target,
+                Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_attach_recipient_it_preserves_available_parent_target() {
+        let input = "attach up to one target Equipment you control to it";
         let lower = input.to_lowercase();
-        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach {
-            attachment,
-            target,
-            multi_target,
-        }) = result
-        else {
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { target, .. }) = result else {
             panic!("{input}: expected Attach, got {result:?}");
         };
-        assert_eq!(
-            attachment,
-            TargetFilter::Typed(
-                TypedFilter::default()
-                    .subtype("Equipment".to_string())
-                    .controller(ControllerRef::You)
-            )
-        );
-        assert_eq!(target, TargetFilter::SelfRef);
-        assert_eq!(
-            multi_target,
-            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
-        );
+        assert_eq!(target, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn parse_attach_recipient_it_preserves_chosen_parent_target_for_self_subject() {
+        let input = "attach up to one target Equipment you control to it";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            parent_target_available: true,
+            parent_target_is_chosen: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { target, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(target, TargetFilter::ParentTarget);
     }
 
     #[test]

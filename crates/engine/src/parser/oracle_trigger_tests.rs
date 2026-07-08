@@ -1376,10 +1376,13 @@ fn trigger_attacks_or_blocks_attach_any_number_optional_targeting() {
         .execute
         .as_deref()
         .expect("attach body must lower to an execute ability");
-    assert!(
-        matches!(execute.effect.as_ref(), Effect::Attach { .. }),
-        "expected Attach effect, got {:?}",
-        execute.effect
+    let Effect::Attach { target, .. } = execute.effect.as_ref() else {
+        panic!("expected Attach effect, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::TriggeringSource,
+        "attached-subject 'to it' must bind to the triggering enchanted creature"
     );
     assert_eq!(
         execute.multi_target,
@@ -1408,10 +1411,13 @@ fn trigger_attach_any_number_in_chain_stays_on_attach_node() {
         .sub_ability
         .as_deref()
         .expect("attach must be chained after draw");
-    assert!(
-        matches!(attach.effect.as_ref(), Effect::Attach { .. }),
-        "expected Attach sub-ability, got {:?}",
-        attach.effect
+    let Effect::Attach { target, .. } = attach.effect.as_ref() else {
+        panic!("expected Attach sub-ability, got {:?}", attach.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::TriggeringSource,
+        "attached-subject chained 'to it' must bind to the triggering enchanted creature"
     );
     assert_eq!(
         attach.multi_target,
@@ -4822,6 +4828,39 @@ fn parse_angel_of_destiny_end_step_loss_issue_1599() {
     );
 }
 
+/// CR 301.5a + CR 603.6a + CR 608.2c: Cloud, Ex-SOLDIER — ETB trigger attaches
+/// the selected Equipment to Cloud itself. The only printed target is the
+/// Equipment being attached; if "to it" lowers to `ParentTarget`, resolution
+/// tries to attach that Equipment to itself and the effect no-ops after target
+/// selection.
+#[test]
+fn parse_cloud_ex_soldier_etb_attach_targets_self() {
+    let def = parse_trigger_line(
+        "When ~ enters, attach up to one target Equipment you control to it.",
+        "Cloud, Ex-SOLDIER",
+    );
+
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    let Effect::Attach { attachment, target } = &*execute.effect else {
+        panic!("expected Attach, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::Typed(
+            TypedFilter::default()
+                .subtype("Equipment".to_string())
+                .controller(ControllerRef::You)
+        )
+    );
+    assert_eq!(*target, TargetFilter::SelfRef);
+    assert_eq!(
+        execute.multi_target,
+        Some(crate::types::ability::MultiTargetSpec::up_to(
+            QuantityExpr::Fixed { value: 1 }
+        ))
+    );
+}
+
 /// CR 208.1 + CR 603.4: Cloud, Ex-SOLDIER — attack trigger with a "Then if
 /// ~ has power 7 or greater, …" sub-ability gate. Before the `~ has power N`
 /// grammar branch was added to `parse_source_power_toughness_condition`,
@@ -5247,6 +5286,50 @@ fn shared_animosity_attack_pump_for_each_other_attacker_sharing_type() {
             );
         }
         other => panic!("expected Pump, got {other:?}"),
+    }
+}
+
+#[test]
+fn mana_echoes_enter_trigger_count_shares_type_with_triggering_creature() {
+    let def = parse_trigger_line(
+        "Whenever another creature enters, add {C} for each creature you control that shares a creature type with it.",
+        "Mana Echoes",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    let exec = def.execute.as_ref().expect("execute");
+    match &*exec.effect {
+        Effect::Mana {
+            produced: ManaProduction::Colorless { count },
+            ..
+        } => {
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } = count
+            else {
+                panic!("count should be ObjectCount, got {count:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("filter should be typed, got {filter:?}");
+            };
+            let shares = tf.properties.iter().find(|p| {
+                matches!(
+                    p,
+                    FilterProp::SharesQuality {
+                        quality: SharedQuality::CreatureType,
+                        ..
+                    }
+                )
+            });
+            let Some(FilterProp::SharesQuality { reference, .. }) = shares else {
+                panic!("expected SharesQuality, properties: {:?}", tf.properties);
+            };
+            assert_eq!(
+                reference.as_deref(),
+                Some(&TargetFilter::TriggeringSource),
+                "shares-type reference should bind to the entering creature"
+            );
+        }
+        other => panic!("expected colorless mana production, got {other:?}"),
     }
 }
 

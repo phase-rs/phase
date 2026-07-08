@@ -1522,6 +1522,120 @@ mod tests {
     }
 
     #[test]
+    fn complete_resolution_attachment_choice_attaches_to_source_host() {
+        let mut state = setup();
+        let cloud = spawn_creature(&mut state, "Cloud, Ex-SOLDIER");
+        let equipment = spawn_equipment(&mut state, "Buster Sword", 12);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            cloud,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        complete_resolution_attachment_choice(&mut state, ability, &[equipment], &mut events)
+            .unwrap();
+
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(cloud))
+        );
+        assert!(state
+            .objects
+            .get(&cloud)
+            .unwrap()
+            .attachments
+            .contains(&equipment));
+    }
+
+    #[test]
+    fn cloud_etb_attach_selection_equips_selected_equipment_to_cloud() {
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        let cloud = spawn_creature(&mut state, "Cloud, Ex-SOLDIER");
+        let other_host = spawn_creature(&mut state, "Other Soldier");
+        let first_equipment = spawn_equipment(&mut state, "Iron Sword", 12);
+        let selected_equipment = spawn_equipment(&mut state, "Buster Sword", 13);
+
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "When ~ enters, attach up to one target Equipment you control to it.",
+            "Cloud, Ex-SOLDIER",
+        );
+        let execute = trigger.execute.as_deref().expect("execute must be Some");
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            (*execute.effect).clone(),
+            vec![],
+            cloud,
+            PlayerId(0),
+        );
+        ability.multi_target = execute.multi_target.clone();
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                cards,
+                effect_kind,
+                min_count,
+                count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*effect_kind, EffectKind::Attach);
+                assert_eq!(*min_count, 0);
+                assert_eq!(*count, 1);
+                assert!(*up_to);
+                assert!(cards.contains(&first_equipment));
+                assert!(cards.contains(&selected_equipment));
+            }
+            other => panic!("expected Cloud attach EffectZoneChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![selected_equipment],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects.get(&selected_equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(cloud))
+        );
+        assert!(state
+            .objects
+            .get(&cloud)
+            .unwrap()
+            .attachments
+            .contains(&selected_equipment));
+        assert!(state
+            .objects
+            .get(&first_equipment)
+            .unwrap()
+            .attached_to
+            .is_none());
+        assert!(state
+            .objects
+            .get(&other_host)
+            .unwrap()
+            .attachments
+            .is_empty());
+    }
+
+    #[test]
     fn optional_attach_with_no_eligible_equipment_is_noop_without_attach_event() {
         use crate::types::ability::TypeFilter;
 

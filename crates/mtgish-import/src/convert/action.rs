@@ -715,10 +715,32 @@ fn target_descriptor_to_filter(targets: &[Target]) -> Option<TargetFilter> {
         | Target::OneOrTwoTargetPermanents(permanents) => filter_mod::convert(permanents).ok(),
         Target::NumberTargetPermanents(_, permanents)
         | Target::UptoNumberTargetPermanents(_, permanents) => filter_mod::convert(permanents).ok(),
-        Target::TargetPlayer(_) | Target::UptoOneTargetPlayer(_) => Some(TargetFilter::Player),
+        Target::TargetPlayer(players) | Target::UptoOneTargetPlayer(players) => {
+            players_to_target_filter(players).ok()
+        }
         // AnyTarget and other shapes stay as-is — no typed constraint to thread.
         _ => None,
     }
+}
+
+fn players_to_target_filter(players: &Players) -> ConvResult<TargetFilter> {
+    Ok(match players {
+        Players::AnyPlayer => TargetFilter::Player,
+        Players::Opponent => {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        }
+        Players::SinglePlayer(player) => {
+            let controller = filter_mod::player_to_controller(player)?;
+            TargetFilter::Typed(TypedFilter::default().controller(controller))
+        }
+        other => {
+            return Err(ConversionGap::MalformedIdiom {
+                idiom: "Players/target-filter",
+                path: String::new(),
+                detail: format!("unsupported target player set: {other:?}"),
+            });
+        }
+    })
 }
 
 /// Top-level entry point: convert an `Actions` body into a typed
@@ -2623,6 +2645,19 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
     match a {
         Action::CreateValueX(_) => Ok(Vec::new()),
         Action::SearchLibrary(actions) => convert_search_library(actions),
+        Action::SearchPlayersLibrary(player, actions) => {
+            let target_filter =
+                search_library_player_target_filter(player, bindings).ok_or_else(|| {
+                    ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "Effect::SearchLibrary",
+                        needed_variant: format!(
+                            "target_player binding for Player::{}",
+                            variant_name_player(player)
+                        ),
+                    }
+                })?;
+            apply_player_target_chain(convert_search_library(actions)?, target_filter)
+        }
         // CR 120.1 + CR 608.2c: mtgish packs "deal A damage to X and B
         // damage to Y" into one action. The engine represents that as an
         // ordinary effect chain: each DealDamage node consumes the next target
@@ -5502,15 +5537,37 @@ fn player_damage_recipient_to_filter(player: &Player) -> Option<TargetFilter> {
     }
 }
 
+fn search_library_player_target_filter(
+    player: &Player,
+    bindings: &VariableBindings,
+) -> Option<TargetFilter> {
+    match player {
+        Player::Ref_TargetPlayer
+        | Player::Ref_TargetPlayer1
+        | Player::Ref_TargetPlayer2
+        | Player::Ref_TargetPlayer3
+        | Player::Ref_TargetPlayers_0
+        | Player::Ref_TargetPlayers_1 => bindings
+            .target_filter
+            .clone()
+            .or_else(|| player_to_target_filter(player)),
+        other => player_damage_recipient_to_filter(other),
+    }
+}
+
 fn apply_player_target_chain(
     effects: Vec<Effect>,
     target_filter: TargetFilter,
 ) -> ConvResult<Vec<Effect>> {
     let mut out = Vec::with_capacity(effects.len());
     for effect in effects {
-        if matches!(out.last(), Some(Effect::RevealHand { .. }))
-            && is_selected_hand_exile_continuation(&effect)
-        {
+        let hand_selection_continuation = matches!(out.last(), Some(Effect::RevealHand { .. }))
+            && is_selected_hand_exile_continuation(&effect);
+        let library_selection_continuation =
+            matches!(out.last(), Some(Effect::SearchLibrary { .. }))
+                && is_search_library_change_zone_continuation(&effect);
+
+        if hand_selection_continuation || library_selection_continuation {
             out.push(effect);
         } else {
             out.push(apply_player_target(effect, target_filter.clone())?);
@@ -5525,6 +5582,17 @@ fn is_selected_hand_exile_continuation(effect: &Effect) -> bool {
         Effect::ChangeZone {
             origin: Some(Zone::Hand),
             destination: Zone::Exile,
+            target: TargetFilter::Any,
+            ..
+        }
+    )
+}
+
+fn is_search_library_change_zone_continuation(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
             target: TargetFilter::Any,
             ..
         }
@@ -6073,6 +6141,11 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             selection_constraint,
             split,
             source_zones: vec![engine::types::zones::Zone::Library],
+        },
+        // CR 701.24 + CR 115.2: "That player shuffles" after searching the
+        // targeted player's library.
+        Effect::Shuffle { .. } => Effect::Shuffle {
+            target: target_filter,
         },
         // No player-target slot on this effect. Strict-fail so the
         // shape-mismatch surfaces in the report rather than silently
@@ -7683,6 +7756,61 @@ mod tests {
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
             })
+        ));
+    }
+
+    #[test]
+    fn search_players_library_target_opponent_preserves_acquire_shape() {
+        let actions = Actions::Targeted(
+            vec![Target::TargetPlayer(Box::new(Players::Opponent))],
+            Box::new(Actions::ActionList(vec![Action::SearchPlayersLibrary(
+                Box::new(Player::Ref_TargetPlayer),
+                vec![
+                    SearchLibraryAction::MayPutACardOntoTheBattlefield(
+                        Box::new(Cards::IsCardtype(CardType::Artifact)),
+                        vec![ReplacementActionWouldEnter::EntersUnderPlayersControl(
+                            Box::new(Player::You),
+                        )],
+                    ),
+                    SearchLibraryAction::Shuffle,
+                ],
+            )])),
+        );
+
+        let effects = convert_list(&actions).unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(card_filter),
+                count: QuantityExpr::UpTo { .. },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(player_filter)),
+                ..
+            } if card_filter
+                .type_filters
+                .iter()
+                .any(|filter| matches!(filter, TypeFilter::Artifact))
+                && player_filter.type_filters.is_empty()
+                && player_filter.controller == Some(ControllerRef::Opponent)
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                enters_under: Some(ControllerRef::You),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::Shuffle {
+                target: TargetFilter::Typed(player_filter),
+            } if player_filter.type_filters.is_empty()
+                && player_filter.controller == Some(ControllerRef::Opponent)
         ));
     }
 
