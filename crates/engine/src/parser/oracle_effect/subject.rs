@@ -36,10 +36,9 @@ use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
-    parse_basic_land_type_plural, parse_cant_be_activated_exemption_in_text,
-    parse_chosen_qualifier_subject, parse_continuous_modifications,
-    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
-    peel_compound_all_quantified_conjuncts,
+    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
+    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
+    parse_static_line_multi, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
