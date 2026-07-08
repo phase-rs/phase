@@ -18856,6 +18856,122 @@ fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
     );
 }
 
+// CR 611.3 + CR 607.2d + CR 205.1b + issue #5246: Rukarumel, Biologist — the
+// compound-subject chosen-type static. The modeled sentence must produce an
+// additive AddChosenSubtype{CreatureType} static whose affected set is the `Or`
+// union of the two "you control" conjuncts.
+#[test]
+fn parser_shape_rukarumel_compound_subject_chosen_type_static() {
+    let def = parse_static_line(
+        "Slivers you control and nontoken creatures you control are the chosen type in addition to their other creature types.",
+    )
+    .expect("Rukarumel's compound-subject chosen-type static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }],
+        "additive chosen-creature-type only (no RemoveAllSubtypes)"
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => assert_eq!(
+            filters.len(),
+            2,
+            "affected must be the Or union of both you-control conjuncts: {filters:?}"
+        ),
+        other => panic!("expected an Or of 2 subject filters, got {other:?}"),
+    }
+}
+
+// Issue #5246: full Rukarumel oracle. The compound-subject additive static must be
+// present AND the trailing "The same is true for ..." (non-battlefield-zone)
+// sentence must surface as an Unimplemented residual — mirroring Arcane
+// Adaptation / Maskwood Nexus, not collapsing the whole line into a strict-fail.
+#[test]
+fn parse_rukarumel_full_oracle_adds_compound_static_and_gaps_tail() {
+    let oracle = "As Rukarumel enters, choose a creature type.\nSlivers you control and nontoken creatures you control are the chosen type in addition to their other creature types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 1/1 colorless Sliver creature token.";
+    let result = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Rukarumel, Biologist",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let has_compound_static = result.statics.iter().any(|def| {
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() >= 2)
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                })
+            && !def
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
+    });
+    assert!(
+        has_compound_static,
+        "Rukarumel must produce the compound-subject additive static: {:?}",
+        result.statics
+    );
+    let tail_gapped = result.abilities.iter().any(|ability| {
+        matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
+                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
+                if frag.contains("creature spells you control")
+        )
+    });
+    assert!(
+        tail_gapped,
+        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        result.abilities
+    );
+}
+
+// Issue #5246 (no-regression): a single-subject chosen-type line must stay with
+// `parse_arcane_adaptation_chosen_type_static` — the compound handler declines it
+// (its affected set is a plain Typed filter, not an `Or`).
+#[test]
+fn single_subject_chosen_type_static_not_hijacked_by_compound_handler() {
+    let def = parse_static_line(
+        "Creatures you control are the chosen type in addition to their other types.",
+    )
+    .expect("single-subject Arcane Adaptation line must still parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            }),
+        "single-subject additive static must be produced"
+    );
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::Or { .. })),
+        "single subject must not be widened into an Or: {:?}",
+        def.affected
+    );
+}
+
+// Issue #5246 (decline): a compound subject with a non-additive (CR 205.1a SET)
+// predicate — no "in addition to ..." — must NOT be claimed by the additive
+// compound handler (there is no compound SET printing to over-fit).
+#[test]
+fn compound_chosen_type_static_declines_non_additive_predicate() {
+    let def = parse_static_line("Slivers you control and Zombies you control are the chosen type.");
+    let is_additive_compound = def.as_ref().is_some_and(|d| {
+        matches!(d.affected, Some(TargetFilter::Or { .. }))
+            && d.modifications
+                == vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }]
+    });
+    assert!(
+        !is_additive_compound,
+        "non-additive compound must not be claimed as an additive chosen-type static: {def:?}"
+    );
+}
+
 // CR 607.2d + CR 301.7: Lifecraft Engine grants the chosen creature subtype to
 // Vehicle permanents you control — not the Creature card type. The additive-type
 // fallback must not mis-tokenize "the chosen creature type" as AddType(Creature).
