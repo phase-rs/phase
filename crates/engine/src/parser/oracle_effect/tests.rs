@@ -33360,6 +33360,36 @@ fn skip_next_untap_step_parses_as_step_skip() {
     );
 }
 
+/// CR 614.10a: "Each opponent skips their next untap step" (Brine Elemental) — a
+/// for-each-player distributor strips the "each opponent" head (setting
+/// `player_scope: Opponent`) and leaves "skip their next untap step", the
+/// third-person per-player body. It lowers to the same `Controller`-targeted
+/// `SkipNextStep` as "skip your next untap step" (each iterating opponent skips
+/// their own next untap step).
+#[test]
+fn each_opponent_skips_next_untap_step_parses_as_step_skip() {
+    let def = parse_effect_chain(
+        "Each opponent skips their next untap step.",
+        AbilityKind::Activated,
+    );
+    assert_eq!(
+        def.player_scope,
+        Some(crate::types::ability::PlayerFilter::Opponent)
+    );
+    let Effect::SkipNextStep {
+        target,
+        step,
+        scope,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected SkipNextStep, got {:?}", def.effect);
+    };
+    assert_eq!(target, &TargetFilter::Controller);
+    assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
+    assert_eq!(scope, &SkipScope::NextOccurrence);
+}
+
 /// CR 614.10 + CR 614.10a + CR 502.3: "Skip the untap step of that turn" (the
 /// second sentence of Savor the Moment / Time Bends to My Will, following an
 /// extra-turn effect) is the current-turn-anaphor sibling of "skip your next
