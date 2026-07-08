@@ -212,6 +212,17 @@ pub(crate) fn parse_typed_you_control(
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::IsCommander]),
                     )
+                // CR 111.1 + CR 111.6 + CR 109.5: "[Creature ]tokens you control" —
+                // token-ness is an object property (CR 111.1), not a subtype, and a
+                // token can be any card type (CR 111.6), so this must span
+                // Treasure/Clue/Food tokens as well as creature tokens. Precedes the
+                // capitalized-subtype fallback, which would otherwise mis-synthesize a
+                // bogus `Subtype("Token")` creature-only filter (Jaheira, Friend of the
+                // Forest).
+                } else if let Some(filter) =
+                    parse_token_you_control_descriptor(&TextPair::new(descriptor, &desc_lower))
+                {
+                    filter
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
                     let subtype_name = parse_subtype(descriptor)

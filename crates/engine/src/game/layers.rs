@@ -5469,14 +5469,17 @@ pub(crate) fn compute_current_copiable_values(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::scenario::GameScenario;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario_db::GameScenarioDbExt;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        CountScope, Duration, Effect, FilterProp, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-        PtValueScope, QuantityExpr, QuantityRef, SacrificeCost, StaticCondition, StaticDefinition,
-        TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        CountScope, Duration, Effect, FilterProp, ManaProduction, ObjectScope, PlayerFilter,
+        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SacrificeCost,
+        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -5553,12 +5556,78 @@ mod tests {
         id
     }
 
+    /// A bare non-creature Treasure token permanent (CR 111.1: `is_token`; CR 111.6:
+    /// carries the Artifact card type and Treasure subtype). No intrinsic abilities —
+    /// so any activated mana ability it ends up with came from a layer-6 grant.
+    fn make_treasure_token(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_token = true;
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Treasure".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// CR 111.1 + CR 111.6 + CR 109.5: Jaheira, Friend of the Forest grants
+    /// "{T}: Add {G}." to "Tokens you control" — every token permanent its controller
+    /// controls, regardless of card type. A non-creature Treasure token must acquire the
+    /// mana ability after layer evaluation (revert-failing reach-guard); a non-token
+    /// creature and an opponent's identical token must not. Reverting the token-descriptor
+    /// parser arm regresses the affected filter to creature tokens only, dropping the grant
+    /// on the Treasure token.
+    #[test]
+    fn jaheira_grants_mana_ability_to_noncreature_tokens_you_control() {
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        sc.add_real_card(P0, "Jaheira, Friend of the Forest", Zone::Battlefield, db);
+
+        let p0_treasure = make_treasure_token(&mut sc.state, P0);
+        // Non-token creature under the same controller — hostile to the token property.
+        let p0_creature = make_creature(&mut sc.state, "Bear", 2, 2, P0);
+        // Identical Treasure token under the opponent — hostile to the controller scope.
+        let p1_treasure = make_treasure_token(&mut sc.state, P1);
+
+        evaluate_layers(&mut sc.state);
+
+        let has_green_tap_mana = |state: &GameState, id: ObjectId| {
+            state.objects.get(&id).unwrap().abilities.iter().any(|a| {
+                a.kind == AbilityKind::Activated
+                    && matches!(a.cost, Some(AbilityCost::Tap))
+                    && matches!(
+                        &*a.effect,
+                        Effect::Mana {
+                            produced: ManaProduction::Fixed { colors, .. },
+                            ..
+                        } if colors.contains(&ManaColor::Green)
+                    )
+            })
+        };
+
+        assert!(
+            has_green_tap_mana(&sc.state, p0_treasure),
+            "a non-creature Treasure token you control must gain Jaheira's \"{{T}}: Add {{G}}\" ability"
+        );
+        assert!(
+            !has_green_tap_mana(&sc.state, p0_creature),
+            "a non-token creature must NOT gain the token-scoped grant"
+        );
+        assert!(
+            !has_green_tap_mana(&sc.state, p1_treasure),
+            "an opponent's token must NOT gain the controller-scoped grant"
+        );
+    }
+
     /// CR 608.2c: The player-control superlative gate evaluates at
     /// resolution across all creatures on the battlefield.
     #[test]
     fn you_control_creature_tied_for_greatest_toughness_condition_evaluates_table_wide() {
-        use crate::parser::oracle_nom::condition::parse_inner_condition;
-
         let (rest, condition) = parse_inner_condition(
             "you control the creature with the greatest toughness or tied for the greatest toughness.",
         )

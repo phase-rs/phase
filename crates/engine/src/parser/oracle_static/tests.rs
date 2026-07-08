@@ -9298,6 +9298,96 @@ fn static_enchanted_land_has_quoted_ability() {
     }
 }
 
+// CR 111.1 + CR 111.6 + CR 109.5: Jaheira, Friend of the Forest — "Tokens you
+// control have "{T}: Add {G}."" The affected filter must span ANY token permanent
+// (token-ness is an object property, CR 111.1, and a token can be any card type,
+// CR 111.6), not just creature tokens. Reverting the token-descriptor arm regresses
+// `affected` to `Typed(["Creature", {Subtype: "Token"}], You)`, which excludes
+// Treasure/Clue/Food tokens — this assertion flips.
+#[test]
+fn tokens_you_control_grant_spans_all_token_permanents() {
+    let def = parse_static_line("Tokens you control have \"{T}: Add {G}.\"").unwrap();
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You)
+        )),
+        "\"Tokens you control\" must match any token permanent, not just creature tokens: {:?}",
+        def.affected
+    );
+    let grant = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted \"{T}: Add {G}\" mana ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert_eq!(definition.kind, AbilityKind::Activated);
+    assert!(
+        matches!(&*definition.effect, Effect::Mana { .. }),
+        "granted ability must be a mana ability: {:?}",
+        definition.effect
+    );
+}
+
+// CR 111.6: "Creature tokens you control" reaches the same token-descriptor arm
+// via the optional "creature " prefix, narrowing to creature tokens only.
+#[test]
+fn creature_tokens_you_control_narrows_to_creature_token_property() {
+    let def = parse_static_line("Creature tokens you control have \"{T}: Add {G}.\"").unwrap();
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You)
+        )),
+        "\"Creature tokens you control\" must narrow to creature tokens: {:?}",
+        def.affected
+    );
+}
+
+// CR 111.1 + CR 109.5: the sibling `parse_continuous_subject_filter` seam (reached when a
+// timing prefix like "During your turn," is stripped before the subject is parsed) must
+// resolve "Tokens you control" through the same token-property arm, not the capitalized
+// subtype fallback. Reverting the `typed_you_control_descriptor_filter` arm regresses this
+// affected filter to creature tokens only.
+#[test]
+fn during_your_turn_tokens_you_control_uses_token_property_seam() {
+    let def = parse_static_line("During your turn, Tokens you control get +1/+1.").unwrap();
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You)
+        )),
+        "the parse_continuous_subject_filter seam must also span all token permanents: {:?}",
+        def.affected
+    );
+}
+
+// Negative over-fire guard: a non-token subject must NOT acquire `FilterProp::Token`.
+// "Artifacts you control" resolves to the core Artifact type, never the token arm.
+#[test]
+fn non_token_you_control_subject_has_no_token_property() {
+    let def = parse_static_line("Artifacts you control have \"{T}: Add {G}.\"").unwrap();
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected a Typed affected filter, got {:?}", def.affected);
+    };
+    assert!(
+        !tf.properties.contains(&FilterProp::Token),
+        "a non-token subject must not gain FilterProp::Token: {tf:?}"
+    );
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "\"Artifacts you control\" must resolve to the Artifact core type: {tf:?}"
+    );
+}
+
 #[test]
 fn quoted_activated_restriction_grants_ability_not_static_mode() {
     let def =
