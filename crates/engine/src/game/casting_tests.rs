@@ -42821,3 +42821,106 @@ fn unsupported_leading_if_predicate_still_drops_option() {
         "an unrecognized leading-if predicate must still drop the alt-cost option, got {option:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Land Grant reveal-hand alternative cost (GitHub #1098; CR 118.9 + CR 701.20a
+// + CR 601.3). "If you have no land cards in hand, you may reveal your hand
+// rather than pay this spell's mana cost." Drives the same real cast-cost
+// pipeline as the Ravenous Trap block above
+// (`payable_spell_alternative_cost_details` → `restrictions::evaluate_condition`)
+// but exercises the `EffectCost(RevealHand)` cost arm and the
+// `Not(ZoneCoreTypeCardCountAtLeast)` hand-composition gate instead of the
+// mana-alt-cost / zone-change-count gate — an untested combination distinct
+// from the Ravenous Trap precedent.
+// ---------------------------------------------------------------------------
+
+/// Build a Land Grant in `player`'s hand carrying the REAL parsed alt-cost
+/// casting option (binds directly to parser output, not a hand-rolled
+/// condition, matching the Ravenous Trap precedent above).
+fn create_land_grant_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let option = crate::parser::oracle_casting::parse_spell_casting_option_line(
+        "If you have no land cards in hand, you may reveal your hand rather than pay this spell's mana cost.",
+        "Land Grant",
+    )
+    .expect("Land Grant alt-cost line must parse");
+
+    let obj_id = create_object(
+        state,
+        CardId(9501),
+        player,
+        "Land Grant".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&obj_id).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 1,
+    };
+    Arc::make_mut(&mut obj.abilities).clear();
+    Arc::make_mut(&mut obj.abilities).push(parse_effect_chain(
+        "Search your library for a Forest card, reveal that card, put it into your hand, then shuffle.",
+        AbilityKind::Spell,
+    ));
+    obj.casting_options.push(option);
+    obj_id
+}
+
+fn push_land_card_to_hand(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
+    let obj_id = create_object(state, CardId(9_502), player, name.to_string(), Zone::Hand);
+    let obj = state.objects.get_mut(&obj_id).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    obj_id
+}
+
+fn land_grant_offered_cost(
+    state: &GameState,
+    player: PlayerId,
+    land_grant: ObjectId,
+) -> Option<AbilityCost> {
+    crate::game::casting_costs::payable_spell_alternative_cost_details(state, player, land_grant)
+        .map(|details| details.cost)
+}
+
+/// LG-a: no land cards in hand (Land Grant is the only card in hand) → the
+/// gate is met, so the reveal-hand alt-cost is offered and the spell is
+/// castable with zero mana available.
+#[test]
+fn land_grant_alt_cost_offered_with_no_lands_in_hand() {
+    let mut state = setup_game_at_main_phase();
+    let land_grant = create_land_grant_in_hand(&mut state, PlayerId(0));
+
+    assert!(
+        matches!(
+            land_grant_offered_cost(&state, PlayerId(0), land_grant),
+            Some(AbilityCost::EffectCost { ref effect })
+                if matches!(**effect, Effect::RevealHand { .. })
+        ),
+        "no land cards in hand meets the gate; reveal-hand alt-cost must be offered"
+    );
+    assert!(
+        can_cast_object_now(&state, PlayerId(0), land_grant),
+        "with the reveal-hand alt-cost payable, Land Grant must be castable with no mana"
+    );
+}
+
+/// LG-b: a land card in hand alongside Land Grant → the gate is unmet, so the
+/// alt-cost is NOT offered and (with no mana sources available) the spell is
+/// not castable. This is the hostile fixture that would pass if the parsed
+/// condition were inverted or the gate silently ignored the hand contents.
+#[test]
+fn land_grant_alt_cost_not_offered_with_land_in_hand() {
+    let mut state = setup_game_at_main_phase();
+    let land_grant = create_land_grant_in_hand(&mut state, PlayerId(0));
+    push_land_card_to_hand(&mut state, PlayerId(0), "Forest");
+
+    assert_eq!(
+        land_grant_offered_cost(&state, PlayerId(0), land_grant),
+        None,
+        "a land card in hand fails the no-lands gate; alt-cost must not be offered"
+    );
+    assert!(
+        !can_cast_object_now(&state, PlayerId(0), land_grant),
+        "without the alt-cost and with no mana available, Land Grant must not be castable"
+    );
+}
