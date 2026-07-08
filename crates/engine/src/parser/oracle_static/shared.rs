@@ -1222,6 +1222,21 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         if !defs.is_empty() {
             return defs;
         }
+        let effect_lower = split.effect_text.to_lowercase();
+        if let Some(mut defs) =
+            parse_compound_subject_keyword_static(&split.effect_text, &effect_lower)
+        {
+            let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
+                    text: split.condition_text.clone(),
+                },
+            );
+            for def in &mut defs {
+                def.condition = Some(condition.clone());
+                def.description = Some(stripped.to_string());
+            }
+            return defs;
+        }
     }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and

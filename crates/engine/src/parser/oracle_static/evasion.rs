@@ -352,58 +352,115 @@ pub(crate) fn parse_compound_subject_rule_static(
     )
 }
 
-/// CR 702.16 + CR 609.6: Compound-subject keyword-grant statics of the form
-/// `"You and creatures you control have <keyword>"` — a single keyword grant
-/// bound to a player plus an object subset. A single `StaticDefinition` cannot
-/// carry both a player scope and an object scope, so decompose into two:
+fn parse_compound_player_keyword_predicate(input: &str) -> OracleResult<'_, ()> {
+    let (after_verb, _) = alt((
+        tag::<_, _, OracleError<'_>>("have "),
+        tag("has "),
+        tag("gain "),
+        tag("gains "),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("hexproof"),
+        tag("shroud"),
+        recognize((tag("protection from "), rest)),
+    ))
+    .parse(after_verb)?;
+    Ok((rest, ()))
+}
+
+fn player_static_mode_for_granted_keyword(keyword: &Keyword) -> Option<StaticMode> {
+    match keyword {
+        Keyword::Protection(target) => Some(StaticMode::PlayerProtection(target.clone())),
+        Keyword::Hexproof => Some(StaticMode::Hexproof),
+        Keyword::Shroud => Some(StaticMode::Shroud),
+        _ => None,
+    }
+}
+
+fn compound_keyword_body_with_condition<'a>(
+    text: &'a str,
+    lower: &'a str,
+) -> Option<(&'a str, &'a str, StaticCondition)> {
+    type VE<'a> = OracleError<'a>;
+
+    if let Ok((body_lower, _)) = tag::<_, _, VE<'_>>("during your turn, ").parse(lower) {
+        let body = &text[text.len() - body_lower.len()..];
+        return Some((body, body_lower, StaticCondition::DuringYourTurn));
+    }
+
+    if let Ok((body_lower, _)) = tag::<_, _, VE<'_>>("during turns other than yours, ").parse(lower)
+    {
+        let body = &text[text.len() - body_lower.len()..];
+        return Some((
+            body,
+            body_lower,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+        ));
+    }
+
+    None
+}
+
+/// Compound-subject keyword-grant statics of the form `"You and <object
+/// subject> have <player-applicable keyword>"` — a single keyword grant bound to
+/// a player plus an object subset. A single `StaticDefinition` cannot carry both
+/// a player scope and an object scope, so decompose into two:
 ///   - an object-half `Continuous` def whose `affected` is the object subset;
-///   - a player-half `PlayerProtection` def whose `affected` is the controller.
+///   - a player-half def whose `affected` is the controller.
 ///
-/// Restricted to `Protection(_)` grants — the only player-applicable keyword
-/// with a runtime-implemented `PlayerProtection` mode. Returns `None` for any
-/// other granted keyword (a player cannot meaningfully "have flying").
+/// Restricted to player-applicable keyword grants with implemented player
+/// statics: Protection, Hexproof, and Shroud. Returns `None` for other granted
+/// keywords because a player cannot meaningfully "have flying".
 pub(crate) fn parse_compound_subject_keyword_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
 
+    if let Some((body, body_lower, condition)) = compound_keyword_body_with_condition(text, lower) {
+        let mut defs = parse_compound_subject_keyword_static(body, body_lower)?;
+        for def in &mut defs {
+            def.condition = Some(condition.clone());
+            def.description = Some(text.to_string());
+        }
+        return Some(defs);
+    }
+
     // Subject: "you and <object subject phrase> ".
     let (after_you, _) = tag::<_, _, VE<'_>>("you and ").parse(lower).ok()?;
-    let (predicate_lower, _) = alt((
-        tag::<_, _, VE<'_>>("creatures you control "),
-        tag("other creatures you control "),
-        tag("permanents you control "),
-    ))
-    .parse(after_you)
-    .ok()?;
+    let (object_subject_lower, (), _) =
+        nom_primitives::scan_preceded(after_you, parse_compound_player_keyword_predicate)?;
 
     // Map the matched lowercase spans back onto the original-case text so the
     // object-subject filter and predicate retain their original casing.
-    let object_subject = text[text.len() - after_you.len()..text.len() - predicate_lower.len()]
-        .trim()
-        .trim_end_matches(' ');
-    let predicate = text[text.len() - predicate_lower.len()..].trim();
+    let object_subject_start = text.len() - after_you.len();
+    let predicate_start = object_subject_start + object_subject_lower.len();
+    let object_subject = text[object_subject_start..predicate_start].trim();
+    let predicate = text[predicate_start..].trim();
 
     let affected = parse_rule_static_subject_filter(object_subject)?;
 
     // Object-half: delegate the predicate to the shared keyword-grant builder.
     let object_def = parse_continuous_gets_has(predicate, affected, text)?;
 
-    // Extract the granted protection target — only `Protection(_)` grants get a
-    // player-half. Any other keyword (or no keyword) → not this pattern.
-    let protection_target = object_def.modifications.iter().find_map(|m| match m {
-        ContinuousModification::AddKeyword {
-            keyword: crate::types::keywords::Keyword::Protection(pt),
-        } => Some(pt.clone()),
+    // Extract the granted player-applicable keyword. Any other keyword (or no
+    // keyword) means this is not a player+object compound static.
+    let player_mode = object_def.modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddKeyword { keyword } => {
+            player_static_mode_for_granted_keyword(keyword)
+        }
         _ => None,
     })?;
 
-    let player_def = StaticDefinition::new(StaticMode::PlayerProtection(protection_target))
+    let mut player_def = StaticDefinition::new(player_mode)
         .affected(TargetFilter::Typed(
             TypedFilter::default().controller(ControllerRef::You),
         ))
         .description(text.to_string());
+    player_def.condition = object_def.condition.clone();
 
     Some(vec![object_def, player_def])
 }
