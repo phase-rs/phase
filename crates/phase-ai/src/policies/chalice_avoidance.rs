@@ -139,7 +139,7 @@ fn spell_can_be_countered(
             // CR 113.6g: this policy scores the cast before the card moves to
             // the stack, so predict the spell's own future stack-functioning
             // self-prohibition instead of asking whether it functions in hand.
-            && !obj.static_definitions.iter_all().any(|sd| {
+            && !obj.static_definitions.iter_unchecked().any(|sd| {
                 sd.mode == StaticMode::CantBeCountered
                     && is_self_referential_prohibition(sd)
                     && (sd.active_zones.is_empty() || sd.active_zones.contains(&Zone::Stack))
