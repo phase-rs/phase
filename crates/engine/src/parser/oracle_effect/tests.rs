@@ -2224,6 +2224,152 @@ fn compound_verb_carry_forward_all_prefix() {
     }
 }
 
+/// CR 611.3 + CR 105.2 + CR 305.7: Nightcreep — compound-quantified dual-subject
+/// become. "all creatures become black and all lands become Swamps" must emit
+/// two `static_abilities` (creature color-set + land type replacement), not a
+/// single static that drops the land conjunct into `description`.
+#[test]
+fn compound_all_subjects_become_nightcreep_dual_predicate() {
+    use crate::types::ability::BasicLandType;
+    use crate::types::mana::ManaColor;
+
+    let clause = parse_effect_clause(
+        "all creatures become black and all lands become Swamps",
+        &mut ParseContext::default(),
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = clause.effect
+    else {
+        panic!("expected GenericEffect, got {:?}", clause.effect);
+    };
+    assert_eq!(
+        static_abilities.len(),
+        2,
+        "Nightcreep needs one static per conjunct: {static_abilities:?}"
+    );
+    assert!(
+        static_abilities.iter().any(|def| {
+            matches!(
+                &def.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+            ) && def
+                .modifications
+                .contains(&ContinuousModification::SetColor {
+                    colors: vec![ManaColor::Black],
+                })
+        }),
+        "creature conjunct must SetColor(Black): {static_abilities:?}"
+    );
+    assert!(
+        static_abilities.iter().any(|def| {
+            matches!(
+                &def.affected,
+                Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Land)
+            ) && def
+                .modifications
+                .contains(&ContinuousModification::SetBasicLandType {
+                    land_type: BasicLandType::Swamp,
+                })
+        }),
+        "land conjunct must SetBasicLandType(Swamp): {static_abilities:?}"
+    );
+    assert!(
+        !static_abilities.iter().any(|def| {
+            def.description
+                .as_deref()
+                .is_some_and(|description| description.contains("and all lands"))
+        }),
+        "second conjunct must not be dropped into description: {static_abilities:?}"
+    );
+}
+
+/// The compound splitter accepts both `become` and `becomes` conjuncts; the
+/// validation gate must not reject the third-person form after split.
+#[test]
+fn compound_all_subjects_become_accepts_becomes_conjunct() {
+    use crate::types::ability::BasicLandType;
+    use crate::types::mana::ManaColor;
+
+    let clause = parse_effect_clause(
+        "all creatures becomes black and all lands become Swamps",
+        &mut ParseContext::default(),
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = clause.effect
+    else {
+        panic!("expected GenericEffect, got {:?}", clause.effect);
+    };
+    assert_eq!(
+        static_abilities.len(),
+        2,
+        "becomes/become mix must still emit two statics: {static_abilities:?}"
+    );
+    assert!(static_abilities.iter().any(|def| {
+        matches!(
+            &def.affected,
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters.contains(&TypeFilter::Creature)
+        ) && def
+            .modifications
+            .contains(&ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black],
+            })
+    }));
+    assert!(static_abilities.iter().any(|def| {
+        matches!(
+            &def.affected,
+            Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Land)
+        ) && def
+            .modifications
+            .contains(&ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Swamp,
+            })
+    }));
+}
+
+/// Single-subject become must still route through the ordinary become path.
+#[test]
+fn compound_all_subjects_become_single_subject_falls_through() {
+    use crate::types::mana::ManaColor;
+
+    let clause = parse_effect_clause("all creatures become black", &mut ParseContext::default());
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = clause.effect
+    else {
+        panic!("expected GenericEffect, got {:?}", clause.effect);
+    };
+    assert_eq!(static_abilities.len(), 1, "single subject is one static");
+    assert!(static_abilities[0]
+        .modifications
+        .contains(&ContinuousModification::SetColor {
+            colors: vec![ManaColor::Black],
+        }));
+}
+
+/// Shared-predicate compound ("all X and all Y become Z") is not this handler.
+#[test]
+fn compound_all_subjects_become_declines_shared_predicate() {
+    let clause = parse_effect_clause(
+        "all creatures and all lands become Swamps",
+        &mut ParseContext::default(),
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = clause.effect
+    else {
+        return;
+    };
+    assert_ne!(
+        static_abilities.len(),
+        2,
+        "shared-predicate compound must not split into dual-become statics: {static_abilities:?}"
+    );
+}
+
 /// CR 608.2c + CR 701.8a: Verb carry-forward for self-reference "~" in compound
 /// actions. "destroy that creature and ~" → sub-clause becomes Destroy { SelfRef }.
 #[test]

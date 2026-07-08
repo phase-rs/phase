@@ -26,8 +26,8 @@ use crate::types::ability::{
     AbilityCondition, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
     CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
     DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter, ZoneRef,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -94,6 +94,11 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // wins over the fixed-N "its power is N or greater" combinator inside
         // that group (which only matches numeric thresholds).
         parse_subject_property_superlative_comparison,
+        // CR 608.2c: Effect-resolution gates like Abzan Beastmaster's "if you
+        // control the creature with the greatest toughness or tied for the
+        // greatest toughness" are player-control predicates over an implicit
+        // creature aggregate population.
+        parse_you_control_superlative_object_condition,
         // CR 208.1 + CR 603.4 + CR 603.10a: "it had power greater than ~'s power"
         // — triggering object's LKI stat vs the source's stat (Drizzt Do'Urden).
         // Placed before `parse_source_state_conditions` so the "it had <stat>"
@@ -2596,7 +2601,8 @@ pub(crate) fn parse_superlative_comparator_phrase(
     .parse(input)
 }
 
-/// Parse the optional "or is tied for [greatest|lowest] [property]" tail.
+/// Parse the optional "or is tied for [greatest|lowest] [property]" /
+/// "or tied for the [greatest|lowest] [property]" tail.
 /// Presence relaxes strict GT/LT to GE/LE. The matched superlative and
 /// property must agree with the leading clause. The shared trailing
 /// "among <filter>" is parsed by the caller.
@@ -2613,9 +2619,14 @@ fn parse_optional_tied_for_tail(
         AggregateFunction::Sum => Comparator::GT,
     };
     // The leading clause may end here (no "or is tied for" tail) — return GT/LT.
-    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or is tied for ").parse(input) else {
+    let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" or is tied for "),
+        tag(" or tied for "),
+    ))
+    .parse(input) else {
         return Ok((input, strict_comparator));
     };
+    let (rest, _) = opt(tag("the ")).parse(rest)?;
     // Match the same superlative as the leading clause.
     let (rest, tied_aggregate) = parse_superlative_adjective(rest)?;
     if tied_aggregate != aggregate {
@@ -2640,6 +2651,78 @@ fn parse_optional_tied_for_tail(
         other => other,
     };
     Ok((rest, relaxed))
+}
+
+/// CR 608.2c + CR 109.4: Parse a player-control superlative gate such as
+/// "you control the creature with the greatest toughness or tied for the
+/// greatest toughness" or "you control a creature with the greatest power
+/// among creatures on the battlefield". This is not source-relative: the
+/// player controls at least one creature whose P/T is tied for the table-wide
+/// maximum/minimum.
+fn parse_you_control_superlative_object_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, _) = alt((tag("the "), tag("a "))).parse(rest)?;
+    let (rest, object_filter) = value(
+        TargetFilter::Typed(TypedFilter::creature()),
+        tag("creature"),
+    )
+    .parse(rest)?;
+    let (rest, _) = tag(" with the ").parse(rest)?;
+    let (rest, aggregate) = parse_superlative_adjective(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, property) = parse_property_keyword(rest)?;
+    let (rest, _) = parse_optional_tied_for_tail(rest, aggregate, property)?;
+    let comparator = match aggregate {
+        AggregateFunction::Max => Comparator::GE,
+        AggregateFunction::Min => Comparator::LE,
+        AggregateFunction::Sum => return Err(oracle_err(rest)),
+    };
+    let (rest, population_filter) =
+        if let Ok((among_rest, _)) = tag::<_, _, OracleError<'_>>(" among ").parse(rest) {
+            let (filter, remainder) = parse_type_phrase(among_rest);
+            if matches!(filter, TargetFilter::Any) {
+                return Err(oracle_err(remainder));
+            }
+            let consumed = among_rest.len() - remainder.len();
+            (&among_rest[consumed..], filter)
+        } else {
+            (rest, object_filter.clone())
+        };
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+
+    let stat = match property {
+        ObjectProperty::Power => PtStat::Power,
+        ObjectProperty::Toughness => PtStat::Toughness,
+        ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
+            return Err(oracle_err(rest));
+        }
+    };
+    let controlled_filter = add_filter_property(
+        inject_controller_you(object_filter.clone()),
+        FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Current,
+            comparator,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: aggregate,
+                    property,
+                    filter: population_filter,
+                },
+            },
+        },
+    );
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ObjectCount {
+                filter: controlled_filter,
+            },
+            1,
+        ),
+    ))
 }
 
 /// Build the `StaticCondition::QuantityComparison` for a superlative-comparison
@@ -16128,6 +16211,124 @@ mod tests {
                 assert_eq!(comparator, Comparator::GE);
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: Abzan Beastmaster's resolve-time gate is an existential
+    /// controlled-creature check against the table-wide greatest toughness.
+    #[test]
+    fn parse_inner_condition_you_control_creature_tied_for_greatest_toughness() {
+        let (rest, c) = parse_inner_condition(
+            "you control the creature with the greatest toughness or tied for the greatest toughness.",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                let has_table_wide_toughness_max = tf.properties.iter().any(|prop| {
+                    let FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
+                        value:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::Aggregate {
+                                        function: AggregateFunction::Max,
+                                        property: ObjectProperty::Toughness,
+                                        filter: TargetFilter::Typed(population),
+                                    },
+                            },
+                    } = prop
+                    else {
+                        return false;
+                    };
+                    population.type_filters == vec![TypeFilter::Creature]
+                        && population.controller.is_none()
+                });
+                assert!(
+                    has_table_wide_toughness_max,
+                    "expected table-wide toughness max comparison, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected controlled creature ObjectCount gate, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: Primal Empathy / Eomer wording carries an explicit aggregate
+    /// population ("among creatures on the battlefield") rather than Abzan
+    /// Beastmaster's implicit creature population.
+    #[test]
+    fn parse_inner_condition_you_control_creature_with_greatest_power_among_battlefield() {
+        let (rest, c) = parse_inner_condition(
+            "you control a creature with the greatest power among creatures on the battlefield.",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                let has_battlefield_power_max = tf.properties.iter().any(|prop| {
+                    let FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
+                        value:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::Aggregate {
+                                        function: AggregateFunction::Max,
+                                        property: ObjectProperty::Power,
+                                        filter: TargetFilter::Typed(population),
+                                    },
+                            },
+                    } = prop
+                    else {
+                        return false;
+                    };
+                    population.type_filters == vec![TypeFilter::Creature]
+                        && population.properties.iter().any(|prop| {
+                            matches!(
+                                prop,
+                                FilterProp::InZone {
+                                    zone: Zone::Battlefield
+                                }
+                            )
+                        })
+                });
+                assert!(
+                    has_battlefield_power_max,
+                    "expected battlefield power max comparison, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected controlled creature ObjectCount gate, got {other:?}"),
         }
     }
 

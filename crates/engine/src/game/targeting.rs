@@ -170,11 +170,11 @@ fn find_legal_targets_with_context(
 
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) || is_any_other_target {
-        add_players(state, &mut targets, source_id);
+        add_players(state, &mut targets, source_id, source_controller);
     }
 
     if let TargetFilter::SpecificPlayer { id } = filter {
-        add_specific_player(state, &mut targets, *id, source_id);
+        add_specific_player(state, &mut targets, *id, source_id, source_controller);
         return targets;
     }
 
@@ -204,7 +204,10 @@ fn find_legal_targets_with_context(
                 // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof,
                 // shroud, and protection exclude illegal player targets.
                 if super::static_abilities::player_cannot_be_targeted_by(
-                    state, player.id, source_id,
+                    state,
+                    player.id,
+                    source_id,
+                    source_controller,
                 ) {
                     continue;
                 }
@@ -1850,7 +1853,12 @@ fn filter_targets_stack_abilities(filter: &TargetFilter) -> bool {
     }
 }
 
-fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: ObjectId) {
+fn add_players(
+    state: &GameState,
+    targets: &mut Vec<TargetRef>,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) {
     // Player-phasing exclusion: a phased-out player is treated as though they
     // don't exist for targeting purposes (mirrors CR 702.26b for permanents,
     // applied to players via card Oracle text like "you phase out").
@@ -1867,7 +1875,12 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: Objec
         }
         // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof, shroud,
         // and protection exclude illegal player targets.
-        if super::static_abilities::player_cannot_be_targeted_by(state, player.id, source_id) {
+        if super::static_abilities::player_cannot_be_targeted_by(
+            state,
+            player.id,
+            source_id,
+            source_controller,
+        ) {
             continue;
         }
         targets.push(TargetRef::Player(player.id));
@@ -1879,6 +1892,7 @@ fn add_specific_player(
     targets: &mut Vec<TargetRef>,
     player_id: PlayerId,
     source_id: ObjectId,
+    source_controller: PlayerId,
 ) {
     let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
         return;
@@ -1886,7 +1900,12 @@ fn add_specific_player(
     if player.is_phased_out() || player.is_eliminated {
         return;
     }
-    if super::static_abilities::player_cannot_be_targeted_by(state, player.id, source_id) {
+    if super::static_abilities::player_cannot_be_targeted_by(
+        state,
+        player.id,
+        source_id,
+        source_controller,
+    ) {
         return;
     }
     targets.push(TargetRef::Player(player.id));

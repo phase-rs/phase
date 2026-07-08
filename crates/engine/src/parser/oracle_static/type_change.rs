@@ -2264,20 +2264,11 @@ pub(crate) fn parse_compound_all_subjects_land_type_change(
 /// distinguishes this compound animation subject from an incidental " and "
 /// inside a lone subject phrase.
 fn parse_compound_all_subjects_filter(subject: &str) -> Option<TargetFilter> {
-    let lower = subject.to_lowercase();
-    let mut filters: Vec<TargetFilter> = Vec::new();
-    let mut remaining: &str = lower.as_str();
-    // Each " and all " seam ends one conjunct and drops the next conjunct's
-    // `all ` quantifier; the shared parser strips a leading `all ` itself, so the
-    // leading conjunct's own quantifier is harmless.
-    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
-        filters.push(parse_compound_subject_conjunct(conjunct.trim())?);
-        remaining = rest;
-    }
-    filters.push(parse_compound_subject_conjunct(remaining.trim())?);
-    if filters.len() < 2 {
-        return None;
-    }
+    let conjuncts = super::static_helpers::peel_compound_all_quantified_conjuncts(subject)?;
+    let filters: Vec<TargetFilter> = conjuncts
+        .iter()
+        .map(|conjunct| parse_compound_subject_conjunct(conjunct.trim()))
+        .collect::<Option<_>>()?;
     Some(TargetFilter::Or { filters })
 }
 
@@ -2297,17 +2288,11 @@ fn parse_compound_subject_conjunct(conjunct: &str) -> Option<TargetFilter> {
 /// Limb's "Forests and Saprolings") return `None` so animation handlers keep
 /// ownership.
 fn parse_compound_all_subjects_land_filter(subject: &str) -> Option<TargetFilter> {
-    let lower = subject.to_lowercase();
-    let mut filters: Vec<TargetFilter> = Vec::new();
-    let mut remaining: &str = lower.as_str();
-    while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and all ") {
-        filters.push(parse_land_type_change_subject(conjunct.trim())?);
-        remaining = rest;
-    }
-    filters.push(parse_land_type_change_subject(remaining.trim())?);
-    if filters.len() < 2 {
-        return None;
-    }
+    let conjuncts = super::static_helpers::peel_compound_all_quantified_conjuncts(subject)?;
+    let filters: Vec<TargetFilter> = conjuncts
+        .iter()
+        .map(|conjunct| parse_land_type_change_subject(conjunct.trim()))
+        .collect::<Option<_>>()?;
     Some(TargetFilter::Or { filters })
 }
 

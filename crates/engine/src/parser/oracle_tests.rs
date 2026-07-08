@@ -1038,11 +1038,11 @@ fn compound_target_player_continuations_share_one_target() {
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AggregateFunction, Comparator, ContinuousModification,
     ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
-    ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition,
-    TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec,
+    ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind,
+    StaticCondition, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -16207,6 +16207,259 @@ fn ability_word_trigger_preserves_fixed_land_subtype_intervening_if() {
         }
         other => panic!("expected Town ObjectCount trigger condition, got {other:?}"),
     }
+}
+
+/// CR 603.4 + CR 608.2c: Abzan Beastmaster's "if you control the creature with
+/// the greatest toughness or tied for the greatest toughness" is a resolve-time
+/// gate on the draw effect, not an intervening-if trigger condition.
+#[test]
+fn abzan_beastmaster_draw_gate_stays_on_resolving_effect() {
+    let result = parse(
+        "At the beginning of your upkeep, draw a card if you control the creature with the greatest toughness or tied for the greatest toughness.",
+        "Abzan Beastmaster",
+        &[],
+        &["Creature"],
+        &["Dog", "Shaman"],
+    );
+
+    assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+    let trigger = &result.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert!(
+        trigger.condition.is_none(),
+        "resolve-time gate must not become an intervening-if trigger condition: {:?}",
+        trigger.condition
+    );
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("upkeep trigger should have an execute body");
+    let Effect::Draw { count, target, .. } = &*execute.effect else {
+        panic!("expected gated Draw effect, got {:?}", execute.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert!(matches!(target, TargetFilter::Controller));
+    assert_abzan_greatest_toughness_gate(
+        execute
+            .condition
+            .as_ref()
+            .expect("Draw effect must carry the greatest-toughness gate"),
+    );
+}
+
+fn assert_abzan_greatest_toughness_gate(condition: &AbilityCondition) {
+    let AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    } = condition
+    else {
+        panic!("expected ObjectCount >= 1 condition, got {condition:?}");
+    };
+    let TargetFilter::Typed(controlled) = filter else {
+        panic!("expected typed controlled-creature filter, got {filter:?}");
+    };
+    assert_eq!(controlled.controller, Some(ControllerRef::You));
+    assert_eq!(controlled.type_filters, vec![TypeFilter::Creature]);
+    let has_table_wide_toughness_max = controlled.properties.iter().any(|prop| {
+        let FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::Aggregate {
+                            function: AggregateFunction::Max,
+                            property: ObjectProperty::Toughness,
+                            filter: TargetFilter::Typed(population),
+                        },
+                },
+        } = prop
+        else {
+            return false;
+        };
+        population.type_filters == vec![TypeFilter::Creature] && population.controller.is_none()
+    });
+    assert!(
+        has_table_wide_toughness_max,
+        "expected table-wide toughness max comparison, got {:?}",
+        controlled.properties
+    );
+}
+
+/// CR 608.2c: Primal Empathy's suffix-if gate uses the explicit "among
+/// creatures on the battlefield" aggregate population, and its Otherwise
+/// sentence must attach as the draw effect's else branch.
+#[test]
+fn primal_empathy_suffix_gate_attaches_otherwise_branch() {
+    let result = parse(
+        "At the beginning of your upkeep, draw a card if you control a creature with the greatest power among creatures on the battlefield. Otherwise, put a +1/+1 counter on a creature you control.",
+        "Primal Empathy",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "Primal Empathy must parse with zero Unimplemented effects: {result:#?}"
+    );
+    assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+    let trigger = &result.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert!(
+        trigger.condition.is_none(),
+        "suffix-if gate must stay on the resolving Draw effect: {:?}",
+        trigger.condition
+    );
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("upkeep trigger should have an execute body");
+    let Effect::Draw { count, target, .. } = &*execute.effect else {
+        panic!("expected gated Draw effect, got {:?}", execute.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert!(matches!(target, TargetFilter::Controller));
+    assert_controlled_creature_greatest_power_ability_gate(
+        execute
+            .condition
+            .as_ref()
+            .expect("Draw effect must carry the greatest-power gate"),
+    );
+
+    let otherwise = execute
+        .else_ability
+        .as_ref()
+        .expect("Otherwise branch must attach to the gated Draw effect");
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target,
+    } = &*otherwise.effect
+    else {
+        panic!(
+            "expected Otherwise PutCounter effect, got {:?}",
+            otherwise.effect
+        );
+    };
+    assert_eq!(*counter_type, CounterType::Plus1Plus1);
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    let TargetFilter::Typed(target) = target else {
+        panic!("expected controlled creature counter target, got {target:?}");
+    };
+    assert_eq!(target.controller, Some(ControllerRef::You));
+    assert_eq!(target.type_filters, vec![TypeFilter::Creature]);
+}
+
+/// CR 603.4: Eomer of the Riddermark uses the same greatest-power gate as an
+/// intervening-if attack trigger condition, not a swallowed Condition_If.
+#[test]
+fn eomer_of_the_riddermark_attack_gate_parses_as_trigger_condition() {
+    let result = parse(
+        "Haste\nWhenever \u{00c9}omer attacks, if you control a creature with the greatest power among creatures on the battlefield, create a 1/1 white Human Soldier creature token.",
+        "\u{00c9}omer of the Riddermark",
+        &[Keyword::Haste],
+        &["Creature"],
+        &["Human", "Knight"],
+    );
+
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "Eomer must parse with zero Unimplemented effects: {result:#?}"
+    );
+    assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+    let trigger = &result.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Attacks);
+    assert_controlled_creature_greatest_power_trigger_gate(
+        trigger
+            .condition
+            .as_ref()
+            .expect("attack trigger must carry the greatest-power gate"),
+    );
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("attack trigger should have an execute body");
+    assert!(
+        matches!(&*execute.effect, Effect::Token { .. }),
+        "expected token creation effect, got {:?}",
+        execute.effect
+    );
+}
+
+fn assert_controlled_creature_greatest_power_ability_gate(condition: &AbilityCondition) {
+    let AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    } = condition
+    else {
+        panic!("expected ObjectCount >= 1 condition, got {condition:?}");
+    };
+    assert_controlled_creature_greatest_power_filter(filter);
+}
+
+fn assert_controlled_creature_greatest_power_trigger_gate(condition: &TriggerCondition) {
+    let TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    } = condition
+    else {
+        panic!("expected ObjectCount >= 1 trigger condition, got {condition:?}");
+    };
+    assert_controlled_creature_greatest_power_filter(filter);
+}
+
+fn assert_controlled_creature_greatest_power_filter(filter: &TargetFilter) {
+    let TargetFilter::Typed(controlled) = filter else {
+        panic!("expected typed controlled-creature filter, got {filter:?}");
+    };
+    assert_eq!(controlled.controller, Some(ControllerRef::You));
+    assert_eq!(controlled.type_filters, vec![TypeFilter::Creature]);
+    let has_battlefield_power_max = controlled.properties.iter().any(|prop| {
+        let FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::Aggregate {
+                            function: AggregateFunction::Max,
+                            property: ObjectProperty::Power,
+                            filter: TargetFilter::Typed(population),
+                        },
+                },
+        } = prop
+        else {
+            return false;
+        };
+        population.type_filters == vec![TypeFilter::Creature]
+            && population.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield
+                    }
+                )
+            })
+    });
+    assert!(
+        has_battlefield_power_max,
+        "expected battlefield power max comparison, got {:?}",
+        controlled.properties
+    );
 }
 
 #[test]

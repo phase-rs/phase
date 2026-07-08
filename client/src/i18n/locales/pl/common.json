@@ -115,6 +115,7 @@
     "recoveryDescription": "Jeśli karta zachowuje się nieprawidłowo, najpierw wyeksportuj stan. Zaawansowany panel debugowania jest dostępny, gdy musisz sprawdzić lub dostosować grę.",
     "copyState": "Kopiuj stan",
     "exportState": "Eksportuj stan",
+    "exportReplay": "Eksportuj powtórkę",
     "openAdvancedDebug": "Otwórz zaawansowane debugowanie",
     "sections": {
       "Flow": "Przebieg",
@@ -125,7 +126,10 @@
       "copied": "Skopiowano stan gry do schowka.",
       "copyFailed": "Nie można skopiować stanu gry.",
       "exported": "Wyeksportowano {{filename}}.",
-      "exportFailed": "Nie można wyeksportować stanu gry."
+      "exportFailed": "Nie można wyeksportować stanu gry.",
+      "replayExported": "Powtórka zapisana jako {{filename}}.",
+      "replayExportUnavailable": "Brak dostępnego nagrania powtórki dla tej rozgrywki.",
+      "replayExportFailed": "Nie udało się wyeksportować powtórki."
     },
     "prompt": {
       "starting": "Gra się rozpoczyna lub przywraca stan.",
