@@ -6142,6 +6142,87 @@ fn land_grant_reveal_hand_alternative_cost_option() {
     );
 }
 
+// CR 608.2c + CR 205.2b (GitHub #4710): Scourglass — "Destroy all permanents
+// except for artifacts and lands" must exclude both types (including artifact
+// creatures, per CR 205.2b's multi-type-object rule), not silently drop the
+// exception clause and destroy everything. Drives the full ability-line parse
+// (not just `parse_type_phrase` in isolation) so the interaction with the
+// trailing "Activate only during your upkeep." restriction sentence is
+// covered too.
+#[test]
+fn scourglass_destroy_all_excludes_artifacts_and_lands() {
+    let r = parse(
+        "{T}, Sacrifice this artifact: Destroy all permanents except for artifacts and lands. Activate only during your upkeep.",
+        "Scourglass",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DestroyAll { target, .. } = &*r.abilities[0].effect else {
+        panic!(
+            "expected DestroyAll effect, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert!(
+        r.abilities[0]
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::DuringYourUpkeep),
+        "the trailing restriction sentence must still parse: {:?}",
+        r.abilities[0].activation_restrictions
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
+// CR 608.2c (GitHub #4710 class): Elspeth Tirel's −5 loyalty ability —
+// "Destroy all other permanents except for lands and tokens" — exercises the
+// heterogeneous split: "lands" is a `TypeFilter::Non` entry, "tokens" is a
+// `FilterProp::NonToken` entry (tokens are a property, not a card type).
+#[test]
+fn elspeth_tirel_minus_five_excludes_lands_and_tokens() {
+    let r = parse(
+        "Destroy all other permanents except for lands and tokens.",
+        "Elspeth Tirel",
+        &[],
+        &["Planeswalker"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DestroyAll { target, .. } = &*r.abilities[0].effect else {
+        panic!(
+            "expected DestroyAll effect, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert!(typed
+        .type_filters
+        .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    assert!(typed.properties.contains(&FilterProp::NonToken));
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_trap_alternative_cost() {
     let r = parse(
