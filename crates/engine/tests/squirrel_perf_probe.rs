@@ -184,8 +184,8 @@ fn probe_declare_blockers() {
                 | StaticMode::BlockRestriction { .. }
                 | StaticMode::MustBlock
                 | StaticMode::MustBlockAttacker { .. }
-                | StaticMode::MustBeBlocked
-                | StaticMode::MustBeBlockedByAll
+                | StaticMode::MustBeBlocked { .. }
+                | StaticMode::MustBeBlockedByAll { .. }
                 | StaticMode::MaxBlockersEachCombat { .. }
                 | StaticMode::ExtraBlockers { .. }
                 | StaticMode::CanBlockShadow

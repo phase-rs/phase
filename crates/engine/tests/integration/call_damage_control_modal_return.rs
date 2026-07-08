@@ -15,8 +15,8 @@
 //!
 //! The fix distributes the header's shared `those <noun>` effect across every
 //! bare-target mode (parser: `distribute_shared_mode_effect`), so each chosen
-//! mode resolves an independent `Effect::Bounce` of a card of its card-type from
-//! the controller's graveyard to hand, parameterized solely by card-type.
+//! mode resolves an independent graveyard-to-hand `Effect::ChangeZone` of a card
+//! of its card-type, parameterized solely by card-type.
 //!
 //! CR 700.2 / CR 700.2a: modal spell; the controller chooses the mode(s) and an
 //! illegal mode (no legal target) can't be chosen.
@@ -90,8 +90,15 @@ fn call_damage_control_modes_have_no_unimplemented() {
     assert_eq!(abilities.len(), 4, "four modes expected");
     for (i, ability) in abilities.iter().enumerate() {
         assert!(
-            matches!(ability.effect.as_ref(), Effect::Bounce { .. }),
-            "mode {i} must be a Bounce (return to hand), got {:?}",
+            matches!(
+                ability.effect.as_ref(),
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    ..
+                }
+            ),
+            "mode {i} must be a graveyard-to-hand ChangeZone, got {:?}",
             ability.effect
         );
     }

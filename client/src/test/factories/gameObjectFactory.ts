@@ -11,9 +11,9 @@ const defaultCardType: CardType = {
 const mergeCardType = (overrides: Partial<CardType> = {}): CardType => ({
   ...defaultCardType,
   ...overrides,
-  supertypes: overrides.supertypes ?? defaultCardType.supertypes,
-  core_types: overrides.core_types ?? defaultCardType.core_types,
-  subtypes: overrides.subtypes ?? defaultCardType.subtypes,
+  supertypes: [...(overrides.supertypes ?? defaultCardType.supertypes)],
+  core_types: [...(overrides.core_types ?? defaultCardType.core_types)],
+  subtypes: [...(overrides.subtypes ?? defaultCardType.subtypes)],
 });
 
 export const gameObjectFactory = Factory.define<GameObject>(() => ({
@@ -35,7 +35,7 @@ export const gameObjectFactory = Factory.define<GameObject>(() => ({
   power: null,
   toughness: null,
   loyalty: null,
-  card_types: defaultCardType,
+  card_types: mergeCardType(),
   mana_cost: { type: "NoCost" },
   keywords: [],
   abilities: [],
@@ -54,10 +54,11 @@ export const gameObjectFactory = Factory.define<GameObject>(() => ({
 export const buildGameObject = (overrides: Partial<GameObject> = {}): GameObject => {
   const { card_types, ...otherOverrides } = overrides;
 
-  return gameObjectFactory.build({
+  return {
+    ...gameObjectFactory.build(),
     ...otherOverrides,
     ...(card_types ? { card_types: mergeCardType(card_types) } : {}),
-  });
+  };
 };
 
 export const buildGameObjectWithCoreTypes = (
@@ -70,5 +71,38 @@ export const buildGameObjectWithCoreTypes = (
       ...(overrides.card_types ?? {}),
       core_types: coreTypes,
     }),
+  });
+};
+
+export const buildObjectMap = (...objects: GameObject[]): Record<string, GameObject> => {
+  return Object.fromEntries(objects.map((object) => [String(object.id), object]));
+};
+
+export const buildCommanderGameObject = (
+  overrides: Partial<GameObject> = {},
+): GameObject => {
+  return buildGameObject({
+    id: 101,
+    card_id: 201,
+    owner: 0,
+    controller: 0,
+    zone: "Command",
+    name: "Mock Commander",
+    power: 3,
+    toughness: 3,
+    card_types: {
+      supertypes: ["Legendary"],
+      core_types: ["Creature"],
+      subtypes: [],
+    },
+    mana_cost: { type: "Cost", shards: ["Green"], generic: 2 },
+    color: ["Green"],
+    base_power: 3,
+    base_toughness: 3,
+    base_color: ["Green"],
+    entered_battlefield_turn: null,
+    is_commander: true,
+    commander_tax: 0,
+    ...overrides,
   });
 };

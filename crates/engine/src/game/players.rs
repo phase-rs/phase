@@ -3,6 +3,7 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::game_state::LinkedExileSnapshot;
 use crate::types::identifiers::ObjectId;
+use crate::types::phase::TurnDirection;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -12,6 +13,23 @@ pub fn is_alive(state: &GameState, player: PlayerId) -> bool {
         .players
         .iter()
         .any(|p| p.id == player && !p.is_eliminated)
+}
+
+/// CR 607.2d / CR 607.2m (by analogy): true iff `player`'s durable per-player
+/// `chosen_attributes` records a `ChosenAttribute::Label` equal to `label`
+/// (case-insensitive). Single authority consulted by every "player who last
+/// chose <anchor>" read site — `TargetFilter::PlayerWhoChoseLabel` (land-drop
+/// static), `FilterProp::ControllerChoseLabel` (creature anthem), and the
+/// `SwapChosenLabels` chaos effect — so the anchor-label predicate is defined
+/// exactly once. Case-insensitive so parser canonicalization never desyncs.
+pub fn player_last_chose_label(state: &GameState, player: PlayerId, label: &str) -> bool {
+    state.players.iter().any(|p| {
+        p.id == player
+            && p.chosen_attributes.iter().any(|a| {
+                matches!(a, crate::types::ability::ChosenAttribute::Label(l)
+                    if l.eq_ignore_ascii_case(label))
+            })
+    })
 }
 
 /// CR 102.1 / CR 500.1: Next living player in seat (turn) order.
@@ -67,6 +85,37 @@ pub fn previous_player(state: &GameState, current: PlayerId) -> PlayerId {
     current
 }
 
+/// CR 103.1: Seat index reached by walking `offset` seats from `start_idx` in
+/// the current turn-order direction. `Normal` walks forward (clockwise, the
+/// CR 103.1 default); `Reversed` walks backward (Temple of Atropos, Aeon Engine,
+/// Time Distortion). This is the SINGLE authority for turn-order direction —
+/// physical seating (`neighbor`/`next_player`/`previous_player`) is deliberately
+/// NOT routed through it, since "the player to your left" is fixed regardless of
+/// turn direction (Pramikon, Sky Rampart). The `Reversed` arithmetic matches the
+/// backward walk in `previous_player`.
+pub(crate) fn turn_order_index(
+    start_idx: usize,
+    offset: usize,
+    len: usize,
+    dir: TurnDirection,
+) -> usize {
+    match dir {
+        TurnDirection::Normal => (start_idx + offset) % len,
+        TurnDirection::Reversed => (start_idx + len - (offset % len)) % len,
+    }
+}
+
+/// CR 101.4 / CR 103.1: Next living player to take a turn, in the current
+/// turn-order direction. `Normal` == [`next_player`]; `Reversed` ==
+/// [`previous_player`]. Use this for turn-order progression; use `next_player` /
+/// `previous_player` directly only for fixed physical-seating queries.
+pub fn next_player_in_turn_order(state: &GameState, current: PlayerId) -> PlayerId {
+    match state.turn_direction {
+        TurnDirection::Normal => next_player(state, current),
+        TurnDirection::Reversed => previous_player(state, current),
+    }
+}
+
 /// CR 102.1 + CR 103.1: Single authority for seating-neighbor resolution.
 ///
 /// Resolves the living player seated immediately to `controller`'s left or
@@ -78,6 +127,31 @@ pub fn neighbor(state: &GameState, controller: PlayerId, direction: SeatDirectio
         SeatDirection::Left => next_player(state, controller),
         SeatDirection::Right => previous_player(state, controller),
     }
+}
+
+/// CR 102.2 + CR 508.1c: The nearest *opponent* in the given seating direction,
+/// skipping living teammates. In a free-for-all every other seat is an opponent
+/// so this equals [`neighbor`], but in team formats (Two-Headed Giant, CR 810)
+/// an adjacent teammate is not the "nearest opponent" — the walk continues past
+/// them to the first living opponent in that direction.
+///
+/// Walks the seat ring one living player at a time via [`neighbor`]; returns
+/// `None` only if the walk returns to `controller` without finding an opponent
+/// (e.g. `controller` is the sole living player). Termination is guaranteed:
+/// each step advances deterministically around the finite living-seat ring.
+pub fn nearest_opponent(
+    state: &GameState,
+    controller: PlayerId,
+    direction: SeatDirection,
+) -> Option<PlayerId> {
+    let mut candidate = neighbor(state, controller, direction);
+    while candidate != controller {
+        if is_opponent(state, controller, candidate) {
+            return Some(candidate);
+        }
+        candidate = neighbor(state, candidate, direction);
+    }
+    None
 }
 
 /// CR 102.2 / CR 102.3: Opponents in two-player and multiplayer games.
@@ -172,6 +246,7 @@ pub fn apnap_order_from(
             ControllerRef::Opponent
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
             | ControllerRef::ParentTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
@@ -179,7 +254,9 @@ pub fn apnap_order_from(
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::TriggeringPlayer
             // CR 303.4b: Enchanted-player scope is not enumerable. Fail closed.
-            | ControllerRef::EnchantedPlayer,
+            | ControllerRef::EnchantedPlayer
+            // CR 102.1: the active player is exactly this default anchor.
+            | ControllerRef::ActivePlayer,
         ) => state.active_player,
     };
 
@@ -194,7 +271,8 @@ pub fn apnap_order_from(
 
     let mut result = Vec::new();
     for offset in 0..len {
-        let idx = (start_idx + offset) % len;
+        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
+        let idx = turn_order_index(start_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
         // CR 800.4f: A player who has left the game does not pay costs or
         // make choices on objects' behalf; skip eliminated players.
@@ -234,7 +312,9 @@ pub fn linked_exile_cards_for_source(
                 (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
                     exiled_id: link.exiled_id,
                     owner: obj.owner,
-                    mana_value: obj.mana_cost.mana_value(),
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card records its combined mana value.
+                    mana_value: obj.effective_mana_value(),
                 })
             })
         })
@@ -357,6 +437,106 @@ mod tests {
             p.is_eliminated = true;
         }
         state.eliminated_players.push(player);
+    }
+
+    // --- turn-order direction (CR 103.1) ---
+
+    #[test]
+    fn turn_order_index_walks_backward_when_reversed() {
+        // Seat ring of 4: from index 1, offset 1.
+        assert_eq!(turn_order_index(1, 1, 4, TurnDirection::Normal), 2);
+        assert_eq!(turn_order_index(1, 1, 4, TurnDirection::Reversed), 0);
+        // Wrap: from index 0 backward one seat → 3.
+        assert_eq!(turn_order_index(0, 1, 4, TurnDirection::Reversed), 3);
+        // offset 0 is the start seat regardless of direction.
+        assert_eq!(turn_order_index(2, 0, 4, TurnDirection::Normal), 2);
+        assert_eq!(turn_order_index(2, 0, 4, TurnDirection::Reversed), 2);
+    }
+
+    #[test]
+    fn next_player_in_turn_order_follows_direction() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        // Normal: next of P1 is P2; Reversed: next of P1 is P0.
+        assert_eq!(next_player_in_turn_order(&state, PlayerId(1)), PlayerId(2));
+        state.turn_direction = TurnDirection::Reversed;
+        assert_eq!(next_player_in_turn_order(&state, PlayerId(1)), PlayerId(0));
+        // Physical seating (neighbor) is unaffected by turn direction.
+        assert_eq!(
+            neighbor(&state, PlayerId(1), SeatDirection::Left),
+            PlayerId(2),
+            "left neighbor is fixed regardless of turn direction"
+        );
+    }
+
+    #[test]
+    fn apnap_order_reverses_with_turn_direction() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+        assert_eq!(
+            apnap_order(&state),
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+        );
+        state.turn_direction = TurnDirection::Reversed;
+        assert_eq!(
+            apnap_order(&state),
+            vec![PlayerId(0), PlayerId(3), PlayerId(2), PlayerId(1)],
+            "CR 101.4: APNAP follows the reversed turn order",
+        );
+    }
+
+    // --- nearest_opponent ---
+
+    #[test]
+    fn nearest_opponent_equals_neighbor_in_free_for_all() {
+        // Individual seats: every other player is an opponent, so the nearest
+        // opponent is just the adjacent seat.
+        let state = make_state(4, FormatConfig::free_for_all());
+        for dir in [SeatDirection::Left, SeatDirection::Right] {
+            assert_eq!(
+                nearest_opponent(&state, PlayerId(0), dir),
+                Some(neighbor(&state, PlayerId(0), dir)),
+                "free-for-all nearest opponent is the adjacent seat ({dir:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_opponent_skips_teammate_in_two_headed_giant() {
+        // 2HG: teams {P0,P1} and {P2,P3}, seat order [P0,P1,P2,P3]. P0's left
+        // neighbor P1 is a TEAMMATE; the nearest opponent to the left is P2.
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert!(
+            !is_opponent(&state, PlayerId(0), PlayerId(1)),
+            "P1 is P0's teammate in 2HG"
+        );
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Left),
+            PlayerId(1),
+            "the adjacent left seat is the teammate"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            Some(PlayerId(2)),
+            "nearest opponent skips the teammate to the first opponent P2"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Right),
+            Some(PlayerId(3)),
+            "to the right, P3 is the first opponent"
+        );
+    }
+
+    #[test]
+    fn nearest_opponent_none_when_sole_survivor() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        for p in [PlayerId(1), PlayerId(2), PlayerId(3)] {
+            eliminate(&mut state, p);
+        }
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            None,
+            "no living opponent in any direction → None"
+        );
     }
 
     // --- is_alive ---

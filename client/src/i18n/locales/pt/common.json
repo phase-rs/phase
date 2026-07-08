@@ -35,11 +35,25 @@
     "off": "Desligado"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Visualização",
+      "tools": "Ferramentas",
+      "game": "Jogo"
+    },
+    "reportCard": "Relatar uma carta",
     "menu": "Menu do jogo",
     "sandboxTools": "Ferramentas de Sandbox",
     "sandboxToolsTitle": "Ferramentas de Sandbox — configure qualquer estado de tabuleiro (`)",
+    "openSandboxTools": "Abrir Ferramentas de Sandbox",
+    "clickModeButton": "Botão de modo de clique",
+    "shown": "Visível",
+    "hidden": "Oculto",
     "resume": "Continuar",
     "settings": "Configurações",
+    "boardLayoutSplit": "Dividido",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Alternar para visualização de mesa dividida",
+    "switchToLegacyView": "Alternar para visualização legacy focada",
     "helpShortcuts": "Ajuda e Atalhos",
     "showAiHand": "Mostrar Mão da IA",
     "hideAiHand": "Ocultar Mão da IA",
@@ -202,6 +216,12 @@
       "message": "Configure qualquer estado de tabuleiro com as <tools>Ferramentas de Sandbox</tools> — adicione cartas e fichas, altere vidas e marcadores, copie permanentes ou avance fases. Abra a qualquer momento com a tecla <key>`</key>.",
       "dismiss": "Dispensar",
       "open": "Abrir Ferramentas de Sandbox"
+    },
+    "reportCardNudge": {
+      "message": "Uma carta é exibida ou jogada de forma errada? Toque na <flag>bandeira de reporte</flag> no canto superior esquerdo para reportá-la e podermos corrigi-la.",
+      "dismiss": "Dispensar",
+      "open": "Reportar carta",
+      "debugPrompt": "Uma carta é exibida ou jogada de forma errada? Reporte-a para podermos corrigi-la."
     }
   },
   "splash": {
@@ -228,5 +248,16 @@
     "settings": "Configurações",
     "languageSettings": "Idioma ({{lang}}) — abrir configurações",
     "languageTitle": "Idioma: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Algo deu errado",
+    "body": "O aplicativo encontrou um erro inesperado e não pode continuar nesta tela. Recarregar geralmente resolve.",
+    "reload": "Recarregar"
+  },
+  "actionError": {
+    "title": "{{action}} falhou",
+    "skipTarget": "Pular alvo",
+    "genericAction": "Ação",
+    "unknownEngineError": "Erro desconhecido do motor"
   }
 }

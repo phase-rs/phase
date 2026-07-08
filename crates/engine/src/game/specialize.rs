@@ -171,6 +171,7 @@ mod tests {
     fn empty_lki() -> LKISnapshot {
         LKISnapshot {
             name: String::new(),
+            token_image_ref: None,
             power: None,
             toughness: None,
             base_power: None,
@@ -186,6 +187,7 @@ mod tests {
             chosen_attributes: vec![],
             counters: Default::default(),
             tapped: false,
+            is_suspected: false,
         }
     }
 

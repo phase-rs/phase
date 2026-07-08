@@ -44,6 +44,20 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         .parse(base)
         .map_or(base, |(rest, _)| rest);
 
+    // CR 105.1 + CR 601.2f: Compound BARE-color subject — "<color> spells and
+    // <color> spells" (the Prophecy Familiar cycle: Nightscape / Stormscape /
+    // Sunscape / Thornscape / Thunderscape Familiar). The single-subject path
+    // below maps a lone bare color via `parse_named_color`, and
+    // `parse_type_phrase` decomposes compounds whose operands carry a type noun
+    // ("Angel spells and Human spells", "red creature spells and green creature
+    // spells"). A two-BARE-color compound falls through both and yields
+    // `None` — which silently drops the color restriction and reduces EVERY
+    // spell. Recognize it here and emit the same `Or` of `HasColor` typed
+    // filters the noun-bearing compounds already produce.
+    if let Some(filter) = parse_cost_mod_compound_color_subject(base) {
+        return Some(filter);
+    }
+
     let that_split: Result<(&str, (&str, &str)), nom::Err<OracleError<'_>>> = all_consuming(alt((
         (
             take_until(" that's "),
@@ -124,6 +138,45 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         )),
     };
     filter.map(remap_cost_mod_imprint_exile_reference)
+}
+
+/// CR 105.1 + CR 601.2f: Decompose a compound BARE-color cost-mod subject —
+/// "<color>[ spells] and <color>[ spells]" — into an `Or` of `HasColor` typed
+/// filters. Each operand is a color name (`nom_primitives::parse_color`)
+/// optionally trailed by the spell noun; operands are joined by " and ".
+///
+/// The Prophecy Familiar cycle (Nightscape Familiar "Blue spells and red
+/// spells you cast cost {1} less to cast", plus Stormscape / Sunscape /
+/// Thornscape / Thunderscape Familiar) is the exemplar class. Requires two or
+/// more colors and full consumption, so a lone bare color ("Red spells …") and
+/// a noun-bearing operand ("red creature spells and …") both decline here and
+/// fall through to the single-subject path and `parse_type_phrase` respectively.
+fn parse_cost_mod_compound_color_subject(base: &str) -> Option<TargetFilter> {
+    // Operand: a bare color name, optionally followed by the spell noun. The
+    // trailing " spell[s]" is present on every operand except the last (the
+    // caller strips one trailing " spells" before this runs).
+    fn color_operand(input: &str) -> OracleResult<'_, ManaColor> {
+        let (input, color) = nom_primitives::parse_color(input)?;
+        let (input, _) = opt(alt((tag(" spells"), tag(" spell")))).parse(input)?;
+        Ok((input, color))
+    }
+
+    let (rest, colors) = separated_list1(tag::<_, _, OracleError<'_>>(" and "), color_operand)
+        .parse(base.trim())
+        .ok()?;
+    if !rest.trim().is_empty() || colors.len() < 2 {
+        return None;
+    }
+
+    let filters = colors
+        .into_iter()
+        .map(|color| {
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
+            )
+        })
+        .collect();
+    Some(TargetFilter::Or { filters })
 }
 
 /// CR 607.2a + CR 607.3: Cost-mod lines such as Semblance Anvil reference
@@ -281,6 +334,9 @@ pub(crate) fn try_parse_impose_additional_cost(
             }
             Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
+            // semantics — fall back to an untyped card filter.
+            Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -290,6 +346,9 @@ pub(crate) fn try_parse_impose_additional_cost(
             // CR 303.4b: Enchanted-player scope is not supported for cost statics;
             // fall back to untyped filter (same as TriggeringPlayer).
             Some(ControllerRef::EnchantedPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 102.1: active-player scope is not emitted for cost statics;
+            // fall back to an untyped card filter (same as TriggeringPlayer).
+            Some(ControllerRef::ActivePlayer) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -648,6 +707,9 @@ pub(crate) fn try_parse_cost_modification(
             // emit this variant for cost statics.
             Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 109.4: TargetOpponent, like TargetPlayer, has no cost-static
+            // semantics — fall back to an untyped card filter.
+            Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -661,6 +723,9 @@ pub(crate) fn try_parse_cost_modification(
             // CR 303.4b: Enchanted-player scope is not supported for cost statics;
             // fall back to untyped filter (same as TriggeringPlayer).
             Some(ControllerRef::EnchantedPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 102.1: active-player scope is not emitted for cost statics;
+            // fall back to an untyped card filter (same as TriggeringPlayer).
+            Some(ControllerRef::ActivePlayer) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -702,7 +767,13 @@ pub(crate) fn try_parse_cost_modification(
             let cond_text = lower[cond_pos + marker.len()..]
                 .trim()
                 .trim_end_matches('.');
-            if let Some(sc) = parse_cost_modifier_condition(cond_text) {
+            // CR 601.2f + CR 611.3a: try the cost-specific predicates first, then
+            // fall back to the shared static-condition grammar so board-state
+            // gates ("if there are ten or more nonland permanents on the
+            // battlefield", Hour of Revelation) attach instead of being swallowed.
+            if let Some(sc) = parse_cost_modifier_condition(cond_text)
+                .or_else(|| parse_static_condition(cond_text))
+            {
                 definition.condition = Some(sc);
             } else if let Ok((rest, sc)) = nom_condition::parse_inner_condition(cond_text) {
                 if rest.trim().is_empty() || rest.trim() == "." {
@@ -1233,6 +1304,115 @@ pub(crate) fn strip_in_addition_suffix(text: &str) -> Option<&str> {
     ]
     .iter()
     .find_map(|suffix| text.strip_suffix(suffix)) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+}
+
+/// CR 611.3a: Classification of a trailing parenthetical on a static line.
+/// Must be evaluated on the **raw** Oracle line before `strip_reminder_text`
+/// removes parenthetical spans — rules-bearing gates like Alhammarret's
+/// `(as long as this creature is on the battlefield)` share the same surface
+/// syntax as reminder prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParentheticalGateExtract<'a> {
+    /// No trailing parenthetical on the line.
+    Absent,
+    /// Trailing parenthetical is reminder prose, not a rules-bearing gate.
+    Benign,
+    /// `(as long as/if <condition>)` with a parseable `StaticCondition`.
+    Recognized(&'a str),
+    /// Gate-shaped parenthetical whose condition is not recognized — caller must decline.
+    Unrecognized,
+}
+
+fn parse_parenthetical_gate_condition_body(i: &str) -> OracleResult<'_, &str> {
+    preceded(
+        alt((tag::<_, _, OracleError<'_>>("as long as "), tag("if "))),
+        rest,
+    )
+    .parse(i)
+}
+
+fn parse_trailing_parenthetical_pieces(i: &str) -> OracleResult<'_, (&str, &str)> {
+    let (i, body) = take_until::<_, _, OracleError<'_>>(" (").parse(i)?;
+    let (i, inner) = preceded(tag(" ("), terminated(take_until(")"), tag(")"))).parse(i)?;
+    Ok((i, (body.trim(), inner.trim())))
+}
+
+/// CR 611.3a: Peel a trailing parenthetical gate from the raw (pre-reminder-strip)
+/// lowercase line. `as long as` is tried before `if` inside the parenthetical.
+/// Unrecognized gate conditions return `Unrecognized` so callers decline rather
+/// than enforce the restriction unconditionally.
+pub(crate) fn extract_trailing_parenthetical_gate_condition(
+    lower: &str,
+) -> ParentheticalGateExtract<'_> {
+    let input = lower.trim().trim_end_matches('.');
+    let Ok((rest, (body, inner))) = parse_trailing_parenthetical_pieces(input) else {
+        return ParentheticalGateExtract::Absent;
+    };
+    if !rest.is_empty() || body.is_empty() {
+        return ParentheticalGateExtract::Absent;
+    }
+    if let Ok(("", condition_text)) =
+        all_consuming(parse_parenthetical_gate_condition_body).parse(inner)
+    {
+        return if parse_static_condition(condition_text).is_some() {
+            ParentheticalGateExtract::Recognized(condition_text)
+        } else {
+            ParentheticalGateExtract::Unrecognized
+        };
+    }
+    ParentheticalGateExtract::Benign
+}
+
+/// CR 611.3a: Oracle dispatch strips reminder parentheticals before the general
+/// static parser runs. Re-attach cant-cast gate conditions from the raw line
+/// without feeding benign parentheticals through unrelated static parsers
+/// (Varolz / Underworld Breach graveyard-keyword grants, etc.).
+pub(crate) fn apply_raw_parenthetical_cant_cast_gate(
+    defs: Vec<StaticDefinition>,
+    raw_line: &str,
+    card_name: &str,
+) -> Vec<StaticDefinition> {
+    use crate::parser::oracle_special::normalize_self_refs_for_static;
+    use crate::types::statics::StaticMode;
+
+    let normalized_raw = normalize_self_refs_for_static(raw_line, card_name);
+    match extract_trailing_parenthetical_gate_condition(&normalized_raw.to_lowercase()) {
+        ParentheticalGateExtract::Unrecognized => defs
+            .into_iter()
+            .filter(|def| !matches!(def.mode, StaticMode::CantBeCast { .. }))
+            .collect(),
+        ParentheticalGateExtract::Recognized(condition_text) => {
+            let Some(condition) = parse_static_condition(condition_text) else {
+                return defs
+                    .into_iter()
+                    .filter(|def| !matches!(def.mode, StaticMode::CantBeCast { .. }))
+                    .collect();
+            };
+            defs.into_iter()
+                .map(|mut def| {
+                    if matches!(def.mode, StaticMode::CantBeCast { .. }) && def.condition.is_none()
+                    {
+                        def.condition = Some(condition.clone());
+                    }
+                    def
+                })
+                .collect()
+        }
+        ParentheticalGateExtract::Absent | ParentheticalGateExtract::Benign => defs,
+    }
+}
+
+/// CR 611.3a: Attach an optional parsed static gate to a prohibition static.
+/// When `gate_condition_text` is present but `parse_static_condition` declines,
+/// return `None` so the caller does not enforce the restriction unconditionally.
+pub(crate) fn attach_parsed_static_gate(
+    def: StaticDefinition,
+    gate_condition_text: Option<&str>,
+) -> Option<StaticDefinition> {
+    match gate_condition_text {
+        None => Some(def),
+        Some(text) => Some(def.condition(parse_static_condition(text)?)),
+    }
 }
 
 /// CR 502.3: Extract a trailing condition from a "doesn't untap during [untap step]" clause.

@@ -92,8 +92,89 @@ export function formatCounterType(type: string): string {
   return type;
 }
 
-export function formatCounterTooltip(type: string, count: number): string {
+/**
+ * Counter serde key (from `CounterType::as_str`, e.g. "P1P1", "stun", "charge")
+ * → mana-font `ms-counter-*` glyph class. Every value is verified present in
+ * `mana-font/css/mana.css` by the guardrail test; counter types with no shipped
+ * glyph are absent and render text-only.
+ */
+export const COUNTER_ICON_CLASS: Record<string, string> = {
+  P1P1: "ms-counter-plus",
+  M1M1: "ms-counter-minus",
+  loyalty: "ms-counter-loyalty",
+  lore: "ms-counter-lore",
+  stun: "ms-counter-stun",
+  shield: "ms-counter-shield",
+  time: "ms-counter-time",
+  charge: "ms-counter-charge",
+  gold: "ms-counter-gold",
+  ki: "ms-counter-ki",
+  rad: "ms-counter-rad",
+  verse: "ms-counter-verse",
+  void: "ms-counter-void",
+  flame: "ms-counter-flame",
+  flood: "ms-counter-flood",
+  fungus: "ms-counter-fungus",
+  muster: "ms-counter-muster",
+  doom: "ms-counter-doom",
+  echo: "ms-counter-echo",
+  finality: "ms-counter-finality",
+  brick: "ms-counter-brick",
+  mining: "ms-counter-mining",
+  paw: "ms-counter-paw",
+  pin: "ms-counter-pin",
+  scream: "ms-counter-scream",
+  skull: "ms-counter-skull",
+  slime: "ms-counter-slime",
+  vortex: "ms-counter-vortex",
+  goad: "ms-counter-goad",
+  damage: "ms-counter-damage",
+  deathtouch: "ms-counter-deathtouch",
+  devotion: "ms-counter-devotion",
+};
+
+/** Resolve a counter type's mana-font glyph class, or null when none ships. */
+export function counterIconClass(type: string): string | null {
+  return COUNTER_ICON_CLASS[type] ?? null;
+}
+
+type CounterTooltipTranslator = (
+  key: string,
+  options?: { count?: number; label?: string; description?: string },
+) => string;
+
+const COUNTER_DESCRIPTION_KEYS: Record<string, string> = {
+  P1P1: "counterTooltip.descriptions.p1p1",
+  M1M1: "counterTooltip.descriptions.m1m1",
+  loyalty: "counterTooltip.descriptions.loyalty",
+  lore: "counterTooltip.descriptions.lore",
+  stun: "counterTooltip.descriptions.stun",
+};
+
+export function formatCounterDescription(
+  type: string,
+  translate: CounterTooltipTranslator,
+): string {
   const label = formatCounterType(type);
+  const key = COUNTER_DESCRIPTION_KEYS[type];
+  return key
+    ? translate(key)
+    : translate("counterTooltip.descriptions.generic", { label });
+}
+
+export function formatCounterTooltip(
+  type: string,
+  count: number,
+  translate?: CounterTooltipTranslator,
+): string {
+  const label = formatCounterType(type);
+  if (translate) {
+    return translate("counterTooltip.summary", {
+      count,
+      label,
+      description: formatCounterDescription(type, translate),
+    });
+  }
   return `${label} counter${count !== 1 ? "s" : ""}: ${count}`;
 }
 

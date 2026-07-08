@@ -9,8 +9,9 @@ import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-import { COUNTER_COLORS, formatCounterTooltip, formatCounterType } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, formatCounterType } from "../../viewmodel/cardProps.ts";
 import { CardImage } from "../card/CardImage.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
 interface Props {
   objectId: ObjectId;
@@ -18,6 +19,18 @@ interface Props {
    *  ratio. Caller controls so the dialog can pick a size that suits its
    *  available width budget without DialogAttachmentCard guessing. */
   widthPx: number;
+  /** Close the enclosing AttachmentsDialog. Called after any interaction that
+   *  advances engine state to a prompt the player resolves on the BOARD rather
+   *  than in this dialog — target-select (the enchant/equip target is a
+   *  battlefield object, not a dialog card) and activation (e.g. Equip
+   *  transitions to `EquipTarget`, which needs the board visible). The
+   *  multi-ability picker is the one exception: it floats above independently,
+   *  so the dialog closes only after the picker itself dispatches.
+   *
+   *  Optional: the non-interactive `AurasHoverPreview` (a `pointer-events-none`
+   *  glance panel) renders these cards purely for display, so no interaction —
+   *  hence no dismiss — is ever possible there and it omits the callback. */
+  onDismiss?: () => void;
 }
 
 /**
@@ -41,7 +54,7 @@ interface Props {
  *     would be blank anyway. Reading directly from gameStore.waitingFor /
  *     legalActionsByObject is the right source here.
  */
-export function DialogAttachmentCard({ objectId, widthPx }: Props) {
+export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
   const { t } = useTranslation("game");
   const playerId = usePlayerId();
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -73,7 +86,6 @@ export function DialogAttachmentCard({ objectId, widthPx }: Props) {
   const isActivatable = objectActions.length > 0;
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const setEnchantmentsDialogPlayer = useUiStore((s) => s.setEnchantmentsDialogPlayer);
 
   const { handlers, firedRef } = useCardHover(objectId);
 
@@ -101,17 +113,23 @@ export function DialogAttachmentCard({ objectId, widthPx }: Props) {
       // Auto-close on target select: the user's intent was decisive ("I
       // picked this target"). The engine moves to the next prompt; leaving
       // the dialog mounted would obscure that next prompt for no reason.
-      setEnchantmentsDialogPlayer(null);
+      onDismiss?.();
       return;
     }
     if (isActivatable) {
       if (objectActions.length === 1) {
         dispatchAction(objectActions[0]);
+        // Close so the board is reachable for whatever the activation asks
+        // next — e.g. Equip transitions to `EquipTarget`, whose creature
+        // target is picked on the battlefield, not in this dialog.
+        onDismiss?.();
       } else {
-        // Multi-ability picker takes over; our dialog stays mounted so the
-        // user can see what they activated against (the modal stacks above
-        // via DialogHost z-ordering — both signals trigger `wrapped`).
+        // Multi-ability picker takes over. Hand off to it and close this
+        // dialog: the picker floats independently (DialogHost z-ordering)
+        // and its own dispatch will drive the next board prompt, so keeping
+        // the attachments dialog mounted behind it only obscures the board.
         setPendingAbilityChoice({ objectId, actions: objectActions });
+        onDismiss?.();
       }
     }
   };
@@ -159,15 +177,15 @@ export function DialogAttachmentCard({ objectId, widthPx }: Props) {
         </div>
       )}
       {counters.length > 0 && (
-        <div className="absolute right-1 top-1 z-20 flex flex-col gap-0.5">
+        <div className="absolute right-1 top-1 z-[60] flex flex-col gap-0.5">
           {counters.map(([type, count]) => (
-            <span
-              key={type}
-              title={formatCounterTooltip(type, count)}
-              className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-            >
-              {formatCounterType(type)} x{count}
-            </span>
+            <CounterTooltip key={type} type={type} count={count}>
+              <span
+                className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+              >
+                {formatCounterType(type)} x{count}
+              </span>
+            </CounterTooltip>
           ))}
         </div>
       )}

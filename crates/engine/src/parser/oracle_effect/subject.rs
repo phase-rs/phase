@@ -17,8 +17,9 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    Duration, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -48,6 +49,22 @@ pub(super) fn try_parse_subject_predicate_ast(
     ctx: &mut ParseContext,
 ) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
+        return None;
+    }
+
+    // CR 723.1 / CR 723.2: "you control [target] during [possessive] next turn /
+    // next combat phase" (Mindslaver / Secret of Bloodbending) is a
+    // `ControlNextTurn` imperative, not a subject-predicate grant. The imperative
+    // path owns the window axis; without this deferral the subject grammar
+    // mis-parses the trailing "combat phase" into an `Unimplemented` remnant.
+    if matches!(
+        imperative::parse_targeted_action_ast(
+            text,
+            &text.to_lowercase(),
+            &mut ParseContext::default()
+        ),
+        Some(crate::parser::oracle_ir::ast::TargetedImperativeAst::ControlNextTurn { .. })
+    ) {
         return None;
     }
 
@@ -300,6 +317,54 @@ fn try_parse_contracted_subject_additive_type_clause(
     let rest_original = &text[prefix_len..];
     let predicate = format!("is {rest_original}");
     let application = additive_type_subject_application(subject_text, ctx)?;
+
+    // CR 205.1a + CR 205.1b + CR 613.1d + CR 611.2a + CR 400.7 + CR 603.6:
+    // type-REPLACEMENT copula — "It's a Treasure artifact with '<ability>', and it
+    // loses all other card types" (Vraska, the Silencer). The "loses all other card
+    // types" tail (kept attached to the copula by the sequence splitter) routes this
+    // to the shared `SetCardTypes` + subtype + granted-ability builder — the same
+    // modifications the copy path already emits (Shelob) — reused here on the
+    // subject-copula path. Tried BEFORE the additive form because the replacement
+    // tail must win over the type-addition reading (mirrors the copy-path ordering
+    // in `parse_except_body`). Like the animation arm below, this anaphor names the
+    // object the PRECEDING clause returned (a reanimated card), never the source
+    // permanent, so gate on a real prior referent (`ParentTarget`, or the
+    // `TriggeringSource` that was returned by a dies-trigger reanimate) and decline
+    // `SelfRef` so a source-permanent misbind honest-defers instead. Installed as an
+    // indefinite continuous effect that ends when the returned object leaves play
+    // (CR 611.2a: no stated duration; CR 400.7: a new object on re-entry is not the
+    // same object — mirrors `install_aura_continuous_effect`).
+    if let Some((_, modifications)) =
+        super::become_copy_except::parse_its_a_type_loses_others(&lower)
+    {
+        let affected = static_affected_for_application(&application);
+        if matches!(
+            affected,
+            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+        ) {
+            return Some(ClauseAst::SubjectPredicate {
+                subject: Box::new(SubjectPhraseAst {
+                    affected: application.affected.clone(),
+                    target: application.target.clone(),
+                    multi_target: application.multi_target.clone(),
+                    inherits_parent: application.inherits_parent,
+                    is_optional: application.is_optional,
+                }),
+                predicate: Box::new(PredicateAst::Become {
+                    effect: Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(affected)
+                            .modifications(modifications)
+                            .description(predicate.clone())],
+                        duration: Some(Duration::UntilHostLeavesPlay),
+                        target: application.target.clone(),
+                    },
+                    duration: Some(Duration::UntilHostLeavesPlay),
+                    sub_ability: None,
+                }),
+            });
+        }
+    }
 
     // CR 205.1b: additive form first — "it's a [type] in addition to its other
     // types" retains prior types (AddType/AddSubtype only).
@@ -1173,11 +1238,13 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
-                    .affected(affected)
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustBeBlocked,
-                    }])],
+                static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked {
+                    by: None,
+                })
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustBeBlocked { by: None },
+                }])],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: application.target,
             },
@@ -1303,7 +1370,13 @@ fn try_parse_subject_restriction_clause(
     // creature gets -3/-0 and its activated abilities can't be activated"), so they
     // bind to `ParentTarget`; `parse_subject_application` resolves the typed-subject
     // forms ("target creature's", "each creature you control").
-    if let Some((before, _)) = tp.split_around(" activated abilities can't be activated") {
+    // CR 605.1a: split on the predicate with either apostrophe glyph so a U+2019
+    // effect clause ("target creature's activated abilities can't be activated
+    // unless they're mana abilities") still reaches the shared exemption scan.
+    if let Some((before, _)) = tp
+        .split_around(" activated abilities can't be activated")
+        .or_else(|| tp.split_around(" activated abilities can\u{2019}t be activated"))
+    {
         let subject = before.original.trim();
         let application = subject_application_for_cant_be_activated(subject, ctx)?;
         let affected = static_affected_for_application(&application);
@@ -2854,13 +2927,47 @@ fn try_split_pump_compound(
 
 fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
     let lower = predicate.to_lowercase();
-    let (choice_text, _) = tag::<_, _, OracleError<'_>>("gain your choice of ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
-    let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-    let first = parse_keyword_from_oracle(left.trim())?;
-    let second = parse_keyword_from_oracle(right.trim())?;
+
+    // Shape 1: "gain your choice of X or Y" — an explicit keyword-grant menu.
+    if let Ok((choice_text, _)) =
+        tag::<_, _, OracleError<'_>>("gain your choice of ").parse(lower.as_str())
+    {
+        let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
+        let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
+        let first = parse_keyword_from_oracle(left.trim())?;
+        let second = parse_keyword_from_oracle(right.trim())?;
+        return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
+    }
+
+    // Shape 2: "gain/have protection from X or from the color of your choice"
+    // (Angelic Intervention, Apostle's Blessing, Giver of Runes, Jeweled Spirit,
+    // Razor Barrier). The predicate arrives DECONJUGATED (gains→gain, has→have),
+    // so anchor on the bare forms — never "gains"/"has".
+    // CR 608.2d: a choice offered by a resolving ability is announced as the
+    // effect is applied (choose one protection).
+    // CR 702.16a: protection from [quality] (color, colorless, or card type).
+    let (remainder, _) = alt((
+        tag::<_, _, OracleError<'_>>("gain protection from "),
+        tag("have protection from "),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let (quality_text, duration) = super::strip_trailing_duration(remainder);
+    // GUARDRAIL: split on the literal " or from " (NOT " or "). Splitting on
+    // " or " would leave the right half as "from the color of your choice",
+    // which parse_protection_target's `from `-prefix arm routes to Quality —
+    // silently killing the color choice. When there is no " or from " this is a
+    // single protection grant, so return None and fall through to the existing
+    // continuous-clause behavior.
+    let (_, (left, right)) =
+        nom_primitives::split_once_on(quality_text.trim(), " or from ").ok()?;
+    // The halves are bare qualities (the "protection from " prefix is already
+    // stripped), so map each with parse_protection_target — NOT
+    // parse_keyword_from_oracle, which expects the full "protection from …" form.
+    let first = Keyword::Protection(crate::types::keywords::parse_protection_target(left.trim()));
+    let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
+        right.trim(),
+    ));
     Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
 }
 
@@ -3422,6 +3529,22 @@ fn build_become_clause(
         return Some(super::parsed_clause(Effect::BecomeSaddled { target }));
     }
 
+    // CR 509.1h: "becomes blocked" makes the target attacking creature a blocked
+    // creature with no blockers assigned (Dazzling Beauty: "Target unblocked
+    // attacking creature becomes blocked."). Mirrors the saddled idiom: a real
+    // "Target ... creature" subject carries its `Typed` filter as the target slot;
+    // an anaphoric subject falls back to `affected`.
+    if all_consuming(tag::<_, _, OracleError<'_>>("blocked"))
+        .parse(become_lower.as_str())
+        .is_ok()
+    {
+        let target = application
+            .target
+            .clone()
+            .unwrap_or_else(|| application.affected.clone());
+        return Some(super::parsed_clause(Effect::BecomeBlocked { target }));
+    }
+
     // CR 707.2 / CR 613.1a: "become a copy of [target]" — copy copiable characteristics.
     // Must intercept before parse_animation_spec which rejects "copy of" patterns.
     //
@@ -3794,11 +3917,17 @@ fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
 /// - "all colors" / "every color" → `SetColor(WUBRG)` (CR 105.2: a multicolored
 ///   object can be each of the five colors). The new color set replaces all
 ///   previous colors (CR 105.3).
-/// - "the chosen color" → `AddChosenColor`, reading the source's
-///   `ChosenAttribute::Color` bound by a preceding `Effect::Choose` in the same
-///   ability (Puca's Eye: "draw a card, then choose a color. This artifact
-///   becomes the chosen color"). Despite the additive-sounding `Add` prefix,
-///   `AddChosenColor` SETS the color at Layer 5 (CR 105.3) — see its definition.
+/// - "the chosen color" / "that color" → `AddChosenColor`, reading the source's
+///   `ChosenAttribute::Color`. For "the chosen color" the color is bound by a
+///   preceding `Effect::Choose` in the same ability (Puca's Eye: "draw a card,
+///   then choose a color. This artifact becomes the chosen color"). For "that
+///   color" (CR 106.1a + CR 202.2) the color is bound by the mana produced
+///   earlier in the SAME activated mana ability ("Add one mana of any color.
+///   This creature becomes that color", Foraging Wickermaw) — the mana producer
+///   records it as `ChosenAttribute::Color` on the source
+///   (`produce_mana_from_ability`), and this `AddChosenColor` reads it live at
+///   Layer 5. Despite the additive-sounding `Add` prefix, `AddChosenColor` SETS
+///   the color at Layer 5 (CR 105.3 / CR 613.1e) — see its definition.
 ///
 /// Returns `None` for any other predicate so the caller falls through to the
 /// fixed-color animation path (which already handles single named colors) and to
@@ -3819,6 +3948,7 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
     if all_consuming(alt((
         tag::<_, _, OracleError<'_>>("the chosen color"),
         tag("the color chosen this way"),
+        tag("that color"),
     )))
     .parse(lower.as_str())
     .is_ok()
@@ -3884,7 +4014,7 @@ fn try_parse_become_choice(
 
     let (choice_type, modification) = if lower.contains("creature type") {
         (
-            ChoiceType::CreatureType,
+            ChoiceType::creature_type(),
             ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
             },
@@ -4844,6 +4974,163 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
     })
 }
 
+/// CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
+/// to <recipient>" — every matching object is its OWN damage source. Produces
+/// `Effect::EachSourceDealsDamage` so per-source iteration survives, instead of the
+/// generic `strip_subject_clause` path which flattens the source class into a
+/// single ability-sourced `DealDamage`.
+///
+/// Dispatched in `parse_effect_clause_inner` immediately after the
+/// `EachDealsDamageEqualToPower` intercept, ahead of every `strip_subject_clause`
+/// site, so all nested contexts (trigger bodies, `ChooseOneOf` branches,
+/// `sub_ability` chains) are caught.
+pub(super) fn try_parse_each_source_deals_damage(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // CR 120.1: require a genuine UNIVERSAL/class quantifier subject ("each <X>").
+    // This is what makes every match its own damage source. It deliberately
+    // EXCLUDES singular anaphoric/targeted subjects that denote ONE source — "that
+    // creature" (TriggeringSource), "it"/"this creature" (SelfRef), "enchanted
+    // creature" (AttachedTo), "target creature you control" (a chosen target) — all
+    // of which `parse_subject_application` would otherwise hand back as a bare
+    // `Typed` class filter, wrongly broadcasting one source's damage across the
+    // whole class.
+    if tag::<_, _, OracleError<'_>>("each ")
+        .parse(lower.as_str())
+        .is_err()
+    {
+        return None;
+    }
+    // CR 608.2c: split subject vs predicate at the "deals"/"deal" verb. "attach"
+    // is not a PREDICATE_VERB, so "each Aura attached to a creature deals …" splits
+    // at "deals", not at "attached".
+    let verb_start = find_predicate_start(text)?;
+    let subject = text[..verb_start].trim();
+    let predicate = text[verb_start..].trim();
+    let predicate_lower = predicate.to_lowercase();
+
+    // CR 120.1: the damage verb must be the clause's MAIN verb — the predicate
+    // begins with "deals"/"deal". `find_predicate_start` splits at the FIRST
+    // predicate verb, so a granted ability ("each creature you control gains
+    // \"{T}: This creature deals 1 damage…\"" — Stensia) splits at "gains" and is
+    // declined here, never mistaking the quoted "deals" for the main action.
+    if alt((
+        tag::<_, _, OracleError<'_>>("deals "),
+        tag::<_, _, OracleError<'_>>("deal "),
+    ))
+    .parse(predicate_lower.as_str())
+    .is_err()
+    {
+        return None;
+    }
+
+    // The recipient phrase: everything after the "deals N damage to " marker.
+    let recipient_phrase = damage_recipient_phrase(&predicate_lower);
+
+    // CR 303.4 (DEFERRED §9): "...to the creature/permanent it's attached to" — a
+    // per-attachment host recipient not yet modeled. Fail CLOSED to an honest
+    // `Unimplemented` BEFORE the subject-parse requirement, so the clause never
+    // mis-deals regardless of how the attachment subject parses (Aura Barbs clause
+    // 2). Clause 1 ("its controller") does not match this phrase.
+    if recipient_phrase.is_some_and(is_attached_host_recipient) {
+        return Some(super::parsed_clause(Effect::unimplemented(
+            "each_source_attached_damage",
+            text,
+        )));
+    }
+
+    // Require a usable non-player object-class source. Player-shaped subjects
+    // ("each player", "each opponent") and anaphoric "each of those …"
+    // (`ParentTarget`) fall through to their own handling.
+    let sources = parse_subject_application(subject, ctx)?.affected;
+    if !is_object_class_source(&sources) {
+        return None;
+    }
+
+    // Delegate the predicate to the shared damage parser so the amount and the
+    // recipient anaphora (`ParentTarget`, `TriggeringSource`, `Any`) resolve
+    // identically to the `DealDamage` the misparse produced — no re-implementation.
+    let (amount, target, damage_source) =
+        match super::lower::try_parse_damage(&predicate_lower, predicate, ctx)? {
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source,
+                ..
+            } => (amount, target, damage_source),
+            _ => return None,
+        };
+    // The source set comes from the filter, never a `Target` damage source.
+    if damage_source.is_some() {
+        return None;
+    }
+    // CR 120.1: only a FIXED, source-INDEPENDENT amount. The amount is resolved
+    // ONCE (uniform across the batch), so a per-source dynamic amount ("equal to
+    // its power", "equal to its mana value") would be wrong — that filter-source
+    // own-power class is deferred (see §1/§9).
+    if !matches!(amount, QuantityExpr::Fixed { .. }) {
+        return None;
+    }
+
+    // CR 109.4 + CR 120.3a: "its controller" is a per-source recipient. Every other
+    // recipient is the shared announced/context target produced above.
+    let recipient = if recipient_phrase.is_some_and(is_its_controller_recipient) {
+        EachDamageRecipient::EachController
+    } else {
+        EachDamageRecipient::Shared(target)
+    };
+
+    Some(super::parsed_clause(Effect::EachSourceDealsDamage {
+        sources,
+        amount,
+        recipient,
+    }))
+}
+
+/// Return the recipient phrase of a "deals N damage to <recipient>" predicate —
+/// the slice after the `" damage to "` marker, trimmed of a trailing period.
+fn damage_recipient_phrase(predicate_lower: &str) -> Option<&str> {
+    let (_rest, (_before, after)) =
+        nom_primitives::split_once_on(predicate_lower, " damage to ").ok()?;
+    Some(after.trim_end_matches('.').trim())
+}
+
+/// CR 109.4 + CR 120.3a: the recipient phrase is exactly "its controller".
+fn is_its_controller_recipient(recipient_phrase: &str) -> bool {
+    all_consuming(tag::<_, _, OracleError<'_>>("its controller"))
+        .parse(recipient_phrase)
+        .is_ok()
+}
+
+/// CR 303.4 (DEFERRED §9): the recipient phrase is "the creature/permanent it's
+/// attached to" (straight + typographic apostrophe), an unmodeled per-attachment
+/// host recipient.
+fn is_attached_host_recipient(recipient_phrase: &str) -> bool {
+    all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("the creature it's attached to"),
+        tag("the creature it\u{2019}s attached to"),
+        tag("the permanent it's attached to"),
+        tag("the permanent it\u{2019}s attached to"),
+    )))
+    .parse(recipient_phrase)
+    .is_ok()
+}
+
+/// CR 120.1: True when `filter` selects game OBJECTS by type/subtype (a valid
+/// `EachSourceDealsDamage` source class), not players.
+fn is_object_class_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            !filters.is_empty() && filters.iter().all(is_object_class_source)
+        }
+        TargetFilter::Not { filter } => is_object_class_source(filter),
+        _ => false,
+    }
+}
+
 /// CR 115.1d: Parse the leading source-count quantifier of the team-up damage
 /// line and return the remaining text plus the `MultiTargetSpec` it encodes.
 /// "up to two" → 0..=2, "one or two" → 1..=2, "two" → exactly 2.
@@ -4908,6 +5195,44 @@ pub(super) fn strip_subject_clause(text: &str) -> Option<String> {
     }
 
     Some(deconjugate_verb(predicate))
+}
+
+/// Strip a leading *controller* subject ("you may " / "you ") from `text`,
+/// returning the imperative remainder in original case; `None` for every other
+/// leading subject.
+///
+/// This is the controller-only counterpart to [`strip_subject_clause`]. It
+/// exists for the token "create … for each X" fallback in
+/// `oracle_effect/mod.rs`, which delegates to `token::try_parse_token`. That
+/// path defaults `Effect::Token.owner` to `TargetFilter::Controller`
+/// (CR 109.5: an unqualified "you" is the controller of the source) and — via
+/// the early return in `try_parse_for_each_effect` — does NOT run the
+/// subject→owner rebinding that the numeric/targeted for-each arms use. So
+/// stripping a *non-controller* subject there ("each player", "each opponent",
+/// "target player/opponent", "its controller", "that player", …) would
+/// silently mis-own the created token to the source controller
+/// (CR 111.11: a token is created under a specific player's control). Only the
+/// controller subject may be stripped in that fallback; any other leading
+/// subject returns `None` so the clause honestly falls through to unsupported.
+pub(super) fn strip_controller_subject_clause(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    // Longest-match first: "you may " before the bare "you " so the optional
+    // permission word is consumed rather than stranded on the remainder.
+    let ((), remainder) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("you may "),
+                tag::<_, _, OracleError<'_>>("you "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let remainder = remainder.trim();
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(remainder.to_string())
 }
 
 /// Strip third-person 's' from the first word: "discards a card" → "discard a card".
@@ -5170,6 +5495,28 @@ mod tests {
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
 
+    /// CR 105.3 + CR 106.1a: "becomes that color" (Foraging Wickermaw) maps to the
+    /// same `AddChosenColor` reader as "the chosen color" (Puca's Eye) — only the
+    /// upstream writer differs (mana production vs `Effect::Choose`). Regression-
+    /// guards the sibling arms so a future edit can't drop them.
+    #[test]
+    fn become_that_color_maps_to_add_chosen_color() {
+        assert!(matches!(
+            try_parse_become_color_modification("that color"),
+            Some(ContinuousModification::AddChosenColor)
+        ));
+        assert!(matches!(
+            try_parse_become_color_modification("the chosen color"),
+            Some(ContinuousModification::AddChosenColor)
+        ));
+        assert!(matches!(
+            try_parse_become_color_modification("all colors"),
+            Some(ContinuousModification::SetColor { .. })
+        ));
+        // Unrelated predicates still fall through (the animation path handles them).
+        assert!(try_parse_become_color_modification("a giant lizard").is_none());
+    }
+
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
     // (unconditional form — no "that don't have" clause) must produce the
     // GenericEffect{AddKeyword(Suspend), ParentTarget, Permanent} shape that
@@ -5426,6 +5773,193 @@ mod tests {
             )),
             "expected RemoveType(Creature), got {:?}",
             static_abilities[0].modifications
+        );
+    }
+
+    // CR 120.1 + CR 608.2c: "each <object class> [you control] deals N damage to
+    // <recipient>" parses to `EachSourceDealsDamage` (per-source iteration), NOT a
+    // single ability-sourced `DealDamage`. Building-block tests, one per cluster
+    // recipient shape, fed the full clause text via `parse_effect`.
+    #[test]
+    fn each_source_deals_damage_parent_target_recipient() {
+        // Missy branch[0] / Case of the Gateway Express: "that <recipient>" bound to
+        // a parent target → Shared(ParentTarget).
+        let effect = super::super::parse_effect(
+            "each artifact creature you control deals 1 damage to that opponent",
+        );
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(matches!(sources, TargetFilter::Typed(_)), "got {sources:?}");
+        assert_eq!(amount, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::ParentTarget)
+        );
+    }
+
+    #[test]
+    fn each_source_deals_damage_triggering_source_recipient() {
+        // Sarkhan the Masterless: "that creature" = the attacker that triggered the
+        // ability → Shared(TriggeringSource).
+        let effect =
+            super::super::parse_effect("each Dragon you control deals 1 damage to that creature");
+        let Effect::EachSourceDealsDamage { recipient, .. } = effect else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::TriggeringSource)
+        );
+    }
+
+    #[test]
+    fn each_source_deals_damage_any_target_recipient() {
+        // Princess Snowfall: "any target" → Shared(Any).
+        let effect =
+            super::super::parse_effect("each Dwarf you control deals 1 damage to any target");
+        let Effect::EachSourceDealsDamage { recipient, .. } = effect else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(recipient, EachDamageRecipient::Shared(TargetFilter::Any));
+    }
+
+    #[test]
+    fn each_source_deals_damage_each_controller_recipient() {
+        // Rakdos Charm mode 3: "its controller" → EachController (per-source).
+        let effect = super::super::parse_effect("each creature deals 1 damage to its controller");
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(matches!(sources, TargetFilter::Typed(_)), "got {sources:?}");
+        assert_eq!(amount, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(recipient, EachDamageRecipient::EachController);
+    }
+
+    #[test]
+    fn each_enchantment_deals_to_its_controller_each_controller() {
+        // Aura Barbs clause 1, exact text → EachController with amount 2.
+        let effect =
+            super::super::parse_effect("each enchantment deals 2 damage to its controller");
+        let Effect::EachSourceDealsDamage {
+            amount, recipient, ..
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(recipient, EachDamageRecipient::EachController);
+    }
+
+    // CR 303.4 (DEFERRED §9): the per-attachment host recipient is not yet modeled —
+    // the clause must fail CLOSED to `Unimplemented` (replacing today's live
+    // `DealDamage{Fixed 2, ParentTarget}` misparse). Asserts the §6 step-1 reorder
+    // fires BEFORE the subject-parse requirement (Aura Barbs clause 2).
+    #[test]
+    fn each_aura_attached_damage_defers_to_unimplemented() {
+        let effect = super::super::parse_effect(
+            "each Aura attached to a creature deals 2 damage to the creature it's attached to",
+        );
+        assert!(
+            matches!(effect, Effect::Unimplemented { .. }),
+            "expected Unimplemented, got {effect:?}"
+        );
+    }
+
+    // Negative: a player-shaped subject must NOT be captured — it falls through so
+    // "each player ..." keeps its existing per-player handling.
+    #[test]
+    fn each_player_subject_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("each player draws a card");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "player subject wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: a self-source broadcast ("~ deals N damage to each creature",
+    // DamageAll) is NOT a per-source class — it must fall through.
+    #[test]
+    fn self_source_damage_each_creature_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("~ deals 1 damage to each creature");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "self-source broadcast wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: a SINGULAR anaphoric source ("that creature" = TriggeringSource,
+    // Flametongue Kavu Avatar) denotes ONE source, not a class — must NOT be
+    // captured (it would wrongly broadcast across all creatures).
+    #[test]
+    fn singular_that_creature_source_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("that creature deals 1 damage to target creature");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "singular anaphoric source wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: an Aura's "enchanted creature deals 1 damage to its owner" (Enslave)
+    // is a single AttachedTo source — must NOT be captured as a class.
+    #[test]
+    fn enchanted_creature_source_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect("enchanted creature deals 1 damage to its owner");
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "enchanted-creature source wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: damage nested inside a GRANTED ability ("each creature you control
+    // gains '{T}: This creature deals 1 damage to target player...'", Stensia) is
+    // not a direct per-source damage — the predicate's main verb is "gains", so it
+    // must NOT be captured.
+    #[test]
+    fn granted_ability_damage_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "each creature you control gains \"{T}: This creature deals 1 damage to target player or planeswalker\" until end of turn",
+        );
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "granted-ability damage wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: a per-source DYNAMIC amount ("each creature you control deals damage
+    // equal to its power") is the deferred filter-source own-power class — the
+    // single uniform resolve would be wrong, so it must NOT be captured.
+    #[test]
+    fn each_source_own_power_amount_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "each creature you control deals damage equal to its power to any target",
+        );
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "per-source dynamic amount wrongly captured: {effect:?}"
+        );
+    }
+
+    // Negative: the targeted own-power team-up shape still routes to
+    // `EachDealsDamageEqualToPower`, never `EachSourceDealsDamage`.
+    #[test]
+    fn each_power_team_up_is_not_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "up to two target creatures you control each deal damage equal to their power to another target creature",
+        );
+        assert!(
+            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
+            "own-power team-up wrongly captured: {effect:?}"
         );
     }
 
@@ -7603,5 +8137,53 @@ mod tests {
         // remainder is not discarded.
         let mut ctx = ParseContext::default();
         assert!(try_parse_copula_goaded_clause("it's goaded and draws a card", &mut ctx).is_none());
+    }
+
+    // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
+    // `Effect::BecomeBlocked` whose target is a Typed(creature) filter carrying
+    // both FilterProp::Unblocked and FilterProp::Attacking. SHAPE test — runtime
+    // semantics are covered by the cast-pipeline tests in
+    // tests/dazzling_beauty_become_blocked.rs.
+    #[test]
+    fn become_blocked_parses_with_unblocked_attacking_target() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+
+        let effect =
+            super::super::parse_effect("Target unblocked attacking creature becomes blocked.");
+        let Effect::BecomeBlocked { target } = &effect else {
+            panic!("expected Effect::BecomeBlocked, got {effect:?}");
+        };
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = target
+        else {
+            panic!("expected a Typed creature target, got {target:?}");
+        };
+        assert!(
+            type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "target must be a creature filter, got {type_filters:?}"
+        );
+        assert!(
+            properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Unblocked)),
+            "target must carry FilterProp::Unblocked (CR 509.1h), got {properties:?}"
+        );
+        assert!(
+            properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Attacking { .. })),
+            "target must carry FilterProp::Attacking, got {properties:?}"
+        );
+        // Reach-guard against a vacuous parse: the effect is the concrete
+        // BecomeBlocked variant, not Unimplemented.
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "must not fall through to Unimplemented"
+        );
     }
 }

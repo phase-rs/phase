@@ -386,6 +386,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         PaymentSelectionPolicy.score(&ctx)
     }
@@ -421,6 +422,10 @@ mod tests {
         eligible_creatures: Vec<ObjectId>,
         creature_ids: Vec<ObjectId>,
     ) -> f64 {
+        let contributions = eligible_creatures
+            .iter()
+            .map(|&id| object_crew_power_contribution(state, id, CrewAction::Crew))
+            .collect();
         score_for_action(
             state,
             WaitingFor::CrewVehicle {
@@ -428,6 +433,7 @@ mod tests {
                 vehicle_id,
                 crew_power,
                 eligible_creatures,
+                contributions,
             },
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -443,6 +449,10 @@ mod tests {
         eligible_creatures: Vec<ObjectId>,
         creature_ids: Vec<ObjectId>,
     ) -> f64 {
+        let contributions = eligible_creatures
+            .iter()
+            .map(|&id| object_crew_power_contribution(state, id, CrewAction::Saddle))
+            .collect();
         score_for_action(
             state,
             WaitingFor::SaddleMount {
@@ -450,6 +460,7 @@ mod tests {
                 mount_id,
                 saddle_power,
                 eligible_creatures,
+                contributions,
             },
             GameAction::SaddleMount {
                 mount_id,

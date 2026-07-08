@@ -4,6 +4,17 @@
     "collapse": "Contraer progreso de resolución",
     "expand": "Expandir progreso de resolución"
   },
+  "debugCreate": {
+    "tokenPower": "Power",
+    "tokenToughness": "Toughness",
+    "tokenPowerPlaceholder": "Power",
+    "tokenToughnessPlaceholder": "Toughness",
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
+  "nextUp": {
+    "label": "Sigue",
+    "tooltip": "El turno de este jugador es el siguiente."
+  },
   "card": {
     "faceDownName": "Carta boca abajo",
     "loading": "Cargando {{name}}",
@@ -16,6 +27,8 @@
     "holdCtrlFront": "Mantén Ctrl para la cara frontal",
     "holdCtrlFlip": "Mantén Ctrl para girar",
     "flip": "Girar",
+    "report": "Informar de un problema",
+    "reported": "Informado ✓",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
@@ -77,9 +90,29 @@
     "priorityTooltip": "Pasa la prioridad. Si la pila está vacía, esto avanza por la ventana de prioridad actual. Atajo: Espacio.",
     "pass": "Pasar",
     "passToEndTooltip": "Pasar automáticamente hasta el paso final a menos que lo interrumpa una elección, una parada o el Control total. Atajo: Intro.",
-    "autoPassing": "Pasando automáticamente al paso final..."
+    "autoPassing": "Pasando automáticamente al paso final...",
+    "resolvingStack": "Resolviendo la pila..."
+  },
+  "cardReport": {
+    "title": "Informar de un problema con una carta",
+    "subtitle": "Elige la carta que no funciona correctamente.",
+    "search": "Buscar cartas…",
+    "empty": "No hay cartas para informar a la vista.",
+    "zone": {
+      "Stack": "Pila",
+      "Battlefield": "Campo de batalla",
+      "Hand": "Mano",
+      "Graveyard": "Cementerio",
+      "Exile": "Exilio",
+      "Command": "Zona de mando"
+    },
+    "emblemTag": "Emblema",
+    "allPlayers": "Todos",
+    "allZones": "Todas las zonas",
+    "cancel": "Cancelar"
   },
   "board": {
+    "reportCard": "Informar de un problema con una carta",
     "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
     "changeBackground": "Cambiar fondo…",
     "customizeLayout": "Personalizar diseño…",
@@ -152,6 +185,12 @@
       "target": "Hidden objects that are legal targets.",
       "choice": "Hidden objects eligible for the active board choice.",
       "sacrifice": "Hidden objects that can be sacrificed."
+    },
+    "collapse": {
+      "label": "Contraer fila",
+      "auto": "Automático",
+      "on": "Siempre activado",
+      "off": "Siempre desactivado"
     }
   },
   "permanent": {
@@ -173,6 +212,10 @@
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
     "hiddenAttachments": "+{{count}} more attached",
+    "fanPick": "Elegir",
+    "fanConfirm": "Confirmar ({{count}})",
+    "viewAttachments_one": "Ver carta anexada",
+    "viewAttachments_other": "Ver {{count}} cartas anexadas",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -216,9 +259,29 @@
     "you": "Tú",
     "ally": "Aliado",
     "restoreDialog": "Restaurar diálogo",
-    "restoreDialogTitle": "Restaurar el diálogo de objetivo de ataque"
+    "restoreDialogTitle": "Restaurar el diálogo de objetivo de ataque",
+    "distribute": "Distribuir",
+    "attackersColumn": "Atacantes",
+    "unassigned": "Sin asignar",
+    "assignedBadge": "Asignado",
+    "allAssigned": "Todos los atacantes asignados",
+    "unassignedRemaining_one": "{{count}} sin asignar",
+    "unassignedRemaining_other": "{{count}} sin asignar",
+    "evenSplitAll": "Repartir todo por igual",
+    "resetAssignments": "Restablecer",
+    "allHere": "Todas aquí",
+    "spread": "Repartir",
+    "spreadEvenly": "Repartir por igual",
+    "assignOne": "Asignar una a {{label}}",
+    "removeOne": "Quitar una de {{label}}",
+    "assignAllHere": "Enviar todas a {{label}}",
+    "assignRemaining_one": "Asignar {{count}} más",
+    "assignRemaining_other": "Asignar {{count}} más",
+    "confirmDistribute_one": "Declarar {{count}} atacante",
+    "confirmDistribute_other": "Declarar {{count}} atacantes"
   },
   "fullControl": {
+    "label": "Control",
     "on": "Control total activado",
     "off": "Control total desactivado",
     "tooltip": "Mantén las ventanas de prioridad en lugar de dejar que los momentos tranquilos pasen automáticamente. Atajo: F."
@@ -257,6 +320,9 @@
     "cleanupDescription": "El daño desaparece y se comprueba el tamaño máximo de la mano.",
     "tooltipStopSet": "Parada establecida: haz clic para quitar esta parada de pasar automáticamente.",
     "tooltipNoStop": "Sin parada establecida: haz clic para pausar el pasar automáticamente aquí.",
+    "scopeAllTurns": "Se detiene en cada turno.",
+    "scopeOwnTurn": "Se detiene solo en tus turnos.",
+    "scopeOpponentsTurns": "Se detiene solo en los turnos de los oponentes.",
     "tooltipCurrentPhase": "Fase actual.",
     "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
   },
@@ -295,6 +361,18 @@
     "tooltip_one": "Pasa el cursor para previsualizar, haz clic para ver",
     "tooltip_other": "{{count}} encantamientos — pasa el cursor para previsualizar, haz clic para ver"
   },
+  "counterTooltip": {
+    "summary_one": "1 contador {{label}}\n{{description}}",
+    "summary_other": "{{count}} contadores {{label}}\n{{description}}",
+    "descriptions": {
+      "p1p1": "Cada contador +1/+1 da +1/+1 al permanente.",
+      "m1m1": "Cada contador -1/-1 da -1/-1 al permanente.",
+      "loyalty": "Los contadores de lealtad registran la lealtad de un planeswalker y las habilidades de lealtad los añaden o retiran.",
+      "lore": "Los contadores de sabiduría registran el progreso de capítulos de una Saga. Añadir uno normalmente dispara la siguiente habilidad de capítulo.",
+      "stun": "Si un permanente con un contador de aturdimiento fuera a enderezarse, en vez de eso retira un contador de aturdimiento.",
+      "generic": "Los contadores {{label}} son marcadores con nombre usados por efectos de cartas."
+    }
+  },
   "badges": {
     "monarch": "Monarca",
     "monarchTooltip": "El Monarca — roba una carta extra al final del turno",
@@ -306,10 +384,10 @@
     "dungeonTooltip": "Aventurándose en {{name}} — sala {{room}}",
     "poisonAriaLabel_one": "{{count}} contador de veneno",
     "poisonAriaLabel_other": "{{count}} contadores de veneno",
-    "poisonTooltip": "Contadores de veneno: {{count}}",
+    "poisonTooltip": "Contadores de veneno: {{count}}\nUn jugador con diez o más contadores de veneno pierde la partida.",
     "energyAriaLabel_one": "{{count}} contador de energía",
     "energyAriaLabel_other": "{{count}} contadores de energía",
-    "energyTooltip": "Energía: {{count}}",
+    "energyTooltip": "Contadores de energía: {{count}}\nLos contadores de energía son un recurso del jugador que las habilidades de cartas pueden gastar.",
     "ringAriaLabel": "El Anillo te tienta (nivel {{level}}), portador del Anillo: {{bearer}}",
     "ringTooltip": "El Anillo te tienta — nivel {{level}}",
     "ringBearerTooltip": "Portador del Anillo: {{name}}",
@@ -321,12 +399,12 @@
     "ringLevel4": "4. Cuando haga daño de combate a un jugador, cada oponente pierde 3 vidas.",
     "radAriaLabel_one": "{{count}} contador rad",
     "radAriaLabel_other": "{{count}} contadores rad",
-    "radTooltip": "Contadores radiación: {{count}}",
+    "radTooltip": "Contadores rad: {{count}}\nAl comienzo de la fase principal precombate de ese jugador, muele cartas igual a sus contadores rad y luego pierde vida por cada carta que no sea tierra molida de esta manera.",
     "experienceAriaLabel_one": "{{count}} contador de experiencia",
     "experienceAriaLabel_other": "{{count}} contadores de experiencia",
-    "experienceTooltip": "Contadores de experiencia: {{count}}",
+    "experienceTooltip": "Contadores de experiencia: {{count}}\nLos contadores de experiencia son contadores de jugador que las habilidades de cartas usan para escalar efectos.",
     "speedAriaLabel": "Velocidad {{value}}",
-    "speedTooltip": "Velocidad: {{value}}",
+    "speedTooltip": "Velocidad: {{value}}\nLa velocidad registra el progreso de Arranca tus motores. Puede aumentar hasta velocidad máxima 4.",
     "condCantWin": "No puede ganar la partida",
     "condCantGainLife": "No puede ganar vidas",
     "condCantLoseLife": "No puede perder vidas",
@@ -415,6 +493,9 @@
     "free": "Gratis",
     "chooseXTitle": "Elige un valor para X",
     "chooseXAria": "Elegir el valor de X",
+    "chooseXInputAria": "Introducir el valor de X",
+    "decreaseX": "Disminuir el valor de X",
+    "increaseX": "Aumentar el valor de X",
     "xEquals": "X = {{value}}",
     "minMax": "mín. {{min}} / máx. {{max}}",
     "maxOnly": "máx. {{max}}",
@@ -452,7 +533,9 @@
     "viewFullHand_other": "Ver la mano completa ({{count}} cartas)",
     "handLabel": "Mano {{count}}",
     "handTitle": "Mano ({{count}})",
-    "cardBack": "Dorso de la carta"
+    "cardBack": "Dorso de la carta",
+    "organizeLabel": "Organizar la mano",
+    "reorderPausedHint": "El reordenamiento por arrastre está pausado mientras la mano está ordenada o filtrada."
   },
   "opponentHud": {
     "ally": "Aliado",
@@ -530,6 +613,22 @@
     "paidKickedTimes": "estímulo ×{{count}}",
     "paidAdditionalCost": "coste extra",
     "paidConvoked": "convocado ×{{count}}"
+  },
+  "priorityYield": {
+    "listHeader": "Cesiones de prioridad",
+    "menuHeader": "Pasar automáticamente este disparo",
+    "menuExplainer": "Omite la pausa en la que el juego se detiene para preguntarte cada vez que este disparo se pone en la pila. Aún puedes responder a otras cosas.",
+    "yieldThis": "Solo este",
+    "yieldThisHint": "Solo este {{source}}, no otras copias",
+    "yieldAllCopies": "Todas las copias",
+    "allCopiesHint": "Cada {{source}}, incluidas las nuevas",
+    "revoke": "Revocar",
+    "revokeHint": "Volver a detenerse en este disparo",
+    "clearAll": "Borrar todo",
+    "menuButton": "Pasar automáticamente este disparo",
+    "menuButtonActive": "Pasando automáticamente: cambiar o revocar",
+    "menuButtonShort": "Auto-pasar",
+    "menuButtonShortActive": "Pasando"
   },
   "targeting": {
     "choosePermanentToCopy": "Elige un permanente para copiar",
@@ -883,7 +982,8 @@
       "title": "Elegir coste de activación"
     },
     "debug": {
-      "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta"
+      "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta",
+      "modeButtonOff": "MODO CLIC DESACTIVADO"
     }
   },
   "gameProvider": {
@@ -934,6 +1034,8 @@
     },
     "deckPreview": {
       "editDeck": "Editar {{name}}",
+      "randomTitle": "Mazo aleatorio",
+      "randomDescription": "Se elegirá un mazo compatible cuando empiece la partida.",
       "cardCount_one": "{{count}} carta",
       "cardCount_other": "{{count}} cartas",
       "unknownBadge": "Desconocidas {{count}}",
@@ -955,6 +1057,13 @@
     }
   },
   "cardChoice": {
+    "eachPlayerCopyChosen": {
+      "title": "Choose creatures to copy",
+      "prompt": "The first creature you choose is copied; if you choose a second, its power becomes +1/+1 counters on the copy.",
+      "confirm": "Confirmar",
+      "copied": "copied",
+      "scaler": "scaler"
+    },
     "badges": {
       "choose": "Elegir",
       "selected": "Seleccionada",
@@ -1270,6 +1379,12 @@
       "optCmc": "Valor de maná",
       "optType": "Tipo",
       "optColor": "Color",
+      "filterLabel": "Mostrar",
+      "filterNone": "Todas",
+      "filterPlayable": "Jugables",
+      "filterCreatures": "Criaturas",
+      "filterLands": "Tierras",
+      "filterNonland": "No tierras",
       "counterDiscard": "Descartar {{selected}} de {{cap}}",
       "counterKeep": "Conservar {{selected}} de {{cap}}",
       "keepInstead": "Conservar en su lugar",
@@ -1417,6 +1532,11 @@
     "dashAltLabel": "Lanzar con Dash",
     "dashAltSuffix": "(gana prisa, vuelve a la mano en el paso final)",
     "dashSubtitle": "Lanza {{name}} normalmente o usa su coste de Dash.",
+    "faceDownEyebrow": "Boca abajo",
+    "faceDownNormalLabel": "Lanzar normalmente",
+    "faceDownAltLabel": "Lanzar boca abajo",
+    "faceDownAltSuffix": "(criatura 2/2 hasta que se ponga boca arriba)",
+    "faceDownSubtitle": "Lanza {{name}} normalmente, o lánzala boca abajo como una criatura 2/2 que puede ponerse boca arriba más tarde.",
     "evokeEyebrow": "Evocar",
     "evokeNormalLabel": "Lanzar normalmente",
     "evokeAltLabel": "Lanzar con Evocar",
@@ -1548,6 +1668,7 @@
     "variantForetell": "Lanzar desde Predecir",
     "variantOverload": "Lanzar con Sobrecargar",
     "variantBestow": "Lanzar con Otorgar",
+    "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
     "variantFallback": "Lanzar con {{type}}"
   },
@@ -1660,7 +1781,10 @@
       "twoColors": "Elige dos colores",
       "numberRange": "Elige un número",
       "labeled": "Toma una decisión",
+      "cardPredicate": "Elige un tipo de carta",
+      "cardPredicateGuess": "Adivina un tipo de carta",
       "keyword": "Elige una habilidad",
+      "counterKind": "Elige un contador",
       "fallback": "Toma una decisión"
     },
     "searchSubtitle": "Escribe para buscar en todas las cartas",
@@ -1837,6 +1961,11 @@
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   },
+  "counterRemoval": {
+    "title": "Remove {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}",
+    "removeLabel": "Remove"
+  },
   "coinFlip": {
     "keep": {
       "title": "Krark's Thumb",
@@ -1919,6 +2048,21 @@
       "priorityMain": "main phase",
       "priority": "priority",
       "thinking": "deciding"
+    },
+    "seat": {
+      "declareAttackers": "Declaring attackers",
+      "declareBlockers": "Declaring blockers",
+      "assigningDamage": "Assigning damage",
+      "choosingTargets": "Choosing targets",
+      "payingCost": "Paying a cost",
+      "mulligan": "Mulligan",
+      "discarding": "Discarding",
+      "orderingTriggers": "Ordering triggers",
+      "respondingToStack": "Responding",
+      "priorityCombat": "Combat",
+      "priorityMain": "Main phase",
+      "priority": "Priority",
+      "thinking": "Thinking"
     }
   }
 }

@@ -1,8 +1,9 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { GameFormat, MatchType, Phase } from "../adapter/types";
+import type { GameFormat, MatchType, PhaseStop } from "../adapter/types";
 import type { CommanderBracket } from "../types/bracket";
+import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
   ANIMATION_SPEED_DEFAULT,
   ANIMATION_SPEED_MAX,
@@ -75,6 +76,13 @@ export type BattlefieldCardDisplay = "art_crop" | "full_card";
  *  {@link useResolvedCommandZoneDisplay}, mirroring the `boardBackground`
  *  "auto-wubrg" resolve-at-use-site precedent. */
 export type CommandZoneDisplay = "compact" | "inline" | "auto";
+/** Whether a battlefield sub-row (lands / support) collapses into its summary
+ *  tile. "auto" = collapse once the row exceeds the crowding threshold (the
+ *  prior fixed behavior); "on" = always collapse into the tile; "off" = never
+ *  collapse (always show the full row). Resolved at the use-site in
+ *  {@link BattlefieldZoneOverflow}, mirroring the `commandZoneDisplay`
+ *  tri-state "auto" precedent. Lands and support each carry their own value. */
+export type ZoneCollapseMode = "auto" | "on" | "off";
 export type TapRotation = "mtga" | "classic";
 export type SpellPaymentMode = "auto" | "manual";
 /** Which screen edge the resolving-stack panel docks to (and collapses toward).
@@ -86,6 +94,7 @@ export type StackDockSide = "left" | "right";
  *  a single thin row (small avatar + name + life) that trades the breakdown for
  *  vertical real-estate. Player-toggleable from the rail. */
 export type OpponentHudDensity = "comfortable" | "compact";
+export type MultiplayerBoardLayout = "focused" | "split";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -275,14 +284,18 @@ function buildDefaultPreferences(): PreferencesState {
     collapsedFolderIds: [],
     lastSeenChangelogId: undefined,
     commandZoneDisplay: "auto",
+    collapseLands: "auto",
+    collapseSupport: "auto",
     tapRotation: "mtga",
     spellPaymentMode: "auto",
+    handSort: "none",
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
     cardPreviewMode: "follow",
     cardPreviewHoverDelayMs: 0,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
+    multiplayerBoardLayout: "focused",
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
     aiArchetypeFilter: "Any",
@@ -293,9 +306,11 @@ function buildDefaultPreferences(): PreferencesState {
     lastPlayerCount: 2,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
+    dismissedReportCardNudge: false,
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
     flexLayout: defaultFlexLayout(),
+    telemetryEnabled: true,
   };
 }
 
@@ -319,7 +334,7 @@ interface PreferencesState {
    *  for the full list. Each event's category is resolved via `eventCategory()`
    *  and the matching multiplier scales its base duration. */
   pacingMultipliers: Record<PacingCategory, number>;
-  phaseStops: Phase[];
+  phaseStops: PhaseStop[];
   masterVolume: number;
   sfxVolume: number;
   musicVolume: number;
@@ -339,8 +354,17 @@ interface PreferencesState {
   lastSeenChangelogId?: number;
   /** Command-zone layout mode (inline dock / compact pile / auto-by-viewport). */
   commandZoneDisplay: CommandZoneDisplay;
+  /** Whether the lands sub-row collapses into its summary tile (auto/on/off). */
+  collapseLands: ZoneCollapseMode;
+  /** Whether the support sub-row collapses into its summary tile (auto/on/off). */
+  collapseSupport: ZoneCollapseMode;
   tapRotation: TapRotation;
   spellPaymentMode: SpellPaymentMode;
+  /** Persisted sort order for the player's own hand (display-only — never
+   *  reorders `player.hand`). Mirrors the discard grid's `SortKey`; defaults to
+   *  "none" (insertion order, the prior behavior). The hide-filter is kept
+   *  ephemeral per-game in `uiStore.handFilter`. */
+  handSort: SortKey;
   showKeywordStrip: boolean;
   /** When true, hovering an unfocused opponent's tab opens a small popover
    *  previewing that opponent's nonland permanents. Disable for a quieter
@@ -357,6 +381,8 @@ interface PreferencesState {
   stackDockSide: StackDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
   opponentHudDensity: OpponentHudDensity;
+  /** Multiplayer board presentation: one focused opponent, or all opponent seats. */
+  multiplayerBoardLayout: MultiplayerBoardLayout;
   aiSeats: AiSeatPref[];
   /** Table-wide cEDH toggle. When true, every AI opponent plays at cEDH
    *  (bracket 5) regardless of its per-seat difficulty, and the AI/human deck
@@ -371,11 +397,17 @@ interface PreferencesState {
   lastPlayerCount: number;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
+  dismissedReportCardNudge: boolean;
   artChain: ArtChainEntry[];
   artOverrides: Record<string, CardArtOverride>;
   /** Persisted board layout (grid bands + per-widget offsets + active preset).
    *  See {@link FlexLayoutConfig}. Edited only in Flex Layout mode. */
   flexLayout: FlexLayoutConfig;
+  /** Whether anonymous, identity-free crash & usage telemetry may be sent.
+   *  Default on. Gates every send at enqueue time so a mid-session toggle takes
+   *  effect immediately. Builds without a `__TELEMETRY_URL__` define never send
+   *  regardless. See `services/telemetry.ts`. */
+  telemetryEnabled: boolean;
 }
 
 interface PreferencesActions {
@@ -385,6 +417,7 @@ interface PreferencesActions {
   setFollowActiveOpponent: (enabled: boolean) => void;
   setStackDockSide: (side: StackDockSide) => void;
   setOpponentHudDensity: (density: OpponentHudDensity) => void;
+  setMultiplayerBoardLayout: (layout: MultiplayerBoardLayout) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -397,7 +430,7 @@ interface PreferencesActions {
    *  audio levels, board background — everything except persisted multiplayer
    *  reconnect state, which is owned by `multiplayerStore`. */
   resetAllPreferences: () => void;
-  setPhaseStops: (stops: Phase[]) => void;
+  setPhaseStops: (stops: PhaseStop[]) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
   setMusicVolume: (vol: number) => void;
@@ -412,8 +445,11 @@ interface PreferencesActions {
   setCollapsedFolderIds: (ids: string[]) => void;
   setLastSeenChangelogId: (id: number) => void;
   setCommandZoneDisplay: (display: CommandZoneDisplay) => void;
+  setCollapseLands: (mode: ZoneCollapseMode) => void;
+  setCollapseSupport: (mode: ZoneCollapseMode) => void;
   setTapRotation: (rotation: TapRotation) => void;
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
+  setHandSort: (sort: SortKey) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
   setCardPreviewMode: (mode: CardPreviewMode) => void;
@@ -434,6 +470,7 @@ interface PreferencesActions {
   setLastPlayerCount: (count: number) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
+  setDismissedReportCardNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
   removeArtChainEntry: (index: number) => void;
   moveArtChainEntry: (fromIndex: number, toIndex: number) => void;
@@ -467,6 +504,8 @@ interface PreferencesActions {
   applyFlexPreset: (config: FlexLayoutConfig) => void;
   /** Reset the layout to the default preset (clears all offsets). */
   resetFlexLayout: () => void;
+  /** Toggle anonymous crash & usage telemetry. */
+  setTelemetryEnabled: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -514,6 +553,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
       setStackDockSide: (side) => set({ stackDockSide: side }),
       setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
+      setMultiplayerBoardLayout: (layout) => set({ multiplayerBoardLayout: layout }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -560,8 +600,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setCollapsedFolderIds: (ids) => set({ collapsedFolderIds: ids }),
       setLastSeenChangelogId: (id) => set({ lastSeenChangelogId: id }),
       setCommandZoneDisplay: (display) => set({ commandZoneDisplay: display }),
+      setCollapseLands: (mode) => set({ collapseLands: mode }),
+      setCollapseSupport: (mode) => set({ collapseSupport: mode }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
+      setHandSort: (sort) => set({ handSort: sort }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
       setCardPreviewMode: (mode) => set({ cardPreviewMode: mode }),
@@ -610,6 +653,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
+      setDismissedReportCardNudge: (dismissed) => set({ dismissedReportCardNudge: dismissed }),
       addArtChainEntry: (entry) =>
         set((state) => {
           const isDuplicate = state.artChain.some((e) =>
@@ -716,10 +760,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         })),
       applyFlexPreset: (config) => set({ flexLayout: cloneFlexLayout(config) }),
       resetFlexLayout: () => set({ flexLayout: defaultFlexLayout() }),
+      setTelemetryEnabled: (enabled) => set({ telemetryEnabled: enabled }),
     }),
     {
       name: "phase-preferences",
-      version: 18,
+      version: 24,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -754,6 +799,22 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          via the shallow merge. The changelog hook then silently seeds
       //          it to the current latest on first load, so existing users get
       //          no unread dot for entries that predate this upgrade.
+      // v18 → v19: Add handSort; legacy stores default to "none" (insertion
+      //          order — the prior hand behavior) via the shallow merge.
+      // v19 → v20: Add collapseLands/collapseSupport; legacy stores default to
+      //          "auto" (the prior threshold-driven collapse) via the shallow
+      //          merge, so existing users see no behavior change.
+      // v20 → v21: Add multiplayerBoardLayout; legacy stores default to
+      //          "focused", preserving the current focused-opponent layout.
+      // v21 → v22: Add telemetryEnabled; legacy stores default to `true` (opt-out,
+      //          identity-free crash & usage telemetry) via the shallow merge —
+      //          no explicit migration block needed (see flexLayout precedent).
+      // v22 → v23: phaseStops gained a turn-direction scope; each legacy bare
+      //          Phase string maps to a scoped stop defaulting to "AllTurns"
+      //          (fire on every turn = the old behavior).
+      // v23 → v24: Add dismissedReportCardNudge; legacy stores default to `false`
+      //          (nudge not yet dismissed) via the shallow merge — no explicit
+      //          migration block needed (see telemetryEnabled precedent).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -887,6 +948,23 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
                 ? { ...s, difficulty: DEFAULT_AI_DIFFICULTY }
                 : s,
             ),
+          };
+        }
+
+        if (version < 21) {
+          migrated = { ...migrated, multiplayerBoardLayout: "focused" };
+        }
+
+        // v22 → v23: phase stops gained a turn-direction scope. Map each legacy
+        // bare Phase string to a scoped stop defaulting to "AllTurns" (fire on
+        // every turn = the old behavior). Non-array values reset to [].
+        if (version < 23) {
+          const legacy = (migrated as { phaseStops?: unknown }).phaseStops;
+          migrated = {
+            ...migrated,
+            phaseStops: Array.isArray(legacy)
+              ? legacy.map((p) => (typeof p === "string" ? { phase: p, scope: "AllTurns" } : p))
+              : [],
           };
         }
 

@@ -421,6 +421,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -429,6 +430,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -440,6 +442,7 @@ mod tests {
                 ..TypedFilter::default()
             }),
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -634,6 +637,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             destination: None,
             keep_count: Some(3),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
@@ -656,6 +660,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 2 },
             destination: Some(Zone::Exile),
             keep_count: Some(2),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,

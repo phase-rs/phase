@@ -43,7 +43,8 @@ fn resolve_sacrifice_scope(
             .map(|p| p.id)
             .filter(|&id| id != ability.controller)
             .collect(),
-        Some(ControllerRef::TargetPlayer) => ability
+        // CR 109.4: TargetOpponent reads identically to TargetPlayer.
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => ability
             .targets
             .iter()
             .find_map(|t| match t {
@@ -108,6 +109,8 @@ fn resolve_sacrifice_scope(
         )
         .map(|pid| vec![pid])
         .unwrap_or_default(),
+        // CR 102.1: the active player, read live.
+        Some(ControllerRef::ActivePlayer) => vec![state.active_player],
     }
 }
 
@@ -559,6 +562,71 @@ mod tests {
             }
             other => panic!("expected EffectZoneChoice with eligible set, got {other:?}"),
         }
+    }
+
+    /// Cluster J1 (building-block companion to the Disciple of Bolas
+    /// cast-pipeline guard): "sacrifice **another** creature" as an EFFECT must
+    /// exclude the ability's source from the eligible pool. With exactly one
+    /// OTHER creature, the mandatory sacrifice auto-resolves onto it and the
+    /// source survives.
+    ///
+    /// CR 701.21a: sacrifice moves the chosen permanent to its owner's
+    /// graveyard. `FilterProp::Another` is evaluated via
+    /// `FilterContext::from_ability` (source excluded). The paired negative
+    /// (source survives) is made non-vacuous by asserting the OTHER creature was
+    /// actually moved to the graveyard.
+    #[test]
+    fn sacrifice_another_creature_effect_excludes_source_from_pool() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Disciple".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hill Giant".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&other).unwrap().card_types.core_types = vec![CoreType::Creature];
+
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Another]),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.battlefield.contains(&source),
+            "FilterProp::Another must exclude the source — it survives"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&other),
+            "the OTHER creature is the sole eligible target and is sacrificed"
+        );
+        assert!(
+            !state.battlefield.contains(&other),
+            "non-vacuous: the other creature actually left the battlefield"
+        );
     }
 
     #[test]

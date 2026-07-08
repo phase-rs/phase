@@ -8,6 +8,7 @@ import { effectiveStackPressure } from "../../utils/stackThroughput.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { getSeatCount, isSplitBoardActive } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay, WaitingFor } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
@@ -32,6 +33,9 @@ function getPendingCastObjectId(
 ): ObjectId | null {
   if (!waitingFor) return null;
   switch (waitingFor.type) {
+    // These cast-flow prompts all carry the casting spell in `pending_cast`, so
+    // the stack keeps its "Casting" badge while the prompt is up. CostTypeChoice
+    // is Celestial Reunion's pre-cost "choose a creature type" (CR 601.2b).
     case "TargetSelection":
     case "ModeChoice":
     case "OptionalCostChoice":
@@ -39,6 +43,7 @@ function getPendingCastObjectId(
     case "BlightChoice":
     case "HarmonizeTapChoice":
     case "ChooseXValue":
+    case "CostTypeChoice":
       return waitingFor.data.pending_cast.object_id;
     // CR 601.2b: PayCost carries its pending cast inside `resume` (only the
     // spell-cast resume; mana-ability cost payment has no pending cast).
@@ -73,7 +78,8 @@ function getViewportSize() {
 
 export function StackDisplay() {
   const { t } = useTranslation("game");
-  const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
+  const gameState = useGameStore((s) => s.gameState);
+  const stack = gameState?.stack ?? EMPTY_STACK;
   const waitingFor = useGameStore((s) => s.waitingFor);
   // Engine-authored stack grouping rides on the same state snapshot that
   // carries `state.stack` (see `engine::game::derived_views`). Reading
@@ -95,6 +101,7 @@ export function StackDisplay() {
   // choice on every resolution.
   const stackDockSide = usePreferencesStore((s) => s.stackDockSide);
   const setStackDockSide = usePreferencesStore((s) => s.setStackDockSide);
+  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const dockedLeft = stackDockSide === "left";
   // User size multiplier over the viewport-derived auto-scale (absent ⇒ 1).
   // Cards derive width AND height from one scale, so this stays aspect-correct.
@@ -171,8 +178,10 @@ export function StackDisplay() {
   // clamped to a pixel top below so the panel header — the only controls (swap,
   // collapse, count) — can never be pushed off the top edge when the pile is
   // taller than the viewport.
-  const topFraction =
-    viewport.width < 640 ? 0.38 :
+  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
+  const topFraction = splitBoardActive
+    ? viewport.width < 640 ? 0.52 : viewport.width < 1024 ? 0.58 : 0.66
+    : viewport.width < 640 ? 0.38 :
       viewport.width < 1024 ? 0.43 : 0.5;
   const collapsedPeekPx = viewport.width < 768 ? 24 : COLLAPSED_PEEK_PX;
 
@@ -248,7 +257,7 @@ export function StackDisplay() {
             <button
               type="button"
               onClick={() => setIsCollapsed(false)}
-              className={`pointer-events-auto absolute top-1/2 z-20 flex h-20 w-7 -translate-y-1/2 items-center justify-center border border-white/10 bg-gray-950/95 text-gray-300 shadow-[0_18px_36px_rgba(0,0,0,0.45)] transition-colors hover:bg-gray-900 hover:text-white ${dockedLeft ? "right-0 translate-x-1/2 rounded-l-md rounded-r-xl" : "left-0 -translate-x-1/2 rounded-l-xl rounded-r-md"}`}
+              className={`pointer-events-auto absolute top-1/2 z-20 flex h-16 w-7 -translate-y-1/2 items-center justify-center rounded-[6px] border border-white/12 bg-gray-950 text-gray-300 shadow-[0_8px_18px_rgba(0,0,0,0.36)] transition-colors hover:bg-gray-900 hover:text-white ${dockedLeft ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2"}`}
               aria-label={t("stack.expandPanel")}
             >
               {/* Chevron points back toward the board (the direction the panel
@@ -263,7 +272,7 @@ export function StackDisplay() {
             </button>
           )}
 
-          <div className="pointer-events-auto relative h-full overflow-hidden rounded-2xl border border-white/10 bg-gray-950/88 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-md">
+          <div className="pointer-events-auto relative h-full overflow-hidden rounded-[10px] border border-white/10 bg-gray-950/96 shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
             <div className="flex h-9 items-center justify-between border-b border-white/10 px-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">

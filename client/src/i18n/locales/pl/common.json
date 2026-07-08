@@ -35,11 +35,25 @@
     "off": "Wył."
   },
   "gameMenu": {
+    "sections": {
+      "view": "Widok",
+      "tools": "Narzędzia",
+      "game": "Gra"
+    },
+    "reportCard": "Zgłoś kartę",
     "menu": "Menu gry",
     "sandboxTools": "Narzędzia piaskownicy",
     "sandboxToolsTitle": "Narzędzia piaskownicy — skonfiguruj dowolny stan pola bitwy (`)",
+    "openSandboxTools": "Otwórz narzędzia piaskownicy",
+    "clickModeButton": "Przycisk trybu kliknięcia",
+    "shown": "Widoczny",
+    "hidden": "Ukryty",
     "resume": "Wznów",
     "settings": "Ustawienia",
+    "boardLayoutSplit": "Podzielony",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Przełącz na widok podzielonego stołu",
+    "switchToLegacyView": "Przełącz na skupiony widok legacy",
     "helpShortcuts": "Pomoc i skróty",
     "showAiHand": "Pokaż rękę AI",
     "hideAiHand": "Ukryj rękę AI",
@@ -202,6 +216,12 @@
       "message": "Skonfiguruj dowolny stan pola bitwy za pomocą <tools>Narzędzi piaskownicy</tools> — dodawaj karty i żetony, zmieniaj życie i znaczniki, kopiuj trwałe permanenty lub przeskakuj fazy. Otwórz je w dowolnej chwili klawiszem <key>`</key>.",
       "dismiss": "Odrzuć",
       "open": "Otwórz Narzędzia piaskownicy"
+    },
+    "reportCardNudge": {
+      "message": "Karta wyświetla się lub działa źle? Dotknij <flag>flagi zgłoszenia</flag> w lewym górnym rogu, aby ją zgłosić, a my ją naprawimy.",
+      "dismiss": "Odrzuć",
+      "open": "Zgłoś kartę",
+      "debugPrompt": "Karta wyświetla się lub działa źle? Zgłoś ją, a my ją naprawimy."
     }
   },
   "splash": {
@@ -228,5 +248,16 @@
     "settings": "Ustawienia",
     "languageSettings": "Język ({{lang}}) — otwórz ustawienia",
     "languageTitle": "Język: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Coś poszło nie tak",
+    "body": "Aplikacja napotkała nieoczekiwany błąd i nie może kontynuować na tym ekranie. Ponowne załadowanie zwykle to naprawia.",
+    "reload": "Załaduj ponownie"
+  },
+  "actionError": {
+    "title": "{{action}} nie powiodła się",
+    "skipTarget": "Pomiń cel",
+    "genericAction": "Akcja",
+    "unknownEngineError": "Nieznany błąd silnika"
   }
 }

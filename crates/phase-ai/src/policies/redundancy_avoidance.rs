@@ -395,6 +395,7 @@ fn redundancy_delta(
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
         | Effect::Explore
         | Effect::ExploreAll { .. }
         | Effect::Investigate
@@ -406,6 +407,7 @@ fn redundancy_delta(
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
@@ -458,6 +460,8 @@ fn redundancy_delta(
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -473,6 +477,7 @@ fn redundancy_delta(
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
@@ -489,11 +494,17 @@ fn redundancy_delta(
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
+        // triggered ability — it has no target and no static redundancy signal.
+        | Effect::ChaosEnsues
+        // CR 103.1: ReverseTurnOrder has no target and no static redundancy signal.
+        | Effect::ReverseTurnOrder
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }
@@ -557,6 +568,9 @@ fn redundancy_delta(
         // CR 702.171b: a permanent cannot become saddled if already saddled; no
         // static redundancy signal — leave to the resolver.
         | Effect::BecomeSaddled { .. }
+        // CR 509.1h: "becomes blocked" has no static redundancy signal (the
+        // target's blocked state is combat-scoped) — leave it to the resolver.
+        | Effect::BecomeBlocked { .. }
         // CR 702.95c-d: PairWith mutates the source/target pair relationship;
         // redundancy depends on trigger timing and revalidation, so this policy
         // leaves it to the resolver.
@@ -576,6 +590,10 @@ fn redundancy_delta(
         // branches — redundancy would require evaluating each branch in turn,
         // which is beyond this policy's scope. Fall through to None.
         | Effect::ChooseOneOf { .. }
+        // CR 122.1 + CR 608.2d: ChooseCounterAdjustment is the choose-one-kind
+        // sibling of ChooseOneOf — the counter kind and add/remove operation are
+        // chosen at resolution, so there is no static redundancy signal to score.
+        | Effect::ChooseCounterAdjustment { .. }
         // CR 614.1a + CR 514.2: AddTargetReplacement registers a one-shot
         // replacement on the resolved target (e.g., "if that creature would
         // die this turn, exile it instead"). Its value depends on whether the
@@ -593,6 +611,11 @@ fn redundancy_delta(
         // instead"). Its value depends on whether a draw later occurs — no
         // static redundancy signal, same as the damage replacement above.
         | Effect::CreateDrawReplacement { .. }
+        // CR 614.1a + CR 614.5: CreatePlaneswalkReplacement installs a continuous,
+        // duration-bound planar-die planeswalk "shield" (Fixed Point in Time). Its
+        // value depends on whether a planeswalk later occurs within the window — no
+        // static redundancy signal, same as the draw replacement above.
+        | Effect::CreatePlaneswalkReplacement { .. }
         // CR 614.12 + CR 303.4: ReturnAsAura installs an Aura conversion +
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.
@@ -630,6 +653,10 @@ fn redundancy_delta(
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
         | Effect::RememberCard { .. }
+        // CR 608.2d + CR 122.1: the counter-kind choice + its consume carry no
+        // static redundancy signal (the value depends on the runtime choice).
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
         | Effect::HeistExile => None,
     }
 }
@@ -1127,6 +1154,7 @@ mod tests {
             config,
             context: ai_ctx,
             cast_facts,
+            search_depth: crate::policies::context::SearchDepth::Root,
         }
     }
 
@@ -1283,6 +1311,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
 
@@ -1311,6 +1340,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
 
@@ -1821,6 +1851,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -2100,6 +2131,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let config = AiConfig::default();

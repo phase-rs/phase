@@ -140,7 +140,7 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
     // Parse the leading typed clause. A bare controlled permanent
     // ("a permanent you control", Panharmonicon) adds nothing the controller
     // match doesn't already enforce, so an unrestrictive clause yields `None`.
-    let (first, remainder) = parse_type_phrase(source_phrase);
+    let (first, remainder) = parse_doubler_disjunct(source_phrase);
     if !doubler_source_is_restrictive(&first) {
         return None;
     }
@@ -160,7 +160,7 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
 
     let mut branches = vec![first];
     loop {
-        let (filter, remainder) = parse_type_phrase(rest);
+        let (filter, remainder) = parse_doubler_disjunct(rest);
         // Each disjunct must independently narrow to a restrictive typed clause.
         // If one does not — e.g. a stray "or" inside an unrelated suffix
         // ("power 4 or greater") split the phrase mid-clause — bail so the
@@ -214,8 +214,44 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
             }) || !tf.properties.is_empty()
         }
         TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
+        // CR 603.2d: "a triggered ability of ~" names the doubler's own source
+        // object — a self-reference that narrows to exactly one permanent, so it
+        // is restrictive (Cloud, Midgar Mercenary).
+        TargetFilter::SelfRef => true,
         _ => false,
     }
+}
+
+/// CR 603.2d + CR 301.5a: Parse one disjunct of a trigger-doubler's source
+/// phrase, handling the two source-relative referents `parse_type_phrase` cannot
+/// express before falling back to it for ordinary typed clauses:
+/// - `~` — the normalized source name → [`TargetFilter::SelfRef`] (Cloud doubling
+///   "a triggered ability of ~").
+/// - "an Equipment attached to it" — here "it" is anaphoric on the doubler's own
+///   source, so it is the source-relative [`FilterProp::AttachedToSource`] set.
+///   `parse_type_phrase` maps "attached to it" to `AttachedToRecipient` (an
+///   enchanted-creature host), which is the wrong referent in a doubler, so this
+///   clause is hand-built.
+fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
+    if let Ok((rest, filter)) = alt((
+        value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~")),
+        value(
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Equipment".to_string())
+                    .properties(vec![FilterProp::AttachedToSource]),
+            ),
+            alt((
+                tag("an equipment attached to it"),
+                tag("a equipment attached to it"),
+            )),
+        ),
+    ))
+    .parse(phrase)
+    {
+        return (filter, rest);
+    }
+    parse_type_phrase(phrase)
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -255,6 +291,33 @@ pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMod
         .parse(rest)
         .ok()?;
     Some(mode)
+}
+
+/// CR 508.1c: The directional attack restriction (Pramikon, Sky Rampart;
+/// Mystic Barrier; Teyo, Geometric Tactician): "Each player may attack only the
+/// nearest opponent in the [last] chosen direction and planeswalkers controlled
+/// by that opponent." The `opt(tag("last "))` tolerates both the base wording
+/// ("the chosen direction") and Mystic Barrier's re-choosable phrasing ("the
+/// last chosen direction"). The chosen direction is bound separately by the
+/// linked "choose left or right" ability (CR 607.2d); this static is the nullary
+/// marker read by the CR 508.1c attacker-declaration gate in `combat.rs`.
+pub(crate) fn parse_attack_only_neighbor_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("each player may attack only the nearest opponent in the ")
+            .parse(lower)
+            .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("last "))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
+        "chosen direction and planeswalkers controlled by that opponent",
+    )
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(StaticMode::AttackOnlyNeighbor)
 }
 
 pub(crate) fn parse_compound_subject_rule_static(
@@ -517,6 +580,102 @@ pub(crate) fn is_extra_blockers_static_candidate(lower: &str) -> bool {
     parse_extra_blockers_static(lower).is_some()
 }
 
+/// CR 509.1c + CR 611.3a: A printed permanent forced-block ("lure") static —
+/// "All creatures able to block `<subject>` do so" — where `<subject>` is a
+/// rule-static subject (a self-reference `~`, or "enchanted creature" for the
+/// Aura form). This is the PERMANENT static class (Ochran Assassin, Breaker of
+/// Armies, Prized Unicorn, Lure), distinct from the one-shot spell/activated
+/// form "… target creature this turn do so" (Alluring Scent), which
+/// `try_parse_mass_forced_block` lowers to a duration-bounded `GenericEffect`.
+/// Misclassifying the printed static as that one-shot effect leaves it as a
+/// never-resolving ability, so the lure never applies (issue #4949). Emitting a
+/// permanent `StaticMode::MustBeBlockedByAll` static routes it through the combat
+/// enforcement that already exists (`game/combat.rs`, CR 509.1c). The subject is
+/// resolved by `parse_rule_static_subject_filter`, which returns `None` for a
+/// `target …` subject so a genuine spell/effect form still falls through to the
+/// effect parser.
+/// CR 509.1c: the blocker slot of the "All <blockers> able to block <subject> do
+/// so" grammar, consumed after the leading `tag("all ")`. Returns the remainder
+/// (positioned at the subject) and the optional blocker filter:
+/// - Slot A — the bare "creature(s) able to block " form → `None` (every idle
+///   able creature is compelled: Lure, Ochran Assassin). Byte-identical to the
+///   old single `tag`, so unfiltered lines are unchanged.
+/// - Slot B — "<type-phrase> able to block " (Talruum Piper "creatures with
+///   flying", Marble Priest "Walls") → `Some(filter)`. The type slot is parsed by
+///   the shared `parse_type_phrase` building block; the phrase must fully consume
+///   up to the literal " able to block " (else the Some form is rejected as
+///   mis-scoped and this returns `None`, letting the line fall through).
+///
+/// A runs before B, and B requires the " able to block " tag on its remainder, so
+/// a bare "creatures able to block " is always resolved to `None` by A.
+pub(crate) fn parse_forced_block_blocker_slot(input: &str) -> Option<(&str, Option<TargetFilter>)> {
+    // Slot A: bare "creature(s) able to block " → None (unfiltered lure).
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("creatures able to block "),
+        tag("creature able to block "),
+    ))
+    .parse(input)
+    {
+        return Some((rest, None));
+    }
+    // Slot B: "<type-phrase> able to block " → Some(filter). Scope the type phrase
+    // to the text before the literal " able to block " so `parse_type_phrase`
+    // cannot over-consume into the subject.
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" able to block ")
+        .parse(input)
+        .ok()?;
+    let (filter, filter_remainder) = parse_type_phrase(type_text);
+    if !filter_remainder.trim().is_empty() {
+        return None; // mis-scoped Some — reject rather than accept a partial filter.
+    }
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" able to block ")
+        .parse(rest)
+        .ok()?;
+    Some((rest, Some(filter)))
+}
+
+pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    // Grammar: "all creatures able to block <subject> do so[.]". The subject is
+    // taken up to the " do so" imperative, then classified by
+    // `parse_rule_static_subject_filter`. A one-shot spell form ("… target
+    // creature this turn do so", Alluring Scent) has a `target …` subject, which
+    // is not a rule-static subject, so this returns `None` and the line falls
+    // through to `try_parse_mass_forced_block` — no separate duration/target check
+    // is needed.
+    // Two-slot blocker grammar after "all ": slot A (the bare "creatures able to
+    // block " form) yields `blockers = None` (every idle able creature — Lure,
+    // Ochran Assassin); slot B ("<type-phrase> able to block ", e.g. "creatures
+    // with flying" for Talruum Piper, "Walls" for Marble Priest) yields
+    // `blockers = Some(filter)` (only matching creatures compelled). A runs
+    // before B and is byte-identical to the old literal, so unfiltered lines are
+    // unchanged. CR 509.1c.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("all ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, blockers) = parse_forced_block_blocker_slot(rest)?;
+    let (_, subject_lower) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" do so"),
+        (tag(" do so"), opt(tag(".")), space0),
+    ))
+    .parse(rest)
+    .ok()?;
+    // The lowercasing is ASCII-length-preserving, so the subject occupies the same
+    // byte span in the original-cased `text`.
+    let start = lower.len() - rest.len();
+    let subject = text.get(start..start + subject_lower.len())?.trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    Some(
+        StaticDefinition::new(StaticMode::MustBeBlockedByAll { blockers })
+            .affected(affected)
+            .description(text.to_string()),
+    )
+}
+
+pub(crate) fn is_forced_block_static_candidate(lower: &str) -> bool {
+    parse_forced_block_static(lower).is_some()
+}
+
 /// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
 /// as though <pronoun> didn't have defender[ as long as <cond>]"` into two
 /// independent `StaticDefinition`s sharing the same `affected` + `condition`.
@@ -619,7 +778,7 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
                 )),
             ),
             value(
-                vec![StaticMode::MustBeBlocked],
+                vec![StaticMode::MustBeBlocked { by: None }],
                 alt((
                     tag::<_, _, VE>("must be blocked each combat if able"),
                     tag("must be blocked if able"),
@@ -1623,28 +1782,39 @@ pub(crate) fn try_parse_compound_subtypes(
 }
 
 /// CR 510.1a + CR 613.11: The "assign[s] combat damage equal to <poss> toughness
-/// rather than <poss> power" predicate, in both the singular ("assigns … its …
-/// its") and plural ("assign … their … their") surface forms. CR 510.1a is the
-/// default ("assigns combat damage equal to its power"); this is a continuous
-/// rule-modification effect (CR 613.11) that substitutes toughness for power.
+/// rather than <poss> power" predicate. CR 510.1a is the default ("assigns combat
+/// damage equal to its power"); this is a continuous rule-modification effect
+/// (CR 613.11) that substitutes toughness for power. All surface forms map to the
+/// same [`ContinuousModification::AssignDamageFromToughness`] rule.
 ///
-/// Both forms map to the same [`ContinuousModification::AssignDamageFromToughness`]
-/// rule — only the subject's grammatical number differs (singular "each creature
-/// … assigns" vs plural "creatures you control … assign"). Centralizing the
-/// phrase here keeps the static-line parser and the one-shot continuous-effect
-/// parser (`parse_continuous_modifications`) in lockstep so a new subject scope
-/// never silently drops the plural form. Returns the post-phrase remainder.
+/// The phrase is decoupled into two independent axes rather than enumerated as
+/// whole-string permutations:
+///   * verb axis — `alt(("assigns", "assign"))`: the intact static form keeps the
+///     inflected "assigns", while the one-shot EFFECT pipeline deconjugates the
+///     verb via `normalize_verb_token` ("assigns" → "assign") *before* reaching
+///     this predicate, so the deconjugated-singular form "assign … its … its"
+///     must be accepted alongside the intact static forms.
+///   * possessive-agreement axis — `alt(("its … its", "their … their"))`: singular
+///     ("each creature … its …") vs plural ("creatures you control … their …").
+///
+/// Because the axes are composed independently, all four combinations parse,
+/// which is a strict superset of the two intact static forms this previously
+/// accepted. Centralizing the phrase here keeps the static-line parser and the
+/// one-shot continuous-effect parser (`parse_continuous_modifications`) in
+/// lockstep so a new subject scope never silently drops a surface form. Returns
+/// the post-phrase remainder.
 pub(crate) fn parse_assigns_damage_from_toughness_predicate(input: &str) -> OracleResult<'_, ()> {
-    alt((
-        value(
-            (),
-            tag("assigns combat damage equal to its toughness rather than its power"),
+    value(
+        (),
+        (
+            alt((tag("assigns"), tag("assign"))),
+            tag(" combat damage equal to "),
+            alt((
+                tag("its toughness rather than its power"),
+                tag("their toughness rather than their power"),
+            )),
         ),
-        value(
-            (),
-            tag("assign combat damage equal to their toughness rather than their power"),
-        ),
-    ))
+    )
     .parse(input)
 }
 

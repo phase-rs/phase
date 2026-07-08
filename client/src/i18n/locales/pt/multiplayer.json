@@ -110,6 +110,7 @@
     "subtitle": "Escolha uma região ou conecte-se a uma instância auto-hospedada.",
     "noneLabel": "Nenhum (apenas P2P)",
     "directCodes": "códigos diretos",
+    "official": "Oficial",
     "selfHosted": "Auto-hospedado",
     "customUrlPlaceholder": "wss://seu-servidor.exemplo/ws",
     "test": "Testar",

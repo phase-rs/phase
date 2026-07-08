@@ -167,6 +167,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = CardAdvantagePolicy.score(&ctx);
@@ -194,6 +195,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: engine::types::ability::TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         ));
 
@@ -225,6 +227,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = CardAdvantagePolicy.score(&ctx);

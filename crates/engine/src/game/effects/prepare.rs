@@ -272,6 +272,7 @@ fn synthesize_prepared_copy_object(
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
             mana_spend_permission: None,
         });
     state.objects.insert(copy_id, copy_obj);
@@ -594,6 +595,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &mut events,
         );
 
@@ -794,6 +796,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 amount: QuantityExpr::Fixed { value: 2 },
                 damage_source: None,
+                excess: None,
             },
             Vec::new(),
             copy_id,
@@ -1014,6 +1017,7 @@ mod tests {
                     duration: None,
                     graveyard_replacement: None,
                     enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
                 });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {

@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, useSearchParams } from "react-router";
 
 import { AppShell } from "./components/chrome/AppShell";
 import { AppToast } from "./components/chrome/AppToast";
+import { RouteTelemetry } from "./components/chrome/RouteTelemetry";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HostControlTile } from "./components/chrome/HostControlTile";
 import { EngineLostModal } from "./components/modal/EngineLostModal";
 import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
@@ -97,9 +99,11 @@ function AppContent() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
+      <RouteTelemetry />
       {showSplash && (
         <SplashScreen progress={progress} onComplete={handleSplashComplete} label={loadLabel} />
       )}
+      <ErrorBoundary>
       <Suspense fallback={<div className="flex min-h-screen items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-500 border-t-white" /></div>}>
         <Routes>
           {/* Modern app shell (rail + tab bar + single scene) wraps every
@@ -119,6 +123,7 @@ function AppContent() {
           <Route path="/game/:id" element={<GameRouteElement />} />
         </Routes>
       </Suspense>
+      </ErrorBoundary>
       <HostControlTile />
       <AppToast />
       <EngineLostModal />
