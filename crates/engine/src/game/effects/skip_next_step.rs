@@ -146,6 +146,7 @@ mod tests {
             modal: None,
             mode_abilities: vec![],
             dig_found_nothing_for_parent_target: false,
+            choose_from_zone_found_nothing_for_parent_target: false,
         }
     }
 

@@ -7729,6 +7729,15 @@ pub struct GameState {
     #[serde(skip)]
     pub last_dig_found_nothing: bool,
 
+    /// CR 609.3 + CR 608.2c: Set when the most recently resolved
+    /// `ChooseFromZone` had no card to choose. Like `last_dig_found_nothing`,
+    /// this is a transient relay consumed by the very next parent->child
+    /// hand-off and copied onto the child ability. It lets `ParentTarget`
+    /// consumers of the missing choice no-op without changing the shared
+    /// unresolved-anaphor fallback for unrelated effects.
+    #[serde(skip)]
+    pub last_choose_from_zone_found_nothing: bool,
+
     /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
     /// "look at the top card of your library" (Dig with `keep_count == 0`,
@@ -8774,6 +8783,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_dig_found_nothing: false,
+            last_choose_from_zone_found_nothing: false,
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),

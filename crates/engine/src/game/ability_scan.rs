@@ -199,6 +199,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
+        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
     } = a;
 
     let mut acc = scan_effect(effect);
@@ -3728,6 +3729,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
         dig_found_nothing_for_parent_target: _, // bool seam flag
+        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
     } = a;
 
     // CR 608.2d: an optional effect / optional targeting / opponent-may

@@ -76,6 +76,17 @@ fn perpetual_target_object_ids(
         }
     }
 
+    // CR 609.3 + CR 608.2c: a ChooseFromZone with no eligible card has no
+    // referent for a ParentTarget perpetual rider. This typed child-field
+    // suppresses only that skipped-choice handoff, leaving the shared
+    // unresolved ParentTarget source fallback intact for other effect shapes.
+    if matches!(target, TargetFilter::ParentTarget)
+        && ability.targets.is_empty()
+        && ability.choose_from_zone_found_nothing_for_parent_target
+    {
+        return Vec::new();
+    }
+
     let effective_targets = crate::game::targeting::resolved_targets(ability, target, state);
     let mut ids = super::effect_object_targets(target, &effective_targets);
 
@@ -99,6 +110,10 @@ fn perpetual_target_object_ids(
                 .filter(|&id| crate::game::filter::matches_target_filter(state, id, target, &ctx))
                 .collect();
         }
+    }
+
+    if ids.is_empty() && matches!(target, TargetFilter::ParentTarget) {
+        return ids;
     }
 
     if ids.is_empty() {
@@ -153,14 +168,17 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::scenario::GameRunner;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, PerpetualModification, ResolvedAbility, TargetFilter, TargetRef,
+        CardSelectionMode, Chooser, Effect, PerpetualModification, ResolvedAbility, TargetFilter,
+        TargetRef, ZoneOwner,
     };
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -504,6 +522,60 @@ mod tests {
         assert_eq!(obj.base_power, Some(2));
         assert_eq!(obj.base_toughness, Some(2));
         assert_eq!(state.objects.get(&source).unwrap().base_power, None);
+    }
+
+    #[test]
+    fn empty_choose_from_zone_parent_target_perpetual_noops() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bloodsprout Talisman".to_string(),
+            Zone::Battlefield,
+        );
+
+        let grant = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: PerpetualModification::GrantKeywords {
+                    keywords: vec![Keyword::Menace],
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let choose = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Hand,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                selection: CardSelectionMode::Chosen,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(grant);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &choose, &mut events, 0).unwrap();
+
+        let obj = state.objects.get(&source).unwrap();
+        assert!(
+            !obj.has_keyword(&Keyword::Menace),
+            "empty ChooseFromZone must not bind ParentTarget to the source"
+        );
+        assert!(
+            obj.perpetual_mods.is_empty(),
+            "source must not receive a perpetual modification when no card was chosen"
+        );
     }
 
     /// Blood Age Muster-style anaphor: the parsed conjure → "its base power and

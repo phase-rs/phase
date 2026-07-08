@@ -19343,6 +19343,13 @@ pub struct ResolvedAbility {
     /// it just found empty.
     #[serde(skip)]
     pub dig_found_nothing_for_parent_target: bool,
+    /// CR 609.3 + CR 608.2c: Stamped only by
+    /// `effects::apply_parent_chain_context` when this ability is the immediate
+    /// child of a `ChooseFromZone` that had no cards to choose. Consumers that
+    /// name the missing choice through `ParentTarget` must no-op instead of
+    /// using the shared source fallback.
+    #[serde(skip)]
+    pub choose_from_zone_found_nothing_for_parent_target: bool,
 }
 
 impl ResolvedAbility {
@@ -19399,6 +19406,7 @@ impl ResolvedAbility {
             modal: None,
             mode_abilities: Vec::new(),
             dig_found_nothing_for_parent_target: false,
+            choose_from_zone_found_nothing_for_parent_target: false,
         }
     }
 
