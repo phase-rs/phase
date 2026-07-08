@@ -43,6 +43,7 @@ pub(super) fn exile_nonresolving_stack_objects(
                 None,
                 false,
                 None,
+                None,
                 events,
             ) {
                 ZoneMoveResult::Done => {}

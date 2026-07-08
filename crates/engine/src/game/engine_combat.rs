@@ -175,6 +175,13 @@ fn enlist_eligible_targets(state: &GameState, attacker: ObjectId) -> Vec<ObjectI
         TargetRef::Object(id) => Some(id),
         TargetRef::Player(_) => None,
     })
+    // CR 508.1g + CR 702.154b + CR 701.26a: enlisting taps a non-attacking
+    // creature to pay an optional attack cost, so a "can't become tapped"
+    // creature (e.g. one goaded by Ood Sphere's Red-Eye) is ineligible. Unlike
+    // the attacker-declaration tap (CR 508.1f), this tap IS a cost, so the
+    // declaration exemption does not apply. Mirrors the convoke/crew auto-tap
+    // gate — the single `object_cant_tap` authority filters at the offer layer.
+    .filter(|&id| !super::restrictions::object_cant_tap(state, id))
     .collect()
 }
 
@@ -243,23 +250,27 @@ pub(super) fn apply_attack_enlist(
         object_id: tapped,
         lki: obj.snapshot_public_characteristics(),
     };
-    let Some(obj) = state.objects.get_mut(&tapped) else {
-        return Ok(());
-    };
-    obj.tapped = true;
 
-    let tap_event = GameEvent::PermanentTapped {
-        object_id: tapped,
-        caused_by: None,
-    };
+    // CR 508.1g + CR 702.154b + CR 701.26a: the enlisted creature is tapped to
+    // pay an optional attack cost, so route it through the single tap-cost
+    // authority (`tap_permanent_for_cost`) that refuses a "can't become tapped"
+    // creature. This is a defensive backstop behind `enlist_eligible_targets`,
+    // which already excludes such creatures at the offer layer. Unlike the
+    // attacker-declaration tap (CR 508.1f), this tap IS a cost and is not exempt.
+    let tap_event_start = events.len();
+    crate::game::restrictions::tap_permanent_for_cost(state, tapped, events)?;
+
     let enlisted = GameEvent::CreatureEnlisted {
         attacker,
         tapped,
         tapped_snapshot: Box::new(snapshot),
     };
-    state.pending_attack_trigger_events.push(tap_event.clone());
+    // CR 508.2: buffer the tap event(s) alongside the linked Enlist event for
+    // deferred trigger matching after all attack costs are chosen.
+    state
+        .pending_attack_trigger_events
+        .extend_from_slice(&events[tap_event_start..]);
     state.pending_attack_trigger_events.push(enlisted.clone());
-    events.push(tap_event);
     events.push(enlisted);
     Ok(())
 }
@@ -1041,6 +1052,53 @@ mod tests {
         assert!(
             !state.objects[&helper].tapped,
             "the enlisted creature is not tapped until the Enlist choice is paid"
+        );
+    }
+
+    /// CR 508.1g + CR 701.26a: a "can't become tapped" creature (e.g. one goaded
+    /// by Ood Sphere's Red-Eye) can't pay the Enlist tap cost, so it must be
+    /// excluded at the offer layer. Unlike attacker declaration (CR 508.1f), the
+    /// enlist tap IS a cost, so the declaration exemption does not apply.
+    #[test]
+    fn enlist_excludes_cant_tap_creature() {
+        use crate::types::statics::StaticMode;
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Enlister", 2, 2);
+        let helper = create_creature(&mut state, PlayerId(0), "Goaded Helper", 3, 3);
+        add_enlist_trigger(&mut state, attacker);
+
+        // Reach-guard: without the restriction the helper IS an eligible target,
+        // proving the exclusion below is not vacuous.
+        assert!(
+            enlist_eligible_targets(&state, attacker).contains(&helper),
+            "plain helper must be enlist-eligible before the CantTap grant"
+        );
+
+        // Grant a printed CantTap static and re-run layers so it is active.
+        {
+            let obj = state.objects.get_mut(&helper).unwrap();
+            let def = crate::types::ability::StaticDefinition::new(StaticMode::CantTap)
+                .affected(crate::types::ability::TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert!(
+            !enlist_eligible_targets(&state, attacker).contains(&helper),
+            "a can't-become-tapped creature must not be offered as an Enlist target"
+        );
+
+        // The declare-attackers flow must not pause on an EnlistChoice when the
+        // only helper can't become tapped, and the helper stays untapped.
+        let waiting = declare_single_enlist_attacker(&mut state, attacker);
+        assert!(
+            !matches!(waiting, WaitingFor::EnlistChoice { .. }),
+            "no Enlist prompt when the only helper can't become tapped, got {waiting:?}"
+        );
+        assert!(
+            !state.objects[&helper].tapped,
+            "the can't-become-tapped helper must remain untapped"
         );
     }
 

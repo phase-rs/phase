@@ -91,6 +91,7 @@ fn setup_emissary_choosing_creature(db: &CardDatabase) -> (GameState, ObjectId, 
             "Sorcery".to_string(),
         ],
         source_id: Some(emissary),
+        persist_player: None,
     };
     runner
         .act(GameAction::ChooseOption {

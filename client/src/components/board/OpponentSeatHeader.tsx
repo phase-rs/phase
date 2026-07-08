@@ -22,6 +22,7 @@ import {
   UnboundedBadge,
 } from "../hud/HudBadges.tsx";
 import { KickConfirmDialog } from "../hud/KickConfirmDialog.tsx";
+import { NextUpBadge } from "../hud/NextUpBadge.tsx";
 
 interface OpponentSeatHeaderProps {
   playerId: PlayerId;
@@ -111,6 +112,11 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
       data-player-hud={String(playerId)}
       style={{ borderTopColor: `${seatColor}aa` }}
     >
+      <NextUpBadge
+        playerId={playerId}
+        compact={compact}
+        className="absolute left-1/2 top-0.5 z-30 -translate-x-1/2 -translate-y-1/2"
+      />
       {isValidPlayerTarget ? (
         <button
           type="button"
@@ -120,7 +126,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
           title={t("opponentHud.clickToTarget", { name: label })}
         />
       ) : null}
-      <div className={`pointer-events-none absolute right-1.5 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-y-1/2 items-center justify-end ${compact ? "gap-1" : "gap-1.5"}`}>
+      <div className={`pointer-events-none absolute left-1/2 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-x-1/2 -translate-y-1/2 items-center justify-center ${compact ? "gap-1" : "gap-1.5"}`}>
         <div
           className={`flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
             isValidPlayerTarget ? "ring-2 ring-cyan-300/70" : ""
@@ -136,9 +142,9 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
           {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
         </div>
 
-        <div className={`flex min-w-0 shrink items-center justify-end ${compact ? "gap-1" : "gap-1.5"}`}>
+        <div className={`flex min-w-0 shrink items-center justify-center ${compact ? "gap-1" : "gap-1.5"}`}>
           <span
-            className={`min-w-0 truncate text-right text-[10px] font-bold uppercase tracking-[0.16em] ${labelWidth}`}
+            className={`min-w-0 truncate text-center text-[10px] font-bold uppercase tracking-[0.16em] ${labelWidth}`}
             style={{ color: seatColor }}
           >
             {label}

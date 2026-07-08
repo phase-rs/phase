@@ -645,6 +645,32 @@ describe("PermanentCard attachments", () => {
     expect(container.querySelector('[data-summoning-sickness-underwater="true"]')).toBeTruthy();
   });
 
+  it("does not render a selected attacker as tapped until the engine marks it tapped", () => {
+    useUiStore.setState({
+      combatMode: "attackers",
+      selectedAttackers: [1],
+    });
+
+    const { container } = renderPermanent();
+
+    expect(container.querySelector(".ms-tap")).toBeNull();
+
+    act(() => {
+      const gameState = useGameStore.getState().gameState!;
+      useGameStore.setState({
+        gameState: {
+          ...gameState,
+          objects: {
+            ...gameState.objects,
+            1: { ...gameState.objects[1], tapped: true },
+          },
+        },
+      });
+    });
+
+    expect(container.querySelector(".ms-tap")).not.toBeNull();
+  });
+
   it("opens the ability picker when a land has mana actions plus a non-mana activated ability", () => {
     const kessig = makeObject({
       id: 39,

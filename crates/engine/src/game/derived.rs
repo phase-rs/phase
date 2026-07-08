@@ -9,7 +9,7 @@ use crate::game::mana_sources::display_land_mana_pips;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::types::ability::StaticCondition;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -241,7 +241,9 @@ pub fn derive_display_state(state: &mut GameState) {
 
     // Derive has_pending_cast so the frontend can read it directly
     // without maintaining a parallel list of casting-flow WaitingFor states.
-    state.has_pending_cast = state.waiting_for.has_pending_cast();
+    state.has_pending_cast = state.waiting_for.has_pending_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
 
     // Invariant: the two storage sites for "am I mid-cast" must agree. If
     // `waiting_for` says we're mid-cast, `GameState::pending_cast` must be

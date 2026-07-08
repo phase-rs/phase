@@ -3,9 +3,10 @@
 //! residual `Effect::Unimplemented` nodes; reverting the corresponding parser
 //! arm reintroduces an `Unimplemented` node and flips the assertion.
 //!
-//! Deferred cards (Heirloom Epic, Steamcore Scholar, Stolen Uniform,
-//! Combustion Man) intentionally retain an honest `Effect::Unimplemented`
-//! residual and are NOT asserted 0-unimpl here.
+//! Deferred cards (Heirloom Epic, Steamcore Scholar, Combustion Man)
+//! intentionally retain an honest `Effect::Unimplemented` residual and are NOT
+//! asserted 0-unimpl here. (Stolen Uniform now parses 0-unimpl — front half B3
+//! plus the last-sentence lose-control delayed trigger both shipped.)
 
 use engine::parser::oracle::parse_oracle_text;
 

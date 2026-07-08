@@ -225,7 +225,7 @@ mod tests {
     use crate::types::game_state::{PublicStateDirty, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaColor;
-    use crate::types::phase::Phase;
+    use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use crate::types::zones::Zone;
 
     use super::super::public_state::{finalize_public_state, mark_public_state_all_dirty};
@@ -417,7 +417,10 @@ mod tests {
         let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
             calls.set(calls.get() + 1);
             ResolveAllCallbackDecision::Action(GameAction::SetPhaseStops {
-                stops: vec![Phase::PreCombatMain],
+                stops: vec![PhaseStop {
+                    phase: Phase::PreCombatMain,
+                    scope: PhaseStopScope::AllTurns,
+                }],
             })
         });
 
@@ -426,7 +429,10 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
         assert_eq!(
             state.phase_stops.get(&PlayerId(1)),
-            Some(&vec![Phase::PreCombatMain])
+            Some(&vec![PhaseStop {
+                phase: Phase::PreCombatMain,
+                scope: PhaseStopScope::AllTurns,
+            }])
         );
     }
 
@@ -483,7 +489,10 @@ mod tests {
         let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
             calls.set(calls.get() + 1);
             ResolveAllCallbackDecision::Action(GameAction::SetPhaseStops {
-                stops: vec![Phase::PreCombatMain],
+                stops: vec![PhaseStop {
+                    phase: Phase::PreCombatMain,
+                    scope: PhaseStopScope::AllTurns,
+                }],
             })
         });
 
@@ -492,7 +501,10 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
         assert_eq!(
             state.phase_stops.get(&PlayerId(1)),
-            Some(&vec![Phase::PreCombatMain])
+            Some(&vec![PhaseStop {
+                phase: Phase::PreCombatMain,
+                scope: PhaseStopScope::AllTurns,
+            }])
         );
     }
 

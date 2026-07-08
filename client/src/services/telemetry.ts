@@ -25,11 +25,21 @@ const FLUSH_AT_COUNT = 20;
 /** Flush this long after the first event was queued, if the count trigger
  *  hasn't already fired. */
 const FLUSH_AFTER_MS = 10_000;
-/** Hard per-session cap on total events (abuse / runaway-loop backstop). */
+/** Hard per-session cap on total events (abuse / runaway-loop backstop). A
+ *  navigation-heavy session can spend up to half this budget on `route_view`s
+ *  before hitting the shared ceiling; that trade is accepted — the reserve
+ *  exists for crash events (`js_error`/`engine_panic`), which fire early rather
+ *  than late in a session. */
 const MAX_EVENTS_PER_SESSION = 100;
-/** Hard per-session cap on `js_error` events specifically — an error loop must
- *  not drown the batch. */
-const MAX_JS_ERRORS_PER_SESSION = 10;
+/** Hard per-session cap on specific event types — a loop of any one kind must
+ *  not drown the batch. Declarative so a new capped event is one entry, not a
+ *  new counter+constant pair. Events absent here are bounded only by
+ *  {@link MAX_EVENTS_PER_SESSION}. */
+const PER_EVENT_CAPS: Record<string, number> = {
+  js_error: 10,
+  card_report: 10,
+  route_view: 50,
+};
 
 /** A queued event: the caller's fields plus the event name and a client
  *  timestamp. Values are truncated (strings) at enqueue. */
@@ -48,7 +58,8 @@ const DISABLED = TELEMETRY_URL === "";
 const queue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let eventsThisSession = 0;
-let jsErrorsThisSession = 0;
+/** Per-event-type send counts this session, checked against {@link PER_EVENT_CAPS}. */
+const perEventCounts: Record<string, number> = {};
 
 /** Truncate a single string field to the session cap. Non-strings pass through
  *  untouched. */
@@ -74,7 +85,8 @@ export function trackEvent(name: string, fields: Record<string, unknown> = {}): 
     if (DISABLED) return;
     if (!usePreferencesStore.getState().telemetryEnabled) return;
     if (eventsThisSession >= MAX_EVENTS_PER_SESSION) return;
-    if (name === "js_error" && jsErrorsThisSession >= MAX_JS_ERRORS_PER_SESSION) return;
+    const cap = PER_EVENT_CAPS[name];
+    if (cap !== undefined && (perEventCounts[name] ?? 0) >= cap) return;
 
     const event: QueuedEvent = { event: name, ts: Date.now() };
     for (const [key, value] of Object.entries(fields)) {
@@ -83,7 +95,7 @@ export function trackEvent(name: string, fields: Record<string, unknown> = {}): 
 
     queue.push(event);
     eventsThisSession += 1;
-    if (name === "js_error") jsErrorsThisSession += 1;
+    perEventCounts[name] = (perEventCounts[name] ?? 0) + 1;
 
     if (queue.length >= FLUSH_AT_COUNT) {
       flushNow();

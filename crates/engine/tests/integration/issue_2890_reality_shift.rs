@@ -142,6 +142,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
         object_id: ObjectId(404),
         lki: LKISnapshot {
             name: "Exiled Creature".to_string(),
+            token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
             base_power: Some(2),

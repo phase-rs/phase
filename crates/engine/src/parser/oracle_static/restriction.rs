@@ -288,9 +288,11 @@ pub(crate) fn parse_attach_only_restriction(
 pub(crate) fn parse_activation_exemption_suffix(
     input: &str,
 ) -> OracleResult<'_, ActivationExemption> {
-    let mut parser = opt(preceded(
-        tag(" unless they're "),
-        value(ActivationExemption::ManaAbilities, tag("mana abilities")),
+    // CR 605.1a: the " unless they're mana abilities" carve-out, tolerant of both
+    // the ASCII and U+2019 apostrophe via the shared suffix combinator.
+    let mut parser = opt(value(
+        ActivationExemption::ManaAbilities,
+        super::shared::parse_mana_ability_exemption_suffix,
     ));
     let (rest, exemption) = parser.parse(input)?;
     Ok((rest, exemption.unwrap_or_default()))
@@ -298,7 +300,13 @@ pub(crate) fn parse_activation_exemption_suffix(
 
 pub(crate) fn parse_cant_be_activated_exemption_in_text(lower: &str) -> ActivationExemption {
     nom_primitives::scan_preceded(lower, |i| {
-        preceded(tag("can't be activated"), parse_activation_exemption_suffix).parse(i)
+        // CR 605.1a: dual-apostrophe predicate + dual-apostrophe exemption suffix,
+        // so a U+2019 self-reference / attached line still records the carve-out.
+        preceded(
+            super::shared::parse_cant_be_activated_predicate,
+            parse_activation_exemption_suffix,
+        )
+        .parse(i)
     })
     .and_then(|(_, exemption, tail)| {
         let trimmed_tail = tail.trim_end_matches('.').trim();
@@ -352,8 +360,13 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
     ))
     .parse(rest_tp.lower)
     {
-        if let Ok((after_predicate, _)) =
-            tag::<_, _, OracleError<'_>>(" can't be activated").parse(after_source)
+        // CR 605.1a: the predicate carries either apostrophe glyph — mirror the
+        // dual-branch used everywhere else (no global apostrophe normalization).
+        if let Ok((after_predicate, _)) = alt((
+            tag::<_, _, OracleError<'_>>(" can't be activated"),
+            tag::<_, _, OracleError<'_>>(" can\u{2019}t be activated"),
+        ))
+        .parse(after_source)
         {
             // Optional "unless they're..." suffix, then the trailing period (or end-of-input).
             if let Ok((tail, exemption)) = parse_activation_exemption_suffix(after_predicate) {
@@ -374,12 +387,16 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
 
     // Otherwise fall back to the type-list + controller-suffix form (Karn, Clarion).
     // Require the predicate ending "... can't be activated[.]" at the tail.
+    // CR 605.1a: accept both apostrophe glyphs on the type-list predicate too
+    // (Karn, Clarion Conqueror) — same reason as the chosen-name branch above.
     let predicate_tp = rest_tp
         .strip_suffix(" can't be activated.") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| rest_tp.strip_suffix(" can't be activated"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                                                                   // Extract the type-list + optional controller suffix via the shared helper.
-                                                                   // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
-                                                                   // for this pattern the tail should be empty (the whole predicate IS the filter).
+        .or_else(|| rest_tp.strip_suffix(" can\u{2019}t be activated.")) // allow-noncombinator: dual-apostrophe variant of the line above.
+        .or_else(|| rest_tp.strip_suffix(" can't be activated")) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| rest_tp.strip_suffix(" can\u{2019}t be activated"))?; // allow-noncombinator: dual-apostrophe variant of the line above.
+                                                                          // Extract the type-list + optional controller suffix via the shared helper.
+                                                                          // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
+                                                                          // for this pattern the tail should be empty (the whole predicate IS the filter).
     let (source_filter, tail) = parse_type_phrase(predicate_tp.original);
     if !tail.trim().is_empty() {
         return None;

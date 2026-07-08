@@ -594,6 +594,46 @@ pub(crate) fn is_extra_blockers_static_candidate(lower: &str) -> bool {
 /// resolved by `parse_rule_static_subject_filter`, which returns `None` for a
 /// `target …` subject so a genuine spell/effect form still falls through to the
 /// effect parser.
+/// CR 509.1c: the blocker slot of the "All <blockers> able to block <subject> do
+/// so" grammar, consumed after the leading `tag("all ")`. Returns the remainder
+/// (positioned at the subject) and the optional blocker filter:
+/// - Slot A — the bare "creature(s) able to block " form → `None` (every idle
+///   able creature is compelled: Lure, Ochran Assassin). Byte-identical to the
+///   old single `tag`, so unfiltered lines are unchanged.
+/// - Slot B — "<type-phrase> able to block " (Talruum Piper "creatures with
+///   flying", Marble Priest "Walls") → `Some(filter)`. The type slot is parsed by
+///   the shared `parse_type_phrase` building block; the phrase must fully consume
+///   up to the literal " able to block " (else the Some form is rejected as
+///   mis-scoped and this returns `None`, letting the line fall through).
+///
+/// A runs before B, and B requires the " able to block " tag on its remainder, so
+/// a bare "creatures able to block " is always resolved to `None` by A.
+pub(crate) fn parse_forced_block_blocker_slot(input: &str) -> Option<(&str, Option<TargetFilter>)> {
+    // Slot A: bare "creature(s) able to block " → None (unfiltered lure).
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("creatures able to block "),
+        tag("creature able to block "),
+    ))
+    .parse(input)
+    {
+        return Some((rest, None));
+    }
+    // Slot B: "<type-phrase> able to block " → Some(filter). Scope the type phrase
+    // to the text before the literal " able to block " so `parse_type_phrase`
+    // cannot over-consume into the subject.
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" able to block ")
+        .parse(input)
+        .ok()?;
+    let (filter, filter_remainder) = parse_type_phrase(type_text);
+    if !filter_remainder.trim().is_empty() {
+        return None; // mis-scoped Some — reject rather than accept a partial filter.
+    }
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" able to block ")
+        .parse(rest)
+        .ok()?;
+    Some((rest, Some(filter)))
+}
+
 pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     // Grammar: "all creatures able to block <subject> do so[.]". The subject is
@@ -603,9 +643,17 @@ pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> 
     // is not a rule-static subject, so this returns `None` and the line falls
     // through to `try_parse_mass_forced_block` — no separate duration/target check
     // is needed.
-    let (rest, _) = tag::<_, _, OracleError<'_>>("all creatures able to block ")
+    // Two-slot blocker grammar after "all ": slot A (the bare "creatures able to
+    // block " form) yields `blockers = None` (every idle able creature — Lure,
+    // Ochran Assassin); slot B ("<type-phrase> able to block ", e.g. "creatures
+    // with flying" for Talruum Piper, "Walls" for Marble Priest) yields
+    // `blockers = Some(filter)` (only matching creatures compelled). A runs
+    // before B and is byte-identical to the old literal, so unfiltered lines are
+    // unchanged. CR 509.1c.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("all ")
         .parse(lower.as_str())
         .ok()?;
+    let (rest, blockers) = parse_forced_block_blocker_slot(rest)?;
     let (_, subject_lower) = all_consuming(terminated(
         take_until::<_, _, OracleError<'_>>(" do so"),
         (tag(" do so"), opt(tag(".")), space0),
@@ -618,7 +666,7 @@ pub(crate) fn parse_forced_block_static(text: &str) -> Option<StaticDefinition> 
     let subject = text.get(start..start + subject_lower.len())?.trim();
     let affected = parse_rule_static_subject_filter(subject)?;
     Some(
-        StaticDefinition::new(StaticMode::MustBeBlockedByAll)
+        StaticDefinition::new(StaticMode::MustBeBlockedByAll { blockers })
             .affected(affected)
             .description(text.to_string()),
     )
@@ -1734,28 +1782,39 @@ pub(crate) fn try_parse_compound_subtypes(
 }
 
 /// CR 510.1a + CR 613.11: The "assign[s] combat damage equal to <poss> toughness
-/// rather than <poss> power" predicate, in both the singular ("assigns … its …
-/// its") and plural ("assign … their … their") surface forms. CR 510.1a is the
-/// default ("assigns combat damage equal to its power"); this is a continuous
-/// rule-modification effect (CR 613.11) that substitutes toughness for power.
+/// rather than <poss> power" predicate. CR 510.1a is the default ("assigns combat
+/// damage equal to its power"); this is a continuous rule-modification effect
+/// (CR 613.11) that substitutes toughness for power. All surface forms map to the
+/// same [`ContinuousModification::AssignDamageFromToughness`] rule.
 ///
-/// Both forms map to the same [`ContinuousModification::AssignDamageFromToughness`]
-/// rule — only the subject's grammatical number differs (singular "each creature
-/// … assigns" vs plural "creatures you control … assign"). Centralizing the
-/// phrase here keeps the static-line parser and the one-shot continuous-effect
-/// parser (`parse_continuous_modifications`) in lockstep so a new subject scope
-/// never silently drops the plural form. Returns the post-phrase remainder.
+/// The phrase is decoupled into two independent axes rather than enumerated as
+/// whole-string permutations:
+///   * verb axis — `alt(("assigns", "assign"))`: the intact static form keeps the
+///     inflected "assigns", while the one-shot EFFECT pipeline deconjugates the
+///     verb via `normalize_verb_token` ("assigns" → "assign") *before* reaching
+///     this predicate, so the deconjugated-singular form "assign … its … its"
+///     must be accepted alongside the intact static forms.
+///   * possessive-agreement axis — `alt(("its … its", "their … their"))`: singular
+///     ("each creature … its …") vs plural ("creatures you control … their …").
+///
+/// Because the axes are composed independently, all four combinations parse,
+/// which is a strict superset of the two intact static forms this previously
+/// accepted. Centralizing the phrase here keeps the static-line parser and the
+/// one-shot continuous-effect parser (`parse_continuous_modifications`) in
+/// lockstep so a new subject scope never silently drops a surface form. Returns
+/// the post-phrase remainder.
 pub(crate) fn parse_assigns_damage_from_toughness_predicate(input: &str) -> OracleResult<'_, ()> {
-    alt((
-        value(
-            (),
-            tag("assigns combat damage equal to its toughness rather than its power"),
+    value(
+        (),
+        (
+            alt((tag("assigns"), tag("assign"))),
+            tag(" combat damage equal to "),
+            alt((
+                tag("its toughness rather than its power"),
+                tag("their toughness rather than their power"),
+            )),
         ),
-        value(
-            (),
-            tag("assign combat damage equal to their toughness rather than their power"),
-        ),
-    ))
+    )
     .parse(input)
 }
 

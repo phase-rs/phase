@@ -94,7 +94,8 @@ fn fill_runtime_fields(
 ) {
     match restriction {
         GameRestriction::DamagePreventionDisabled { source, .. }
-        | GameRestriction::ProhibitActivity { source, .. } => {
+        | GameRestriction::ProhibitActivity { source, .. }
+        | GameRestriction::CantEnterBattlefieldFrom { source, .. } => {
             *source = ability.source_id;
         }
     }
@@ -145,7 +146,10 @@ fn fill_runtime_fields(
                 | RestrictionPlayerScope::OpponentsOfSourceController => {}
             }
         }
-        GameRestriction::DamagePreventionDisabled { .. } => {}
+        // CantEnterBattlefieldFrom has no acting-player scope (it prohibits an
+        // object zone transition, CR 614.1d), so there is nothing to lower here.
+        GameRestriction::DamagePreventionDisabled { .. }
+        | GameRestriction::CantEnterBattlefieldFrom { .. } => {}
     }
 
     match restriction {
@@ -195,7 +199,11 @@ fn fill_runtime_fields(
                 _ => {}
             }
         }
-        GameRestriction::DamagePreventionDisabled { .. } => {}
+        // CR 611.2a: the parser hardcodes `EndOfTurn` ("this turn") for
+        // CantEnterBattlefieldFrom, so there is no duration to lower — same as
+        // DamagePreventionDisabled.
+        GameRestriction::DamagePreventionDisabled { .. }
+        | GameRestriction::CantEnterBattlefieldFrom { .. } => {}
     }
 }
 

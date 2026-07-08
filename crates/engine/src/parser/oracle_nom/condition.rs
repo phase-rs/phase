@@ -132,6 +132,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_triggering_player_has_unattacked_opponent,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
+        parse_offered_card_mana_value_comparison,
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
@@ -1900,8 +1901,8 @@ fn parse_pt_ref_scoped(input: &str, scope: ObjectScope) -> OracleResult<'_, Quan
     .parse(input)
 }
 
-/// Possessive-subject form: `<possessive> <property> is `, leaving the threshold
-/// number on the remaining input.
+/// Possessive-subject form: `<possessive> <property> {is|was} `, leaving the
+/// threshold number on the remaining input.
 fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((
         tag("its "),
@@ -1918,21 +1919,31 @@ fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
         tag("equipped creature's "),
     ))
     .parse(input)?;
-    alt((
+    // CR 208.1: decouple the property axis (power/toughness) from the linking-
+    // verb axis (present "is" / past "was") so the arm count is the SUM of the
+    // two axes, not their product. Past tense surfaces when the subject's stat
+    // is read as last-known information (CR 603.10a look-back + CR 608.2h): a
+    // dies-trigger intervening "if" checks the creature's last-known power --
+    // "if its power was 3 or greater" (Deathknell Berserker). "was" is a strict
+    // superset of the prior "is"-only forms; no card uses "its <stat> was ..."
+    // in any other position, so every previously supported parse is unchanged.
+    let (rest, qty) = alt((
         value(
             QuantityRef::Power {
                 scope: crate::types::ability::ObjectScope::Source,
             },
-            tag("power is "),
+            tag("power"),
         ),
         value(
             QuantityRef::Toughness {
                 scope: crate::types::ability::ObjectScope::Source,
             },
-            tag("toughness is "),
+            tag("toughness"),
         ),
     ))
-    .parse(rest)
+    .parse(rest)?;
+    let (rest, _) = alt((tag(" is "), tag(" was "))).parse(rest)?;
+    Ok((rest, qty))
 }
 
 /// Source-subject form: `<subject> has <property> `, leaving the threshold
@@ -2378,6 +2389,17 @@ pub(crate) fn parse_spell_target_has_superlative(
     let (rest, aggregate) = parse_superlative_adjective(input)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
     let (rest, property) = parse_property_keyword(rest)?;
+    // CR 608.2c: consume an optional "or is tied for <same superlative> <same
+    // property>" tail (Wretched Banquet: "the least power or is tied for least
+    // power among creatures on the battlefield"). In this spell-target form the
+    // aggregate population INCLUDES the target itself, so the Min/Max comparison
+    // below already uses LE/GE (ties allowed) -- the tail is redundant text,
+    // discarded here so the shared "among <filter>" clause still parses. The
+    // trigger-anchored `parse_subject_has_superlative_form` instead READS this
+    // tail's comparator to relax its strict GT/LT, because it excludes the
+    // trigger object from the population. Agreement of the tail's superlative and
+    // property with the leading clause is enforced by the shared combinator.
+    let (rest, _) = parse_optional_tied_for_tail(rest, aggregate, property)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" among ").parse(rest)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
@@ -3871,6 +3893,62 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// still win for those patterns. A broader `parse_quantity` LHS would steal
 /// those phrases and rewrite their AST shape, breaking the derived-state
 /// dirty tracker (see `game/derived.rs:65`) that scans for `DevotionGE`.
+/// CR 202.3 + CR 608.2c + CR 115.1: Compare the mana value of a
+/// demonstratively-referenced card (the card just offered for casting) against
+/// a dynamic quantity — "[the spell's | that spell's | that card's | the
+/// card's] mana value is {less than | greater than}[ or equal to] <quantity>".
+///
+/// Covers the "impulse a nonland card off the top and cast it only if it is
+/// cheap enough" class (Bre of Clan Stoutarm: "You may cast that card without
+/// paying its mana cost if the spell's mana value is less than or equal to the
+/// amount of life you gained this turn. Otherwise, put it into your hand"). The
+/// referenced card is the first object target of the resolving cast sub-ability
+/// — the `ExileFromTopUntil` resolver injects the exiled hit as that target
+/// (CR 115.1) — so it lowers to `ObjectManaValue { scope: Target }`, read at
+/// resolution against the live life-gained tally. The comparator vocabulary is
+/// the shared `parse_life_total_comparator` (less/greater than [or equal to]);
+/// the RHS is any dynamic `parse_quantity`, so the same combinator serves every
+/// "cast if MV ≤ <dynamic amount>" card, not just the life-gained referent.
+///
+/// Otherwise-routing (auditor note): re-homing this gate onto the cast clause
+/// makes the downstream "Otherwise, put it into your hand" lower to the cast's
+/// `else_ability` — the PRE-EXISTING else_ability convention shared with Wick,
+/// the Whorled Mind / Chandra-class "may X, otherwise Y" cards. The runtime
+/// fires that branch on BOTH the condition-false outcome (mana value > life
+/// gained) and the optional-decline outcome, so a declined-but-eligible card
+/// also goes to hand. This is the deliberate current convention, NOT an
+/// accidental decline-branch shortcut. It is also not a confirmed-correct
+/// reading: the strict editorial parse of "Otherwise" (= condition-negation
+/// only, mana value > life) implies a declined-but-eligible card would STAY
+/// EXILED, and there is no published Bre ruling either way (as of 2026-07-02).
+/// Splitting condition-false vs optional-decline is class-wide engine debt (the
+/// routing lives in the runtime chain resolver, not here).
+fn parse_offered_card_mana_value_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        tag("the spell's"),
+        tag("that spell's"),
+        tag("that card's"),
+        tag("the card's"),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((tag(" mana value"), tag(" converted mana cost"))).parse(rest)?;
+    let (rest, _) = tag(" is ").parse(rest)?;
+    let (rest, comparator) = parse_life_total_comparator(rest)?;
+    let (rest, rhs) = nom_quantity::parse_quantity(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            },
+            comparator,
+            rhs,
+        },
+    ))
+}
+
 fn parse_quantity_quantity_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("x").parse(input)?;
     // Require word-boundary after 'x' so we don't consume the leading 'x' in
@@ -3910,7 +3988,7 @@ fn existential_aggregate(comparator: Comparator) -> AggregateFunction {
 /// CR 119: Comparator phrase for current life total checks. Longest
 /// alternatives must precede their prefixes ("less than or equal to" before
 /// "less than").
-fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
+pub(crate) fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
     alt((
         value(
             Comparator::LE,
@@ -6218,29 +6296,60 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let had_enter_suffix = "enter the battlefield under your control this turn";
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you had ").parse(input) {
+        // "you had N or more [type] enter ..." (counted threshold, GE) — the
+        // "you had" auxiliary reads the present-tense "enter" surface. Falls
+        // back to the singular "you had a/an/another [type] enter ..." form.
+        if let Ok(result) = parse_or_more_entered_count(rest, had_enter_suffix) {
+            return Ok(result);
+        }
         return parse_entered_this_turn_subject(rest, had_enter_suffix, 1);
     }
 
     // Branch 1: "N or more [type] entered..."
-    if let Ok((after_n, n)) = parse_number(input) {
-        let after_n = after_n.trim_start();
-        if let Ok((type_and_rest, _)) = tag::<_, _, OracleError<'_>>("or more ").parse(after_n) {
-            if let Ok((rest, type_text)) =
-                take_until::<_, _, OracleError<'_>>(entered_suffix).parse(type_and_rest)
-            {
-                let (rest, _) = tag(entered_suffix).parse(rest)?;
-                let (filter, _) = parse_type_phrase(type_text.trim());
-                let filter = inject_controller_you(filter);
-                return Ok((
-                    rest,
-                    make_quantity_ge(QuantityRef::EnteredThisTurn { filter }, n),
-                ));
-            }
-        }
+    if let Ok(result) = parse_or_more_entered_count(input, entered_suffix) {
+        return Ok(result);
     }
 
     // Branch 2: "a/an/another [type] entered..."
     parse_entered_this_turn_subject(input, entered_suffix, 1)
+}
+
+/// CR 403.3 + CR 608.2h: Parse "N or more [type] <suffix>" into a GE threshold
+/// on the this-turn battlefield-entry count. Shared by the bare past-tense
+/// surface ("N or more creatures entered the battlefield under your control
+/// this turn") and the "you had"-auxiliary present-tense surface ("you had N
+/// or more creatures enter the battlefield under your control this turn", e.g.
+/// Park Heights Pegasus) — both denote the same this-turn entry tally, so the
+/// count and suffix are the only axes that vary.
+///
+/// Uses `QuantityRef::BattlefieldEntriesThisTurn` (the `battlefield_entries_
+/// this_turn` snapshot authority) rather than the live-board `EnteredThisTurn`:
+/// a permanent that entered under your control this turn still counts after it
+/// has left the battlefield (died, was bounced, or sacrificed) before the
+/// condition resolves, because "entered ... this turn" is a historical event,
+/// not a current-board population read. `PlayerScope::Controller` scopes the
+/// tally to entries under the ability controller's control (the runtime keys
+/// on `record.controller`), so the type filter carries no controller of its
+/// own — mirroring the `who had N or more ... enter` for-each authority.
+fn parse_or_more_entered_count<'a>(
+    input: &'a str,
+    suffix: &'static str,
+) -> OracleResult<'a, StaticCondition> {
+    let (after_n, n) = parse_number(input)?;
+    let (type_and_rest, _) = tag("or more ").parse(after_n.trim_start())?;
+    let (rest, type_text) = take_until(suffix).parse(type_and_rest)?;
+    let (rest, _) = tag(suffix).parse(rest)?;
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter,
+            },
+            n,
+        ),
+    ))
 }
 
 fn parse_entered_this_turn_subject<'a>(
@@ -10244,6 +10353,9 @@ mod tests {
 
     #[test]
     fn test_entered_this_turn_count() {
+        // The counted "N or more [type] entered ... this turn" surface reads the
+        // battlefield-entry snapshot (entries that later left still count), not
+        // the live-board `EnteredThisTurn` population.
         let (rest, c) = parse_inner_condition(
             "two or more creatures entered the battlefield under your control this turn",
         )
@@ -10253,12 +10365,16 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::EnteredThisTurn { .. },
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player: PlayerScope::Controller,
+                                ..
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
             } => {}
-            other => panic!("expected EnteredThisTurn GE 2, got {other:?}"),
+            other => panic!("expected BattlefieldEntriesThisTurn GE 2, got {other:?}"),
         }
     }
 
@@ -10335,6 +10451,39 @@ mod tests {
                 assert!(filter.properties.contains(&FilterProp::Another));
             }
             other => panic!("expected another creature EnteredThisTurn GE 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_had_two_or_more_enter_this_turn() {
+        // Park Heights Pegasus: "... draw a card if you had two or more creatures
+        // enter the battlefield under your control this turn." The counted "N or
+        // more" threshold under the "you had" auxiliary must yield GE 2, not the
+        // singular GE 1 the article-only path produced (which dropped the count).
+        let (rest, c) = parse_inner_condition(
+            "you had two or more creatures enter the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player: PlayerScope::Controller,
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {
+                // "under your control" is scoped by PlayerScope::Controller (the
+                // runtime keys on record.controller), so the type filter itself
+                // carries only the creature type, no controller.
+                assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected creatures BattlefieldEntriesThisTurn GE 2, got {other:?}"),
         }
     }
 
@@ -12085,6 +12234,58 @@ mod tests {
                 other => panic!("{text:?} → {other:?}"),
             }
         }
+    }
+
+    /// CR 208.1 + CR 603.10a + CR 608.2h: past-tense possessive P/T threshold.
+    /// A dies-trigger intervening "if" reads the creature's last-known power via
+    /// the CR 603.10a look-back, so the linking verb is "was", not "is" (e.g.
+    /// Deathknell Berserker: "if its power was 3 or greater"). Decoupling the
+    /// verb axis makes "was" a strict superset of "is"; the present-tense forms
+    /// must still parse identically (no regression).
+    #[test]
+    fn test_its_power_toughness_was_threshold_lki() {
+        // "its power was 3 or greater" -> Power(Source) GE 3
+        let (rest, c) = parse_inner_condition("its power was 3 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            },
+            "past-tense possessive power threshold"
+        );
+        // "its toughness was 1 or less" -> Toughness(Source) LE 1
+        let (rest, c) = parse_inner_condition("its toughness was 1 or less").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            },
+            "past-tense possessive toughness threshold"
+        );
+        // No regression: the present-tense "is" form still parses identically.
+        let (rest, c) = parse_inner_condition("its power is 3 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -101,11 +101,14 @@ impl StaticSourceIndex {
         for &id in &state.command_zone {
             // CR 114.3: command-zone emblems carry static abilities. CR 905.4 +
             // CR 113.6b: a face-up conspiracy's abilities function from the
-            // command zone too. Both are indexed; commanders (is_emblem == false,
-            // not a conspiracy) are not.
+            // command zone too. CR 311.2 / CR 312.2: an active plane / phenomenon
+            // remains in and functions from the command zone, contributing any
+            // static that opts in via `active_zones.contains(Command)`. All route
+            // through the single admission authority; commanders (is_emblem ==
+            // false, not a conspiracy, no opt-in static) are not indexed.
             if let Some(obj) = state.objects.get(&id) {
                 let is_command_zone_source =
-                    obj.is_emblem || super::conspiracy::functions_from_command_zone(obj);
+                    super::functioning_abilities::object_sources_static_from_command_zone(obj);
                 if is_command_zone_source && object_sources_continuous_effect(obj) {
                     fresh.command_sources.push_back(id);
                 }

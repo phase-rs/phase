@@ -1,4 +1,4 @@
-import type { Phase } from "../../adapter/types";
+import type { Phase, PhaseStopScope } from "../../adapter/types";
 import { useId, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -117,17 +117,23 @@ const PHASE_KEY: Record<Phase, string> = {
 
 type PhaseTranslate = ReturnType<typeof useTranslation>["t"];
 
+const SCOPE_TOOLTIP_KEY: Record<PhaseStopScope, string> = {
+  AllTurns: "phaseStop.scopeAllTurns",
+  OwnTurn: "phaseStop.scopeOwnTurn",
+  OpponentsTurns: "phaseStop.scopeOpponentsTurns",
+};
+
 function getPhaseTooltip(
   t: PhaseTranslate,
   phase: Phase,
-  hasStop: boolean,
+  scope: PhaseStopScope | undefined,
   isActive: boolean,
 ): string {
   const key = PHASE_KEY[phase];
   return t("phaseStop.tooltip", {
     label: t(`phaseStop.${key}Label`),
     description: t(`phaseStop.${key}Description`),
-    stopText: hasStop ? t("phaseStop.tooltipStopSet") : t("phaseStop.tooltipNoStop"),
+    stopText: scope ? t(SCOPE_TOOLTIP_KEY[scope]) : t("phaseStop.tooltipNoStop"),
     activeText: isActive ? ` ${t("phaseStop.tooltipCurrentPhase")}` : "",
   });
 }
@@ -140,34 +146,49 @@ function PhaseDot({ phase }: { phase: Phase }) {
   const setPhaseStops = usePreferencesStore((s) => s.setPhaseStops);
 
   const isActive = phase === currentPhase;
-  const hasStop = phaseStops.includes(phase);
-  const tooltip = getPhaseTooltip(t, phase, hasStop, isActive);
+  const stop = phaseStops.find((s) => s.phase === phase);
+  const hasStop = stop !== undefined;
+  const tooltip = getPhaseTooltip(t, phase, stop?.scope, isActive);
 
-  const togglePhase = () => {
-    if (hasStop) {
-      setPhaseStops(phaseStops.filter((p) => p !== phase));
-    } else {
-      setPhaseStops([...phaseStops, phase]);
+  // Cycle the stop for this phase: off → AllTurns → OwnTurn → OpponentsTurns → off.
+  // Update in place so array order is preserved — `usePhaseStopsSync` dedupes by
+  // positional comparison, so appending would reorder and force a redundant
+  // engine dispatch even when the set of stops is unchanged.
+  const cyclePhase = () => {
+    if (stop === undefined) {
+      setPhaseStops([...phaseStops, { phase, scope: "AllTurns" }]);
+      return;
     }
+    const next: PhaseStopScope | null =
+      stop.scope === "AllTurns"
+        ? "OwnTurn"
+        : stop.scope === "OwnTurn"
+          ? "OpponentsTurns"
+          : null; // OpponentsTurns → off
+    setPhaseStops(
+      next === null
+        ? phaseStops.filter((s) => s.phase !== phase)
+        : phaseStops.map((s) => (s.phase === phase ? { phase, scope: next } : s)),
+    );
   };
 
   return (
     <button
       type="button"
-      onClick={togglePhase}
+      onClick={cyclePhase}
       aria-label={tooltip}
       aria-describedby={tooltipId}
       aria-pressed={hasStop}
-      className={`group relative flex h-6 w-6 items-center justify-center rounded-full border transition-all duration-200 lg:h-8 lg:w-8 lg:p-1 ${
+      className={`group relative flex h-6 w-6 items-center justify-center rounded-[7px] border transition-colors duration-150 lg:h-8 lg:w-8 lg:p-1 ${
         isActive
-          ? "border-cyan-300/45 bg-cyan-400/18 text-white shadow-[0_10px_22px_rgba(34,211,238,0.22)]"
+          ? "border-cyan-300/45 bg-cyan-950/82 text-white"
           : hasStop
             ? "border-white/12 bg-white/8 text-slate-200 hover:border-white/20 hover:text-white"
             : "border-transparent bg-transparent text-slate-500 hover:border-white/10 hover:bg-white/5 hover:text-slate-200"
       }`}
     >
       {isActive && (
-        <span className="absolute -top-1 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.9)]" />
+        <span className="absolute -top-1 left-1/2 h-1 w-3 -translate-x-1/2 rounded-[2px] bg-amber-300" />
       )}
       {PHASE_ICONS[phase]}
       {hasStop && (
@@ -184,7 +205,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorLeft() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
       {LEFT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -196,7 +217,7 @@ export function PhaseIndicatorLeft() {
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorRight() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
       {RIGHT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -213,7 +234,7 @@ export function CombatPhaseIndicator() {
   return (
     <div
       data-combat-phase-indicator
-      className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/64 px-1 py-1 backdrop-blur-xl lg:px-1.5"
+      className="flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:px-1.5"
     >
       {COMBAT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />

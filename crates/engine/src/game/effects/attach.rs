@@ -98,6 +98,19 @@ pub fn resolve_unattach_all(
     let target_ids = resolved_object_ids_for_filter(state, ability, target_filter);
 
     let ctx = FilterContext::from_ability(ability);
+    // CR 608.2c + CR 701.3d: A context-ref attachment anaphor ("unattach it" →
+    // `ParentTarget`/`ParentTargetSlot`) designates the snapshot object recorded
+    // when the effect was created, not a live filter match — `matches_target_filter`
+    // returns false for positive parent-refs (filter.rs: "resolve at resolution
+    // time"). Resolve it here against the ability's target snapshot, mirroring how
+    // the sibling `resolve_attach` routes `ParentTarget` through resolution rather
+    // than object matching. Typed host filters and `SelfRef` stay on the
+    // `matches_target_filter` path.
+    let explicit_attachment_ids: Option<Vec<ObjectId>> = matches!(
+        attachment_filter,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+    )
+    .then(|| super::effect_object_targets(attachment_filter, &ability.targets));
     for target_id in target_ids {
         let attachments = state
             .objects
@@ -105,7 +118,11 @@ pub fn resolve_unattach_all(
             .map(|target| target.attachments.clone())
             .unwrap_or_default();
         for attachment_id in attachments {
-            if !matches_target_filter(state, attachment_id, attachment_filter, &ctx) {
+            let keep = match &explicit_attachment_ids {
+                Some(ids) => ids.contains(&attachment_id),
+                None => matches_target_filter(state, attachment_id, attachment_filter, &ctx),
+            };
+            if !keep {
                 continue;
             }
             if let Some(old_target) = unattach(state, attachment_id) {
@@ -357,6 +374,21 @@ fn resolve_object_filter<'a>(
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         }),
+        // CR 608.2c: a precise slot anaphor ("Attach it to the chosen creature"
+        // → attachment slot 1, target slot 0) resolves against the whole
+        // resolving chain's accumulated targets. The per-clause `ability.targets`
+        // may carry only this clause's nearest target, so route through
+        // `resolved_targets`, whose `ParentTargetSlot` arm walks the ROOT chain
+        // (CR 608.2c) — the same authority the GainControl handler falls back to.
+        // The shared `target_slots` iterator is intentionally not consumed here.
+        TargetFilter::ParentTargetSlot { index } => {
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index).and_then(
+                |target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                },
+            )
+        }
         _ => {
             let ctx = FilterContext::from_ability(ability);
             target_slots
@@ -1487,6 +1519,120 @@ mod tests {
             state.objects.get(&second).unwrap().attached_to,
             Some(AttachTarget::Object(host))
         );
+    }
+
+    #[test]
+    fn complete_resolution_attachment_choice_attaches_to_source_host() {
+        let mut state = setup();
+        let cloud = spawn_creature(&mut state, "Cloud, Ex-SOLDIER");
+        let equipment = spawn_equipment(&mut state, "Buster Sword", 12);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            cloud,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        complete_resolution_attachment_choice(&mut state, ability, &[equipment], &mut events)
+            .unwrap();
+
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(cloud))
+        );
+        assert!(state
+            .objects
+            .get(&cloud)
+            .unwrap()
+            .attachments
+            .contains(&equipment));
+    }
+
+    #[test]
+    fn cloud_etb_attach_selection_equips_selected_equipment_to_cloud() {
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        let cloud = spawn_creature(&mut state, "Cloud, Ex-SOLDIER");
+        let other_host = spawn_creature(&mut state, "Other Soldier");
+        let first_equipment = spawn_equipment(&mut state, "Iron Sword", 12);
+        let selected_equipment = spawn_equipment(&mut state, "Buster Sword", 13);
+
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "When ~ enters, attach up to one target Equipment you control to it.",
+            "Cloud, Ex-SOLDIER",
+        );
+        let execute = trigger.execute.as_deref().expect("execute must be Some");
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            (*execute.effect).clone(),
+            vec![],
+            cloud,
+            PlayerId(0),
+        );
+        ability.multi_target = execute.multi_target.clone();
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                cards,
+                effect_kind,
+                min_count,
+                count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*effect_kind, EffectKind::Attach);
+                assert_eq!(*min_count, 0);
+                assert_eq!(*count, 1);
+                assert!(*up_to);
+                assert!(cards.contains(&first_equipment));
+                assert!(cards.contains(&selected_equipment));
+            }
+            other => panic!("expected Cloud attach EffectZoneChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![selected_equipment],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects.get(&selected_equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(cloud))
+        );
+        assert!(state
+            .objects
+            .get(&cloud)
+            .unwrap()
+            .attachments
+            .contains(&selected_equipment));
+        assert!(state
+            .objects
+            .get(&first_equipment)
+            .unwrap()
+            .attached_to
+            .is_none());
+        assert!(state
+            .objects
+            .get(&other_host)
+            .unwrap()
+            .attachments
+            .is_empty());
     }
 
     #[test]

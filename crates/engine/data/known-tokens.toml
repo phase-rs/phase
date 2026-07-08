@@ -8581,13 +8581,17 @@ preset_id = "07ff41fd-707c-5a4e-9acd-a2fabcfec692"
 [[token]]
 id = "08086333-bd24-563d-97b8-f838c5a0c9bf"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Ghalta and Mavren"]
 set_code = "WMOM"
 set_name = "MOM Japanese Promo Tokens"
 collector_number = "5"
 released_at = "2023-04-21"
 type_line = "Token Creature — Dinosaur"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Dinosaur"
@@ -11963,7 +11967,7 @@ preset_id = "0c159f1d-c5e0-5ff5-9634-772cd3526dfb"
 [[token]]
 id = "0c16da93-98d7-5037-a250-30d1e5482f15"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Shark Typhoon"]
 set_code = "IKO"
 set_name = "Ikoria: Lair of Behemoths"
@@ -11971,6 +11975,10 @@ collector_number = "7"
 released_at = "2020-04-24"
 type_line = "Token Creature — Shark"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Shark"
@@ -13147,7 +13155,7 @@ preset_id = "0d854bcb-6335-5040-a1e6-3f19a590a625"
 [[token]]
 id = "0ded5128-d811-510b-869c-16908c0a12cb"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Arboreal Alliance",
     "Assemble the Entmoot",
@@ -13158,6 +13166,10 @@ set_name = "Tales of Middle-earth Commander"
 collector_number = "13"
 released_at = "2023-06-23"
 type_line = "Token Creature — Treefolk"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Treefolk"
@@ -13648,6 +13660,10 @@ collector_number = "4"
 released_at = "2021-11-19"
 type_line = "Token Creature — Spirit Cleric"
 rules_text = "This creature's power and toughness are each equal to the number of Spirits you control."
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Spirit Cleric"
@@ -16070,13 +16086,17 @@ preset_id = "1161e9df-c6ac-52a4-b867-3d3b8bf3ae8d"
 [[token]]
 id = "11645c43-6413-5f87-a7f8-2c46161d09c3"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Hydra Broodmaster"]
 set_code = "C21"
 set_name = "Commander 2021"
 collector_number = "16"
 released_at = "2021-04-23"
 type_line = "Token Creature — Hydra"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Hydra"
@@ -16632,6 +16652,10 @@ collector_number = "20"
 released_at = "2020-08-07"
 type_line = "Token Creature — Elemental"
 rules_text = "This creature's power and toughness are each equal to the number of creatures you control."
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -17896,7 +17920,7 @@ preset_id = "12e842f9-2944-524c-bb45-0a991520f21e"
 [[token]]
 id = "12ea9ae7-f2ee-5e08-ba1e-68890a67cd4e"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Geralf, Visionary Stitcher",
     "Stitcher Geralf",
@@ -17906,6 +17930,10 @@ set_name = "Commander Masters"
 collector_number = "13"
 released_at = "2023-08-04"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -17989,7 +18017,7 @@ preset_id = "1317f88a-f170-5307-8867-b320c1164a05"
 [[token]]
 id = "1322fef2-b30e-5895-aa28-f0fa0879a89d"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Construct",
     "Gemini Engine",
@@ -18002,6 +18030,10 @@ set_name = "Kaladesh"
 collector_number = "2"
 released_at = "2016-09-30"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -19319,7 +19351,7 @@ preset_id = "1537811d-76c4-59f0-bf3a-8f85a1ccb897"
 [[token]]
 id = "1545ee29-d9c1-57ff-acae-431cfd6d60cf"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -19336,6 +19368,10 @@ set_name = "Modern Masters 2017"
 collector_number = "13"
 released_at = "2017-03-17"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -19507,13 +19543,17 @@ preset_id = "155dc632-d3a5-57a4-a219-adb39b963063"
 [[token]]
 id = "157e07f6-6d96-58f5-ae0c-f8027f00400c"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Phyrexian Rebirth"]
 set_code = "BRC"
 set_name = "The Brothers' War Commander"
 collector_number = "11"
 released_at = "2022-11-18"
 type_line = "Token Artifact Creature — Phyrexian Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Phyrexian Horror"
@@ -23885,6 +23925,10 @@ released_at = "2014-07-18"
 type_line = "Token Creature — Treefolk Warrior"
 rules_text = "This creature's power and toughness are each equal to the number of Forests you control."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Treefolk Warrior"
 core_types = ["Creature"]
@@ -24713,13 +24757,17 @@ preset_id = "1bccdf42-2306-5331-acb2-532007b15e4a"
 [[token]]
 id = "1bd3ecd2-7048-548f-ae5a-6410354766b8"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Profane Transfusion"]
 set_code = "CMR"
 set_name = "Commander Legends"
 collector_number = "10"
 released_at = "2020-11-20"
 type_line = "Token Artifact Creature — Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Horror"
@@ -25614,7 +25662,7 @@ preset_id = "1c57f366-37c9-537d-9ec1-1919d69a6846"
 [[token]]
 id = "1c7cd3de-6d37-562e-bfcd-7dcf912008f0"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Rootha, Mastering the Moment"]
 set_code = "SOC"
 set_name = "Secrets of Strixhaven Commander"
@@ -25622,6 +25670,10 @@ collector_number = "19"
 released_at = "2026-04-24"
 type_line = "Token Creature — Elemental"
 rules_text = "Flying, haste"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -26928,12 +26980,16 @@ preset_id = "1e97e854-0f35-5cef-aefd-c9d0423e193a"
 [[token]]
 id = "1ec68c0c-28fb-505a-9384-9fdf01fa6ac4"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 set_code = "PTDMU"
 set_name = "Dominaria United Southeast Asia Tokens"
 collector_number = "1"
 released_at = "2022-09-09"
 type_line = "Token Creature — Human"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Soldier"
@@ -27582,13 +27638,17 @@ preset_id = "1fd97c7c-9348-5c62-a1b5-c19fefa2e1b8"
 [[token]]
 id = "1fd9cf52-c3e7-563a-85e7-2202ed8a7b98"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Phyrexian Rebirth"]
 set_code = "MOC"
 set_name = "March of the Machine Commander"
 collector_number = "40"
 released_at = "2023-04-21"
 type_line = "Token Artifact Creature — Phyrexian Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Phyrexian Horror"
@@ -30221,13 +30281,17 @@ preset_id = "22a28f99-386e-5b4c-98b1-ce589600b6c9"
 [[token]]
 id = "22dbcfbd-79aa-5d9e-b5ee-ab3ef77529db"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Nissa, Ascended Animist"]
 set_code = "ONE"
 set_name = "Phyrexia: All Will Be One"
 collector_number = "7"
 released_at = "2023-02-10"
 type_line = "Token Creature — Phyrexian Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Phyrexian Horror"
@@ -30888,7 +30952,7 @@ preset_id = "237a0941-3118-512d-a40d-a42c0c518c5a"
 [[token]]
 id = "2394b923-52ac-5677-bdd1-777134dcbf1c"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Geralf, Visionary Stitcher",
     "Stitcher Geralf",
@@ -30898,6 +30962,10 @@ set_name = "Commander 2014"
 collector_number = "11"
 released_at = "2014-11-07"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -31325,13 +31393,17 @@ preset_id = "2429cbc6-ddb2-5c6f-802e-92f2fb6fee5d"
 [[token]]
 id = "2429f52e-1661-533b-bc09-9bad24c35085"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Hydra Broodmaster"]
 set_code = "JOU"
 set_name = "Journey into Nyx"
 collector_number = "4"
 released_at = "2014-05-02"
 type_line = "Token Creature — Hydra"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Hydra"
@@ -32967,6 +33039,10 @@ released_at = "2021-07-23"
 type_line = "Token Creature — Dog Illusion"
 rules_text = "This creature's power and toughness are each equal to twice the number of cards in your hand."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Dog Illusion"
 core_types = ["Creature"]
@@ -33516,6 +33592,10 @@ collector_number = "10"
 released_at = "2026-01-23"
 type_line = "Token Creature — Elemental"
 rules_text = "This creature's power and toughness are each equal to the number of creatures you control."
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -37843,7 +37923,7 @@ preset_id = "2ca6847c-e3f2-5003-8034-7b4c956afc0e"
 [[token]]
 id = "2cc424c9-f4f3-52ff-b664-514643531691"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -37860,6 +37940,10 @@ set_name = "Duskmourn: House of Horror Commander"
 collector_number = "14"
 released_at = "2024-09-27"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -37902,7 +37986,7 @@ preset_id = "2cc424c9-f4f3-52ff-b664-514643531691"
 [[token]]
 id = "2cda45cb-a7c8-55cd-98ad-4a707d2546ec"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Formless Genesis"]
 set_code = "EOC"
 set_name = "Edge of Eternities Commander"
@@ -37912,6 +37996,10 @@ type_line = "Token Creature — Shapeshifter"
 rules_text = """
 Changeling (This token is every creature type.)
 Deathtouch"""
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Shapeshifter"
@@ -38230,7 +38318,7 @@ preset_id = "2d7abecf-0830-5436-a81a-df51cd82f8b6"
 [[token]]
 id = "2db91485-8cc2-5ea5-bee9-fe4b504f872d"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Arboreal Alliance",
     "Assemble the Entmoot",
@@ -38241,6 +38329,10 @@ set_name = "New Capenna Commander"
 collector_number = "30"
 released_at = "2022-04-29"
 type_line = "Token Creature — Treefolk"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Treefolk"
@@ -38263,7 +38355,7 @@ preset_id = "2db91485-8cc2-5ea5-bee9-fe4b504f872d"
 [[token]]
 id = "2dd373fc-3a90-5398-bda9-faed675767a9"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Vulshok Factory"]
 set_code = "ONC"
 set_name = "Phyrexia: All Will Be One Commander"
@@ -38271,6 +38363,10 @@ collector_number = "18"
 released_at = "2023-02-10"
 type_line = "Token Artifact Creature — Golem"
 rules_text = "Haste"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Golem"
@@ -41367,7 +41463,7 @@ preset_id = "316d0b61-ce39-5800-91b0-f047750e64f2"
 [[token]]
 id = "316d1630-e9d4-5cb4-adfc-7175aeefd4ef"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -41379,6 +41475,10 @@ collector_number = "2"
 released_at = "2014-06-06"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -43417,7 +43517,7 @@ preset_id = "340d30ce-7bbd-51b7-8a0d-503e2b47035f"
 [[token]]
 id = "341c37dc-2ba1-5179-b682-ec15a944c513"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Flesh Carver",
     "Spoils of Blood",
@@ -43427,6 +43527,10 @@ set_name = "Commander 2014"
 collector_number = "15"
 released_at = "2014-11-07"
 type_line = "Token Creature — Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Horror"
@@ -43654,13 +43758,17 @@ preset_id = "3459327e-38e0-52c6-a20d-8c866d674693"
 [[token]]
 id = "34a7d9ba-1821-58bc-bac4-cb9f6d73ffe6"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Kalitas, Bloodchief of Ghet"]
 set_code = "ZEN"
 set_name = "Zendikar"
 collector_number = "6"
 released_at = "2009-10-02"
 type_line = "Token Creature — Vampire"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Vampire"
@@ -44975,7 +45083,7 @@ preset_id = "369a5599-0be1-5d49-b883-171fed96dbf5"
 [[token]]
 id = "36d79a78-afc0-5abc-8157-037512af9d55"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Gemini Engine",
     "Metallurgic Summonings",
@@ -44987,6 +45095,10 @@ set_name = "Kaladesh"
 collector_number = "3"
 released_at = "2016-09-30"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -50840,7 +50952,7 @@ preset_id = "3de757dd-9448-59ac-9d97-e96adc6ba66a"
 [[token]]
 id = "3df270fb-2842-5181-aeb3-6a653e0691bf"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -50857,6 +50969,10 @@ set_name = "Double Masters"
 collector_number = "15"
 released_at = "2020-08-07"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -52571,6 +52687,10 @@ released_at = "2010-07-16"
 type_line = "Token Creature — Avatar"
 rules_text = "This creature's power and toughness are each equal to your life total."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Avatar"
 core_types = ["Creature"]
@@ -53268,7 +53388,7 @@ preset_id = "40d2c1dd-2089-5ea8-8867-cf8e1db04445"
 [[token]]
 id = "40dfbc8d-d66f-5e20-8b3f-8c843a6d6a69"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Inscription of Insight",
     "Skyclave Apparition",
@@ -53278,6 +53398,10 @@ set_name = "Bloomburrow Commander"
 collector_number = "13"
 released_at = "2024-08-02"
 type_line = "Token Creature — Illusion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Illusion"
@@ -56568,13 +56692,17 @@ preset_id = "4603b26d-cc27-5fee-94af-ae77d0b684b7"
 [[token]]
 id = "460f112b-4295-543d-94db-8859d66e81f2"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Phyrexian Rebirth"]
 set_code = "ONC"
 set_name = "Phyrexia: All Will Be One Commander"
 collector_number = "20"
 released_at = "2023-02-10"
 type_line = "Token Artifact Creature — Phyrexian Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Phyrexian Horror"
@@ -59566,7 +59694,7 @@ preset_id = "48c88ecc-7e79-5258-a351-d3ce0a6d85e7"
 [[token]]
 id = "48d55c9e-8d4b-567e-a493-5f3c03136c00"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Inscription of Insight",
     "Skyclave Apparition",
@@ -59576,6 +59704,10 @@ set_name = "Secrets of Strixhaven Commander"
 collector_number = "7"
 released_at = "2026-04-24"
 type_line = "Token Creature — Illusion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Illusion"
@@ -62006,7 +62138,7 @@ preset_id = "4b0b11fb-6382-5e5d-bbab-e77c1ed5cab0"
 [[token]]
 id = "4b2d5b53-2f7c-5085-8d6e-cd92e9faf092"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Wrenn and Seven"]
 set_code = "DSC"
 set_name = "Duskmourn: House of Horror Commander"
@@ -62016,6 +62148,10 @@ type_line = "Token Creature — Treefolk"
 rules_text = """
 Reach
 This creature's power and toughness are each equal to the number of lands you control."""
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Treefolk"
@@ -69671,6 +69807,10 @@ rules_text = """
 Trample
 Toxic 1 (Players dealt combat damage by this creature also get a poison counter.)"""
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Phyrexian Wurm"
 core_types = ["Creature"]
@@ -70199,13 +70339,17 @@ preset_id = "534ff50b-4189-562a-89cb-ec8790d38620"
 [[token]]
 id = "53518bdd-3f35-5b95-9591-255a1036fda8"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Phyrexian Processor"]
 set_code = "DDE"
 set_name = "Duel Decks: Phyrexia vs. the Coalition"
 collector_number = "2"
 released_at = "2010-03-19"
 type_line = "Token Creature — Minion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Minion"
@@ -74119,7 +74263,7 @@ preset_id = "567b830b-0a81-5da4-a8b6-78b90b6877d0"
 [[token]]
 id = "56b09793-68bf-56de-ab32-7ee18e9aa1ca"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Urabrask's Forge"]
 set_code = "ONE"
 set_name = "Phyrexia: All Will Be One"
@@ -74127,6 +74271,10 @@ collector_number = "4"
 released_at = "2023-02-10"
 type_line = "Token Creature — Phyrexian Horror"
 rules_text = "Trample, haste"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "1"
 
 [token.body]
 display_name = "Phyrexian Horror"
@@ -74341,13 +74489,17 @@ preset_id = "56f90b98-163e-52ad-a14d-6996fda56f8d"
 [[token]]
 id = "570c3c71-b13b-509d-a61e-4d3ff221a8c4"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Experimental Overload"]
 set_code = "M21"
 set_name = "Core Set 2021"
 collector_number = "13"
 released_at = "2020-07-03"
 type_line = "Token Creature — Weird"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Weird"
@@ -74432,7 +74584,7 @@ preset_id = "570cd489-7238-5cc6-9f6e-c789738dd1e6"
 [[token]]
 id = "573dfb1d-12df-5a9e-87ee-1596698b73ea"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Ritual of the Returned",
     "Soul Separator",
@@ -74442,6 +74594,10 @@ set_name = "Innistrad Remastered"
 collector_number = "12"
 released_at = "2025-01-24"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -75697,13 +75853,17 @@ preset_id = "5846af2a-b320-5784-9096-f6b26e1f157f"
 [[token]]
 id = "58572f10-72f2-5f42-9216-1fb08db52d95"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Kin-Tree Invocation"]
 set_code = "KTK"
 set_name = "Khans of Tarkir"
 collector_number = "10"
 released_at = "2014-09-26"
 type_line = "Token Creature — Spirit Warrior"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Spirit Warrior"
@@ -76938,7 +77098,7 @@ preset_id = "5a28cd23-684e-554a-87dd-710c22b6f805"
 [[token]]
 id = "5a7153f0-d17e-5c43-9180-4756c62a5fdc"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Geralf, Visionary Stitcher",
     "Stitcher Geralf",
@@ -76948,6 +77108,10 @@ set_name = "Midnight Hunt Commander"
 collector_number = "4"
 released_at = "2021-09-24"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -82902,7 +83066,7 @@ preset_id = "6011878b-5a14-590c-8b07-562c1d139cc0"
 [[token]]
 id = "6025051b-dd22-57eb-b795-e936277b8b89"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Gemini Engine",
     "Metallurgic Summonings",
@@ -82914,6 +83078,10 @@ set_name = "The Brothers' War Promos"
 collector_number = "T2"
 released_at = "2022-11-18"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -83852,13 +84020,17 @@ preset_id = "6175fc22-4805-5f27-8fb9-f1cb92212a58"
 [[token]]
 id = "618893aa-cc4f-5940-8887-ad6f9a38a3a0"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Ghalta and Mavren"]
 set_code = "MOM"
 set_name = "March of the Machine"
 collector_number = "7"
 released_at = "2023-04-21"
 type_line = "Token Creature — Dinosaur"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Dinosaur"
@@ -84964,6 +85136,10 @@ released_at = "2021-09-24"
 type_line = "Token Creature — Ooze"
 rules_text = "This creature's power is equal to the number of card types among cards in your graveyard and its toughness is equal to that number plus 1."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*+1"
+
 [token.body]
 display_name = "Ooze"
 core_types = ["Creature"]
@@ -85270,6 +85446,10 @@ collector_number = "23"
 released_at = "2015-11-13"
 type_line = "Token Enchantment Creature — Spirit"
 rules_text = "This creature's power and toughness are each equal to the number of experience counters you have."
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Spirit"
@@ -86780,6 +86960,10 @@ released_at = "2017-12-08"
 type_line = "Token Creature — Elemental"
 rules_text = "This creature's power and toughness are each equal to the number of creatures you control."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Elemental"
 core_types = ["Creature"]
@@ -87692,7 +87876,7 @@ preset_id = "675657d3-e2cb-5145-b0fc-f9ba1f1f3951"
 [[token]]
 id = "675dfee7-ab2e-5b06-9d0d-07e567aa9b26"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Ritual of the Returned",
     "Soul Separator",
@@ -87702,6 +87886,10 @@ set_name = "Journey into Nyx"
 collector_number = "2"
 released_at = "2014-05-02"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -88632,13 +88820,17 @@ preset_id = "686ad1d7-d846-5ef3-89f4-c46dc7279e2e"
 [[token]]
 id = "686c5694-6de0-598b-b641-368eee728149"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Aether Refinery"]
 set_code = "M3C"
 set_name = "Modern Horizons 3 Commander"
 collector_number = "9"
 released_at = "2024-06-14"
 type_line = "Token Creature — Aetherborn"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Aetherborn"
@@ -89922,7 +90114,7 @@ preset_id = "69863b68-0cee-589c-a3d4-b02bbce9db2f"
 [[token]]
 id = "69a13b2c-d2e9-516c-8bf9-97f350163d3f"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Construct",
     "Gemini Engine",
@@ -89935,6 +90127,10 @@ set_name = "The Brothers' War Promos"
 collector_number = "T1"
 released_at = "2022-11-18"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -90620,7 +90816,7 @@ preset_id = "6a48d751-7da2-5ec5-9e3d-0697870d6a0f"
 [[token]]
 id = "6a4b2397-94ca-582a-b5f4-1b993e30bcb7"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Shark Typhoon"]
 set_code = "OTC"
 set_name = "Outlaws of Thunder Junction Commander"
@@ -90628,6 +90824,10 @@ collector_number = "6"
 released_at = "2024-04-19"
 type_line = "Token Creature — Shark"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Shark"
@@ -95748,6 +95948,10 @@ rules_text = """
 Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.
 (This token's mana cost is {1}{G}.)"""
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "1+*"
+
 [token.body]
 display_name = "Tarmogoyf"
 core_types = ["Creature"]
@@ -95809,7 +96013,7 @@ preset_id = "6e6c43c5-7306-5761-909d-397f62cc605c"
 [[token]]
 id = "6e7758ec-e4bb-59fc-a314-6a52cc158724"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -95826,6 +96030,10 @@ set_name = "Rise of the Eldrazi"
 collector_number = "4"
 released_at = "2010-04-23"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -96233,13 +96441,17 @@ preset_id = "6f222117-73e0-5b15-8f8d-529bfa2cdbc1"
 [[token]]
 id = "6f296fb6-0425-553d-9744-e16a81199d28"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Profane Transfusion"]
 set_code = "MBS"
 set_name = "Mirrodin Besieged"
 collector_number = "4"
 released_at = "2011-02-04"
 type_line = "Token Artifact Creature — Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Horror"
@@ -96300,7 +96512,7 @@ preset_id = "6f6d519d-0848-54a0-96d0-81cd8a5d4c42"
 [[token]]
 id = "6f91d082-f5ac-52fb-bcc6-c6ca501db94d"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Arboreal Alliance",
     "Assemble the Entmoot",
@@ -96311,6 +96523,10 @@ set_name = "Commander Anthology"
 collector_number = "15"
 released_at = "2017-06-09"
 type_line = "Token Creature — Treefolk"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Treefolk"
@@ -101039,7 +101255,7 @@ preset_id = "74ecab3c-1cad-5140-960a-63fc5bddc600"
 [[token]]
 id = "74f5a433-a6a6-5dfc-aee4-0ce66033e572"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Ritual of the Returned",
     "Soul Separator",
@@ -101049,6 +101265,10 @@ set_name = "Dominaria United Southeast Asia Tokens"
 collector_number = "3"
 released_at = "2022-09-09"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -102158,7 +102378,7 @@ preset_id = "75d29d40-278b-5165-879f-0cc30dc8a4a4"
 [[token]]
 id = "75e2af1c-33af-5f39-9787-2d242a91e882"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -102175,6 +102395,10 @@ set_name = "Ultimate Masters"
 collector_number = "14"
 released_at = "2018-12-07"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -103733,7 +103957,7 @@ preset_id = "781899c6-c45b-5b3e-954f-60c08ad68a58"
 [[token]]
 id = "7836eecb-7d19-5cb3-bce6-677cf23367b7"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Inscription of Insight",
     "Skyclave Apparition",
@@ -103743,6 +103967,10 @@ set_name = "Modern Horizons 3 Commander"
 collector_number = "6"
 released_at = "2024-06-14"
 type_line = "Token Creature — Illusion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Illusion"
@@ -106531,13 +106759,17 @@ preset_id = "7ad2c163-6575-5d2d-ac75-aeb04fa45a34"
 [[token]]
 id = "7af4122b-94af-5e15-9d75-54f15bbb442a"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["The Skullspore Nexus"]
 set_code = "LCI"
 set_name = "The Lost Caverns of Ixalan"
 collector_number = "12"
 released_at = "2023-11-17"
 type_line = "Token Creature — Fungus Dinosaur"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Fungus Dinosaur"
@@ -111396,7 +111628,7 @@ preset_id = "7f7ef390-9103-5a8b-a909-c3c2aaef29e9"
 [[token]]
 id = "7faf91b1-2607-5562-a7db-41cc0c9ac47b"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Budoka Gardener",
     "Budoka Gardener // Dokai, Weaver of Life",
@@ -111411,6 +111643,10 @@ set_name = "Commander 2018"
 collector_number = "16"
 released_at = "2018-08-10"
 type_line = "Token Creature — Elemental"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -113037,7 +113273,7 @@ preset_id = "8070e93b-ba0e-54e3-9c4a-d1235c6c4c6a"
 [[token]]
 id = "80841262-4d32-5b30-be85-197c097d6444"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Manaform Hellkite"]
 set_code = "SOC"
 set_name = "Secrets of Strixhaven Commander"
@@ -113045,6 +113281,10 @@ collector_number = "13"
 released_at = "2026-04-24"
 type_line = "Token Creature — Dragon Illusion"
 rules_text = "Flying, haste"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Dragon Illusion"
@@ -115987,12 +116227,16 @@ preset_id = "855bb2c7-8aa9-56b2-b9fc-a04788cc1c9f"
 [[token]]
 id = "8564813e-e288-5b40-88ce-ccc7c0ee6336"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 set_code = "PTBRO"
 set_name = "The Brothers' War Southeast Asia Tokens"
 collector_number = "2"
 released_at = "2022-11-18"
 type_line = "Token Creature — Urzan Automaton"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Urzan Automaton"
@@ -116168,13 +116412,17 @@ preset_id = "85e364ba-495c-52df-8efa-f3e0ce028b6a"
 [[token]]
 id = "85e62787-3770-5070-aa29-28ff06cd8bf2"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Profane Transfusion"]
 set_code = "C16"
 set_name = "Commander 2016"
 collector_number = "19"
 released_at = "2016-11-11"
 type_line = "Token Artifact Creature — Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Horror"
@@ -119161,7 +119409,7 @@ preset_id = "8903fa50-695b-57a5-8f42-acdb65adce94"
 [[token]]
 id = "89047637-7bd8-5e84-9360-5f00bae47f77"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -119178,6 +119426,10 @@ set_name = "Return to Ravnica"
 collector_number = "8"
 released_at = "2012-10-05"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -121629,6 +121881,10 @@ released_at = "2007-10-12"
 type_line = "Token Creature — Avatar"
 rules_text = "This creature's power and toughness are each equal to your life total."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Avatar"
 core_types = ["Creature"]
@@ -123131,7 +123387,7 @@ preset_id = "8d32e4af-d168-5a47-9b9e-4512e2063e6d"
 [[token]]
 id = "8d4c65cf-be37-53bc-a823-5a87eb5f2521"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -123148,6 +123404,10 @@ set_name = "Shards of Alara"
 collector_number = "8"
 released_at = "2008-10-03"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -132536,7 +132796,7 @@ preset_id = "94c06733-8abe-555b-9015-4d4ce32c40e3"
 [[token]]
 id = "94d9bf29-b5c7-57fe-b6da-bc068103aa50"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Ritual of the Returned",
     "Soul Separator",
@@ -132546,6 +132806,10 @@ set_name = "Eldritch Moon"
 collector_number = "6"
 released_at = "2016-07-22"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -135965,7 +136229,7 @@ preset_id = "99cd5dce-a251-5697-94e6-0360d92d8ab7"
 [[token]]
 id = "99ce8c0e-18a3-5e1a-b2ad-447062105212"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -135977,6 +136241,10 @@ collector_number = "6"
 released_at = "2014-12-05"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -139298,7 +139566,7 @@ preset_id = "9cc5f7cc-2554-56d9-aa8b-edfefab91a0d"
 [[token]]
 id = "9cd481a2-eed9-5d16-a789-6228b9fbc5a6"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Budoka Gardener // Dokai, Weaver of Life",
     "Dance of the Tumbleweeds",
@@ -139311,6 +139579,10 @@ set_name = "Oath of the Gatewatch"
 collector_number = "10"
 released_at = "2016-01-22"
 type_line = "Token Creature — Elemental"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -140457,6 +140729,10 @@ released_at = "2023-11-17"
 type_line = "Token Artifact Creature — Gnome Soldier"
 rules_text = "This creature's power and toughness are each equal to the number of artifacts and/or creatures you control."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Gnome Soldier"
 core_types = [
@@ -140556,7 +140832,7 @@ preset_id = "9f5df138-c492-5bb0-b519-ce0762663c74"
 [[token]]
 id = "9f5fff5d-a989-58d7-b8ba-f2492e720ade"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -140568,6 +140844,10 @@ collector_number = "2"
 released_at = "2009-04-10"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -144094,13 +144374,17 @@ preset_id = "a48209c0-04de-5b70-a252-d5c3462dc3b3"
 [[token]]
 id = "a4983cdd-213f-50d6-aeb4-8ad1d257bf46"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Hydra Broodmaster"]
 set_code = "M3C"
 set_name = "Modern Horizons 3 Commander"
 collector_number = "20"
 released_at = "2024-06-14"
 type_line = "Token Creature — Hydra"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Hydra"
@@ -144975,7 +145259,7 @@ preset_id = "a5c96d41-cabd-57a5-b7d7-90957340d40a"
 [[token]]
 id = "a5e07755-997e-538e-bd79-d13d63acb926"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Wrenn and Seven"]
 set_code = "INR"
 set_name = "Innistrad Remastered"
@@ -144985,6 +145269,10 @@ type_line = "Token Creature — Treefolk"
 rules_text = """
 Reach
 This creature's power and toughness are each equal to the number of lands you control."""
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Treefolk"
@@ -146529,7 +146817,7 @@ preset_id = "a80c9961-5303-587a-8b48-5e3d5a8dee97"
 [[token]]
 id = "a819ecc0-e17d-5a7d-b7b4-2e9c098bfa1d"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Manaform Hellkite"]
 set_code = "VOW"
 set_name = "Innistrad: Crimson Vow"
@@ -146537,6 +146825,10 @@ collector_number = "9"
 released_at = "2021-11-19"
 type_line = "Token Creature — Dragon Illusion"
 rules_text = "Flying, haste"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Dragon Illusion"
@@ -149118,13 +149410,17 @@ preset_id = "ab23fbc6-93ff-5576-935d-1baf0dce8f4d"
 [[token]]
 id = "ab391511-1501-5e51-86a6-5bc6e38d8763"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Profane Transfusion"]
 set_code = "C19"
 set_name = "Commander 2019"
 collector_number = "23"
 released_at = "2019-08-23"
 type_line = "Token Artifact Creature — Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Horror"
@@ -150515,13 +150811,17 @@ preset_id = "ac5267b4-033c-5424-bb73-5ce499ff175c"
 [[token]]
 id = "ac66aba2-a487-5025-8197-d9a268c36935"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Chainer's Torment"]
 set_code = "DOM"
 set_name = "Dominaria"
 collector_number = "6"
 released_at = "2018-04-27"
 type_line = "Token Creature — Nightmare Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Nightmare Horror"
@@ -162274,7 +162574,7 @@ preset_id = "b9f1ebfd-34fc-5c08-b211-5e2578b91982"
 [[token]]
 id = "b9f7553d-55f1-5a3d-a0bc-2c36967c544f"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Corpse Cobble"]
 set_code = "MID"
 set_name = "Innistrad: Midnight Hunt"
@@ -162282,6 +162582,10 @@ collector_number = "15"
 released_at = "2021-09-24"
 type_line = "Token Creature — Zombie"
 rules_text = "Menace (This creature can't be blocked except by two or more creatures.)"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -164504,7 +164808,7 @@ preset_id = "bc2331ef-369f-5929-9a00-c32b48e89cbf"
 [[token]]
 id = "bc238d44-72c8-5163-9d81-f907013a613c"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -164516,6 +164820,10 @@ collector_number = "12"
 released_at = "2014-11-07"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -165523,7 +165831,7 @@ preset_id = "bd5f51ee-08a2-5368-9dd0-cb3052e719ec"
 [[token]]
 id = "bd747c18-1a47-5677-871c-9daae2341cca"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Gemini Engine",
     "Metallurgic Summonings",
@@ -165535,6 +165843,10 @@ set_name = "Commander 2021"
 collector_number = "22"
 released_at = "2021-04-23"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -165811,7 +166123,7 @@ preset_id = "bdd2e8d4-e586-513b-a7d4-399f1417b85b"
 [[token]]
 id = "bde7b1be-5058-58b7-8e56-9d4d8ae7af3a"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Manaform Hellkite"]
 set_code = "TDC"
 set_name = "Tarkir: Dragonstorm Commander"
@@ -165819,6 +166131,10 @@ collector_number = "15"
 released_at = "2025-04-11"
 type_line = "Token Creature — Dragon Illusion"
 rules_text = "Flying, haste"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Dragon Illusion"
@@ -167878,13 +168194,17 @@ preset_id = "c024f57b-b8ec-55a7-937f-db99918c2a1d"
 [[token]]
 id = "c06ee636-394e-505c-8844-ac3c012e5a06"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Kura, the Boundless Sky"]
 set_code = "NEO"
 set_name = "Kamigawa: Neon Dynasty"
 collector_number = "12"
 released_at = "2022-02-18"
 type_line = "Token Creature — Spirit"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Spirit"
@@ -169646,6 +169966,10 @@ collector_number = "1"
 released_at = "2013-05-03"
 type_line = "Token Creature — Elemental"
 rules_text = "This creature's power and toughness are each equal to the number of creatures you control."
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -174135,13 +174459,17 @@ preset_id = "c63e8785-25d1-5281-a361-f5699650ae11"
 [[token]]
 id = "c648341a-d6a1-51c3-95c2-acaf0fdfe6ac"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Corpseweft"]
 set_code = "DTK"
 set_name = "Dragons of Tarkir"
 collector_number = "4"
 released_at = "2015-03-27"
 type_line = "Token Creature — Zombie Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie Horror"
@@ -175343,7 +175671,7 @@ preset_id = "c8266738-dc3a-5b7e-8a53-2ef29c92d37c"
 [[token]]
 id = "c827d437-be61-5b73-8d1a-b3576f6629a8"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Seize the Storm"]
 set_code = "MID"
 set_name = "Innistrad: Midnight Hunt"
@@ -175353,6 +175681,10 @@ type_line = "Token Creature — Elemental"
 rules_text = """
 Trample
 This creature's power and toughness are each equal to the number of instant and sorcery cards in your graveyard plus the number of cards with flashback you own in exile."""
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -178910,7 +179242,7 @@ preset_id = "cc38a9ca-b576-5193-aa82-324eac09d676"
 [[token]]
 id = "cc583797-5394-5651-9f55-d860222fcc9b"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -178922,6 +179254,10 @@ collector_number = "12"
 released_at = "2022-12-02"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -180234,7 +180570,7 @@ preset_id = "ce40eaba-4a56-5e24-bdfe-2c1e963a6afe"
 [[token]]
 id = "ce47d822-2ec8-5683-91d7-96716305caac"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Abzan Monument",
     "Krumar Initiate",
@@ -180246,6 +180582,10 @@ set_name = "Tarkir: Dragonstorm"
 collector_number = "9"
 released_at = "2025-04-11"
 type_line = "Token Creature — Spirit"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Spirit"
@@ -181017,13 +181357,17 @@ preset_id = "ce7679de-7ccf-5d6a-b11c-2a70d54bce93"
 [[token]]
 id = "ce807f9d-ef00-5936-a725-b4c9011d2edb"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Profane Transfusion"]
 set_code = "C18"
 set_name = "Commander 2018"
 collector_number = "22"
 released_at = "2018-08-10"
 type_line = "Token Artifact Creature — Horror"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Horror"
@@ -181616,7 +181960,7 @@ preset_id = "cf393d4e-6e10-54a0-8923-a5e8f31bd3ba"
 [[token]]
 id = "cf39570a-a491-5d21-a385-0119796ac0a9"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Misty Salon",
     "Smoky Lounge",
@@ -181629,6 +181973,10 @@ collector_number = "8"
 released_at = "2024-09-27"
 type_line = "Token Creature — Spirit"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Spirit"
@@ -182604,7 +182952,7 @@ preset_id = "d02dc942-4c0b-5f16-834a-0dc29b6dc93b"
 [[token]]
 id = "d04c4459-a2d4-5f0f-84cb-0f211d41be96"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Seize the Storm"]
 set_code = "INR"
 set_name = "Innistrad Remastered"
@@ -182614,6 +182962,10 @@ type_line = "Token Creature — Elemental"
 rules_text = """
 Trample
 This creature's power and toughness are each equal to the number of instant and sorcery cards in your graveyard plus the number of cards with flashback you own in exile."""
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -182681,7 +183033,7 @@ preset_id = "d055b8d2-a80f-5759-82d3-e4287b202426"
 [[token]]
 id = "d07787f4-9cc9-532c-8917-b4afb42e49b9"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Budoka Gardener",
     "Budoka Gardener // Dokai, Weaver of Life",
@@ -182696,6 +183048,10 @@ set_name = "Outlaws of Thunder Junction"
 collector_number = "12"
 released_at = "2024-04-19"
 type_line = "Token Creature — Elemental"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -182966,6 +183322,10 @@ collector_number = "24"
 released_at = "2019-08-23"
 type_line = "Token Artifact Creature — Sculpture"
 rules_text = "This creature's power and toughness are each equal to the number of Sculptures you control."
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Sculpture"
@@ -183701,7 +184061,7 @@ preset_id = "d1fed647-a495-51e4-904b-85946036fbc5"
 [[token]]
 id = "d2064065-01fd-54fb-89d7-a4bdd51f9ef5"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Purphoros's Intervention"]
 set_code = "THB"
 set_name = "Theros Beyond Death"
@@ -183709,6 +184069,10 @@ collector_number = "8"
 released_at = "2020-01-24"
 type_line = "Token Creature — Elemental"
 rules_text = "Trample, haste"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "1"
 
 [token.body]
 display_name = "Elemental"
@@ -183917,7 +184281,7 @@ preset_id = "d221c39f-0f44-5d8b-a246-e5bb061b466a"
 [[token]]
 id = "d223b599-3253-5f87-8e98-1dfe083fa7d2"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Gemini Engine",
     "Metallurgic Summonings",
@@ -183929,6 +184293,10 @@ set_name = "Unstable"
 collector_number = "19"
 released_at = "2017-12-08"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -185048,13 +185416,17 @@ preset_id = "d350c562-4e9f-5462-bbf5-afc8a0e7910d"
 [[token]]
 id = "d3514110-ce8f-5d62-9991-f498505241b2"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Grakmaw, Skyclave Ravager"]
 set_code = "ZNR"
 set_name = "Zendikar Rising"
 collector_number = "9"
 released_at = "2020-09-25"
 type_line = "Token Creature — Hydra"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Hydra"
@@ -185200,7 +185572,7 @@ preset_id = "d3d27491-b15c-5475-9f2e-73ad7064b00e"
 [[token]]
 id = "d3d7ce7b-5ea0-5653-ad6c-0de20e759e62"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Geralf, Visionary Stitcher",
     "Stitcher Geralf",
@@ -185210,6 +185582,10 @@ set_name = "Innistrad: Crimson Vow"
 collector_number = "5"
 released_at = "2021-11-19"
 type_line = "Token Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Zombie"
@@ -191776,6 +192152,10 @@ released_at = "2024-04-19"
 type_line = "Token Legendary Creature — Ox"
 rules_text = "This creature's power and toughness are each equal to the number of lands you control."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Beau"
 core_types = ["Creature"]
@@ -195634,6 +196014,10 @@ released_at = "2009-07-17"
 type_line = "Token Creature — Avatar"
 rules_text = "This creature's power and toughness are each equal to your life total."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Avatar"
 core_types = ["Creature"]
@@ -195655,7 +196039,7 @@ preset_id = "de0a2314-9c8f-52b1-bc5d-861615617700"
 [[token]]
 id = "de25859d-60a9-503d-b191-b72a4bd9eca8"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Arboreal Alliance",
     "Assemble the Entmoot",
@@ -195666,6 +196050,10 @@ set_name = "Commander 2014"
 collector_number = "25"
 released_at = "2014-11-07"
 type_line = "Token Creature — Treefolk"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Treefolk"
@@ -196758,7 +197146,7 @@ preset_id = "de807b5d-5a96-5bd8-ba32-ddcaf8ecac0c"
 [[token]]
 id = "de813230-3334-5fe0-8e3d-df8a0422571f"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -196770,6 +197158,10 @@ collector_number = "15"
 released_at = "2022-04-29"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -198192,7 +198584,7 @@ preset_id = "e0454949-5f81-53e7-951c-9245ec100e38"
 [[token]]
 id = "e06431b6-e469-59ea-ae40-070e3c7d224d"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Inscription of Insight",
     "Skyclave Apparition",
@@ -198202,6 +198594,10 @@ set_name = "Zendikar Rising"
 collector_number = "6"
 released_at = "2020-09-25"
 type_line = "Token Creature — Illusion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Illusion"
@@ -199439,7 +199835,7 @@ preset_id = "e1712205-f6a6-5ffa-befc-9becced0337f"
 [[token]]
 id = "e1728060-2847-5553-8cbf-f343927cffbf"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -199456,6 +199852,10 @@ set_name = "RNA Guild Kit"
 collector_number = "9"
 released_at = "2019-02-15"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -205253,6 +205653,10 @@ released_at = "2017-03-17"
 type_line = "Token Creature — Elemental"
 rules_text = "This creature's power and toughness are each equal to the number of creatures you control."
 
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
 [token.body]
 display_name = "Elemental"
 core_types = ["Creature"]
@@ -205950,12 +206354,16 @@ preset_id = "e9d0c3ba-e49f-509b-8227-f39558f12f3d"
 [[token]]
 id = "e9d3f1cd-6983-5b5d-bd70-2aa8e3c752e5"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 set_code = "PTDMU"
 set_name = "Dominaria United Southeast Asia Tokens"
 collector_number = "2"
 released_at = "2022-09-09"
 type_line = "Token Creature — Angel"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Angel"
@@ -205973,7 +206381,7 @@ preset_id = "e9d3f1cd-6983-5b5d-bd70-2aa8e3c752e5"
 [[token]]
 id = "e9d4c9dd-aabd-5b24-9c12-495ba9642306"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Mask of the Jadecrafter",
     "Rootwire Amalgam",
@@ -205983,6 +206391,10 @@ set_name = "The Brothers' War"
 collector_number = "6"
 released_at = "2022-11-18"
 type_line = "Token Artifact Creature — Golem"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Golem"
@@ -207177,7 +207589,7 @@ preset_id = "ec0ab5d6-95e0-5d59-ac3f-6d6f69ab109e"
 [[token]]
 id = "ec3fbb0c-455e-5aaf-8790-9711bea6a34d"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Gemini Engine",
     "Metallurgic Summonings",
@@ -207189,6 +207601,10 @@ set_name = "The Brothers' War Southeast Asia Tokens"
 collector_number = "1"
 released_at = "2022-11-18"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -207364,7 +207780,7 @@ preset_id = "ec4b5da6-c561-5591-ac84-21f5a9372ea2"
 [[token]]
 id = "ec55a15c-5829-512f-92c9-f574dab901c7"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Shark Typhoon"]
 set_code = "DSC"
 set_name = "Duskmourn: House of Horror Commander"
@@ -207372,6 +207788,10 @@ collector_number = "4"
 released_at = "2024-09-27"
 type_line = "Token Creature — Shark"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Shark"
@@ -211637,7 +212057,7 @@ preset_id = "f08192e3-745c-5f8c-91c5-7da8649604af"
 [[token]]
 id = "f0a5b981-cd82-54db-8950-0c824031c19f"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Convert to Slime",
     "Effluence Devourer",
@@ -211654,6 +212074,10 @@ set_name = "Innistrad"
 collector_number = "10"
 released_at = "2011-09-30"
 type_line = "Token Creature — Ooze"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Ooze"
@@ -212349,7 +212773,7 @@ preset_id = "f1b671ae-b6e9-5bd5-aab5-6605a16a9ae1"
 [[token]]
 id = "f1bed91d-6add-5945-ac41-be69ba306baf"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Quartzwood Crasher"]
 set_code = "IKO"
 set_name = "Ikoria: Lair of Behemoths"
@@ -212357,6 +212781,10 @@ collector_number = "11"
 released_at = "2020-04-24"
 type_line = "Token Creature — Dinosaur Beast"
 rules_text = "Trample"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Dinosaur Beast"
@@ -214871,7 +215299,7 @@ preset_id = "f417ca69-6652-5aab-a1ba-ad1a05122478"
 [[token]]
 id = "f4260a65-d274-5382-b397-cdb68ddf0a9f"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Gemini Engine",
     "Metallurgic Summonings",
@@ -214883,6 +215311,10 @@ set_name = "Commander Masters"
 collector_number = "42"
 released_at = "2023-08-04"
 type_line = "Token Artifact Creature — Construct"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Construct"
@@ -215027,7 +215459,7 @@ preset_id = "f47e3eeb-f1d4-5fd2-852e-5f08ec9bd5c8"
 [[token]]
 id = "f491d91a-8f4e-54a5-9513-5d89bad9f4ec"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Wrenn and Seven"]
 set_code = "MID"
 set_name = "Innistrad: Midnight Hunt"
@@ -215037,6 +215469,10 @@ type_line = "Token Creature — Treefolk"
 rules_text = """
 Reach
 This creature's power and toughness are each equal to the number of lands you control."""
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Treefolk"
@@ -216457,12 +216893,16 @@ preset_id = "f5b1634e-a14b-51d6-a679-356f7f0ac60f"
 [[token]]
 id = "f5ba110a-31c8-5b26-b526-c4e8ecd3fab3"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 set_code = "PTBRO"
 set_name = "The Brothers' War Southeast Asia Tokens"
 collector_number = "3"
 released_at = "2022-11-18"
 type_line = "Token Artifact Creature — Zombie"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Artifact Zombie"
@@ -220586,13 +221026,17 @@ preset_id = "f9338bcd-2cdb-5451-a609-a7e173e41118"
 [[token]]
 id = "f9482da1-1da5-5ed9-a322-f3b5031d8904"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Devastating Summons"]
 set_code = "ROE"
 set_name = "Rise of the Eldrazi"
 collector_number = "2"
 released_at = "2010-04-23"
 type_line = "Token Creature — Elemental"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Elemental"
@@ -221019,7 +221463,7 @@ preset_id = "f9d674a3-6c0b-5949-b09b-9bc93cd11a9f"
 [[token]]
 id = "fa2ea14c-516a-5f0a-bbb6-a0aea8d002c5"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Quartzwood Crasher"]
 set_code = "LCC"
 set_name = "The Lost Caverns of Ixalan Commander"
@@ -221027,6 +221471,10 @@ collector_number = "11"
 released_at = "2023-11-17"
 type_line = "Token Creature — Dinosaur Beast"
 rules_text = "Trample"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Dinosaur Beast"
@@ -221397,7 +221845,7 @@ preset_id = "fa9eac92-3a7d-5b17-8320-f046addea8c7"
 [[token]]
 id = "faa99cc4-340d-5cb0-9fb8-f18b0c4ebdfe"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -221409,6 +221857,10 @@ collector_number = "6"
 released_at = "2003-01-01"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -223017,7 +223469,7 @@ preset_id = "fb73a691-c5b7-5c29-9af7-5c847c3cf05d"
 [[token]]
 id = "fb865241-eb39-57df-a9df-ed0a0093f512"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = [
     "Promise of Power",
     "Reign of the Pit",
@@ -223029,6 +223481,10 @@ collector_number = "7"
 released_at = "2021-04-23"
 type_line = "Token Creature — Demon"
 rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Demon"
@@ -229070,7 +229526,7 @@ preset_id = "ff3b889c-4b82-5527-85dd-26c35744e751"
 [[token]]
 id = "ff412d57-76eb-5464-8c64-9f0cc7a03cdd"
 category = "Creature"
-fidelity = "PartialMissingAbilities"
+fidelity = "Full"
 source_card_names = ["Formless Genesis"]
 set_code = "DSC"
 set_name = "Duskmourn: House of Horror Commander"
@@ -229080,6 +229536,10 @@ type_line = "Token Creature — Shapeshifter"
 rules_text = """
 Changeling (This token is every creature type.)
 Deathtouch"""
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
 
 [token.body]
 display_name = "Shapeshifter"

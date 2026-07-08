@@ -40,6 +40,41 @@ test("sanitizeTelemetryBatch accepts the five Tier 1 events with envelope fields
   }
 });
 
+test("sanitizeTelemetryBatch accepts the Tier 2 report/usage events with their columns", () => {
+  const out = sanitizeTelemetryBatch(
+    batch([
+      { event: "card_report", oracle_id: "abc", face_name: "Front", name: "Colossal Dreadmaw", zone: "Battlefield", game_mode: "ai", turn: 5, supported: 2, total: 3 },
+      { event: "session_start", route: "/game" },
+      { event: "game_start", game_mode: "ai", player_count: 2, ai_count: 1 },
+      { event: "route_view", route: "/deck-builder" },
+    ]),
+  );
+  assert.equal(out.length, 4);
+  for (const e of out) {
+    assert.equal(e.blobs.length, EVENT_SCHEMAS[e.event].blobs.length);
+    assert.equal(e.doubles.length, EVENT_SCHEMAS[e.event].doubles.length);
+  }
+  const [report, session, gameStart, route] = out;
+  // card_report columns land in documented order (blobs then doubles).
+  assert.deepEqual(report.blobs, ["abc", "Front", "Colossal Dreadmaw", "Battlefield", "ai"]);
+  assert.deepEqual(report.doubles, [5, 2, 3]);
+  assert.deepEqual(session.blobs, ["/game"]);
+  assert.deepEqual(session.doubles, []);
+  assert.deepEqual(gameStart.blobs, ["ai"]);
+  assert.deepEqual(gameStart.doubles, [2, 1]);
+  assert.deepEqual(route.blobs, ["/deck-builder"]);
+  assert.deepEqual(route.doubles, []);
+});
+
+test("unknown fields are dropped from a new Tier 2 event", () => {
+  const [e] = sanitizeTelemetryBatch(
+    batch([{ event: "card_report", oracle_id: "abc", face_name: "", name: "X", zone: "Hand", game_mode: "ai", turn: 1, supported: 1, total: 1, secret: "leak" }]),
+  );
+  // Only schema columns are projected; the extra field never appears.
+  assert.deepEqual(e.blobs, ["abc", "", "X", "Hand", "ai"]);
+  assert.deepEqual(e.doubles, [1, 1, 1]);
+});
+
 test("toDataPoint prepends the envelope blobs and sets the single index", () => {
   const [e] = sanitizeTelemetryBatch(
     batch([{ event: "chunk_reload", reason: "preload-error", deferred: true, chunk: "c.js" }]),
@@ -129,7 +164,27 @@ test("booleans and numbers coerce; missing/other values default", () => {
   const [drawn] = sanitizeTelemetryBatch(
     batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 7, unimplemented_oracle_ids: ["x", 5, "y"] }]),
   );
-  // winner_kind null → ""; array keeps only strings, comma-joined.
-  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y"]);
+  // winner_kind null → ""; array keeps only strings, comma-joined;
+  // pending_trigger_abandons absent → "".
+  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y", ""]);
   assert.deepEqual(drawn.doubles, [7]);
+});
+
+test("the game_end pending_trigger_abandons list survives the join at the client's 20-item cap", () => {
+  // Mirrors the unimplemented_oracle_ids blob: the abandon descriptors are
+  // comma-joined into the 5th game_end blob and kept up to the list cap.
+  const abandons = Array.from(
+    { length: 20 },
+    (_, i) => `Test Source (stack entry ${i})`,
+  );
+  const [e] = sanitizeTelemetryBatch(
+    batch([{ event: "game_end", result: "winner", winner_kind: "human", game_mode: "ai", turn_count: 3, pending_trigger_abandons: abandons }]),
+  );
+  assert.equal(e.blobs[4], abandons.join(","));
+  assert.equal(e.blobs[4].split(",").length, 20);
+  // Non-strings are dropped, strings comma-joined (same treatment as oracle ids).
+  const [mixed] = sanitizeTelemetryBatch(
+    batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 1, pending_trigger_abandons: ["a", 5, "b"] }]),
+  );
+  assert.equal(mixed.blobs[4], "a,b");
 });
