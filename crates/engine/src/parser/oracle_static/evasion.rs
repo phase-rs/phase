@@ -501,8 +501,13 @@ fn parse_oxford_object_conjuncts(text: &str) -> Option<TargetFilter> {
         conjuncts.push(item.trim());
         remaining = rest;
     }
-    let last = remaining.trim();
-    conjuncts.push(last.strip_prefix("and ").unwrap_or(last).trim());
+    // Pattern 1 (PATTERNS.md): strip the Oxford "and " connector from the final
+    // conjunct via `opt(tag(...))` rather than `strip_prefix` — the connector is
+    // genuinely optional (absent when only 2 total object conjuncts follow "you").
+    let (last, _) = opt(tag::<_, _, OracleError<'_>>("and "))
+        .parse(remaining.trim())
+        .ok()?;
+    conjuncts.push(last.trim());
     if conjuncts.len() < 2 {
         return None;
     }
