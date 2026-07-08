@@ -7033,6 +7033,35 @@ fn trigger_you_cast_aura_spell() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
 
+/// Issue #5324 (CR 205.3a + CR 601.2a): "Whenever you cast an Aura, Equipment,
+/// or Vehicle spell, draw a card." (Sram, Senior Edificer) — the comma-separated
+/// subtype disjunction must survive the effect-truncation as a 3-leg
+/// `TargetFilter::Or`, not collapse to Aura only (which dropped Equipment and
+/// Vehicle, so the trigger no longer fired on those spells).
+#[test]
+fn trigger_you_cast_comma_subtype_disjunction_spell() {
+    let def = parse_trigger_line(
+        "Whenever you cast an Aura, Equipment, or Vehicle spell, draw a card.",
+        "Sram, Senior Edificer",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    let TargetFilter::Or { filters } = def
+        .valid_card
+        .expect("Sram's cast trigger must set valid_card")
+    else {
+        panic!("expected an Or disjunction, got {:?}", def.valid_card);
+    };
+    assert_eq!(filters.len(), 3, "expected 3 subtype legs, got {filters:?}");
+    let rendered = format!("{filters:?}");
+    for subtype in ["Aura", "Equipment", "Vehicle"] {
+        assert!(
+            rendered.contains(subtype),
+            "missing {subtype} leg in {rendered}"
+        );
+    }
+}
+
 /// CR 601.2 + CR 702.33d: "Whenever you cast a kicked spell" is a
 /// SpellCast trigger whose `valid_card` gates on the cast-time kicked
 /// snapshot, not an unrestricted any-spell trigger.

@@ -12356,6 +12356,42 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             return Some((TriggerMode::SpellCast, def));
         }
 
+        // CR 205.3a + CR 601.2a: a comma-separated card-type / subtype disjunction
+        // ("Whenever you cast an Aura, Equipment, or Vehicle spell" — Sram, Senior
+        // Edificer) spans the truncation ", " the same way the color disjunction
+        // above does. `parse_type_phrase` consumes the whole "<t1>, <t2>, or <tN>
+        // spell" list into a `TargetFilter::Or`, so recognize it on the untruncated
+        // remainder before the truncation below cuts it to the first leg (which
+        // dropped Equipment/Vehicle, leaving the trigger firing only on Auras).
+        // Guarded to fire only when the type phrase actually held a comma list (so
+        // comma-less "instant or sorcery spell" keeps its existing modifier-aware
+        // path), the remainder is only the effect clause (no post-spell modifier
+        // stranded after the list), and no cast-origin "from <zone>" qualifier was
+        // swept into the filter (which needs the separate `spell_cast_origin` gate).
+        {
+            let trimmed = after.trim();
+            let (filter, remainder) = parse_type_phrase(trimmed);
+            let consumed = &trimmed[..trimmed.len() - remainder.len()];
+            let is_comma_type_list = matches!(
+                &filter,
+                TargetFilter::Or { filters } if filters.len() >= 2
+            ) && nom_primitives::scan_contains(consumed, ", ")
+                && !nom_primitives::scan_contains(consumed, " from ");
+            let remainder_is_effect_only = {
+                let rest = remainder.trim_start();
+                rest.is_empty() || tag::<_, _, OracleError<'_>>(",").parse(rest).is_ok()
+            };
+            if is_comma_type_list && remainder_is_effect_only {
+                let filter = if is_another {
+                    add_another_prop(filter)
+                } else {
+                    filter
+                };
+                def.valid_card = Some(filter);
+                return Some((TriggerMode::SpellCast, def));
+            }
+        }
+
         // Truncate at ", " so any effect clause doesn't leak into the type parser.
         let payload = nom_primitives::split_once_on(after, ", ")
             .map(|(_, (before, _))| before)
