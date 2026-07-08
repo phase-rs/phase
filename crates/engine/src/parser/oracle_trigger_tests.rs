@@ -7046,19 +7046,18 @@ fn trigger_you_cast_comma_subtype_disjunction_spell() {
     );
     assert_eq!(def.mode, TriggerMode::SpellCast);
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
-    let TargetFilter::Or { filters } = def
-        .valid_card
-        .expect("Sram's cast trigger must set valid_card")
-    else {
-        panic!("expected an Or disjunction, got {:?}", def.valid_card);
-    };
-    assert_eq!(filters.len(), 3, "expected 3 subtype legs, got {filters:?}");
-    let rendered = format!("{filters:?}");
-    for subtype in ["Aura", "Equipment", "Vehicle"] {
-        assert!(
-            rendered.contains(subtype),
-            "missing {subtype} leg in {rendered}"
-        );
+    match def.valid_card {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 3, "expected 3 subtype legs, got {filters:?}");
+            let rendered = format!("{filters:?}");
+            for subtype in ["Aura", "Equipment", "Vehicle"] {
+                assert!(
+                    rendered.contains(subtype),
+                    "missing {subtype} leg in {rendered}"
+                );
+            }
+        }
+        other => panic!("Sram's cast trigger must set an Or valid_card, got {other:?}"),
     }
 }
 
