@@ -2342,6 +2342,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // suffixes like "creatures". Stop before `Card` / `Subtype` — those are
     // informational suffixes ("creature card") or belong to the subtype slot.
     let mut extra_core_type_filters: Vec<TypeFilter> = Vec::new();
+    let mut relative_core_type_filters: Vec<TypeFilter> = Vec::new();
     if matches!(
         card_type,
         Some(
@@ -2621,6 +2622,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // fires for real subtypes, so color/supertype "that's" clauses are unaffected.
     if let Some((subtype_filter, consumed)) = parse_that_is_subtype_suffix(&lower[pos..]) {
         adjective_type_filters.push(subtype_filter);
+        pos += consumed;
+    }
+
+    // Positive relative card-type restriction:
+    // "permanent that's an artifact, creature, or enchantment" keeps the base
+    // permanent/supertype restrictions and distributes the trailing card-type
+    // list as OR branches.
+    if let Some((core_types, consumed)) = parse_that_is_core_type_suffix(&lower[pos..]) {
+        relative_core_type_filters = core_types;
         pos += consumed;
     }
 
@@ -3057,7 +3067,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    let type_filters = [
+    let mut base_type_filters = [
         adjective_type_filters,
         card_type.map(|ct| vec![ct]).unwrap_or_default(),
         extra_core_type_filters,
@@ -3067,12 +3077,29 @@ pub fn parse_type_phrase_with_ctx<'a>(
         neg_type_filters,
     ]
     .concat();
-    let filter = if property_disjunction_ranges.is_empty() {
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            properties,
-        })
+
+    let type_filter_branches = if relative_core_type_filters.is_empty() {
+        vec![base_type_filters]
+    } else if relative_core_type_filters.len() == 1 {
+        base_type_filters.push(
+            relative_core_type_filters
+                .pop()
+                .expect("len checked to be exactly 1"),
+        );
+        vec![base_type_filters]
+    } else {
+        relative_core_type_filters
+            .into_iter()
+            .map(|relative_type| {
+                let mut branch = base_type_filters.clone();
+                branch.push(relative_type);
+                branch
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let property_branches = if property_disjunction_ranges.is_empty() {
+        vec![properties]
     } else {
         let mut disjunctive_indices = vec![false; properties.len()];
         for (start, len) in &property_disjunction_ranges {
@@ -3100,18 +3127,23 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 })
                 .collect();
         }
-        TargetFilter::Or {
-            filters: branch_props
-                .into_iter()
-                .map(|properties| {
-                    TargetFilter::Typed(TypedFilter {
-                        type_filters: type_filters.clone(),
-                        controller: controller.clone(),
-                        properties,
-                    })
-                })
-                .collect(),
+        branch_props
+    };
+
+    let mut filters = Vec::new();
+    for type_filters in type_filter_branches {
+        for properties in &property_branches {
+            filters.push(TargetFilter::Typed(TypedFilter {
+                type_filters: type_filters.clone(),
+                controller: controller.clone(),
+                properties: properties.clone(),
+            }));
         }
+    }
+    let filter = if filters.len() == 1 {
+        filters.pop().expect("single typed filter should exist")
+    } else {
+        TargetFilter::Or { filters }
     };
     let filter = if exclude_chosen_type {
         TargetFilter::And {
@@ -6296,6 +6328,88 @@ fn parse_that_isnt_subtype_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
         vec![TypeFilter::Non(Box::new(TypeFilter::Subtype(subtype)))],
         total,
     ))
+}
+
+fn is_relative_core_type_filter(type_filter: &TypeFilter) -> bool {
+    matches!(
+        type_filter,
+        TypeFilter::Creature
+            | TypeFilter::Land
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Instant
+            | TypeFilter::Sorcery
+            | TypeFilter::Planeswalker
+            | TypeFilter::Battle
+            | TypeFilter::Permanent
+            | TypeFilter::Card
+    )
+}
+
+fn parse_relative_core_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    )))
+    .parse(input)?;
+    let (rest, type_filter) = nom_target::parse_type_filter_word(input)?;
+    if is_relative_core_type_filter(&type_filter) {
+        Ok((rest, type_filter))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )))
+    }
+}
+
+fn parse_relative_core_type_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", and/or "),
+            tag(", and "),
+            tag(", or "),
+            tag(" and/or "),
+            tag(" and "),
+            tag(" or "),
+            tag(", "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    let (mut rest, first) = parse_relative_core_type_leg(input)?;
+    let mut type_filters = vec![first];
+
+    while let Ok((after_separator, _)) = parse_relative_core_type_separator(rest) {
+        let Ok((after_type, next_type)) = parse_relative_core_type_leg(after_separator) else {
+            break;
+        };
+        type_filters.push(next_type);
+        rest = after_type;
+    }
+
+    Ok((rest, type_filters))
+}
+
+/// Parses a positive relative card-type clause like
+/// "that's an artifact, creature, or enchantment" into the trailing card-type
+/// list. The caller applies those types as branches against the already-parsed
+/// base filter, so shared prefixes like Legendary/Permanent stay attached to
+/// every leg.
+fn parse_that_is_core_type_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    if negated {
+        return None;
+    }
+
+    let (rest, type_filters) = parse_relative_core_type_list(after_intro).ok()?;
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    Some((type_filters, consumed))
 }
 
 /// CR 205.3 (#2905): the positive counterpart of `parse_that_isnt_subtype_suffix`.
@@ -14250,6 +14364,38 @@ mod tests {
             "expected HasSupertype(Legendary) in {:?}",
             tf.properties
         );
+    }
+
+    /// Bounty Agent: "target legendary permanent that's an artifact, creature,
+    /// or enchantment" must keep the Legendary restriction and distribute the
+    /// relative card-type disjunction across three permanent-type legs.
+    #[test]
+    fn parse_target_legendary_permanent_with_relative_type_union() {
+        let (filter, rest) =
+            parse_target("target legendary permanent that's an artifact, creature, or enchantment");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3, "expected three type legs: {filters:?}");
+        for ty in [
+            TypeFilter::Artifact,
+            TypeFilter::Creature,
+            TypeFilter::Enchantment,
+        ] {
+            let Some(TargetFilter::Typed(tf)) = filters.iter().find(
+                |filter| matches!(filter, TargetFilter::Typed(tf) if has_type(tf, ty.clone())),
+            ) else {
+                panic!("missing {ty:?} leg in {filters:?}");
+            };
+            assert!(has_type(tf, TypeFilter::Permanent));
+            assert!(tf.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary
+                }
+            )));
+        }
     }
 
     /// CR 205.2a: "artifact or creature" is an OR-union of the two core types,

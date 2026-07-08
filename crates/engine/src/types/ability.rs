@@ -7233,6 +7233,12 @@ pub fn is_loyalty_ability_cost(cost: &AbilityCost) -> bool {
                 && target.is_none()
                 && matches!(selection, CounterCostSelection::SingleObject)
         }
+        // CR 606.1 + CR 118.7: A loyalty ability whose activation cost has been
+        // raised by a static (Eidolon of Obstruction) carries its loyalty cost
+        // inside a `Composite` alongside the added mana. It is still a loyalty
+        // ability, so the CR 606.3 once-per-turn gate and loyalty-activation
+        // tracking must keep recognizing it after the tax.
+        AbilityCost::Composite { costs } => costs.iter().any(is_loyalty_ability_cost),
         _ => false,
     }
 }

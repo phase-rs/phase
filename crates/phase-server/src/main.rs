@@ -7386,6 +7386,58 @@ mod p2p_backup_delete_tests {
     }
 
     #[tokio::test]
+    async fn get_rejects_missing_host_peer_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        seed_backup(&app_state);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        assert_eq!(
+            request_status(&base_url, "GET", &format!("/p2p-draft-backup/{DRAFT_CODE}")).await,
+            StatusCode::BAD_REQUEST,
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn get_rejects_mismatched_host_peer_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        seed_backup(&app_state);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        assert_eq!(
+            request_status(
+                &base_url,
+                "GET",
+                &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={OTHER_PEER}")
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn get_accepts_matching_host_peer_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        seed_backup(&app_state);
+        let (base_url, server) = spawn_p2p_backup_http_test(app_state).await;
+
+        assert_eq!(
+            request_status(
+                &base_url,
+                "GET",
+                &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={HOST_PEER}")
+            )
+            .await,
+            StatusCode::OK,
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn delete_rejects_missing_host_peer_id_and_preserves_row() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app_state = test_app_state(&temp_dir);

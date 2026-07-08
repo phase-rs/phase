@@ -33276,6 +33276,291 @@ mod loyalty_gate {
         );
     }
 
+    /// CR 606.3 + CR 606.1 + CR 118.7: A loyalty ability whose activation cost was
+    /// raised by a static (Eidolon of Obstruction) carries its `Loyalty` cost
+    /// inside a `Composite`. The DIRECT `GameAction::ActivateAbility` guard in
+    /// `handle_activate_ability` classifies the already tax-mutated cost with
+    /// `is_loyalty_ability_cost`, so that predicate must keep recognizing the
+    /// taxed composite — otherwise a second taxed loyalty activation in the same
+    /// turn bypasses the per-permanent CR 606.3 gate (candidate generation still
+    /// blocks through its pre-tax path). Reverting the `Composite` arm of
+    /// `is_loyalty_ability_cost` makes the guard skip and this activation succeed.
+    #[test]
+    fn direct_activation_of_taxed_loyalty_ability_second_time_denied() {
+        use crate::types::ability::{StaticDefinition, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let mut state = setup_game_at_main_phase();
+        // P0's planeswalker with a single loyalty ability.
+        let pw = add_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Taxed Walker",
+            4,
+            vec![make_loyalty_ability(1)],
+        );
+        // P1's Eidolon of Obstruction taxes loyalty abilities of planeswalkers
+        // P1's opponents (P0) control.
+        let eidolon_card_id = CardId(state.next_object_id);
+        let eidolon = create_object(
+            &mut state,
+            eidolon_card_id,
+            PlayerId(1),
+            "Eidolon of Obstruction".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&eidolon).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "loyalty".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+            ))]
+            .into();
+        }
+
+        // Simulate P0 having already activated a loyalty ability of this PW this turn.
+        state
+            .objects
+            .get_mut(&pw)
+            .unwrap()
+            .loyalty_activations_this_turn = 1;
+
+        // CR 606.3: the direct activation must be rejected even though the tax
+        // wrapped the loyalty cost in a `Composite`.
+        let mut events = Vec::new();
+        let result = handle_activate_ability(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(ref m)) if m.contains("loyalty")),
+            "a taxed loyalty ability must still hit the CR 606.3 once-per-turn guard, got {result:?}"
+        );
+    }
+
+    /// CR 118.7 + CR 606.1 + CR 606.4: Production regression for the real
+    /// `GameAction::ActivateAbility` path (`handle_activate_loyalty`, engine.rs).
+    /// Without Eidolon, a fixed loyalty ability uses the mana-free fast path and
+    /// never enters a mana-payment step. With Eidolon taxing it {1}, the fast
+    /// path defers to the general activated-ability flow, which gates the
+    /// activation behind paying the added mana — so an opponent who lacks the {1}
+    /// cannot activate it for free. Reverting the `handle_activate_loyalty`
+    /// delegation makes the taxed case resolve without a mana step and this fails.
+    #[test]
+    fn eidolon_forces_mana_payment_for_real_loyalty_activation() {
+        use crate::types::ability::{StaticDefinition, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        fn build(with_eidolon: bool) -> (GameState, ObjectId) {
+            let mut state = setup_game_at_main_phase();
+            let pw = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "Loyal Walker",
+                4,
+                vec![make_loyalty_ability(1)],
+            );
+            if with_eidolon {
+                let cid = CardId(state.next_object_id);
+                let eidolon = create_object(
+                    &mut state,
+                    cid,
+                    PlayerId(1),
+                    "Eidolon of Obstruction".to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&eidolon).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.static_definitions =
+                    vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                        mode: CostModifyMode::Raise,
+                        keyword: "loyalty".to_string(),
+                        amount: 1,
+                        minimum_mana: None,
+                        dynamic_count: None,
+                        exemption: ActivationExemption::None,
+                        activator: None,
+                    })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker)
+                            .controller(ControllerRef::Opponent),
+                    ))]
+                    .into();
+            }
+            (state, pw)
+        }
+
+        // Control: untaxed loyalty activation never requires mana.
+        let (mut s0, pw0) = build(false);
+        let mut ev0 = Vec::new();
+        let r0 = crate::game::planeswalker::handle_activate_loyalty(
+            &mut s0,
+            PlayerId(0),
+            pw0,
+            0,
+            &mut ev0,
+        )
+        .expect("untaxed loyalty activation must proceed");
+        assert!(
+            !matches!(r0, WaitingFor::ManaPayment { .. }),
+            "an untaxed loyalty ability must not require mana, got {r0:?}"
+        );
+
+        // Under Eidolon, the real activation path routes through the general
+        // activated-ability flow and gates on the added {1}: the mana leg is paid
+        // FIRST (CR 601.2g) with the loyalty counter cost deferred as the residual.
+        // A manaless player therefore either stops at a mana-payment step or is
+        // refused — but NEVER gains a free loyalty change (the pre-fix bug: the
+        // composite paid the loyalty counters, then failed on the unaffordable
+        // mana). The unchanged loyalty is the load-bearing assertion.
+        let (mut s1, pw1) = build(true);
+        let loyalty_before = s1.objects.get(&pw1).unwrap().loyalty;
+        let mut ev1 = Vec::new();
+        let r1 = crate::game::planeswalker::handle_activate_loyalty(
+            &mut s1,
+            PlayerId(0),
+            pw1,
+            0,
+            &mut ev1,
+        );
+        match &r1 {
+            Ok(wf) => assert!(
+                matches!(wf, WaitingFor::ManaPayment { .. }),
+                "a taxed loyalty activation must stop at the mana-payment step, got {wf:?}"
+            ),
+            Err(EngineError::ActionNotAllowed(m)) => assert!(
+                m.to_lowercase().contains("mana"),
+                "a taxed loyalty refusal must be about the unpayable mana, got {m}"
+            ),
+            other => panic!("unexpected activation result {other:?}"),
+        }
+        assert_eq!(
+            s1.objects.get(&pw1).unwrap().loyalty,
+            loyalty_before,
+            "the loyalty counter must not change until the taxed {{1}} is paid"
+        );
+    }
+
+    /// CR 601.2c + CR 118.7: A TARGETED loyalty ability taxed by Eidolon must
+    /// still choose targets before paying costs. The taxed composite is deferred
+    /// (not hoisted) for targeted abilities, so activation falls through to the
+    /// general target-first path: it stops at target selection with the loyalty
+    /// counter (and the added {1}) still unpaid. The unchanged loyalty while
+    /// waiting for targets is the load-bearing assertion — the pre-fix delegation
+    /// hoisted the mana leg and paid before target selection.
+    #[test]
+    fn eidolon_taxed_targeted_loyalty_selects_targets_before_paying() {
+        use crate::types::ability::{
+            ActivationRestriction, Effect, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::mana::ManaType;
+        use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let mut state = setup_game_at_main_phase();
+
+        // A targeted [-1] loyalty ability: deal 1 damage to target creature.
+        let mut targeted = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                damage_source: None,
+                excess: None,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -1 });
+        targeted
+            .activation_restrictions
+            .push(ActivationRestriction::AsSorcery);
+        targeted
+            .activation_restrictions
+            .push(ActivationRestriction::OnlyOnceEachTurn);
+        let pw = add_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Targeting Walker",
+            4,
+            vec![targeted],
+        );
+
+        // Two opposing creatures so target selection is interactive (not auto).
+        for (cid, name) in [(9001u64, "Creature A"), (9002u64, "Creature B")] {
+            let c = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // Eidolon (P1) taxes P0's planeswalker loyalty abilities {1}.
+        let cid = CardId(state.next_object_id);
+        let eidolon = create_object(
+            &mut state,
+            cid,
+            PlayerId(1),
+            "Eidolon of Obstruction".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&eidolon).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "loyalty".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+            ))]
+            .into();
+        }
+
+        // Give P0 the {1} so activation reaches target selection rather than being
+        // refused for unpayable mana.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let loyalty_before = state.objects.get(&pw).unwrap().loyalty;
+        let waiting = crate::game::planeswalker::handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            pw,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("taxed targeted loyalty activation must proceed to target selection");
+        assert!(
+            matches!(waiting, WaitingFor::TargetSelection { .. }),
+            "a taxed targeted loyalty ability must ask for targets first, got {waiting:?}"
+        );
+        assert_eq!(
+            state.objects.get(&pw).unwrap().loyalty,
+            loyalty_before,
+            "loyalty must be unchanged while waiting for target selection"
+        );
+    }
+
     /// CR 606.3: The per-permanent gate resets at the start of the controller's
     /// turn (verified via `loyalty_activation_resets_at_turn_start` in
     /// `planeswalker.rs`). Reproducing the reset effect here ensures the
@@ -38756,6 +39041,171 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
         generic_of(&def_other),
         3,
         "a source without the chosen name must not be taxed"
+    );
+}
+
+/// CR 606.1 + CR 118.7 + CR 601.2f: Eidolon of Obstruction — "Loyalty abilities
+/// of planeswalkers your opponents control cost {1} more to activate." Loyalty
+/// abilities are activated abilities (CR 606.1) whose printed cost is a bare
+/// `Loyalty` cost with no mana component, so the raise must ADD a generic-mana
+/// component (CR 118.7) rather than grow a nonexistent one. The generalized
+/// "Activated/Loyalty abilities of [subject]" parser emits
+/// `ReduceAbilityCost { keyword: "loyalty" }`, and the runtime gate matches it
+/// against an ability whose cost `is_loyalty_ability_cost`.
+///
+/// Drives the production seam `apply_cost_reduction`. Discriminating assertions:
+///   - An opponent's planeswalker loyalty ability gains a {1} generic component.
+///     Reverting the `increase_generic_in_cost` non-mana arm leaves the bare
+///     `Loyalty` cost untouched, so this reads {0} and fails.
+///   - The controller's OWN planeswalker loyalty ability is untaxed (the
+///     `controller: Opponent` affected filter excludes it).
+///   - A non-loyalty (mana-cost) activated ability on the opponent's
+///     planeswalker is untaxed — the "loyalty" keyword requires a loyalty cost.
+///     Reverting the gate's `keyword == "loyalty"` arm would leave the first
+///     assertion at {0}.
+#[test]
+fn eidolon_of_obstruction_taxes_opponent_loyalty_ability() {
+    use crate::types::ability::{
+        AbilityCost, Effect, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::{CostModifyMode, StaticMode};
+
+    let mut state = GameState::new_two_player(7);
+
+    // Eidolon of Obstruction (controlled by P0) carries the parsed Raise static
+    // keyed on "loyalty", affecting planeswalkers P0's opponents control.
+    let eidolon = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Eidolon of Obstruction".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&eidolon).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "loyalty".to_string(),
+            amount: 1,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+        ))]
+        .into();
+    }
+
+    // Opponent's planeswalker (P1) and the controller's own planeswalker (P0).
+    let opp_pw = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(1),
+        "Opponent Walker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&opp_pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+    let own_pw = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Own Walker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&own_pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+
+    let make_loyalty_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "loyalty".to_string(),
+                description: None,
+            },
+        );
+        def.cost = Some(AbilityCost::Loyalty { amount: 1 });
+        def
+    };
+    let make_mana_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "mana".to_string(),
+                description: None,
+            },
+        );
+        def.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            },
+        });
+        def
+    };
+    // Sum the generic mana across a (possibly composite) cost.
+    let added_generic = |def: &AbilityDefinition| -> u32 {
+        match def.cost.as_ref().unwrap() {
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .filter_map(|c| match c {
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic, .. },
+                    } => Some(*generic),
+                    _ => None,
+                })
+                .sum(),
+            AbilityCost::Loyalty { .. } => 0,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("unexpected cost {other:?}"),
+        }
+    };
+
+    // Opponent's loyalty ability: the bare Loyalty cost gains a {1} component.
+    let mut def_opp = make_loyalty_def();
+    apply_cost_reduction(&state, &mut def_opp, PlayerId(1), opp_pw);
+    assert_eq!(
+        added_generic(&def_opp),
+        1,
+        "an opponent's loyalty ability must be taxed {{1}}"
+    );
+
+    // Controller's OWN loyalty ability: untaxed (opponent-scoped affected filter).
+    let mut def_own = make_loyalty_def();
+    apply_cost_reduction(&state, &mut def_own, PlayerId(0), own_pw);
+    assert_eq!(
+        added_generic(&def_own),
+        0,
+        "the controller's own loyalty ability must not be taxed"
+    );
+
+    // A non-loyalty (mana-cost) activated ability on the opponent's planeswalker:
+    // untaxed — the loyalty-keyed static requires a loyalty cost.
+    let mut def_mana = make_mana_def();
+    apply_cost_reduction(&state, &mut def_mana, PlayerId(1), opp_pw);
+    assert_eq!(
+        added_generic(&def_mana),
+        3,
+        "the loyalty-keyed static must not tax a non-loyalty ability"
     );
 }
 
