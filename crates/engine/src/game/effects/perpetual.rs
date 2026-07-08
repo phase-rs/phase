@@ -168,6 +168,7 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::scenario::GameRunner;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -177,6 +178,7 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -524,9 +526,6 @@ mod tests {
 
     #[test]
     fn empty_choose_from_zone_parent_target_perpetual_noops() {
-        use crate::game::effects::resolve_ability_chain;
-        use crate::types::keywords::Keyword;
-
         let mut state = GameState::new_two_player(7);
         let source = create_object(
             &mut state,

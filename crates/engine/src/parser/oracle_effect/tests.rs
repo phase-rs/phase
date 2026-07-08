@@ -1,10 +1,11 @@
 use super::*;
 use crate::parser::parse_oracle_text;
-use crate::types::ability::AttachmentKind;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
+use crate::types::ability::{AttachmentKind, PerpetualModification};
 use crate::types::card_type::CoreType;
-use crate::types::mana::ManaCostShard;
+use crate::types::mana::{ManaCost, ManaCostShard};
+use crate::types::statics::CostModifyMode;
 
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
@@ -31667,10 +31668,6 @@ fn perpetual_anaphor_after_chosen_card_targets_parent_target() {
 
 #[test]
 fn perpetual_modify_cost_bound_it_uses_prior_referent() {
-    use crate::types::ability::PerpetualModification;
-    use crate::types::mana::ManaCost;
-    use crate::types::statics::CostModifyMode;
-
     fn assert_sub_cost(def: &AbilityDefinition, mode: CostModifyMode, amount: ManaCost) {
         let sub = def
             .sub_ability
