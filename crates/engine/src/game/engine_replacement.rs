@@ -355,7 +355,22 @@ pub(super) fn handle_replacement_choice(
                 // the count and the central `post_replacement_continuation`
                 // drain below runs the chain (Choose → RevealUntil).
                 draw @ ProposedEvent::Draw { player_id, .. } => {
-                    apply_draw_after_replacement(state, draw, events);
+                    let drawn_count = apply_draw_after_replacement(state, draw, events);
+                    // CR 121.6b + CR 609.3: this Draw arm resolves the ONE unit
+                    // that was paused (the choice just answered) — it does NOT
+                    // go through `resume_multi_draw`'s own closure, so its
+                    // actually-drawn count is never folded into the running
+                    // total unless done here explicitly. Fold it into the
+                    // stashed `PendingMultiDraw.accumulated` (if this player has
+                    // one in flight) BEFORE the drain below reads it, so the
+                    // eventual `state.last_effect_count` commit includes every
+                    // unit of the original instruction — not just the units
+                    // `resume_multi_draw` itself executed without pausing.
+                    if let Some(pending) = state.pending_multi_draw.as_mut() {
+                        if pending.player == player_id {
+                            pending.accumulated += drawn_count;
+                        }
+                    }
                     // CR 805.4b: if this resumed draw IS the front of the
                     // team draw-step queue (the active player's mandatory
                     // draw, parked here by a CR 616.1 competing-replacement

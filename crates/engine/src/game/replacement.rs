@@ -9774,6 +9774,32 @@ mod tests {
             state.objects[&ObjectId(10)].zone == Zone::Graveyard,
             "the dredge card must remain in the graveyard after unit 1 declines"
         );
+
+        // Decline unit 2's offer as well — both units now draw normally. This
+        // is the exact regression matthewevans's review flagged on PR #5360:
+        // unit 1's actually-drawn count is folded into `pending_multi_draw`
+        // directly in `handle_replacement_choice`'s `Draw` arm (NOT inside
+        // `resume_multi_draw`'s own closure, since that arm resolves the
+        // ALREADY-paused unit rather than looping into a fresh one) — before
+        // this fix, that count was silently dropped, undercounting the total.
+        let outcome_2 = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("resume unit 2's decline choice");
+        assert!(
+            matches!(outcome_2.waiting_for, WaitingFor::Priority { .. }),
+            "both units resolved — no further replacement choice should remain, got {:?}",
+            outcome_2.waiting_for
+        );
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "CR 609.3: both units drew normally (unit 1's declined draw, folded \
+             into the resumed multi-draw's total, PLUS unit 2's declined draw) \
+             — the total must be 2, not 1 (which would mean unit 1's own draw \
+             was silently dropped from the accumulator)"
+        );
     }
 
     #[test]
