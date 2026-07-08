@@ -1554,6 +1554,9 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
         "body_hash": text_hash(pr.get("body")),
         "body_excerpt": excerpt(pr.get("body"), 800),
         "commit_author_logins": commit_author_logins(pr.get("commits") or []),
+        "maintainer_merge_commit_count": maintainer_merge_commit_count(
+            pr.get("commits") or [], acting_login
+        ),
         "comments": [
             {
                 "author": comment.get("author", {}).get("login"),
@@ -1624,6 +1627,23 @@ def commit_author_logins(commits: list[dict[str, Any]]) -> list[str]:
         if author.get("login")
     }
     return sorted(logins, key=str.casefold)
+
+
+def maintainer_merge_commit_count(commits: list[dict[str, Any]], acting_login: str) -> int:
+    acting = fold_login(acting_login)
+    count = 0
+    for commit in commits:
+        headline = str(commit.get("messageHeadline") or "")
+        if not headline.startswith("Merge "):
+            continue
+        author_logins = {
+            fold_login(str(author.get("login")))
+            for author in commit.get("authors", [])
+            if author.get("login")
+        }
+        if acting in author_logins:
+            count += 1
+    return count
 
 
 def every_commit_has_agent_coauthor(commits: list[dict[str, Any]]) -> bool:
@@ -1701,6 +1721,47 @@ def proof_profile(
 def proof_tracking_signals(packet: dict[str, Any]) -> list[str]:
     proof = packet.get("proof") or {}
     return list(proof.get("tracking_signals") or [])
+
+
+def is_parser_refactor_file(path: str) -> bool:
+    return path.startswith("crates/engine/src/parser/")
+
+
+def is_declared_refactor(pr: dict[str, Any]) -> bool:
+    labels = {str(label).casefold() for label in pr.get("labels", []) if label}
+    title = str(pr.get("title") or "").casefold()
+    return "refactor" in labels or title.startswith("refactor")
+
+
+def low_risk_refactor_proof_override(
+    *,
+    pr: dict[str, Any],
+    files: list[str],
+    classification: dict[str, Any],
+    checks: dict[str, Any],
+    parse_diff: dict[str, Any],
+    proof: dict[str, Any],
+) -> bool:
+    """Allow green parser-only refactors to clear body-proof-only gaps.
+
+    Agent coauthorship still raises scrutiny, but for a refactor with no card parse
+    changes the concrete evidence is the diff shape, parse-diff, and green checks.
+    Hard proof risks like skipped verification or Gittensor closed-heavy still block.
+    """
+    if not proof.get("proof_gap"):
+        return False
+    risk_flags = set(proof.get("risk_flags") or [])
+    if risk_flags & {"verification-skipped-or-delegated", "gittensor-closed-heavy"}:
+        return False
+    return (
+        bool(files)
+        and classification.get("surface") == "backend"
+        and is_declared_refactor(pr)
+        and all(is_parser_refactor_file(path) for path in files)
+        and checks.get("state") == "green"
+        and parse_diff.get("present")
+        and parse_diff.get("state") == "no_changes"
+    )
 
 
 def fetch_gittensor_records(api_url: str | None) -> tuple[list[dict[str, Any]], str | None]:
@@ -2079,13 +2140,32 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     # a stale merge-base whose R2 baseline aged out shows "Baseline pending" forever, so
     # flag engine-surface review candidates to consider update-branch first. The
     # files_truncated safety reason from make_packet is preserved — it must not be masked.
-    if (
+    baseline_pending_after_maintainer_merge = (
+        "engine" in (classification.get("path_classes") or {})
+        and parse_diff.get("state") == "baseline_pending"
+        and int(pr.get("maintainer_merge_commit_count") or 0) > 0
+    )
+    stale_changes_requested = (
+        review_decision == "CHANGES_REQUESTED"
+        and latest_commit is not None
+        and latest_commit != head
+    )
+    if baseline_pending_after_maintainer_merge and (
+        review_decision == "APPROVED" or stale_changes_requested
+    ) and not (packet.get("proof") or {}).get("proof_gap"):
+        action = "approve_ready_for_handler"
+        reason = "baseline_pending_after_maintainer_merge_ready"
+    elif (
         action == "review"
         and reason != "files_truncated_needs_manual_classification"
         and "engine" in (classification.get("path_classes") or {})
         and parse_diff.get("state") == "baseline_pending"
     ):
-        reason = "review_parse_baseline_pending"
+        reason = (
+            "review_parse_baseline_pending_after_maintainer_merge"
+            if baseline_pending_after_maintainer_merge
+            else "review_parse_baseline_pending"
+        )
 
     recommendation = {
         "pr": pr.get("number"),
@@ -2178,6 +2258,17 @@ def make_packet(
         # scrutiny into a queue-safety proof blocker.
         proof["proof_required"] = False
         proof["proof_gap"] = False
+    elif low_risk_refactor_proof_override(
+        pr=compact_pr,
+        files=files,
+        classification=classification,
+        checks=checks,
+        parse_diff=parse_diff,
+        proof=proof,
+    ):
+        proof["proof_satisfied"] = True
+        proof["proof_gap"] = False
+        proof["proof_override"] = "low_risk_parser_refactor_green_no_parse_changes"
     packet = {
         "schema_version": 1,
         "completeness": "complete" if mode == "full" else "triage",
@@ -2255,7 +2346,7 @@ def pr_node_fields(
         else ""
     )
     status_rollup = (
-        "commits(last:20){nodes{commit{oid authors(first:10){nodes{name email user{login}}} "
+        "commits(last:20){nodes{commit{oid messageHeadline authors(first:10){nodes{name email user{login}}} "
         "statusCheckRollup{state contexts(first:"
         f"{status_contexts_first}"
         "){nodes{__typename "
@@ -2263,7 +2354,7 @@ def pr_node_fields(
         "... on StatusContext{context state}}}}}}}"
         if status_contexts_first is not None
         else (
-            "commits(last:20){nodes{commit{oid authors(first:10){nodes{name email user{login}}} "
+            "commits(last:20){nodes{commit{oid messageHeadline authors(first:10){nodes{name email user{login}}} "
             "statusCheckRollup{state}}}}"
         )
     )
@@ -2389,6 +2480,7 @@ def graphql_commit_authors(node: dict[str, Any]) -> list[dict[str, Any]]:
         commits.append(
             {
                 "oid": commit.get("oid"),
+                "messageHeadline": commit.get("messageHeadline"),
                 "authors": [
                     {
                         "login": ((author.get("user") or {}).get("login")),
