@@ -10956,6 +10956,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
             source_id: None,
+            invalidation: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
