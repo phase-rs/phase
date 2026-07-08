@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -13,7 +14,6 @@ import type {
   CounterType,
   ExileCostSourceZone,
   GameObject,
-  ManaCost,
   ManaType,
   ObjectId,
   OutsideGameChoiceEntry,
@@ -31,11 +31,13 @@ import {
   ScrollableCardStrip,
 } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
+import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
+import { RoomDoorChoiceModal } from "./RoomDoorChoiceModal.tsx";
 import {
   SeparatePilesChoiceModal,
   SeparatePilesPartitionModal,
@@ -50,6 +52,7 @@ import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.t
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
+import { EachPlayerCopyChosenModal } from "./EachPlayerCopyChosenModal.tsx";
 import {
   CoinFlipKeepModal,
   DigModal,
@@ -68,6 +71,8 @@ import {
   searchChoiceSubtitle,
   type EffectZoneMode,
 } from "./cardChoice/shared.tsx";
+import { manaValueOfObject } from "./cardChoice/manaValue.ts";
+import SelectableCardGrid from "./cardChoice/SelectableCardGrid.tsx";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type SearchPartitionChoice = Extract<
   WaitingFor,
@@ -104,6 +109,7 @@ type RepeatDecision = Extract<WaitingFor, { type: "RepeatDecision" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
+type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
@@ -149,7 +155,20 @@ export function CardChoiceModal() {
       );
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
-      return <ChooseFromZoneModal data={waitingFor.data} />;
+      // A "for each player, choose ..." iteration (Breach the Multiverse) emits
+      // this WaitingFor once per player's zone in sequence. Keying on the prompt
+      // identity (player + source + card set) remounts the modal between steps so
+      // its internal `selectedSet` resets — otherwise a stale prior pick survives
+      // and the next confirm dispatches a card not in the new candidate set.
+      return (
+        <ChooseFromZoneModal
+          key={`${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`}
+          data={waitingFor.data}
+        />
+      );
+    case "BeholdChoice":
+      if (!canActForWaitingState) return null;
+      return <BeholdChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -158,6 +177,16 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return <DrawnThisTurnTopdeckModal data={waitingFor.data} />;
     case "NamedChoice":
+      if (!canActForWaitingState) return null;
+      return <NamedChoiceModal data={waitingFor.data} />;
+    case "OpponentGuess":
+      // CR 608.2d: the guesser picks one of the offered options. Display-only —
+      // reuses the generic option picker; the engine computes correctness.
+      if (!canActForWaitingState) return null;
+      return <NamedChoiceModal data={waitingFor.data} />;
+    // Pre-choice behold ("choose a creature type and behold N of that type"):
+    // same creature-type picker + ChooseOption dispatch as NamedChoice.
+    case "CostTypeChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
     case "DamageSourceChoice":
@@ -174,7 +203,7 @@ export function CardChoiceModal() {
       return <SeparatePilesChoiceModal data={waitingFor.data} />;
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} />;
+      return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
       if (!canActForWaitingState) return null;
       return <ChooseUntapSubsetModal data={waitingFor.data} />;
@@ -226,6 +255,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
@@ -236,6 +266,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={waitingFor.data}
           title={
             waitingFor.data.up_to
@@ -252,6 +283,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <DiscardModal
+          key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
         />
@@ -272,7 +304,12 @@ export function CardChoiceModal() {
       return <DistributeAmongModal data={waitingFor.data} />;
     case "MoveCountersDistribution":
       if (!canActForWaitingState) return null;
-      return <MoveCountersDistributionModal data={waitingFor.data} />;
+      return <MoveCountersDistributionModal waitingFor={waitingFor} />;
+    // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) reuses the
+    // counter-distribution modal in no-destination removal mode.
+    case "RemoveCountersChoice":
+      if (!canActForWaitingState) return null;
+      return <MoveCountersDistributionModal waitingFor={waitingFor} />;
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       // CR 115.7: Single-target retargets are picked directly on the board via
@@ -302,6 +339,9 @@ export function CardChoiceModal() {
     case "CategoryChoice":
       if (!canActForWaitingState) return null;
       return <CategoryChoiceModal data={waitingFor.data} />;
+    case "EachPlayerCopyChosenSelection":
+      if (!canActForWaitingState) return null;
+      return <EachPlayerCopyChosenModal data={waitingFor.data} />;
     case "ManifestDreadChoice":
       if (!canActForWaitingState) return null;
       return <ManifestDreadModal data={waitingFor.data} />;
@@ -322,6 +362,9 @@ export function CardChoiceModal() {
     case "SpecializeColor":
       if (!canActForWaitingState) return null;
       return <SpecializeColorModal data={waitingFor.data} />;
+    case "ChooseRoomDoor":
+      if (!canActForWaitingState) return null;
+      return <RoomDoorChoiceModal data={waitingFor.data} />;
     default:
       return null;
   }
@@ -520,6 +563,12 @@ function SearchPartitionModal({
   const tappedText = data.primary_enter_tapped
     ? t("cardChoice.searchPartition.tapped")
     : "";
+  const primaryText = t(
+    `cardChoice.searchPartition.zones.${data.primary_destination}`,
+  );
+  const restText = t(
+    `cardChoice.searchPartition.zones.${data.rest_destination}`,
+  );
 
   useEffect(() => {
     setSelectedSet(new Set());
@@ -557,6 +606,8 @@ function SearchPartitionModal({
       subtitle={t("cardChoice.searchPartition.subtitle", {
         count: data.primary_count,
         tapped: tappedText,
+        primary: primaryText,
+        rest: restText,
       })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
@@ -860,6 +911,60 @@ function ChooseFromZoneModal({ data }: { data: ChooseFromZoneChoice["data"] }) {
   );
 }
 
+// CR 701.4a: Behold a [quality] — the controller picks exactly ONE beholdable
+// object from the engine-provided mixed-zone candidate list (permanents they
+// control ∪ matching hand cards). Display-only: the engine supplies `choices`
+// and enforces legality; clicking a card dispatches a single-object SelectCards.
+// A chosen hand card is publicly revealed by the engine; a chosen permanent is
+// already public. This modal never filters or derives eligibility.
+function BeholdChoiceModal({ data }: { data: BeholdChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  const handleChoose = useCallback(
+    (id: ObjectId) => {
+      dispatch({ type: "SelectCards", data: { cards: [id] } });
+    },
+    [dispatch],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.behold.title")}
+      subtitle={t("cardChoice.behold.subtitleChoose")}
+    >
+      <ScrollableCardStrip>
+        {data.choices.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: 0.85, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6, opacity: 1 }}
+              onClick={() => handleChoose(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
 function PairChoiceModal({ data }: { data: PairChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -923,9 +1028,11 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const isTapUntapChoice =
     data.effect_kind === "Untap" || data.effect_kind === "Tap";
+  const isAttachChoice = data.effect_kind === "Attach";
   const isSacrifice =
     data.zone === "Battlefield" &&
     data.destination == null &&
+    !isAttachChoice &&
     !isTapUntapChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
@@ -959,6 +1066,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     ? data.effect_kind === "Untap"
       ? "Untap"
       : "Tap"
+    : isAttachChoice
+      ? "Attach"
     : isSacrifice
       ? "Sacrifice"
       : isTopdeck
@@ -2136,6 +2245,7 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
     case "Discard":
       return (
         <DiscardModal
+          key={choicesKey}
           data={{ ...data, cards: data.choices }}
           title={
             isManaAbility
@@ -2224,38 +2334,6 @@ function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
       confirmLabel={t("cardChoice.badges.exile")}
     />
   );
-}
-
-function manaValueOfShard(shard: string): number {
-  switch (shard) {
-    case "TwoWhite":
-    case "TwoBlue":
-    case "TwoBlack":
-    case "TwoRed":
-    case "TwoGreen":
-      return 2;
-    case "X":
-      return 0;
-    default:
-      return 1;
-  }
-}
-
-function manaValueOfCost(cost: ManaCost): number {
-  switch (cost.type) {
-    case "NoCost":
-    case "SelfManaCost":
-      return 0;
-    case "Cost":
-      return (
-        cost.generic +
-        cost.shards.reduce((sum, shard) => sum + manaValueOfShard(shard), 0)
-      );
-  }
-}
-
-function manaValueOfObject(obj: { mana_cost: ManaCost }): number {
-  return manaValueOfCost(obj.mana_cost);
 }
 
 function CollectEvidenceModal({
@@ -2385,27 +2463,27 @@ function DiscardModal({
   const hasUnlessOption = data.unless_filter != null;
   const isUpTo = data.up_to === true;
 
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.count) {
-          next.add(id);
-        }
-        return next;
-      });
-    },
-    [data.count],
-  );
+  // Keep-mode is offered only for fixed-count exact discards with room to keep
+  // (covers DiscardToHandSize + exact DiscardChoice/ConniveDiscard; hidden for
+  // WardDiscardChoice count=1 and up-to/unless modes).
+  const keepEligible =
+    !isUpTo && !hasUnlessOption && data.count > 1 && data.count < data.cards.length;
+  const [keepMode, setKeepMode] = useState(false);
+  const active = keepMode && keepEligible;
+  const keepCap = data.cards.length - data.count;
+  const cap = active ? keepCap : data.count;
+
+  const onToggleKeep = useCallback(() => {
+    setKeepMode((m) => !m);
+    setSelected(new Set());
+  }, []);
 
   const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: Array.from(selected) },
-    });
-  }, [dispatch, selected]);
+    const cards = active
+      ? data.cards.filter((id) => !selected.has(id))
+      : Array.from(selected);
+    dispatch({ type: "SelectCards", data: { cards } });
+  }, [active, data.cards, dispatch, selected]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -2415,15 +2493,32 @@ function DiscardModal({
 
   // CR 701.9b: "up to N" allows 0..=count; exact requires precisely count.
   // CR 608.2c: "discard N unless you discard a [type]" — accept 1 card OR count cards.
-  const isReady = isUpTo
-    ? selected.size <= data.count
-    : selected.size === data.count || (hasUnlessOption && selected.size === 1);
+  // Keep-mode: keeping exactly keepCap leaves exactly `count` to discard.
+  const isReady = active
+    ? selected.size === keepCap
+    : isUpTo
+      ? selected.size <= data.count
+      : selected.size === data.count || (hasUnlessOption && selected.size === 1);
 
-  const subtitle = isUpTo
-    ? t("cardChoice.discard.subtitleUpTo", { count: data.count })
-    : hasUnlessOption
-      ? t("cardChoice.discard.subtitleUnless", { count: data.count })
-      : t("cardChoice.discard.subtitleExact", { count: data.count });
+  const subtitle = active
+    ? t("cardChoice.discard.subtitleKeep", { count: keepCap })
+    : isUpTo
+      ? t("cardChoice.discard.subtitleUpTo", { count: data.count })
+      : hasUnlessOption
+        ? t("cardChoice.discard.subtitleUnless", { count: data.count })
+        : t("cardChoice.discard.subtitleExact", { count: data.count });
+
+  const tone = active
+    ? EFFECT_ZONE_VISUAL_CLASSES.Battlefield // green ring/overlay/badge = "keep"
+    : EFFECT_ZONE_VISUAL_CLASSES.Sacrifice; // red = "discard"
+  const badgeLabel = active ? t("cardChoice.badges.keep") : t("cardChoice.badges.discard");
+  const counterText = active
+    ? t("cardChoice.bulk.counterKeep", { selected: selected.size, cap: keepCap })
+    : t("cardChoice.bulk.counterDiscard", { selected: selected.size, cap: data.count });
+
+  // The confirm button always shows the discard count (even in keep-mode where
+  // `selected` tracks the keep set — invert to show how many will be discarded).
+  const discardSelectedForLabel = active ? data.cards.length - selected.size : selected.size;
 
   return (
     <ChoiceOverlay
@@ -2436,7 +2531,7 @@ function DiscardModal({
               onClick={handleConfirm}
               disabled={!isReady}
               label={t("cardChoice.buttons.discardCount", {
-                selected: selected.size,
+                selected: discardSelectedForLabel,
                 count: data.count,
               })}
             />
@@ -2446,49 +2541,39 @@ function DiscardModal({
             onClick={handleConfirm}
             disabled={!isReady}
             label={t("cardChoice.buttons.discardCount", {
-              selected: selected.size,
+              selected: discardSelectedForLabel,
               count: data.count,
             })}
           />
         )
       }
     >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-red-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
+      <>
+        {keepEligible && (
+          <div className="px-1 pb-1">
+            <button
+              type="button"
+              className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
+              onClick={onToggleKeep}
             >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("cardChoice.badges.discard")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
+              {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
+            </button>
+          </div>
+        )}
+        <SelectableCardGrid
+          cards={data.cards}
+          objects={objects}
+          value={selected}
+          onChange={setSelected}
+          cap={cap}
+          tone={tone}
+          badgeLabel={badgeLabel}
+          counterText={counterText}
+          hoverProps={hoverProps}
+          onConfirm={handleConfirm}
+          canConfirm={isReady}
+        />
+      </>
     </ChoiceOverlay>
   );
 }
@@ -2575,48 +2660,84 @@ function CommanderZoneChoiceModal({
   const obj = objects[data.commander_id];
   const zoneName =
     data.current_zone.charAt(0).toUpperCase() + data.current_zone.slice(1);
+  const commanderCardStyle = {
+    "--card-w": "5.5rem",
+    "--card-h": "7.7rem",
+  } as CSSProperties;
 
   return (
-    <ChoiceOverlay
-      title={t("cardChoice.commanderZone.title")}
-      subtitle={t("cardChoice.commanderZone.subtitle", {
-        name: obj?.name ?? t("cardChoice.commanderZone.commanderFallback"),
-        zone: zoneName,
-      })}
-    >
-      <div className="flex items-center gap-6">
-        <motion.div
-          className="relative rounded-lg"
-          initial={{ opacity: 0, y: 60, scale: 0.85 }}
-          animate={{ opacity: 0.85, y: 0, scale: 1 }}
-          transition={{ delay: 0.1, duration: 0.35 }}
-          {...hoverProps(data.commander_id)}
-        >
-          <CardImage
-            cardName={obj?.name ?? "Unknown"}
-            size="normal"
-            className={CHOICE_CARD_IMAGE_CLASS}
-          />
-        </motion.div>
-        <div className="flex flex-col gap-3">
-          <ConfirmButton
-            label={t("cardChoice.commanderZone.labelCommandZone")}
-            onClick={() =>
-              dispatch({ type: "DecideOptionalEffect", data: { accept: true } })
-            }
-          />
-          <ConfirmButton
-            label={t("cardChoice.commanderZone.labelLeave", { zone: zoneName })}
-            onClick={() =>
-              dispatch({
-                type: "DecideOptionalEffect",
-                data: { accept: false },
-              })
-            }
-          />
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
+      <div className="absolute inset-0 bg-black/68" />
+      <motion.div
+        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[12px] border border-white/10 bg-[#0b1020] shadow-[0_18px_48px_rgba(0,0,0,0.48)]"
+        data-testid="commander-zone-choice-dialog"
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.22, ease: "easeOut" }}
+      >
+        <div className="border-b border-white/10 px-4 py-3">
+          <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
+            {t("choiceOverlay.eyebrow")}
+          </div>
+          <h2 className="text-lg font-semibold text-white">
+            {t("cardChoice.commanderZone.title")}
+          </h2>
+          <p className="mt-1 text-sm leading-snug text-slate-400">
+            {t("cardChoice.commanderZone.subtitle", {
+              name: obj?.name ?? t("cardChoice.commanderZone.commanderFallback"),
+              zone: zoneName,
+            })}
+          </p>
         </div>
-      </div>
-    </ChoiceOverlay>
+        <div className="grid gap-4 px-4 py-4 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center">
+          <motion.div
+            className="relative mx-auto rounded-lg sm:mx-0"
+            style={commanderCardStyle}
+            initial={{ opacity: 0, y: 60, scale: 0.85 }}
+            animate={{ opacity: 0.85, y: 0, scale: 1 }}
+            transition={{ delay: 0.1, duration: 0.35 }}
+            {...hoverProps(data.commander_id)}
+          >
+            <CardImage
+              cardName={obj?.name ?? "Unknown"}
+              size="normal"
+              className={CHOICE_CARD_IMAGE_CLASS}
+            />
+          </motion.div>
+          <div className="grid min-w-0 gap-2">
+            <button
+              type="button"
+              className={menuButtonClass({
+                tone: "cyan",
+                size: "md",
+                className: "w-full justify-center",
+              })}
+              onClick={() =>
+                dispatch({ type: "DecideOptionalEffect", data: { accept: true } })
+              }
+            >
+              {t("cardChoice.commanderZone.labelCommandZone")}
+            </button>
+            <button
+              type="button"
+              className={menuButtonClass({
+                tone: "amber",
+                size: "md",
+                className: "w-full justify-center",
+              })}
+              onClick={() =>
+                dispatch({
+                  type: "DecideOptionalEffect",
+                  data: { accept: false },
+                })
+              }
+            >
+              {t("cardChoice.commanderZone.labelLeave", { zone: zoneName })}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </div>
   );
 }
 

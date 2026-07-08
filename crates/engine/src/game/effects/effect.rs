@@ -48,6 +48,20 @@ pub fn resolve(
                     | ContinuousModification::AddDynamicKeyword { value, .. } => {
                         *value = snapshot_resolution_context_quantity(value, events);
                     }
+                    // CR 611.2d: A resolution-created continuous effect that
+                    // grants a `ModifyCost` static keyed to a variable X (Rowan,
+                    // Scion of War / Will, Scion of Peace: "cost {X} less … where
+                    // X is the amount of life you lost/gained this turn") fixes X
+                    // once, here, on resolution. Without this, the granted
+                    // static's `dynamic_count` would be re-resolved at every
+                    // later cast (casting.rs::collect_self_cost_modifiers),
+                    // letting same-turn life changes retroactively move the
+                    // already-locked reduction. Snapshot the dynamic count into a
+                    // concrete `amount` so the grant behaves as a fixed-X
+                    // continuous effect for the rest of the turn (CR 611.2c).
+                    ContinuousModification::GrantStaticAbility { definition } => {
+                        snapshot_granted_cost_modifier(state, ability, definition);
+                    }
                     _ => {}
                 }
             }
@@ -120,6 +134,39 @@ fn register_transient_effect(
     duration: &Duration,
 ) {
     let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
+
+    // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
+    // control any time" permission (Lumbering Laundry) is a *player-scoped* look
+    // permission, not an object grant. Unlike a pump or keyword grant, the set of
+    // face-down permanents the looker may see is re-evaluated continuously at look
+    // time (a permanent turned face down after this resolves but before end of
+    // turn is still visible to the looker), so the affected face-down filter must
+    // ride on the TCE intact rather than be expanded to a fixed `SpecificObject`
+    // set by the broadcast branch below. Register ONE TCE whose `controller` is
+    // the looker and whose `affected` keeps the face-down/controller filter; the
+    // visibility check (`viewer_may_look_at_face_down`) reads it exactly like the
+    // printed `MayLookAtFaceDown` static, evaluating the filter against each
+    // face-down permanent from the looker's perspective.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::MayLookAtFaceDown,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+            );
+            return;
+        }
+    }
 
     // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
     // always refers to the source object regardless of `ability.targets`.
@@ -463,7 +510,7 @@ fn transient_bound_filters(
         .collect()
 }
 
-fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
+pub(super) fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
     matches!(
         filter,
         TargetFilter::TriggeringSource | TargetFilter::ParentTarget | TargetFilter::CostPaidObject
@@ -476,7 +523,7 @@ fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool
 /// Inherited-reference `affected` values (`ParentTarget`, …) win over the
 /// targeting descriptor so a `target: Typed(Creature)` + `affected:
 /// ParentTarget` pair binds to the chosen creature, not every creature.
-fn generic_effect_application_filter<'a>(
+pub(super) fn generic_effect_application_filter<'a>(
     target_filter: Option<&'a TargetFilter>,
     static_affected: Option<&'a TargetFilter>,
 ) -> Option<&'a TargetFilter> {
@@ -610,6 +657,45 @@ fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent
             right: Box::new(snapshot_resolution_context_quantity(right, events)),
         },
     }
+}
+
+/// CR 611.2d + CR 608.2h: Fix a granted cost-modification static's variable X
+/// once, at resolution.
+///
+/// When a resolving ability creates a turn-duration continuous effect that
+/// grants a [`StaticMode::ModifyCost`] keyed to a dynamic game-state quantity
+/// (Rowan, Scion of War / Will, Scion of Peace: "Spells you cast this turn …
+/// cost {X} less … where X is the amount of life you lost/gained this turn"),
+/// CR 611.2d requires X to be determined exactly once, on resolution — not
+/// re-read at each later cast. The parser lowers X as
+/// `ModifyCost { amount, dynamic_count: Some(LifeLostThisTurn/…), .. }`, where
+/// the effective reduction is `amount * resolve_quantity(dynamic_count)`
+/// (casting.rs::collect_self_cost_modifiers). We resolve that multiplier here
+/// and fold it into a concrete `amount` (via [`ManaCost::scaled`], matching the
+/// generic-and-shard scaling `apply_cost_mod_to_mana` would have applied), then
+/// clear `dynamic_count` so the grant is a fixed-X continuous effect for the
+/// rest of the turn (CR 611.2c). Statics with no `dynamic_count` are untouched.
+fn snapshot_granted_cost_modifier(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    definition: &mut StaticDefinition,
+) {
+    use crate::types::statics::StaticMode;
+
+    let StaticMode::ModifyCost {
+        amount,
+        dynamic_count,
+        ..
+    } = &mut definition.mode
+    else {
+        return;
+    };
+    let Some(qty) = dynamic_count.take() else {
+        return;
+    };
+    let multiplier =
+        resolve_quantity_with_targets(state, &QuantityExpr::Ref { qty }, ability).max(0) as u32;
+    *amount = amount.scaled(multiplier);
 }
 
 #[cfg(test)]
@@ -1830,6 +1916,107 @@ mod tests {
         );
     }
 
+    /// CR 708.5 + CR 611.2c: A `GenericEffect` carrying the `MayLookAtFaceDown`
+    /// permission (Lumbering Laundry's "{2}: Until end of turn, you may look at
+    /// face-down creatures you don't control any time.") registers ONE transient
+    /// continuous effect that KEEPS the face-down/controller filter intact and
+    /// binds to the looker via `controller` — it must NOT be expanded into a
+    /// fixed `SpecificObject` set by the broadcast branch (a look permission is a
+    /// rules-modifying continuous effect per CR 611.2c, re-evaluated continuously
+    /// at look time). Discriminating: the `tce.affected == Typed(..)` assertion
+    /// fails (the broadcast branch would bind to `SpecificObject` per resolution-
+    /// time face-down permanents) if the `register_transient_effect`
+    /// MayLookAtFaceDown branch is removed.
+    #[test]
+    fn generic_effect_may_look_at_face_down_keeps_filter_and_binds_looker() {
+        use crate::types::ability::FilterProp;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let looker = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            looker,
+            "Lumbering Laundry".to_string(),
+            Zone::Battlefield,
+        );
+        // Put an OPPONENT face-down creature on the battlefield, so the broadcast
+        // branch (if it ran) would have a concrete object to bind to — the test
+        // asserts it does NOT bind there.
+        let opp_face_down = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Hidden".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&opp_face_down).unwrap().face_down = true;
+
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::FaceDown]),
+        );
+        let static_def = StaticDefinition::new(StaticMode::MayLookAtFaceDown)
+            .affected(affected.clone())
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtFaceDown,
+            }]);
+
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: None,
+                target: None,
+            },
+            vec![],
+            source,
+            looker,
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the look permission registers exactly one TCE"
+        );
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(
+            tce.controller, looker,
+            "the TCE controller must be the looker"
+        );
+        assert_eq!(
+            tce.affected, affected,
+            "the face-down/controller filter must ride on the TCE intact, not be expanded to SpecificObject"
+        );
+        assert_eq!(tce.duration, Duration::UntilEndOfTurn);
+        assert!(
+            tce.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MayLookAtFaceDown,
+                }
+            )),
+            "the TCE must carry the MayLookAtFaceDown mode"
+        );
+
+        // CR 708.5: the layer system must NOT stamp the permission onto the
+        // opponent's face-down creature (player-scoped permission, not an object
+        // grant). Mirrors the gather skip in `layers::gather_transient_continuous_effects`.
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&opp_face_down]
+                .static_definitions
+                .iter_all()
+                .any(|sd| sd.mode == StaticMode::MayLookAtFaceDown),
+            "the look permission must not be applied to the opponent's creature as an object grant"
+        );
+    }
+
     #[test]
     fn generic_effect_snapshots_dynamic_pt_modifications_at_resolution() {
         let mut state = GameState::new_two_player(42);
@@ -2774,6 +2961,336 @@ mod tests {
         assert!(
             state.transient_continuous_effects.is_empty(),
             "no keyword present on any creature → zero TCEs registered"
+        );
+    }
+
+    /// CR 205.3m + CR 702.11a + CR 702.12a (Selfless Safewright): the grant
+    /// "Other permanents you control of that type gain hexproof and
+    /// indestructible until end of turn" — parsed from real Oracle text — must
+    /// route "of that type" to `FilterProp::IsChosenCreatureType`, bind only to
+    /// your other permanents whose subtypes include the source's chosen creature
+    /// type, and grant both keywords through `evaluate_layers`.
+    ///
+    /// REVERT-PROOF: reverting the "of that type" suffix arm in
+    /// `oracle_target.rs` leaves the grant clause `Effect::Unimplemented` (the
+    /// `match` below panics — no `GenericEffect`), and even reaching resolution,
+    /// the non-matching Goblin and the source itself must NOT gain the keywords.
+    #[test]
+    fn selfless_safewright_grants_to_chosen_type_permanents_only() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Source permanent that "chose Elf".
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selfless Safewright".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.chosen_attributes
+                .push(ChosenAttribute::CreatureType("Elf".to_string()));
+        }
+
+        // Another Elf you control — must be granted.
+        let elf = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&elf).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+        }
+
+        // A Goblin you control — wrong type, must NOT be granted.
+        let goblin = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&goblin).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+        }
+
+        // An opponent's Elf — wrong controller, must NOT be granted.
+        let opp_elf = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Enemy Elf".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_elf).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+        }
+
+        // Parse the grant clause through the REAL effect parser.
+        let mut effect = crate::parser::oracle_effect::parse_effect(
+            "Other permanents you control of that type gain hexproof and indestructible until end of turn",
+        );
+        match &mut effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                let modifications = &static_abilities
+                    .first()
+                    .expect("grant must produce a static")
+                    .modifications;
+                assert!(
+                    modifications.contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Hexproof
+                    }) && modifications.contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Indestructible
+                    }),
+                    "grant must add hexproof and indestructible, got {modifications:?}"
+                );
+            }
+            other => panic!("expected GenericEffect from grant parser, got {other:?}"),
+        }
+
+        let ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0))
+            .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        let elf_obj = state.objects.get(&elf).unwrap();
+        assert!(
+            elf_obj.has_keyword(&Keyword::Hexproof)
+                && elf_obj.has_keyword(&Keyword::Indestructible),
+            "another Elf you control must gain both keywords"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&source)
+                .unwrap()
+                .has_keyword(&Keyword::Hexproof),
+            "the source must be excluded by the 'other' (Another) constraint"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&goblin)
+                .unwrap()
+                .has_keyword(&Keyword::Hexproof),
+            "a Goblin must NOT gain the keywords (wrong chosen type)"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&opp_elf)
+                .unwrap()
+                .has_keyword(&Keyword::Hexproof),
+            "an opponent's Elf must NOT gain the keywords (wrong controller)"
+        );
+    }
+
+    /// CR 611.2a + CR 514.2: End-to-end pipeline test for a keyword grant that
+    /// is compounded with a non-pump conjunct (Homarid Warrior: "This creature
+    /// gains shroud until end of turn and doesn't untap during your next untap
+    /// step."). Drives parse → `build_resolved_from_def` → `resolve_ability_chain`
+    /// → `execute_cleanup` against the real engine. A reverted fix loses the
+    /// "doesn't untap" conjunct (silently swallowed by
+    /// `parse_continuous_modifications`), so the CantUntap restriction is never
+    /// registered — this test fails on that.
+    #[test]
+    fn keyword_grant_compounded_with_doesnt_untap_resolves_both_and_shroud_expires() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::game::turns::execute_cleanup;
+        use crate::types::ability::AbilityKind;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Homarid Warrior".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Parse the FULL clause through the real chain parser.
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "This creature gains shroud until end of turn and doesn't untap during your next untap step.",
+            AbilityKind::Activated,
+        );
+        // Parser-shape guard mirrors the lib parser test: the keyword grant must
+        // carry its duration rather than defaulting permanently.
+        assert_eq!(
+            def.duration,
+            Some(Duration::UntilEndOfTurn),
+            "keyword grant must keep its until-end-of-turn duration"
+        );
+
+        let resolved = build_resolved_from_def(&def, source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        evaluate_layers(&mut state);
+
+        // Shroud is live before cleanup.
+        assert!(
+            state
+                .objects
+                .get(&source)
+                .unwrap()
+                .has_keyword(&Keyword::Shroud),
+            "source must have shroud before cleanup"
+        );
+
+        // The "doesn't untap" conjunct survived the split: a CantUntap transient
+        // restriction is registered (it would be dropped if the fix is reverted).
+        assert!(
+            state.transient_continuous_effects.iter().any(|tce| {
+                tce.modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantUntap,
+                    })
+            }),
+            "the 'doesn't untap' conjunct must register a CantUntap restriction, \
+             not be silently swallowed; TCEs: {:?}",
+            state.transient_continuous_effects
+        );
+
+        // CR 514.2: the until-end-of-turn shroud grant expires at cleanup.
+        execute_cleanup(&mut state, &mut events);
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&source)
+                .unwrap()
+                .has_keyword(&Keyword::Shroud),
+            "shroud must be gone after cleanup (until end of turn expiry)"
+        );
+    }
+
+    /// Finding 1 (Ood Sphere): the Red-Eye sub-ability grants `CantTap` to the
+    /// goaded creatures via `GenericEffect { affected: ParentTarget, target:
+    /// ParentTarget }`. With MULTIPLE chosen object targets (one goaded creature
+    /// per opponent, as the `repeat_for: PlayerCount(Opponent)` machinery
+    /// aggregates), the inherited-object-target binding (effect.rs) must register
+    /// ONE `SpecificObject` CantTap TCE per target — so EVERY goaded creature gets
+    /// the restriction, and a non-goaded creature does not. This is the
+    /// binding-side proof for the multi-opponent aggregation.
+    #[test]
+    fn generic_effect_cant_tap_binds_every_parent_target_object() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::restrictions::object_cant_tap;
+        use crate::types::ability::TargetRef;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ood Sphere".to_string(),
+            Zone::Command,
+        );
+        let goaded_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Goaded Bear A".to_string(),
+            Zone::Battlefield,
+        );
+        let goaded_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Goaded Bear B".to_string(),
+            Zone::Battlefield,
+        );
+        let untouched = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Untouched Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for cid in [goaded_a, goaded_b, untouched] {
+            state
+                .objects
+                .get_mut(&cid)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // The sub-ability shape emitted by the parser: grant CantTap (on SelfRef)
+        // to the ParentTarget set, until the controller's next turn.
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(
+                    StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef),
+                ),
+            }]);
+        let duration = Duration::UntilNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(duration.clone()),
+                target: Some(TargetFilter::ParentTarget),
+            },
+            vec![TargetRef::Object(goaded_a), TargetRef::Object(goaded_b)],
+            source,
+            PlayerId(0),
+        )
+        .duration(duration);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // One SpecificObject TCE per goaded creature (the inherited-object-target
+        // binding), NOT a single ParentTarget/tracked-set fallback.
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            2,
+            "one CantTap grant per goaded creature: {:?}",
+            state.transient_continuous_effects
+        );
+
+        evaluate_layers(&mut state);
+        assert!(
+            object_cant_tap(&state, goaded_a),
+            "first goaded creature must be can't-become-tapped"
+        );
+        assert!(
+            object_cant_tap(&state, goaded_b),
+            "second goaded creature must be can't-become-tapped"
+        );
+        assert!(
+            !object_cant_tap(&state, untouched),
+            "a non-goaded creature must NOT be restricted"
         );
     }
 }

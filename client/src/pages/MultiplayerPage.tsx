@@ -133,6 +133,9 @@ export function MultiplayerPage() {
   // compatibility check react to the user's format choice without any
   // cross-component plumbing.
   const storeFormatConfig = useMultiplayerStore((s) => s.formatConfig);
+  const compatibilityPlayerCount = useMultiplayerStore(
+    (s) => s.compatibilityPlayerCount,
+  );
   // Live deck-vs-format compatibility state, rendered as a chip under the
   // Active Deck banner on host-setup. `idle` suppresses the chip entirely
   // (no deck, no format, or not on host-setup). Evaluation runs through
@@ -197,7 +200,11 @@ export function MultiplayerPage() {
     setLiveCheck({ status: "checking", format });
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      evaluateDeckCompatibility(deck, { selectedFormat: format })
+      evaluateDeckCompatibility(deck, {
+        selectedFormat: format,
+        playerCount:
+          compatibilityPlayerCount ?? storeFormatConfig?.min_players ?? 2,
+      })
         .then((result) => {
           if (cancelled) return;
           setLiveCheck(classifyCompatResult(format, result));
@@ -211,7 +218,13 @@ export function MultiplayerPage() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [view, activeDeckName, storeFormatConfig?.format]);
+  }, [
+    view,
+    activeDeckName,
+    compatibilityPlayerCount,
+    storeFormatConfig?.format,
+    storeFormatConfig?.min_players,
+  ]);
 
   // In deck-select, tapping a deck tile IS the confirmation — there's no
   // other use for the screen since we don't show deck contents. We persist
@@ -364,6 +377,7 @@ export function MultiplayerPage() {
         try {
           const compat = await evaluateDeckCompatibility(parsedDeck, {
             selectedFormat: validationFormat,
+            playerCount: action.type === "host" ? action.settings.formatConfig.max_players : undefined,
           });
           if (compat.selected_format_compatible === false) {
             const reason =
@@ -397,6 +411,7 @@ export function MultiplayerPage() {
         const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
         const allOpponentsAreAi =
           opponentCount > 0
+          && action.settings.formatConfig.format !== "Planechase"
           && Array.from({ length: opponentCount }, (_, i) => i + 1)
             .every((seatIndex) => aiSeatIndexes.has(seatIndex));
         if (allOpponentsAreAi) {
@@ -744,7 +759,7 @@ export function MultiplayerPage() {
             joining a table picks the deck against the host's format via
             the deck-select view. */}
         {view === "host-setup" && activeDeckName && (
-          <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
+          <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[10px] border border-white/10 bg-black/20 px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
             <div className="min-w-0">
               <div className="text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
                 {t("page.activeDeck")}
@@ -778,7 +793,7 @@ export function MultiplayerPage() {
 
         {/* No deck warning — host-setup only, for the same reason as above. */}
         {view === "host-setup" && !activeDeckName && (
-          <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[16px] border border-amber-500/20 bg-amber-500/8 px-4 py-2.5">
+          <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[10px] border border-amber-400/20 bg-amber-500/[0.07] px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
             <span className="text-xs text-amber-200">
               {t("page.noDeckWarning")}
             </span>
@@ -849,7 +864,7 @@ export function MultiplayerPage() {
         {view === "deck-select" && (
           <>
             {pendingAction?.type === "join" && pendingAction.context && (
-              <div className="mb-4 w-full max-w-3xl rounded-[16px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-2.5">
+              <div className="mb-4 w-full max-w-3xl rounded-[10px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
                 <div className="text-[0.6rem] uppercase tracking-[0.22em] text-cyan-300/70">
                   {t("page.joining")}
                 </div>
@@ -968,7 +983,7 @@ function DraftLobbyPanel({
           {t("draftLobbyPanel.draftPod")}
         </div>
         {roomCode && (
-          <span className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-xs tracking-wider text-purple-400">
+          <span className="rounded-[6px] border border-white/10 bg-black/25 px-2.5 py-0.5 font-mono text-xs tracking-wider text-purple-300">
             {roomCode}
           </span>
         )}
@@ -979,7 +994,7 @@ function DraftLobbyPanel({
       )}
 
       {phase === "error" && (
-        <div className="rounded-[16px] border border-rose-400/20 bg-rose-500/[0.07] px-4 py-3 text-sm text-rose-200">
+        <div className="rounded-[10px] border border-rose-400/20 bg-rose-500/[0.07] px-4 py-3 text-sm text-rose-200 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
           {error ?? t("draftLobbyPanel.connectionFailed")}
         </div>
       )}
@@ -1027,11 +1042,11 @@ function DeckLegalityChip({ check }: { check: LiveCheck }) {
   if (check.status === "idle") return null;
 
   const base =
-    "mb-4 flex w-full max-w-3xl items-start gap-3 rounded-[16px] border px-4 py-2.5";
+    "mb-4 flex w-full max-w-3xl items-start gap-3 rounded-[10px] border px-4 py-2.5 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm";
 
   if (check.status === "checking") {
     return (
-      <div className={`${base} border-white/8 bg-black/16`}>
+      <div className={`${base} border-white/10 bg-black/20`}>
         <span className="text-xs text-slate-400">
           {t("deckLegalityChip.checking", { format: check.format })}
         </span>

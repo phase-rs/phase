@@ -17,6 +17,7 @@ fn red_mana(n: usize) -> Vec<ManaUnit> {
         .map(|_| ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(0),
+            pip_id: engine::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -143,6 +144,8 @@ fn untargeted_second_spell_draws_instead_of_copying() {
     let draw_spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Simple Draw", true, "Draw a card.")
         .id();
+    // Flurry resolves before the draw spell and takes Opt; Simple Draw needs a card below it.
+    scenario.add_spell_to_library_top(P0, "Filler", true);
     scenario.add_spell_to_library_top(P0, "Opt", true);
     scenario.with_mana_pool(P0, red_mana(3));
     let mut runner = scenario.build();

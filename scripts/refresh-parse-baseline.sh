@@ -10,8 +10,8 @@
 # every PR diffs against it via ./scripts/snapshot-regression.sh, and intended
 # parse changes refresh it in the same PR (exactly like a committed snapshot).
 #
-# Update protocol (mirrors data/engine-inventory.json — a committed, generated
-# baseline refreshed by contributors, not by CI auto-commit):
+# Update protocol: this is a committed, generated baseline refreshed by
+# contributors, not by CI auto-commit.
 #   * Run this whenever you intentionally change the parsed output of any card
 #     (a parser/engine change that moves an ast_hash). Commit the updated
 #     data/parse-baseline.json in the SAME PR as the change that caused it, so

@@ -1,8 +1,9 @@
-use crate::types::ability::{ControllerRef, PlayerRelation, SeatDirection};
+use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::game_state::LinkedExileSnapshot;
 use crate::types::identifiers::ObjectId;
+use crate::types::phase::TurnDirection;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -12,6 +13,23 @@ pub fn is_alive(state: &GameState, player: PlayerId) -> bool {
         .players
         .iter()
         .any(|p| p.id == player && !p.is_eliminated)
+}
+
+/// CR 607.2d / CR 607.2m (by analogy): true iff `player`'s durable per-player
+/// `chosen_attributes` records a `ChosenAttribute::Label` equal to `label`
+/// (case-insensitive). Single authority consulted by every "player who last
+/// chose <anchor>" read site — `TargetFilter::PlayerWhoChoseLabel` (land-drop
+/// static), `FilterProp::ControllerChoseLabel` (creature anthem), and the
+/// `SwapChosenLabels` chaos effect — so the anchor-label predicate is defined
+/// exactly once. Case-insensitive so parser canonicalization never desyncs.
+pub fn player_last_chose_label(state: &GameState, player: PlayerId, label: &str) -> bool {
+    state.players.iter().any(|p| {
+        p.id == player
+            && p.chosen_attributes.iter().any(|a| {
+                matches!(a, crate::types::ability::ChosenAttribute::Label(l)
+                    if l.eq_ignore_ascii_case(label))
+            })
+    })
 }
 
 /// CR 102.1 / CR 500.1: Next living player in seat (turn) order.
@@ -67,6 +85,37 @@ pub fn previous_player(state: &GameState, current: PlayerId) -> PlayerId {
     current
 }
 
+/// CR 103.1: Seat index reached by walking `offset` seats from `start_idx` in
+/// the current turn-order direction. `Normal` walks forward (clockwise, the
+/// CR 103.1 default); `Reversed` walks backward (Temple of Atropos, Aeon Engine,
+/// Time Distortion). This is the SINGLE authority for turn-order direction —
+/// physical seating (`neighbor`/`next_player`/`previous_player`) is deliberately
+/// NOT routed through it, since "the player to your left" is fixed regardless of
+/// turn direction (Pramikon, Sky Rampart). The `Reversed` arithmetic matches the
+/// backward walk in `previous_player`.
+pub(crate) fn turn_order_index(
+    start_idx: usize,
+    offset: usize,
+    len: usize,
+    dir: TurnDirection,
+) -> usize {
+    match dir {
+        TurnDirection::Normal => (start_idx + offset) % len,
+        TurnDirection::Reversed => (start_idx + len - (offset % len)) % len,
+    }
+}
+
+/// CR 101.4 / CR 103.1: Next living player to take a turn, in the current
+/// turn-order direction. `Normal` == [`next_player`]; `Reversed` ==
+/// [`previous_player`]. Use this for turn-order progression; use `next_player` /
+/// `previous_player` directly only for fixed physical-seating queries.
+pub fn next_player_in_turn_order(state: &GameState, current: PlayerId) -> PlayerId {
+    match state.turn_direction {
+        TurnDirection::Normal => next_player(state, current),
+        TurnDirection::Reversed => previous_player(state, current),
+    }
+}
+
 /// CR 102.1 + CR 103.1: Single authority for seating-neighbor resolution.
 ///
 /// Resolves the living player seated immediately to `controller`'s left or
@@ -78,6 +127,31 @@ pub fn neighbor(state: &GameState, controller: PlayerId, direction: SeatDirectio
         SeatDirection::Left => next_player(state, controller),
         SeatDirection::Right => previous_player(state, controller),
     }
+}
+
+/// CR 102.2 + CR 508.1c: The nearest *opponent* in the given seating direction,
+/// skipping living teammates. In a free-for-all every other seat is an opponent
+/// so this equals [`neighbor`], but in team formats (Two-Headed Giant, CR 810)
+/// an adjacent teammate is not the "nearest opponent" — the walk continues past
+/// them to the first living opponent in that direction.
+///
+/// Walks the seat ring one living player at a time via [`neighbor`]; returns
+/// `None` only if the walk returns to `controller` without finding an opponent
+/// (e.g. `controller` is the sole living player). Termination is guaranteed:
+/// each step advances deterministically around the finite living-seat ring.
+pub fn nearest_opponent(
+    state: &GameState,
+    controller: PlayerId,
+    direction: SeatDirection,
+) -> Option<PlayerId> {
+    let mut candidate = neighbor(state, controller, direction);
+    while candidate != controller {
+        if is_opponent(state, controller, candidate) {
+            return Some(candidate);
+        }
+        candidate = neighbor(state, candidate, direction);
+    }
+    None
 }
 
 /// CR 102.2 / CR 102.3: Opponents in two-player and multiplayer games.
@@ -94,14 +168,7 @@ pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 
 /// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
 pub fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) -> bool {
-    if player == other {
-        return false;
-    }
-    if state.format_config.team_based {
-        team_index(player) != team_index(other)
-    } else {
-        true
-    }
+    super::topology::is_opponent(state, player, other)
 }
 
 /// CR 102.1 / CR 102.2 / CR 102.3 / CR 109.5: Match a player against a
@@ -179,14 +246,23 @@ pub fn apnap_order_from(
             ControllerRef::Opponent
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
             | ControllerRef::ParentTargetController
             | ControllerRef::ParentTargetOwner
             | ControllerRef::DefendingPlayer
             | ControllerRef::SourceChosenPlayer
             | ControllerRef::ChosenPlayer { .. }
-            | ControllerRef::TriggeringPlayer,
+            | ControllerRef::TriggeringPlayer
+            // CR 303.4b: Enchanted-player scope is not enumerable. Fail closed.
+            | ControllerRef::EnchantedPlayer
+            // CR 102.1: the active player is exactly this default anchor.
+            | ControllerRef::ActivePlayer,
         ) => state.active_player,
     };
+
+    if state.format_config.topology().has_shared_team_turns() {
+        return super::topology::apnap_order_from(state, start_player);
+    }
 
     let start_idx = seat_order
         .iter()
@@ -195,7 +271,8 @@ pub fn apnap_order_from(
 
     let mut result = Vec::new();
     for offset in 0..len {
-        let idx = (start_idx + offset) % len;
+        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
+        let idx = turn_order_index(start_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
         // CR 800.4f: A player who has left the game does not pay costs or
         // make choices on objects' behalf; skip eliminated players.
@@ -235,7 +312,9 @@ pub fn linked_exile_cards_for_source(
                 (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
                     exiled_id: link.exiled_id,
                     owner: obj.owner,
-                    mana_value: obj.mana_cost.mana_value(),
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card records its combined mana value.
+                    mana_value: obj.effective_mana_value(),
                 })
             })
         })
@@ -282,29 +361,66 @@ pub fn owns_card_exiled_by_source(
 /// For Two-Headed Giant: players 0+1 are team A, players 2+3 are team B.
 /// For non-team formats, returns an empty vec.
 pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
-    if !state.format_config.team_based {
-        return Vec::new();
-    }
+    super::topology::teammates(state, player)
+}
 
-    // 2HG team pairing: even-indexed players are paired with the next odd-indexed player
-    let player_idx = player.0;
-    let team_base = team_index(player) * 2;
-    let partner_idx = if player_idx == team_base {
-        team_base + 1
-    } else {
-        team_base
-    };
-    let partner = PlayerId(partner_idx);
-
-    if is_alive(state, partner) {
-        vec![partner]
-    } else {
-        Vec::new()
+/// CR 810.9a + CR 810.9d: Fold a player population into one i32 by aggregating
+/// each DISTINCT team's shared `team_life_total` exactly once (dedup by team).
+/// Min/Max = extremum over team totals; Sum = Σ team totals (no double-count).
+/// Empty population → 0. Off-team every player is its own singleton team, so
+/// this matches a per-individual fold: the dedup key falls back to `pid.0`,
+/// which is distinct per player even when two players share a `team_index`
+/// (e.g. a 1v1 where players 0 and 1 are both `team_index == 0`).
+/// CR 810.9d is the confirming example: a per-team extremum (Repay in Kind)
+/// reads each team's total once, not each member.
+pub(crate) fn aggregate_over_teams<I>(
+    state: &GameState,
+    players: I,
+    aggregate: AggregateFunction,
+) -> i32
+where
+    I: IntoIterator<Item = PlayerId>,
+{
+    let mut seen = std::collections::BTreeSet::new();
+    let team_totals = players.into_iter().filter_map(|pid| {
+        let key = super::topology::shared_resource_dedup_key(state, pid);
+        seen.insert(key).then(|| team_life_total(state, pid))
+    });
+    match aggregate {
+        AggregateFunction::Max => team_totals.max().unwrap_or(0),
+        AggregateFunction::Min => team_totals.min().unwrap_or(0),
+        AggregateFunction::Sum => team_totals.sum(),
     }
 }
 
-fn team_index(player: PlayerId) -> u8 {
-    player.0 / 2
+/// CR 810.4 + CR 810.9a: A player's team's shared life total. In non-team
+/// formats this is just the player's own life total — `teammates` returns
+/// empty, so the sum degenerates to the single value. CR 810.9a: "If a cost
+/// or effect needs to know the value of an individual player's life total,
+/// that cost or effect uses the team's life total instead" — callers that
+/// read an individual life total for a comparison, cost, or SBA check in a
+/// team-based format must go through this accessor rather than `Player::life`
+/// directly. The underlying per-player `life` fields remain the single
+/// source of truth (CR 810.9: life loss/gain still happens to "each player
+/// individually") — this is a pure derived sum, not a separate stored pool.
+pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
+    super::topology::shared_resource_members(state, player)
+        .into_iter()
+        .filter_map(|member| state.players.iter().find(|p| p.id == member))
+        .map(|p| p.life)
+        .sum()
+}
+
+/// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
+/// Mirrors `team_life_total` — a pure derived sum over `Player::poison_counters`
+/// for the player and their (living) teammates. Non-team formats degenerate
+/// to the player's own count.
+pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
+    super::topology::shared_resource_members(state, player)
+        .into_iter()
+        .filter_map(|member| state.players.iter().find(|p| p.id == member))
+        .map(|p| p.poison_counters)
+        .sum()
 }
 
 #[cfg(test)]
@@ -321,6 +437,106 @@ mod tests {
             p.is_eliminated = true;
         }
         state.eliminated_players.push(player);
+    }
+
+    // --- turn-order direction (CR 103.1) ---
+
+    #[test]
+    fn turn_order_index_walks_backward_when_reversed() {
+        // Seat ring of 4: from index 1, offset 1.
+        assert_eq!(turn_order_index(1, 1, 4, TurnDirection::Normal), 2);
+        assert_eq!(turn_order_index(1, 1, 4, TurnDirection::Reversed), 0);
+        // Wrap: from index 0 backward one seat → 3.
+        assert_eq!(turn_order_index(0, 1, 4, TurnDirection::Reversed), 3);
+        // offset 0 is the start seat regardless of direction.
+        assert_eq!(turn_order_index(2, 0, 4, TurnDirection::Normal), 2);
+        assert_eq!(turn_order_index(2, 0, 4, TurnDirection::Reversed), 2);
+    }
+
+    #[test]
+    fn next_player_in_turn_order_follows_direction() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        // Normal: next of P1 is P2; Reversed: next of P1 is P0.
+        assert_eq!(next_player_in_turn_order(&state, PlayerId(1)), PlayerId(2));
+        state.turn_direction = TurnDirection::Reversed;
+        assert_eq!(next_player_in_turn_order(&state, PlayerId(1)), PlayerId(0));
+        // Physical seating (neighbor) is unaffected by turn direction.
+        assert_eq!(
+            neighbor(&state, PlayerId(1), SeatDirection::Left),
+            PlayerId(2),
+            "left neighbor is fixed regardless of turn direction"
+        );
+    }
+
+    #[test]
+    fn apnap_order_reverses_with_turn_direction() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+        assert_eq!(
+            apnap_order(&state),
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+        );
+        state.turn_direction = TurnDirection::Reversed;
+        assert_eq!(
+            apnap_order(&state),
+            vec![PlayerId(0), PlayerId(3), PlayerId(2), PlayerId(1)],
+            "CR 101.4: APNAP follows the reversed turn order",
+        );
+    }
+
+    // --- nearest_opponent ---
+
+    #[test]
+    fn nearest_opponent_equals_neighbor_in_free_for_all() {
+        // Individual seats: every other player is an opponent, so the nearest
+        // opponent is just the adjacent seat.
+        let state = make_state(4, FormatConfig::free_for_all());
+        for dir in [SeatDirection::Left, SeatDirection::Right] {
+            assert_eq!(
+                nearest_opponent(&state, PlayerId(0), dir),
+                Some(neighbor(&state, PlayerId(0), dir)),
+                "free-for-all nearest opponent is the adjacent seat ({dir:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_opponent_skips_teammate_in_two_headed_giant() {
+        // 2HG: teams {P0,P1} and {P2,P3}, seat order [P0,P1,P2,P3]. P0's left
+        // neighbor P1 is a TEAMMATE; the nearest opponent to the left is P2.
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert!(
+            !is_opponent(&state, PlayerId(0), PlayerId(1)),
+            "P1 is P0's teammate in 2HG"
+        );
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Left),
+            PlayerId(1),
+            "the adjacent left seat is the teammate"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            Some(PlayerId(2)),
+            "nearest opponent skips the teammate to the first opponent P2"
+        );
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Right),
+            Some(PlayerId(3)),
+            "to the right, P3 is the first opponent"
+        );
+    }
+
+    #[test]
+    fn nearest_opponent_none_when_sole_survivor() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        for p in [PlayerId(1), PlayerId(2), PlayerId(3)] {
+            eliminate(&mut state, p);
+        }
+        assert_eq!(
+            nearest_opponent(&state, PlayerId(0), SeatDirection::Left),
+            None,
+            "no living opponent in any direction → None"
+        );
     }
 
     // --- is_alive ---
@@ -462,6 +678,7 @@ mod tests {
         let state = make_state(2, FormatConfig::standard());
         assert_eq!(opponents(&state, PlayerId(0)), vec![PlayerId(1)]);
         assert_eq!(opponents(&state, PlayerId(1)), vec![PlayerId(0)]);
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(1)));
     }
 
     #[test]
@@ -605,6 +822,9 @@ mod tests {
     fn teammates_2hg_player_0_has_teammate_1() {
         let state = make_state(4, FormatConfig::two_headed_giant());
         assert_eq!(teammates(&state, PlayerId(0)), vec![PlayerId(1)]);
+        assert!(!is_opponent(&state, PlayerId(0), PlayerId(1)));
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(2)));
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(3)));
     }
 
     #[test]
@@ -630,5 +850,132 @@ mod tests {
         let mut state = make_state(4, FormatConfig::two_headed_giant());
         eliminate(&mut state, PlayerId(1));
         assert!(teammates(&state, PlayerId(0)).is_empty());
+    }
+
+    // --- team_life_total / team_poison_total ---
+
+    /// CR 810.4: "Each team has a shared life total, which starts at 30
+    /// life" — the TEAM's combined total at game start must be 30, not 30
+    /// per player (60 per team). Regression for a bug where `GameState::new`
+    /// gave every player the full `starting_life` regardless of team size.
+    #[test]
+    fn team_life_total_at_game_start_is_30_not_60() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        assert_eq!(team_life_total(&state, PlayerId(0)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(1)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(3)), 30);
+    }
+
+    #[test]
+    fn new_two_hg_initializes_15_per_seat_30_team_total() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        assert!(state.players.iter().all(|player| player.life == 15));
+        assert_eq!(team_life_total(&state, PlayerId(0)), 30);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 30);
+
+        let standard = GameState::new(FormatConfig::standard(), 2, 0);
+        assert_eq!(standard.players[0].life, 20);
+        assert_eq!(standard.players[1].life, 20);
+
+        let commander = GameState::new(FormatConfig::commander(), 4, 0);
+        assert!(commander.players.iter().all(|player| player.life == 40));
+    }
+
+    /// Outside team-based formats, `team_life_total` degenerates to the
+    /// player's own (full, unsplit) starting life — no regression from the
+    /// 2HG even-split fix.
+    #[test]
+    fn team_life_total_non_team_format_is_full_starting_life() {
+        let state = GameState::new(FormatConfig::commander(), 4, 0);
+        assert_eq!(team_life_total(&state, PlayerId(0)), 40);
+    }
+
+    #[test]
+    fn team_poison_total_sums_living_teammates() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].poison_counters = 6;
+        state.players[1].poison_counters = 9;
+        assert_eq!(team_poison_total(&state, PlayerId(0)), 15);
+        assert_eq!(team_poison_total(&state, PlayerId(1)), 15);
+        // Opposing team is unaffected.
+        assert_eq!(team_poison_total(&state, PlayerId(2)), 0);
+    }
+
+    #[test]
+    fn archenemy_life_and_poison_are_individual_not_shared_by_side() {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 0);
+        state.players[1].poison_counters = 6;
+        state.players[2].poison_counters = 9;
+
+        assert_eq!(team_life_total(&state, PlayerId(0)), 40);
+        assert_eq!(team_life_total(&state, PlayerId(1)), 20);
+        assert_eq!(team_life_total(&state, PlayerId(2)), 20);
+        assert_eq!(team_poison_total(&state, PlayerId(1)), 6);
+        assert_eq!(team_poison_total(&state, PlayerId(2)), 9);
+    }
+
+    // --- aggregate_over_teams ---
+
+    /// CR 810.9a + CR 810.9d: aggregating life over a population folds each
+    /// DISTINCT team's shared total exactly once. Over the two opponents of
+    /// team A (players 2 and 3 with 9 and 5 = team total 14), Sum/Max/Min all
+    /// read 14 ONCE — not 28 (double-counted) and not 9 (individual). This is
+    /// the byte-distinguishing regression for Malignus-style off-team reads.
+    #[test]
+    fn aggregate_over_teams_dedups_a_shared_team() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[2].life = 9;
+        state.players[3].life = 5;
+        let opp_team = vec![PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, opp_team.clone(), AggregateFunction::Sum),
+            14,
+            "Sum must count the shared team total once, not 28"
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, opp_team.clone(), AggregateFunction::Max),
+            14
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, opp_team, AggregateFunction::Min),
+            14
+        );
+    }
+
+    /// The dedup key falls back to `pid.0` off-team so two players that share a
+    /// `team_index` in a NON-team format are NOT collapsed. In Commander,
+    /// players 0 and 1 both have `team_index == 0` (0/2 and 1/2); a bare
+    /// `team_index` key would drop one and break Sum. With the `pid.0` guard,
+    /// Sum over [11, 7] is 18 (both counted as singleton teams).
+    #[test]
+    fn aggregate_over_teams_non_team_format_keeps_players_distinct() {
+        let mut state = GameState::new(FormatConfig::commander(), 4, 0);
+        state.players[0].life = 11;
+        state.players[1].life = 7;
+        assert_eq!(
+            aggregate_over_teams(
+                &state,
+                vec![PlayerId(0), PlayerId(1)],
+                AggregateFunction::Sum
+            ),
+            18,
+            "non-team players sharing a team_index must stay distinct via the pid.0 guard"
+        );
+    }
+
+    /// Empty population → 0 for every aggregate.
+    #[test]
+    fn aggregate_over_teams_empty_population_is_zero() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        let empty: Vec<PlayerId> = Vec::new();
+        assert_eq!(
+            aggregate_over_teams(&state, empty.clone(), AggregateFunction::Max),
+            0
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, empty, AggregateFunction::Sum),
+            0
+        );
     }
 }

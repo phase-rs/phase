@@ -1,10 +1,11 @@
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useEffect, type ReactNode } from "react";
+import { AnimatePresence, motion, useDragControls, useReducedMotion } from "framer-motion";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
+import { useIsNarrowViewport } from "./DialogHost.tsx";
 
 interface DialogShellProps {
   eyebrow?: ReactNode;
@@ -42,10 +43,20 @@ export function DialogShell({
 }: DialogShellProps) {
   const { t } = useTranslation("game");
   const peek = useOptionalDialogPeek();
+  const isNarrow = useIsNarrowViewport();
   const inspectHoverProps = useInspectHoverProps();
   const resolvedEyebrow = eyebrow ?? t("dialogShell.eyebrow");
   const cardHoverProps =
     previewObjectId != null ? inspectHoverProps(previewObjectId) : undefined;
+
+  // Drag-to-reposition: the dialog can sit over board content the player needs
+  // to see (targets, the mana they're paying with). `dragListener={false}` +
+  // `dragControls` mean a drag only begins from the header handle, so clicks on
+  // body controls never start a drag. Constrained to the overlay so the card
+  // can't be flung off-screen. Position resets on each open (fresh mount).
+  const dragControls = useDragControls();
+  const constraintsRef = useRef<HTMLDivElement>(null);
+  const startHeaderDrag = (event: ReactPointerEvent) => dragControls.start(event);
 
   // Esc-to-close: standard modal contract. Only attach when the dialog is
   // dismissable (consumers like ChoiceOverlay that omit `onClose` have a
@@ -76,6 +87,7 @@ export function DialogShell({
   return (
     <AnimatePresence>
       <motion.div
+        ref={constraintsRef}
         className="fixed inset-0 z-50 flex items-center justify-center px-2 py-2 lg:px-4 lg:py-6"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -94,6 +106,12 @@ export function DialogShell({
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.95, opacity: 0, y: 10 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
+          drag
+          dragListener={false}
+          dragControls={dragControls}
+          dragMomentum={false}
+          dragElastic={0.05}
+          dragConstraints={constraintsRef}
         >
           <div {...cardHoverProps} className={cardClass}>
             <DialogHeader
@@ -101,6 +119,7 @@ export function DialogShell({
               eyebrowClassName={eyebrowClassName}
               title={title}
               subtitle={subtitle}
+              onHandlePointerDown={startHeaderDrag}
             />
             {onClose ? <CloseButton onClose={onClose} /> : null}
             {children}
@@ -110,7 +129,12 @@ export function DialogShell({
               </div>
             ) : null}
           </div>
-          {peek ? <PeekTab onClick={peek.togglePeek} /> : null}
+          {peek ? (
+            <PeekTab
+              onClick={peek.togglePeek}
+              direction={isNarrow ? "bottom" : "right"}
+            />
+          ) : null}
         </motion.div>
       </motion.div>
     </AnimatePresence>
@@ -122,6 +146,9 @@ interface DialogHeaderProps {
   eyebrowClassName?: string;
   title: ReactNode;
   subtitle?: ReactNode;
+  /** When provided, the header acts as the dialog's drag handle: pointer-down
+   * starts a drag via the shell's `dragControls`. Absent → static header. */
+  onHandlePointerDown?: (event: ReactPointerEvent) => void;
 }
 
 export function DialogHeader({
@@ -129,14 +156,24 @@ export function DialogHeader({
   eyebrowClassName,
   title,
   subtitle,
+  onHandlePointerDown,
 }: DialogHeaderProps) {
   const eyebrowClass = [
     "text-[0.68rem] uppercase tracking-[0.22em]",
     eyebrowClassName ?? "text-slate-500",
   ].join(" ");
 
+  // `touch-none` keeps a touch-drag on the handle from scrolling the page;
+  // `cursor-grab` signals the affordance. Only applied when draggable.
+  const handleClass = onHandlePointerDown
+    ? "cursor-grab touch-none select-none active:cursor-grabbing"
+    : "";
+
   return (
-    <div className="relative border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5">
+    <div
+      onPointerDown={onHandlePointerDown}
+      className={`relative border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5 ${handleClass}`}
+    >
       <div className={eyebrowClass}>{eyebrow}</div>
       <h2 className="mt-1 text-base font-semibold text-white lg:text-xl">
         {title}
@@ -152,8 +189,8 @@ export function DialogHeader({
  * Pill tab attached to the edge the dialog slides toward when peeked. The
  * pulsing glow signals "actionable affordance — click me to peek." Mirrors
  * `PeekRestoreTab`'s `direction` axis so the collapse cue points the same way
- * the modal exits: the right edge on wide viewports, the bottom edge on narrow
- * ones (where the dialog slides down rather than sideways).
+ * the modal exits: the right edge on wide viewports, the top-right corner on
+ * narrow ones (where the dialog slides down rather than sideways).
  */
 export function PeekTab({
   onClick,
@@ -165,21 +202,21 @@ export function PeekTab({
   const { t } = useTranslation("game");
   const shouldReduceMotion = useReducedMotion();
 
-  // Glow is offset toward the edge the modal slides to (+x right / +y bottom)
-  // so it visually radiates toward the battlefield the player wants to peek at.
+  // Wide viewports: glow biased toward the slide-off edge. Mobile top-corner
+  // tab uses a centered pulse so the affordance reads symmetric on a square btn.
   const restingShadow =
     direction === "right"
       ? "0 18px 36px rgba(0,0,0,0.55), 14px 0 0 -8px rgba(34,211,238,0)"
-      : "0 18px 36px rgba(0,0,0,0.55), 0 14px 0 -8px rgba(34,211,238,0)";
+      : "0 8px 20px rgba(0,0,0,0.45), 0 0 0 0 rgba(34,211,238,0)";
   const pulseShadow =
     direction === "right"
       ? "0 18px 36px rgba(0,0,0,0.55), 18px 0 36px rgba(34,211,238,0.65)"
-      : "0 18px 36px rgba(0,0,0,0.55), 0 18px 36px rgba(34,211,238,0.65)";
+      : "0 8px 20px rgba(0,0,0,0.45), 0 0 24px rgba(34,211,238,0.65)";
 
   const positionClass =
     direction === "right"
       ? "right-0 top-1/2 h-24 w-9 -translate-y-1/2 translate-x-1/3"
-      : "bottom-0 left-1/2 h-9 w-24 -translate-x-1/2 translate-y-1/3";
+      : "right-3 top-1 h-9 w-9 -translate-y-1/3";
 
   // The chevron points the way the modal exits: right as-is, down when rotated.
   const iconClass =

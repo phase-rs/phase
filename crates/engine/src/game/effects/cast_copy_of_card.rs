@@ -17,8 +17,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target_filter, cost) = match &ability.effect {
-        Effect::CastCopyOfCard { target, cost } => (target, cost),
+    let (target_filter, cost, count) = match &ability.effect {
+        Effect::CastCopyOfCard {
+            target,
+            cost,
+            count,
+        } => (target, cost, count),
         _ => return Err(EffectError::MissingParam("CastCopyOfCard".to_string())),
     };
 
@@ -47,18 +51,33 @@ pub fn resolve(
             .collect();
 
         if !source_ids.is_empty() {
-            let count = source_ids.len();
+            // CR 707.12a: "you may cast UP TO N of the copies" caps how many of
+            // the copies may be cast. `count: None` (the 13 existing cards) means
+            // every copy may be cast. The choice is always `up_to` (the player
+            // chooses individually whether to cast each copy), so the cap is the
+            // upper bound `min(N, available)`.
+            let cap = count
+                .as_ref()
+                .map(|expr| {
+                    crate::game::quantity::resolve_quantity_with_targets(state, expr, ability)
+                        .max(0) as usize
+                })
+                .unwrap_or(source_ids.len());
+            let choose = cap.min(source_ids.len());
             let mut resume = ability.clone();
             resume.effect = Effect::CastCopyOfCard {
                 target: TargetFilter::None,
                 cost: cost.clone(),
+                // The cap is consumed by this choice; the resumed cast of the
+                // chosen copies (explicit targets) must not re-apply it.
+                count: None,
             };
             resume.sub_ability = None;
             super::append_to_pending_continuation(state, Some(Box::new(resume)));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: source_ids,
-                count,
+                count: choose,
                 up_to: true,
                 constraint: None,
                 source_id: ability.source_id,
@@ -86,6 +105,7 @@ pub fn resolve(
             resume.effect = Effect::CastCopyOfCard {
                 target: TargetFilter::None,
                 cost: cost.clone(),
+                count: None,
             };
             resume.sub_ability = None;
             if index + 1 < source_ids.len() {
@@ -281,6 +301,7 @@ mod tests {
             Effect::CastCopyOfCard {
                 target: TargetFilter::None,
                 cost: ManaCost::zero(),
+                count: None,
             },
             vec![TargetRef::Object(source_id)],
             ObjectId(99),
@@ -324,6 +345,7 @@ mod tests {
                     id: TrackedSetId(0),
                 },
                 cost: ManaCost::zero(),
+                count: None,
             },
             Vec::new(),
             ObjectId(99),
@@ -369,6 +391,7 @@ mod tests {
                     id: TrackedSetId(1),
                 },
                 cost: ManaCost::zero(),
+                count: None,
             },
             Vec::new(),
             ObjectId(99),
@@ -415,6 +438,7 @@ mod tests {
             Effect::CastCopyOfCard {
                 target: TargetFilter::None,
                 cost: ManaCost::zero(),
+                count: None,
             },
             vec![TargetRef::Object(source_id)],
             ObjectId(99),
@@ -460,6 +484,7 @@ mod tests {
             Effect::CastCopyOfCard {
                 target: TargetFilter::None,
                 cost: ManaCost::zero(),
+                count: None,
             },
             vec![TargetRef::Object(source_id)],
             ObjectId(99),

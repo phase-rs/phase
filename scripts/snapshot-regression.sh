@@ -22,8 +22,8 @@
 #      (the committed baseline). Exit 0 = no AST moved; exit 1 = something
 #      moved (intended or regression — read the "Regression suspects" block).
 #      Intended changes are landed by refreshing the baseline in the same PR
-#      (same model as data/engine-inventory.json — a committed, generated file
-#      contributors refresh, reviewed in the PR diff):
+#      (a committed, generated file contributors refresh and reviewers inspect
+#      in the PR diff):
 #        ./scripts/refresh-parse-baseline.sh   (or: cargo parse-baseline)
 #
 #   2. Ad-hoc before/after (local, transient):

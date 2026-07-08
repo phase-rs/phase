@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { MyDecks } from "../MyDecks";
-import { saveDeckOrigins, STORAGE_KEY_PREFIX } from "../../../constants/storage";
+import {
+  RANDOM_DECK_SELECTION,
+  saveDeckOrigins,
+  STORAGE_KEY_PREFIX,
+} from "../../../constants/storage";
 import type { ParsedDeck } from "../../../services/deckParser";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
@@ -65,7 +69,7 @@ describe("MyDecks", () => {
     vi.unstubAllGlobals();
   });
 
-  it("prefilters commander selection context and can reveal incompatible decks on demand", async () => {
+  it("checks commander selection context and can reveal incompatible decks on demand", async () => {
     saveDeck("Commander Ready", {
       main: [{ name: "Island", count: 99 }],
       sideboard: [],
@@ -108,9 +112,17 @@ describe("MyDecks", () => {
       />,
     );
 
-    expect(await screen.findByText("Off Format")).toBeInTheDocument();
-    expect(evaluateDeckCompatibilityBatch).not.toHaveBeenCalled();
-    expect(screen.getByText("Commander Ready")).toBeInTheDocument();
+    expect(await screen.findByText("Commander Ready")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(evaluateDeckCompatibilityBatch).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "Commander Ready" }),
+          expect.objectContaining({ name: "Off Format" }),
+        ]),
+        expect.objectContaining({ selectedFormat: "Commander" }),
+      ),
+    );
+    expect(screen.getByText("Off Format")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show all decks" })).toBeInTheDocument();
   });
 
@@ -380,5 +392,128 @@ describe("MyDecks", () => {
     expect(onSelectDeck).toHaveBeenCalledWith("[Pre-built] Secrets of Strixhaven (SOS)");
     expect(localStorage.getItem(`${STORAGE_KEY_PREFIX}[Pre-built] Secrets of Strixhaven (SOS)`)).toBeTruthy();
     expect(loadPreconDeckMap).toHaveBeenCalled();
+  });
+
+  it("filters selection decks by source and precon set", async () => {
+    saveDeck("User Commander", {
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Zimone, Mystery Unraveler"],
+    });
+    saveDeck("[Pre-built] Secrets of Strixhaven (SOS)", {
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Zimone, Mystery Unraveler"],
+    });
+    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+      sos: {
+        code: "SOS",
+        name: "Secrets of Strixhaven",
+        type: "Commander Deck",
+        releaseDate: "2026-02-01",
+        coveragePct: 100,
+        mainBoard: [{ name: "Island", count: 99 }],
+        sideBoard: [],
+        commander: [{ name: "Zimone, Mystery Unraveler", count: 1 }],
+      },
+      p0: {
+        code: "P0",
+        name: "Precon Zero",
+        type: "Commander Deck",
+        releaseDate: "2026-01-01",
+        coveragePct: 100,
+        mainBoard: [{ name: "Forest", count: 99 }],
+        sideBoard: [],
+        commander: [{ name: "Tatyova, Benthic Druid", count: 1 }],
+      },
+    });
+
+    render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Commander"
+        activeDeckName={null}
+        onSelectDeck={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("User Commander")).toBeInTheDocument();
+    expect(await screen.findByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Deck source" }));
+    await user.click(screen.getByRole("option", { name: "My decks" }));
+
+    expect(screen.getByText("User Commander")).toBeInTheDocument();
+    expect(screen.queryByText("Secrets of Strixhaven (SOS)")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Deck source" }));
+    await user.click(screen.getByRole("option", { name: "Precons" }));
+
+    expect(screen.queryByText("User Commander")).not.toBeInTheDocument();
+    expect(screen.getByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Precon set" }));
+    await user.click(screen.getByRole("option", { name: "P0" }));
+
+    expect(screen.queryByText("Secrets of Strixhaven (SOS)")).not.toBeInTheDocument();
+    expect(screen.getByText("Precon Zero (P0)")).toBeInTheDocument();
+  });
+
+  it("random selection prefers exact-format feed decks over incompatible user decks", async () => {
+    saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("User Pauper", { main: [{ name: "Lightning Bolt", count: 60 }], sideboard: [] });
+    saveDeckOrigins({ "Known Standard": "mtggoldfish-standard" });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({
+      "User Pauper": {
+        standard: { compatible: false, reasons: [] },
+        commander: { compatible: false, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: false,
+        selected_format_reasons: ["Not Standard legal"],
+        color_identity: ["R"],
+      },
+    });
+    const onSelectDeck = vi.fn();
+
+    render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Standard"
+        activeDeckName={null}
+        onSelectDeck={onSelectDeck}
+      />,
+    );
+
+    expect(await screen.findByText("Known Standard")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+
+    await waitFor(() => expect(onSelectDeck).toHaveBeenCalledWith("Known Standard"));
+    expect(onSelectDeck).not.toHaveBeenCalledWith("User Pauper");
+  });
+
+  it("can defer random selection without materializing a concrete deck", async () => {
+    saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    const onSelectDeck = vi.fn();
+
+    render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Standard"
+        activeDeckName={null}
+        onSelectDeck={onSelectDeck}
+        randomSelectionMode="defer"
+      />,
+    );
+
+    expect(await screen.findByText("Known Standard")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+
+    expect(onSelectDeck).toHaveBeenCalledWith(RANDOM_DECK_SELECTION);
+    expect(evaluateDeckCompatibilityBatch).not.toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ summaryOnly: true }),
+    );
   });
 });

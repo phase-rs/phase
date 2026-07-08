@@ -286,6 +286,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::ChooseCounterMoveDistribution { selections } => {
             bound_list("ChooseCounterMoveDistribution.selections", selections.len())?;
         }
+        GameAction::ChooseCountersToRemove { selections } => {
+            bound_list("ChooseCountersToRemove.selections", selections.len())?;
+        }
         GameAction::CrewVehicle { creature_ids, .. } => {
             bound_list("CrewVehicle.creature_ids", creature_ids.len())?;
         }
@@ -317,6 +320,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         }
         GameAction::SelectCategoryPermanents { choices } => {
             bound_list("SelectCategoryPermanents.choices", choices.len())?;
+        }
+        GameAction::ChooseKeptCreatures { kept } => {
+            bound_list("ChooseKeptCreatures.kept", kept.len())?;
         }
         GameAction::SubmitPhyrexianChoices { choices } => {
             bound_list("SubmitPhyrexianChoices.choices", choices.len())?;
@@ -371,6 +377,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::MulliganDecision { .. }
         | GameAction::TapLandForMana { .. }
         | GameAction::UntapLandForMana { .. }
+        | GameAction::SpendPoolMana { .. }
+        | GameAction::UnspendPoolMana { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
         | GameAction::CancelCast
@@ -381,6 +389,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::TurnFaceUp { .. }
         | GameAction::ChoosePlayDraw { .. }
         | GameAction::ChoosePile { .. }
+        | GameAction::SubmitVoteCandidate { .. }
         | GameAction::ChooseBranch { .. }
         | GameAction::ChooseDamageSource { .. }
         | GameAction::DecideOptionalCost { .. }
@@ -408,11 +417,14 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseDungeon { .. }
         | GameAction::ChooseDungeonRoom { .. }
         | GameAction::UnlockRoomDoor { .. }
+        | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
+        | GameAction::RollPlanarDie
         | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
         | GameAction::CascadeChoice { .. }
         | GameAction::RippleChoice { .. }
         | GameAction::FreeCastWindowChoice { .. }
@@ -436,6 +448,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::PassParadigmOffer
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
+        | GameAction::SetPriorityYield { .. }
         | GameAction::Concede { .. } => {}
     }
     Ok(())

@@ -50,6 +50,72 @@ fn refers_to_attached(filter: &TargetFilter) -> bool {
         ))
 }
 
+/// CR 701.14a + CR 120.10: Resolve the two fighters as `(subject, fought
+/// creature)` without mutating state. This is the single authority for the
+/// fighter split, so the damage resolver and the "[the fought creature] is
+/// dealt excess damage this way" recipient lookup
+/// (`previous_effect_excess_amount_from_events`, The Last Agni Kai) never
+/// disagree on which object receives the fight damage.
+///
+/// - Two chosen object targets ("target creature you control fights target
+///   creature an opponent controls") → both are fighters and the fought
+///   creature is the *second* target.
+/// - One chosen object target ("~ fights target creature" / "enchanted creature
+///   fights target creature") → the subject is the ability source / attached
+///   host and the sole object target is the fought creature.
+///
+/// `Ok(None)` means the fight can't happen (a dual-target fight reduced to a
+/// lone surviving fighter) and must resolve with no damage.
+pub(crate) fn resolve_fight_fighters(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Result<Option<(ObjectId, ObjectId)>, EffectError> {
+    let object_targets: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+
+    // CR 701.14a + CR 608.2c: "those creatures fight each other" — a two-fighter
+    // chain (Malamet/Longstalk/Duel) whose declared fighters live in the two
+    // earliest chain slots. Under most-recent-only chain propagation the Fight
+    // node's LOCAL `targets` carry at most one object, so recover BOTH fighters
+    // from the flattened chain root. Fire ONLY when the root genuinely declares
+    // two distinct object slots; otherwise fall through untouched, protecting
+    // incumbent single-fighter `Fight{ParentTarget}` cards (time to feed,
+    // ezuri's predation, joust, …) whose root has <2 object slots (slot 1 → None).
+    if object_targets.len() < 2 {
+        if let (Some(TargetRef::Object(a)), Some(TargetRef::Object(b))) = (
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, 0),
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, 1),
+        ) {
+            if a != b {
+                return Ok(Some((a, b)));
+            }
+        }
+    }
+
+    if object_targets.len() >= 2 {
+        return Ok(Some((object_targets[0], object_targets[1])));
+    }
+    if let Effect::Fight { subject, .. } = &ability.effect {
+        if crate::game::ability_utils::fight_subject_needs_target_slot(subject) {
+            // CR 701.14a: Dual-target fights require both chosen fighters; do
+            // not reinterpret a lone survivor as "~ fights target creature".
+            return Ok(None);
+        }
+    }
+    let source_id = resolve_fight_subject(state, ability)?;
+    let target_id = object_targets
+        .first()
+        .copied()
+        .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
+    Ok(Some((source_id, target_id)))
+}
+
 /// CR 701.14b + CR 702.26b: A creature can fight only while it is on the
 /// battlefield, still a creature, and phased in. A phased-out permanent is
 /// treated as though it does not exist (CR 702.26b), so a creature that phased
@@ -69,23 +135,25 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.14a: Resolve the fighting creature from the effect's subject.
-    // For "enchanted creature fights", subject is AttachedTo → look up attached_to.
-    // For "~ fights", subject is SelfRef → use ability.source_id directly.
-    let source_id = resolve_fight_subject(state, ability)?;
-
-    // Target creature from ability.targets
-    let target_id = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
+    // CR 701.14a: Resolve the two fighters.
+    // - "~ fights target creature" / "it fights target …": one chosen object target;
+    //   the subject (~ / enchanted creature) is the other fighter.
+    // - "Target creature you control fights another target creature": two chosen
+    //   object targets are the fighters; the ability's source (e.g. Ulvenwald
+    //   Tracker) is not a participant.
+    let (source_id, target_id) = match resolve_fight_fighters(state, ability)? {
+        Some(pair) => pair,
+        None => {
+            // CR 701.14a: Dual-target fight reduced to a lone fighter — no fight,
+            // no damage. Emit the parent Fight event so downstream "when a
+            // creature fights" triggers observe the (no-op) resolution.
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Fight,
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+    };
 
     // CR 701.14b: If either fighter left the battlefield or is no longer a creature, no damage.
     if !fight_eligible(state, source_id) || !fight_eligible(state, target_id) {
@@ -235,6 +303,7 @@ fn build_fight_damage_node(
             },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Object(target_id)],
         source_id,
@@ -309,6 +378,33 @@ mod tests {
     }
 
     #[test]
+    fn dual_target_fight_uses_both_chosen_creatures_not_ability_source() {
+        // CR 701.14a: "Target creature you control fights another target creature"
+        // — both chosen creatures fight; the activated source is not a fighter.
+        let mut state = GameState::new_two_player(42);
+        let tracker = make_creature(&mut state, PlayerId(0), "Ulvenwald Tracker", 1, 1);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::Any,
+                subject: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(bear), TargetRef::Object(wolf)],
+            tracker,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&wolf].damage_marked, 3);
+        assert_eq!(state.objects[&bear].damage_marked, 2);
+        assert_eq!(state.objects[&tracker].damage_marked, 0);
+    }
+
+    #[test]
     fn test_fight_emits_damage_events() {
         let mut state = GameState::new_two_player(42);
         let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
@@ -354,6 +450,7 @@ mod tests {
         mana.condition = Some(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Excess,
         });
         ability.sub_ability = Some(Box::new(mana));
 
@@ -390,6 +487,7 @@ mod tests {
         mana.condition = Some(AbilityCondition::PreviousEffectAmount {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Excess,
         });
         ability.sub_ability = Some(Box::new(mana));
 
@@ -397,6 +495,70 @@ mod tests {
         crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+    }
+
+    /// CR 120.10 + CR 701.14a: In a *dual-target* fight (The Last Agni Kai —
+    /// "target creature you control fights target creature an opponent controls.
+    /// If the creature the opponent controls is dealt excess damage this way,
+    /// add that much {R}"), both the excess-gate condition and the "that much"
+    /// quantity must read excess dealt to the FOUGHT creature (the second chosen
+    /// object target), never the fighting subject (the first).
+    ///
+    /// Discriminates the fix: the attacker (5/5) is fat and takes no excess from
+    /// the 0/1 victim, so the old first-object-target lookup read 0 excess off
+    /// the subject and produced no mana. The victim receives 5 damage — 4 excess
+    /// beyond its 1 lethal — so the correct recipient lookup adds 4 red mana.
+    #[test]
+    fn dual_target_fight_excess_reads_fought_creature_not_subject() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = make_creature(&mut state, PlayerId(0), "Attacker", 5, 5);
+        let victim = make_creature(&mut state, PlayerId(1), "Victim", 0, 1);
+
+        // Dual-target fight: both fighters are chosen object targets, ordered
+        // [your creature, opponent's creature].
+        let mut ability = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::Any,
+                subject: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(attacker), TargetRef::Object(victim)],
+            attacker,
+            PlayerId(0),
+        );
+        let mut mana = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            attacker,
+            PlayerId(0),
+        );
+        mana.condition = Some(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Fixed { value: 0 },
+            channel: crate::types::ability::DamageChannel::Excess,
+        });
+        ability.sub_ability = Some(Box::new(mana));
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // 4 excess dealt to the fought creature → "add that much {R}" = 4 red.
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 4);
+        // The subject took no excess (victim has 0 power) — the old lookup would
+        // have read 0 here and added no mana.
+        assert_eq!(state.objects[&attacker].damage_marked, 0);
+        assert_eq!(state.objects[&victim].damage_marked, 5);
     }
 
     #[test]
@@ -608,7 +770,11 @@ mod tests {
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: *player,
             candidate_count: 1,
-            candidate_descriptions: vec!["Shield".to_string()],
+            candidates: vec![crate::types::game_state::ReplacementCandidateSummary {
+                source_id: bear,
+                source_name: String::new(),
+                description: "Shield".to_string(),
+            }],
         };
 
         // Accept the replacement for bear → wolf (first direction).
@@ -758,6 +924,66 @@ mod tests {
         assert_eq!(
             state.objects[&bear].damage_marked, 0,
             "phased-out bear deals no damage"
+        );
+    }
+
+    /// CR 701.14a + CR 608.2c: the b2 dual-fight divert must fire ONLY when the
+    /// flattened chain root declares two distinct object slots. A 1-slot root
+    /// (`resolve_parent_slot_from_root(1) == None`) falls through to the
+    /// single-target path; a 2-slot root recovers both fighters. Synthetic,
+    /// zero card-data dependency: the two cases differ only in whether a second
+    /// chain slot exists. Reverting to a naive `len<2 && ParentTarget` guard
+    /// makes the 1-slot case wrongly reinterpret the lone target as a divert.
+    #[test]
+    fn dual_fight_divert_guarded_on_two_distinct_root_slots() {
+        let mut state = GameState::new_two_player(42);
+        let a = make_creature(&mut state, PlayerId(0), "A", 3, 3);
+        let b = make_creature(&mut state, PlayerId(1), "B", 2, 2);
+
+        // 1-slot root: top node is the Fight with a single local object target and
+        // NO sub-chain. flatten_targets_in_chain == [a] → slot 1 is None → divert
+        // off → single-target fall-through (subject SelfRef → source, target a).
+        let one_slot = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::ParentTarget,
+                subject: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(a)],
+            a, // source
+            PlayerId(0),
+        );
+        let fighters = resolve_fight_fighters(&state, &one_slot).unwrap();
+        assert_eq!(
+            fighters,
+            Some((a, a)),
+            "1-slot root: no divert; SelfRef subject + sole target → (source, target)"
+        );
+
+        // 2-slot root: top node holds [a], a sub-ability node holds [b]. The
+        // flattened root is [a, b] → both slots Some & distinct → divert fires.
+        let mut two_slot = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::ParentTarget,
+                subject: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(a)],
+            a,
+            PlayerId(0),
+        );
+        let sub = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(b)],
+            a,
+            PlayerId(0),
+        );
+        two_slot.sub_ability = Some(Box::new(sub));
+        let fighters = resolve_fight_fighters(&state, &two_slot).unwrap();
+        assert_eq!(
+            fighters,
+            Some((a, b)),
+            "2-slot root: divert recovers both declared fighters (slot0, slot1)"
         );
     }
 

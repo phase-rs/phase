@@ -15,7 +15,8 @@ import {
   type BoardChoiceView,
 } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
-import type { GameObject } from "../../adapter/types.ts";
+import type { GameEvent, GameObject } from "../../adapter/types.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
@@ -92,6 +93,9 @@ export function TargetingOverlay() {
   const triggerDescription = waitingFor?.type === "TriggerTargetSelection" && waitingFor.data.description
     ? renderDescription(waitingFor.data.description, sourceName ?? "this")
     : undefined;
+  const triggerDamageAmount = waitingFor?.type === "TriggerTargetSelection"
+    ? triggerDamageAmountForPrompt(waitingFor.data.trigger_event, waitingFor.data.trigger_events)
+    : null;
   const spellTargetDescription = waitingFor?.type === "TargetSelection" && waitingFor.data.pending_cast.ability.description
     ? renderDescription(waitingFor.data.pending_cast.ability.description, sourceName ?? "this")
     : undefined;
@@ -172,7 +176,7 @@ export function TargetingOverlay() {
   return (
     <AnimatePresence>
       <motion.div
-        className="pointer-events-none fixed inset-0 z-40"
+        className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.dialogHost}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -185,7 +189,10 @@ export function TargetingOverlay() {
             opponent's face-down hand (low-value space) and clears the
             opponent-HUD tab rail below it — the rail carries life/creature/land
             counts that must stay readable and clickable during targeting. */}
-        <div className="absolute left-0 right-0 top-1 flex flex-col items-center gap-1">
+        <div
+          className="absolute left-0 right-0 flex flex-col items-center gap-1"
+          style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
+        >
           {sourceName && (
             <div className="rounded-md bg-gray-800/90 px-4 py-1 text-sm font-medium text-amber-300 shadow">
               {sourceName}
@@ -197,6 +204,11 @@ export function TargetingOverlay() {
           {enginePrompt && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
               <RichLabel text={enginePrompt} size="xs" />
+            </div>
+          )}
+          {triggerDamageAmount != null && (
+            <div className="rounded-md border border-red-400/40 bg-red-950/90 px-3 py-1 text-sm font-semibold text-red-100 shadow">
+              {t("targeting.triggerDamageAmount", { amount: triggerDamageAmount })}
             </div>
           )}
         </div>
@@ -274,6 +286,23 @@ export function TargetingOverlay() {
       </motion.div>
     </AnimatePresence>
   );
+}
+
+function triggerDamageAmountForPrompt(
+  triggerEvent: GameEvent | undefined,
+  triggerEvents: GameEvent[] | undefined,
+): number | null {
+  const event = triggerEvent ?? (triggerEvents?.length === 1 ? triggerEvents[0] : undefined);
+  if (!event) return null;
+
+  switch (event.type) {
+    case "DamageDealt":
+      return event.data.amount;
+    case "CombatDamageDealtToPlayer":
+      return event.data.total_damage;
+    default:
+      return null;
+  }
 }
 
 type TargetingPromptParams = {
@@ -412,6 +441,12 @@ function boardChoicePrompt(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.prompt.totalPowerAtMost", {
+        action,
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -460,6 +495,11 @@ function boardChoiceConfirmLabel(
         selected: boardChoiceSelectedPower(choice, selectedIds, objects),
         required: choice.selection.power,
       });
+    case "totalPowerAtMost":
+      return t("boardChoice.confirmPowerAtMost", {
+        selected: boardChoiceSelectedPower(choice, selectedIds, objects),
+        max: choice.selection.power,
+      });
   }
 }
 
@@ -478,6 +518,7 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
     case "crew":
     case "saddle":
     case "station":
+    case "keep":
       return "bg-sky-700 hover:bg-sky-600";
   }
 }

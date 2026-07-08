@@ -56,6 +56,7 @@ fn optional_cost_paid_sets_flag() {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
@@ -148,6 +149,7 @@ fn optional_cost_skipped_clears_flag() {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
@@ -341,6 +343,7 @@ fn cancel_cast_at_optional_cost_choice() {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
@@ -1004,6 +1007,7 @@ fn setup_pitch_scenario() -> (
         .with_ability(Effect::Counter {
             target: TargetFilter::Any,
             source_rider: None,
+            countered_spell_zone: None,
         })
         .with_additional_cost(AdditionalCost::Required(AbilityCost::Exile {
             count: 1,
@@ -1275,6 +1279,7 @@ fn play_land_from_graveyard_with_permission() {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1341,6 +1346,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1408,6 +1414,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1486,6 +1493,7 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
+                extra_cost: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1540,6 +1548,7 @@ fn optional_blight_with_no_creatures_skips_prompt() {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
@@ -1595,6 +1604,7 @@ fn required_blight_with_no_creatures_rejects_cast() {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         })
         .with_additional_cost(AdditionalCost::Required(AbilityCost::Blight { count: 1 }))
         .id();
@@ -1646,6 +1656,7 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         })
         .with_additional_cost(AdditionalCost::Choice(
             AbilityCost::Blight { count: 1 },

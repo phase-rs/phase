@@ -259,6 +259,17 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 701.50a + CR 614.1a: A creature is about to connive (draw N, discard N,
+    /// +1/+1 per nonland discarded). Carried through the replacement pipeline so
+    /// effects that intercept the connive keyword action (Leader, Super-Genius —
+    /// "instead you draw a card, then that creature connives") see the event
+    /// before the draw/discard/counter steps run. `count` is the connive N value,
+    /// already resolved from `QuantityExpr` at propose time.
+    Connive {
+        object_id: ObjectId,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
     /// CR 701.34a + CR 614.1a: A player is about to proliferate. Replacement
     /// effects can modify how many times the proliferate action is performed
     /// (Tekuthal, Inquiry Dominus — "proliferate twice instead").
@@ -431,6 +442,17 @@ pub enum ProposedEvent {
         units: Vec<UnitDecision>,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 701.31 + CR 901.9c + CR 614.1a: A player is about to planeswalk as a
+    /// result of rolling the Planeswalker symbol on the planar die (the
+    /// CR 901.8 "planeswalking ability" resolving). This is the ONLY planeswalk
+    /// cause routed through the replacement pipeline — encounter / SBA /
+    /// leave-game planeswalks (CR 701.31c) call `planechase::planeswalk`
+    /// directly and are never replaced. "Chaos ensues instead" (Fixed Point in
+    /// Time) replaces this event.
+    Planeswalk {
+        player_id: PlayerId,
+        applied: HashSet<ReplacementId>,
+    },
 }
 
 fn default_produce_mana_count() -> u32 {
@@ -469,6 +491,15 @@ impl ProposedEvent {
         Self::BeginPhase {
             player_id,
             phase,
+            applied: HashSet::new(),
+        }
+    }
+
+    /// CR 701.31 + CR 901.9c + CR 614.1a: Construct a `Planeswalk` proposed
+    /// event for the planar-die planeswalking ability (CR 901.8).
+    pub fn planeswalk(player_id: PlayerId) -> Self {
+        Self::Planeswalk {
+            player_id,
             applied: HashSet::new(),
         }
     }
@@ -531,6 +562,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::Explore { applied, .. }
+            | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
@@ -547,7 +579,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginTurn { applied, .. }
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
-            | ProposedEvent::EmptyManaPool { applied, .. } => applied,
+            | ProposedEvent::EmptyManaPool { applied, .. }
+            | ProposedEvent::Planeswalk { applied, .. } => applied,
         }
     }
 
@@ -560,6 +593,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::Explore { applied, .. }
+            | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
@@ -576,7 +610,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginTurn { applied, .. }
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
-            | ProposedEvent::EmptyManaPool { applied, .. } => applied,
+            | ProposedEvent::EmptyManaPool { applied, .. }
+            | ProposedEvent::Planeswalk { applied, .. } => applied,
         }
     }
 
@@ -611,7 +646,10 @@ impl ProposedEvent {
             | ProposedEvent::TurnFaceUp { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
-            | ProposedEvent::Explore { object_id, .. } => state
+            | ProposedEvent::Explore { object_id, .. }
+            // CR 701.50a: The conniving permanent's controller is the affected
+            // player — they draw/discard and choose the connive replacement order.
+            | ProposedEvent::Connive { object_id, .. } => state
                 .objects
                 .get(object_id)
                 .map(|o| o.controller)
@@ -661,7 +699,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginTurn { player_id, .. }
             | ProposedEvent::BeginPhase { player_id, .. }
             | ProposedEvent::ProduceMana { player_id, .. }
-            | ProposedEvent::EmptyManaPool { player_id, .. } => *player_id,
+            | ProposedEvent::EmptyManaPool { player_id, .. }
+            | ProposedEvent::Planeswalk { player_id, .. } => *player_id,
             ProposedEvent::CreateToken { owner, .. } => *owner,
         }
     }
@@ -677,7 +716,10 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Discard { object_id, .. }
             | ProposedEvent::Sacrifice { object_id, .. }
-            | ProposedEvent::Explore { object_id, .. } => Some(*object_id),
+            | ProposedEvent::Explore { object_id, .. }
+            // CR 614.1a: the conniving permanent is the affected object the
+            // `valid_card` filter ("a creature you control") is matched against.
+            | ProposedEvent::Connive { object_id, .. } => Some(*object_id),
             ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,
@@ -705,7 +747,10 @@ impl ProposedEvent {
             | ProposedEvent::CreateToken { .. }
             | ProposedEvent::BeginTurn { .. }
             | ProposedEvent::BeginPhase { .. }
-            | ProposedEvent::EmptyManaPool { .. } => None,
+            | ProposedEvent::EmptyManaPool { .. }
+            // CR 701.31: a planeswalk has no affected object — the planar deck
+            // rotation is not an object-scoped event.
+            | ProposedEvent::Planeswalk { .. } => None,
         }
     }
 }

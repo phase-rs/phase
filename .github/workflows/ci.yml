@@ -75,12 +75,50 @@ jobs:
           fi
           ./scripts/check-engine-authorities.sh "$BASE"
 
+      - name: Test card-data load gate
+        # Diff-based gate: new test code must not reparse the full ~90 MB
+        # client/public/card-data.json (tens of seconds/test under nextest, and
+        # it self-skips in CI). Use support::shared_card_db() (fixture-backed).
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="origin/main"
+          fi
+          ./scripts/check-test-card-data-load.sh "$BASE"
+
   rust-test:
-    name: Rust tests
+    name: Rust tests (shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free runner disk for Rust test linking
+        # The nextest count partition splits execution, but each shard still
+        # runs `cargo test --no-run` for the whole workspace. Keep the Rust
+        # caches intact and reclaim only unused hosted-image payloads before
+        # setup-rust-toolchain restores/saves Cargo state.
+        run: |
+          echo "Disk before cleanup:"
+          df -h /
+
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+
+          if command -v docker >/dev/null 2>&1; then
+            docker system prune --all --force || true
+          fi
+
+          echo "Disk after cleanup:"
+          df -h /
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -97,7 +135,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo nextest run --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
+        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/2 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
@@ -195,7 +233,7 @@ jobs:
         continue-on-error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           ./scripts/coverage-regression-check.sh \
-            "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json" \
+            "https://data.phase-rs.dev/preview/coverage-data.json" \
             data/coverage-data.json \
             --fail-on-engine
 
@@ -218,6 +256,94 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin set-check -- \
             data/ --diff data/parse-baseline.json --ignore-membership
+
+      - name: Parse-detail diff vs base baseline
+        # PR-only review aid (NEVER blocks — continue-on-error): surfaces the
+        # field-level parse changes this PR introduces, for the reviewing LLM.
+        # Unlike the regression check above (supported flips only), this diffs
+        # the full parse_details tree.
+        #
+        # Baseline = the published coverage of the EXACT main commit this CI
+        # merge commit was built on (the merge commit's non-head parent),
+        # fetched by its engine-source hash; head = the coverage built above
+        # from that same merge commit. So head - baseline isolates EXACTLY this
+        # PR's parse changes, with no second coverage build and no cross-PR
+        # contamination — even when the PR is behind main, or has main merged
+        # into it (both sides move in lockstep because the base is read off the
+        # merge commit, not the frozen webhook base.sha). Path filter: identical
+        # engine-source hash => no parse
+        # change is possible => skip before the bin build. --features cli keeps
+        # the same [tool, cli] engine fingerprint as the steps above (lib cache
+        # hit; only the new bin links).
+        id: parsediff
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PAYLOAD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Derive the baseline from the ACTUAL main commit this CI merge commit
+          # was built on — its non-head parent — NOT the webhook payload's
+          # base.sha. The payload value freezes at event-creation time, but the
+          # checked-out refs/pull/N/merge floats: GitHub recomputes it against
+          # main's tip whenever main advances or the contributor merges main into
+          # the branch. When the two diverge, head carries the newer main while a
+          # payload-base.sha baseline does not, so head - baseline leaks every
+          # intervening main parse change into this PR's diff (this contaminated
+          # #4303: a one-card autotap fix whose comment listed 25 unrelated
+          # cards). Reading the base off the merge commit's parent keeps both
+          # sides in lockstep no matter how stale (or main-merged) the PR is.
+          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+            P1="$(git rev-parse HEAD^1)"
+            P2="$(git rev-parse HEAD^2)"
+            # Parent order is not contractual across GitHub's merge-ref build, so
+            # pick whichever parent is NOT the PR head as the base (main) side.
+            if [ "$P1" = "$HEAD_SHA" ]; then BASE_SHA="$P2"; else BASE_SHA="$P1"; fi
+          else
+            # Unmergeable PR (no synthetic merge commit) — nothing to pin to;
+            # fall back to the payload base.sha.
+            BASE_SHA="$PAYLOAD_BASE_SHA"
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
+          HEAD_HASH="$(./scripts/engine-source-hash.sh HEAD)"
+          if [ "$BASE_HASH" = "$HEAD_HASH" ]; then
+            echo "Engine source unchanged vs base ($BASE_HASH) — no parse change possible; skipping."
+            echo "produced=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$PR_NUMBER" > pr-number.txt
+          URL="https://data.phase-rs.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
+          if curl -fsSL --retry 3 --retry-delay 2 "$URL" -o coverage-base.json; then
+            cargo run --profile tool --features cli --bin coverage-parse-diff -- \
+              coverage-base.json data/coverage-data.json \
+              --base-sha "$BASE_SHA" \
+              --markdown parse-diff.md --json parse-diff.json
+          else
+            # Baseline not published yet (base.sha only just merged) or aged out
+            # of retention. NEVER fall back to the lagging preview/ snapshot —
+            # that reintroduces cross-PR contamination. Emit a pending marker so
+            # reviewers can distinguish "attempted but baseline unavailable"
+            # from "parse-diff never ran."
+            printf '<!-- coverage-parse-diff -->\n### Parse changes introduced by this PR\n\n_Baseline pending for `%s` — this populates once main publishes its coverage snapshot (a few minutes after that commit landed)._\n' "$BASE_SHA" > parse-diff.md
+          fi
+          echo "produced=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload parse-diff artifact
+        # Consumed by .github/workflows/coverage-parse-diff-comment.yml, which
+        # posts the sticky PR comment from the trusted workflow_run context.
+        if: github.event_name == 'pull_request' && steps.parsediff.outputs.produced == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parse-diff
+          if-no-files-found: ignore
+          retention-days: 3
+          path: |
+            parse-diff.md
+            parse-diff.json
+            pr-number.txt
 
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
@@ -253,6 +379,35 @@ jobs:
           npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          # changelog{,-meta}.json are committed to client/public/ (not generated
+          # into data/ like the files above), so the preview snapshot tracks main
+          # the moment a regenerated changelog lands — ahead of the nightly that
+          # carries it to production.
+          npx wrangler r2 object put phase-rs-data/preview/changelog.json --file client/public/changelog.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/preview/changelog-meta.json --file client/public/changelog-meta.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+
+      - name: Publish immutable parse-diff baseline to R2
+        # Content-addressed sibling of the mutable preview/coverage-data.json
+        # write above: an immutable copy keyed by THIS commit's engine-source
+        # hash. The PR-side "Parse-detail diff" step fetches the copy matching
+        # its CI merge commit's base parent's hash, so its baseline is the exact
+        # main that merge commit was built on — never the lagging preview/
+        # snapshot (which mixes in other PRs' changes). Identical-source commits
+        # dedupe to one object, so storage is
+        # bounded by distinct parser states, not commit count. best-effort
+        # (continue-on-error): a missed publish just defers a PR's comment to
+        # "baseline pending" until the next main push, never wedges main.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          HASH="$(./scripts/engine-source-hash.sh HEAD)"
+          npx wrangler r2 object put "phase-rs-data/parse-baselines/coverage-data-${HASH}.json" \
+            --file data/coverage-data.json --remote --content-type application/json \
+            --cache-control "public, max-age=31536000, immutable"
 
   draft-pools:
     # Split out of card-data-gate because draft-pool-gen lives in draft-core and

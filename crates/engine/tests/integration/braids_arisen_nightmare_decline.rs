@@ -1,5 +1,6 @@
 //! Integration tests for Braids, Arisen Nightmare's end-step decline tail
-//! (GitHub issue #491 — "directs life loss to the wrong player").
+//! (GitHub issues #491 / #4246 — "directs life loss to the wrong player" /
+//! "declining the sacrifice still applies decline consequences").
 //!
 //! Oracle text:
 //!   At the beginning of your end step, you may sacrifice an artifact,
@@ -136,6 +137,54 @@ fn decide_optional(state: &mut GameState, accept: bool) {
     };
     apply(state, player, GameAction::DecideOptionalEffect { accept })
         .expect("optional-effect decision should succeed");
+}
+
+/// Test D — controller declines the optional sacrifice. The entire "If you do"
+/// branch must be skipped: no opponent prompts, no life loss, no draws.
+#[test]
+fn braids_controller_declines_no_consequences() {
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let braids = add_permanent(&mut state, 10, PlayerId(0), "Braids", CoreType::Creature);
+    add_permanent(
+        &mut state,
+        11,
+        PlayerId(0),
+        "Grizzly Bears",
+        CoreType::Creature,
+    );
+    add_permanent(&mut state, 20, PlayerId(1), "Forest", CoreType::Land);
+    seed_library(&mut state, 30, PlayerId(0));
+
+    let p0_life_before = life(&state, PlayerId(0));
+    let p1_life_before = life(&state, PlayerId(1));
+    let p0_hand_before = hand_len(&state, PlayerId(0));
+
+    let ability = braids_execute(PlayerId(0), braids);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    // P0 declines the optional sacrifice — the "If you do" branch must not run.
+    decide_optional(&mut state, false);
+
+    assert_eq!(
+        life(&state, PlayerId(1)),
+        p1_life_before,
+        "opponent must not lose life when the controller declined to sacrifice"
+    );
+    assert_eq!(
+        life(&state, PlayerId(0)),
+        p0_life_before,
+        "controller must not lose life"
+    );
+    assert_eq!(
+        hand_len(&state, PlayerId(0)),
+        p0_hand_before,
+        "controller must not draw when they declined to sacrifice"
+    );
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+        "no further optional prompts after declining the root sacrifice"
+    );
 }
 
 /// Test A — single declining opponent. P0 controls Braids + a creature to

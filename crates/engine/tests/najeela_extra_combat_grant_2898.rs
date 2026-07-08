@@ -48,6 +48,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
             after: Phase::EndCombat,
             followed_by: vec![],
             count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+            attacker_restriction: None,
         },
         vec![],
         source,
@@ -79,6 +80,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
@@ -187,6 +189,8 @@ fn najeela_applies_untap_grant_and_extra_combat() {
         state.extra_phases.contains(&ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         }),
         "extra combat phase must be scheduled; got {:?}",
         state.extra_phases

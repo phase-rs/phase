@@ -28,12 +28,32 @@
     "updateIssue": "update issue",
     "updated": "updated"
   },
+  "comboDetector": {
+    "label": "Combo Detector",
+    "title": "Detect infinite loops: end mandatory loops automatically and show ∞ resources (off by default)",
+    "on": "On",
+    "off": "Off"
+  },
   "gameMenu": {
+    "sections": {
+      "view": "View",
+      "tools": "Tools",
+      "game": "Game"
+    },
+    "reportCard": "Report a card",
     "menu": "Game menu",
     "sandboxTools": "Sandbox Tools",
     "sandboxToolsTitle": "Sandbox Tools — set up any board state (`)",
+    "openSandboxTools": "Open Sandbox Tools",
+    "clickModeButton": "Click Mode Button",
+    "shown": "Shown",
+    "hidden": "Hidden",
     "resume": "Resume",
     "settings": "Settings",
+    "boardLayoutSplit": "Split",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Switch to split table view",
+    "switchToLegacyView": "Switch to legacy focused view",
     "helpShortcuts": "Help & Shortcuts",
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",
@@ -56,6 +76,7 @@
     "seatPlayer": "Player",
     "seatOpen": "Open",
     "seatAi": "AI ({{difficulty}})",
+    "teamLabel": "Team {{number}}",
     "waiting": "Waiting…",
     "seatLabel": "Seat {{id}}",
     "addAi": "Add AI",
@@ -195,6 +216,12 @@
       "message": "Set up any board state with <tools>Sandbox Tools</tools> — add cards and tokens, change life and counters, copy permanents, or jump phases. Open it anytime with the <key>`</key> key.",
       "dismiss": "Dismiss",
       "open": "Open Sandbox Tools"
+    },
+    "reportCardNudge": {
+      "message": "See a card render or play wrong? Tap the <flag>report flag</flag> in the top-left to flag it so we can fix it.",
+      "dismiss": "Dismiss",
+      "open": "Report a Card",
+      "debugPrompt": "See a card render or play wrong? Flag it so we can fix it."
     }
   },
   "splash": {
@@ -221,5 +248,16 @@
     "settings": "Settings",
     "languageSettings": "Language ({{lang}}) — open settings",
     "languageTitle": "Language: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Something went wrong",
+    "body": "The app hit an unexpected error and can't continue on this screen. Reloading usually fixes it.",
+    "reload": "Reload"
+  },
+  "actionError": {
+    "title": "{{action}} failed",
+    "skipTarget": "Skip target",
+    "genericAction": "Action",
+    "unknownEngineError": "Unknown engine error"
   }
 }

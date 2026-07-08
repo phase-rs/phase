@@ -35,15 +35,29 @@ export function defaultPacingMultipliers(): Record<PacingCategory, number> {
  *  category appear here. */
 const EVENT_PACING_CATEGORY: Record<string, PacingCategory> = {
   DamageDealt: "combat",
+  GroupedDamageFlurry: "combat",
 };
 
 export function eventCategory(eventType: string): PacingCategory {
   return EVENT_PACING_CATEGORY[eventType] ?? "effects";
 }
 
+export type GroupedDamageFlurryEvent = {
+  type: "GroupedDamageFlurry";
+  data: {
+    player_id: number;
+    source_ids: number[];
+    total_damage: number;
+    hit_count: number;
+  };
+};
+
+export type AnimationEvent = GameEvent | GroupedDamageFlurryEvent;
+
 export interface StepEffect {
-  event: GameEvent;
+  event: AnimationEvent;
   duration: number;
+  displayOnly?: true;
 }
 
 export interface AnimationStep {
@@ -55,6 +69,15 @@ export type PositionSnapshot = Map<number, DOMRect>;
 
 /** Combat pacing defaults (normal speed). */
 export const COMBAT_ENGAGEMENT_DURATION_MS = 900;
+export const GROUPED_COMBAT_DAMAGE_THRESHOLD = 12;
+export const GROUPED_COMBAT_DAMAGE_DURATION_MS = 900;
+export const GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS = 260;
+export const DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT = 16;
+export const DAMAGE_FLURRY_PROJECTILE_MIN = 8;
+export const DAMAGE_FLURRY_PROJECTILE_MAX = 32;
+export const DAMAGE_FLURRY_TRAIL_PARTICLE_MAX = 96;
+export const GROUPED_EVENT_RUN_THRESHOLD = 8;
+export const GROUPED_TOKEN_CREATION_THRESHOLD = GROUPED_EVENT_RUN_THRESHOLD;
 
 export const EVENT_DURATIONS: Record<string, number> = {
   ZoneChanged: 400,
@@ -73,6 +96,19 @@ export const DEFAULT_DURATION = 200;
 
 /** How long the card slam flight phase takes before impact (ms, before speed multiplier). */
 export const CARD_SLAM_FLIGHT_MS = 200;
+
+export function isPlayerDamageAnimationEvent(event: AnimationEvent, playerId: number): boolean {
+  if (event.type === "GroupedDamageFlurry") {
+    return event.data.player_id === playerId;
+  }
+  return event.type === "DamageDealt" && "Player" in event.data.target && event.data.target.Player === playerId;
+}
+
+export function impactDelayMsForAnimationEvent(event: AnimationEvent): number {
+  if (event.type === "GroupedDamageFlurry") return GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS;
+  if (event.type === "DamageDealt" && "Player" in event.data.target) return CARD_SLAM_FLIGHT_MS;
+  return 0;
+}
 
 /** Base "your turn / opponent's turn" banner display duration, before any
  *  pacing multipliers apply. */

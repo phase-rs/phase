@@ -204,6 +204,10 @@ fn colors_produced_by_land(land: &game_object::GameObject) -> Vec<engine::types:
                         colors.push(*c);
                     }
                 }
+                // CR 202.2c: Omnath, Locus of All — colors come from a target
+                // object resolved at trigger time, not statically predictable
+                // for land-animation color preview. Contribute nothing.
+                ManaProduction::AnyCombinationOfObjectColors { .. } => {}
                 _ => {}
             }
         }
@@ -443,6 +447,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         LandAnimationPolicy.verdict(&ctx)
     }

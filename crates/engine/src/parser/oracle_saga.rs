@@ -292,7 +292,9 @@ fn promote_generic_effect_duration(effect: &mut Effect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ControllerRef, FilterProp, PtValue, TypeFilter};
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, PtValue, TypeFilter,
+    };
 
     #[test]
     fn parse_roman_numeral_range() {
@@ -508,6 +510,42 @@ mod tests {
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// CR 111.3 (issue #4605): Urza's Saga chapter II grants
+    /// `{2}, {T}: Create a 0/0 colorless Construct artifact creature token with
+    /// 'This token gets +1/+1 for each artifact you control.'`. Because the
+    /// create-token clause is nested inside the double-quoted granted ability,
+    /// its inner token ability uses SINGLE quotes. The granted ability's effect
+    /// must be a token-creation effect — NOT the inner `Pump` lifted out of the
+    /// single-quoted span (which is what made activating it create no token).
+    #[test]
+    fn urzas_saga_chapter_two_granted_ability_creates_token() {
+        let lines = vec![
+            "II — This Saga gains \"{2}, {T}: Create a 0/0 colorless Construct artifact creature token with 'This token gets +1/+1 for each artifact you control.'\"",
+        ];
+        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Urza's Saga");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().unwrap();
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*exec.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", exec.effect);
+        };
+        let granted = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .find_map(|m| match m {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .expect("chapter II must grant an activated ability");
+        assert!(
+            matches!(&*granted.effect, Effect::Token { .. }),
+            "granted ability must create a token, got {:?}",
+            granted.effect
+        );
     }
 
     /// CR 514.2: Roar of the Fifth People chapter IV explicitly says "until end

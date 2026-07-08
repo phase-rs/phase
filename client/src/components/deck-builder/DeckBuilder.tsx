@@ -56,6 +56,8 @@ export function DeckBuilder({
     setActiveSurface,
     deckView,
     setDeckView,
+    groupMode,
+    setGroupMode,
     dirty,
     cardDataCache,
     compatibility,
@@ -91,7 +93,6 @@ export function DeckBuilder({
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
-    effectiveCap,
   } = useDeckBuilder({ format, onFormatChange, initialDeckName, searchFilters });
   const { t } = useTranslation("deck-builder");
 
@@ -335,24 +336,45 @@ export function DeckBuilder({
                 </button>
               </div>
             ) : (
-              <div className="flex gap-1 rounded-lg border border-white/8 bg-black/18 p-0.5">
-                {(["list", "stack"] as const).map((view) => (
-                  <button
-                    key={view}
-                    type="button"
-                    onClick={() => setDeckView(view)}
-                    aria-label={view === "list" ? t("deck.listView") : t("deck.stackView")}
-                    aria-pressed={deckView === view}
-                    title={view === "list" ? t("deck.listView") : t("deck.stackView")}
-                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
-                      deckView === view
-                        ? "bg-white/14 text-white"
-                        : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    {view === "list" ? <ListViewIcon /> : <StackViewIcon />}
-                  </button>
-                ))}
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1 rounded-lg border border-white/8 bg-black/18 p-0.5">
+                  {(["type", "color"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setGroupMode(mode)}
+                      aria-label={mode === "type" ? t("deck.groupByType") : t("deck.groupByColor")}
+                      aria-pressed={groupMode === mode}
+                      title={mode === "type" ? t("deck.groupByType") : t("deck.groupByColor")}
+                      className={`rounded-md px-2 py-1 text-xs transition-colors ${
+                        groupMode === mode
+                          ? "bg-white/14 text-white"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      {mode === "type" ? t("deck.groupType") : t("deck.groupColor")}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex gap-1 rounded-lg border border-white/8 bg-black/18 p-0.5">
+                  {(["list", "stack"] as const).map((view) => (
+                    <button
+                      key={view}
+                      type="button"
+                      onClick={() => setDeckView(view)}
+                      aria-label={view === "list" ? t("deck.listView") : t("deck.stackView")}
+                      aria-pressed={deckView === view}
+                      title={view === "list" ? t("deck.listView") : t("deck.stackView")}
+                      className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+                        deckView === view
+                          ? "bg-white/14 text-white"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      {view === "list" ? <ListViewIcon /> : <StackViewIcon />}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -398,6 +420,8 @@ export function DeckBuilder({
                         onCardHover={onCardHover}
                         format={format}
                         compatibility={compatibility}
+                        cardDataCache={cardDataCache}
+                        groupMode={groupMode}
                         onChooseArt={handleListContextMenu}
                         onSetAsCommander={isCommander ? handleSetCommander : undefined}
                         isCommanderEligible={isCommander ? isCommanderEligible : undefined}
@@ -411,13 +435,13 @@ export function DeckBuilder({
                       deck={deck}
                       commanders={commanders}
                       cardDataCache={cardDataCache}
+                      groupMode={groupMode}
                       onAddCard={handleAddCardByName}
                       onRemoveCard={handleRemoveCard}
                       onMoveCard={handleMoveCard}
                       onRemoveCommander={handleRemoveCommander}
                       onCardHover={onCardHover}
                       format={format}
-                      getEffectiveCap={effectiveCap}
                     />
                   )}
                 </div>
@@ -444,7 +468,7 @@ export function DeckBuilder({
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
                 onCardHover={onCardHover}
-                getEffectiveCap={effectiveCap}
+                formatValidationReasons={compatibility?.selected_format_reasons}
               />
             )}
             <StatsPanel

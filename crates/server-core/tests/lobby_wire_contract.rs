@@ -144,13 +144,13 @@ fn server_hello_mode_byte_identical() {
     let lb_hello = lb::LobbyServerMessage::ServerHello {
         server_version: "0.1.0".into(),
         build_commit: "abc".into(),
-        protocol_version: 7,
+        protocol_version: lb::PROTOCOL_VERSION,
         mode: lb::ServerMode::LobbyOnly,
     };
     let sc_hello = sc::ServerMessage::ServerHello {
         server_version: "0.1.0".into(),
         build_commit: "abc".into(),
-        protocol_version: 7,
+        protocol_version: sc::PROTOCOL_VERSION,
         mode: sc::ServerMode::LobbyOnly,
         // None + skip_serializing_if keeps the wire identical to the lobby
         // broker's ServerHello, which has no public_url field.

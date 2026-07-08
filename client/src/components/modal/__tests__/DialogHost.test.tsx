@@ -138,9 +138,12 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).not.toBe("none");
   });
 
-  it("keeps the viewport wrapper for plain mana payment without convoke", () => {
-    // Plain payment is committed via the panel's Pay button (no board taps), so
-    // the host wraps normally — only `convoke_mode` payments go click-through.
+  it("anchors plain (manual) mana payment but leaves it click-through so board taps reach lands", () => {
+    // Manual payment of plain mana requires the player to tap their own lands and
+    // click mana-pool pips on the board BEHIND the panel. The host stays anchored
+    // at `fixed inset-0 z-40` (so the panel can't be trapped beneath the board) but
+    // goes click-through via `pointer-events: none` so those board taps land — even
+    // without `convoke_mode`. (Reverting Part A flips pointerEvents back to "" here.)
     setWaitingFor({
       type: "ManaPayment",
       data: { player: 0 },
@@ -152,6 +155,52 @@ describe("DialogHost", () => {
     );
     const wrapper = container.firstElementChild as HTMLElement | null;
     expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/z-40/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
+  it("keeps plain mana payment peekable so it can be slid off overlapped lands", () => {
+    // Any ManaPayment panel (manual plain, convoke, improvise) is bottom-anchored
+    // and can overlap the lands the player must tap — so it stays peekable even
+    // while click-through. Before Part A, a non-convoke ManaPayment was click-through
+    // but NOT peekable, so the peek tab never appeared here.
+    setWaitingFor({
+      type: "ManaPayment",
+      data: { player: 0 },
+    } as never);
+    render(
+      <DialogHost>
+        <DialogShell title="t">
+          <div />
+        </DialogShell>
+      </DialogHost>,
+    );
+    fireEvent.click(screen.getByLabelText("Move dialog out of the way"));
+    expect(screen.getByLabelText("Restore dialog")).toBeInTheDocument();
+  });
+
+  it("suppresses plain mana payment click-through while a UI dialog is open", () => {
+    // A UI dialog opened mid-payment (e.g. a mana-ability picker) renders inside the
+    // host; leaving the host click-through would make its buttons dead. So even for
+    // plain ManaPayment, an open `pendingAbilityChoice` restores host pointer events.
+    setWaitingFor({
+      type: "ManaPayment",
+      data: { player: 0 },
+    } as never);
+    useUiStore.setState({
+      pendingAbilityChoice: {
+        objectId: 7,
+        actions: [{ type: "TapForConvoke", data: { object_id: 7, mana_type: "Green" } }],
+      },
+    });
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.style.pointerEvents).not.toBe("none");
   });
 
   it("anchors battlefield sacrifice choices but leaves them click-through", () => {

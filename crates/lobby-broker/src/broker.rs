@@ -376,6 +376,11 @@ impl Broker {
         let game_code = env.new_game_code();
         let player_token = env.new_token();
         let pc = requested_player_count.clamp(2, 6);
+        if let Some(format_config) = format_config.as_ref() {
+            if let Err(reason) = format_config.validate_for_player_count(pc) {
+                return vec![error(&reason)];
+            }
+        }
         let (host_version, host_build_commit) = conn
             .client_hello
             .as_ref()
@@ -753,7 +758,7 @@ fn error(message: &str) -> Outbound {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::LobbyClientMessage;
+    use crate::protocol::{LobbyClientMessage, PROTOCOL_VERSION};
     use std::cell::Cell;
 
     /// Deterministic env: monotonic codes/tokens so sequence assertions are
@@ -803,7 +808,7 @@ mod tests {
             LobbyClientMessage::ClientHello {
                 client_version: "0.1.0".into(),
                 build_commit: "abc".into(),
-                protocol_version: 7,
+                protocol_version: PROTOCOL_VERSION,
             },
             env,
         );
@@ -1260,6 +1265,42 @@ mod tests {
             },
             &env,
         );
+        assert!(matches!(
+            out.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+        assert!(conn.host_game.is_none());
+    }
+
+    #[test]
+    fn create_rejects_archenemy_seat_outside_player_count() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+        let mut format_config = engine::types::format::FormatConfig::archenemy();
+        format_config.archenemy_player = Some(engine::types::player::PlayerId(4));
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateGameWithSettings {
+                deck: test_deck(),
+                display_name: "Host".into(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 4,
+                match_config: Default::default(),
+                format_config: Some(format_config),
+                room_name: None,
+                host_peer_id: Some("peer-host".into()),
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+            },
+            &env,
+        );
+
         assert!(matches!(
             out.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::Error { .. })]

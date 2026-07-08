@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Back to deck",
     "listView": "List view",
-    "stackView": "Stack view"
+    "stackView": "Stack view",
+    "groupType": "Type",
+    "groupColor": "Color",
+    "groupByType": "Group by type",
+    "groupByColor": "Group by color"
   },
   "tabs": {
     "ariaLabel": "Deck builder surface",
@@ -48,7 +52,11 @@
     "clone": "Clone",
     "cloneTitle": "Save a copy under a new name",
     "loadDeck": "Load deck...",
-    "nameToSave": "Name the deck to save it"
+    "nameToSave": "Name the deck to save it",
+    "savedToastTitle": "Deck saved",
+    "savedToastDescription": "\"{{name}}\" was saved to your decks.",
+    "clonedToastTitle": "Deck cloned",
+    "clonedToastDescription": "A copy was saved as \"{{name}}\"."
   },
   "unsaved": {
     "title": "Unsaved changes",
@@ -101,13 +109,31 @@
     "maybeboardEmptyHint": "Cards you're considering. Tap → Maybeboard on a deck card to park one here.",
     "group": {
       "Creatures": "Creatures",
-      "Spells": "Spells",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Instants",
+      "Sorceries": "Sorceries",
+      "Artifacts": "Artifacts",
+      "Enchantments": "Enchantments",
+      "Battles": "Battles",
+      "Lands": "Lands",
+      "Other": "Other"
+    },
+    "colorGroup": {
+      "White": "White",
+      "Blue": "Blue",
+      "Black": "Black",
+      "Red": "Red",
+      "Green": "Green",
+      "Multicolor": "Multicolor",
+      "Colorless": "Colorless",
       "Lands": "Lands"
     },
     "importModalTitle": "Import Deck",
     "pastePlaceholder": "Paste deck list (MTGA or .dck format)...",
     "fromFile": "From File",
     "parse": "Parse",
+    "parsing": "Parsing…",
+    "parseError": "Couldn't find any cards. Paste a deck in MTGA or .dck format.",
     "exportModalTitle": "Export Deck",
     "saveToFile": "Save to File",
     "copied": "Copied!",
@@ -141,7 +167,23 @@
     "groupCards_other": "{{count}} cards",
     "group": {
       "Creatures": "Creatures",
-      "Spells": "Spells",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Instants",
+      "Sorceries": "Sorceries",
+      "Artifacts": "Artifacts",
+      "Enchantments": "Enchantments",
+      "Battles": "Battles",
+      "Lands": "Lands",
+      "Other": "Other"
+    },
+    "colorGroup": {
+      "White": "White",
+      "Blue": "Blue",
+      "Black": "Black",
+      "Red": "Red",
+      "Green": "Green",
+      "Multicolor": "Multicolor",
+      "Colorless": "Colorless",
       "Lands": "Lands"
     },
     "sideboardGroup": "Sideboard",
@@ -231,5 +273,11 @@
     "minimumCount": "Deck has {{count}} cards (minimum 60)",
     "maxCopies": "{{name}}: {{count}} copies (max 4)",
     "companionInMain": "{{name}} is your companion but is also in the main deck — this violates its deckbuilding condition. Remove it from the main deck to use it as a companion."
+  },
+  "switcher": {
+    "starred": "Starred",
+    "unfiled": "Unfiled",
+    "searchPlaceholder": "Search decks…",
+    "noMatches": "No decks match"
   }
 }

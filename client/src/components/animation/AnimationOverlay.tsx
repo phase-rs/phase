@@ -1,7 +1,12 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
-import type { StepEffect } from "../../animation/types.ts";
+import {
+  DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT,
+  impactDelayMsForAnimationEvent,
+  isPlayerDamageAnimationEvent,
+  type StepEffect,
+} from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
 import { fetchCardImageUrl } from "../../services/scryfall.ts";
@@ -91,6 +96,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
+  const stepTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [activeFloats, setActiveFloats] = useState<ActiveFloat[]>([]);
   const [activeDeathClones, setActiveDeathClones] = useState<DeathClone[]>([]);
   const [activeVignette, setActiveVignette] = useState<{
@@ -133,11 +139,55 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [],
   );
 
+  const scheduleStepTimeout = useCallback((callback: () => void, delay: number) => {
+    const timeout = setTimeout(() => {
+      stepTimeoutsRef.current = stepTimeoutsRef.current.filter((id) => id !== timeout);
+      callback();
+    }, delay);
+    stepTimeoutsRef.current.push(timeout);
+  }, []);
+
   const processEffect = useCallback(
     (effect: StepEffect, stepEffects: StepEffect[]) => {
       const { event } = effect;
 
       switch (event.type) {
+        case "GroupedDamageFlurry": {
+          const { player_id, source_ids, total_damage, hit_count } = event.data;
+          const to = getPlayerHudPosition(player_id);
+          const fromPoints = source_ids
+            .slice(0, DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT)
+            .map((sourceId) => getObjectPosition(sourceId))
+            .filter((position): position is { x: number; y: number } => position != null);
+          const origins = fromPoints.length > 0 ? fromPoints : [to];
+          const impactDelay = impactDelayMsForAnimationEvent(event) * speedMultiplier;
+
+          if (vfxQuality !== "minimal") {
+            particleRef.current?.damageFlurry(origins, to, hit_count, total_damage, impactDelay);
+          }
+
+          scheduleStepTimeout(() => {
+            audioManager.playSfx("DamageDealt");
+            const id = ++floatIdCounter;
+            setActiveFloats((prev) => [
+              ...prev,
+              { id, value: -total_damage, position: to, color: "#ef4444" },
+            ]);
+
+            if (vfxQuality !== "minimal") {
+              particleRef.current?.playerDamage(to.x, to.y, total_damage);
+              setActiveVignette({ damageAmount: total_damage });
+              scheduleStepTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
+            }
+
+            if (vfxQuality === "full" && containerRef.current) {
+              const intensity = total_damage >= 20 ? "heavy" : total_damage >= 10 ? "medium" : "light";
+              applyScreenShake(containerRef.current, intensity, speedMultiplier);
+            }
+          }, impactDelay);
+          break;
+        }
+
         case "DamageDealt": {
           const { source_id, target, amount } = event.data;
           let pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
@@ -244,24 +294,33 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           // Skip floating number when DamageDealt already covers this player
           // in the same step (avoids duplicate floating numbers)
           const hasDamageDealt = stepEffects.some(
-            (e) =>
-              e.event.type === "DamageDealt" &&
-              "Player" in e.event.data.target &&
-              e.event.data.target.Player === player_id,
+            (e) => isPlayerDamageAnimationEvent(e.event, player_id),
           );
-
-          if (!hasDamageDealt) {
+          const groupedDamageEvent = effect.displayOnly
+            ? stepEffects.find((e) => e.event.type === "GroupedDamageFlurry")
+            : undefined;
+          const showLifeChange = () => {
             const { x, y } = getPlayerHudPosition(player_id);
-            const id = ++floatIdCounter;
-            setActiveFloats((prev) => [
-              ...prev,
-              { id, value: amount, position: { x, y }, color: amount > 0 ? "#22c55e" : "#ef4444" },
-            ]);
-          }
+            if (!hasDamageDealt) {
+              const id = ++floatIdCounter;
+              setActiveFloats((prev) => [
+                ...prev,
+                { id, value: amount, position: { x, y }, color: amount > 0 ? "#22c55e" : "#ef4444" },
+              ]);
+            }
 
-          if (amount > 0 && vfxQuality !== "minimal") {
-            const { x, y } = getPlayerHudPosition(player_id);
-            particleRef.current?.healEffect(x, y, amount);
+            if (amount > 0 && vfxQuality !== "minimal") {
+              particleRef.current?.healEffect(x, y, amount);
+            }
+          };
+
+          if (groupedDamageEvent) {
+            scheduleStepTimeout(
+              showLifeChange,
+              impactDelayMsForAnimationEvent(groupedDamageEvent.event) * speedMultiplier,
+            );
+          } else {
+            showLifeChange();
           }
           break;
         }
@@ -422,6 +481,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       vfxQuality,
       speedMultiplier,
       containerRef,
+      scheduleStepTimeout,
     ],
   );
 
@@ -436,6 +496,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     const timer = setTimeout(advanceStep, activeStep.duration * speedMultiplier);
     return () => {
       clearTimeout(timer);
+      for (const stepTimeout of stepTimeoutsRef.current) clearTimeout(stepTimeout);
+      stepTimeoutsRef.current = [];
+      setActiveVignette(null);
     };
   }, [activeStep, advanceStep, processEffect, speedMultiplier]);
 

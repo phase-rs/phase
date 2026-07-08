@@ -13,6 +13,28 @@ pub struct AtomicCardsFile {
     pub data: HashMap<String, Vec<AtomicCard>>,
 }
 
+/// Root structure of an MTGJSON CardTypes.json file (CR 205.3 canonical lists).
+#[derive(Deserialize, Debug, Clone)]
+pub struct CardTypesFile {
+    pub data: CardTypesData,
+}
+
+/// CR 205.3: per-category subtype and supertype lists from MTGJSON CardTypes.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CardTypesData {
+    pub creature: CardTypeEntry,
+}
+
+/// Subtype/supertype entry for one card category in CardTypes.json.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CardTypeEntry {
+    pub sub_types: Vec<String>,
+    #[serde(default)]
+    pub super_types: Vec<String>,
+}
+
 /// A single card face from MTGJSON's atomic card data.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +86,12 @@ pub struct AtomicCard {
     /// sidecars for content i18n. The engine itself stays English-only.
     #[serde(default)]
     pub foreign_data: Vec<ForeignData>,
+    /// Related-card metadata from AtomicCards' `relatedCards`. Without this
+    /// field serde silently drops `relatedCards.spellbook`, leaving the Alchemy
+    /// `Effect::DraftFromSpellbook` faces inert (drafting from an empty list).
+    /// Captured here so `oracle_gen` can harvest the spellbook lists at export.
+    #[serde(default)]
+    pub related_cards: SetRelatedCards,
 }
 
 /// A localized printing of a card from MTGJSON's `foreignData` array. `language`
@@ -208,6 +236,13 @@ pub struct SetRelatedCards {
 pub fn load_atomic_cards(path: &Path) -> Result<AtomicCardsFile, Box<dyn Error>> {
     let contents = std::fs::read_to_string(path)?;
     let file: AtomicCardsFile = serde_json::from_str(&contents)?;
+    Ok(file)
+}
+
+/// Load and deserialize a CardTypes.json file.
+pub fn load_card_types(path: &Path) -> Result<CardTypesFile, Box<dyn Error>> {
+    let contents = std::fs::read_to_string(path)?;
+    let file: CardTypesFile = serde_json::from_str(&contents)?;
     Ok(file)
 }
 
@@ -588,5 +623,54 @@ mod tests {
         let data = load_atomic_cards(&path).expect("Should load test fixture from file");
         let card = find_card(&data, "Lightning Bolt").expect("Lightning Bolt should exist");
         assert_eq!(card.name, "Lightning Bolt");
+    }
+
+    /// Reach-guard for the Alchemy spellbook data pipeline: AtomicCards' nested
+    /// `relatedCards.spellbook` must survive deserialization into `AtomicCard`.
+    /// Before capturing `related_cards`, serde silently dropped this array,
+    /// leaving every `Effect::DraftFromSpellbook` face inert. The card WITHOUT
+    /// `relatedCards` proves the `#[serde(default)]` fallback yields an empty
+    /// list (non-vacuous negative twin).
+    #[test]
+    fn deserializes_related_cards_spellbook() {
+        let data: AtomicCardsFile = serde_json::from_str(
+            r#"{
+                "data": {
+                    "Alchemist": [{
+                        "name": "Alchemist",
+                        "colors": [],
+                        "colorIdentity": [],
+                        "layout": "normal",
+                        "manaValue": 2.0,
+                        "identifiers": {},
+                        "relatedCards": {
+                            "spellbook": ["Brainstorm", "Ponder"]
+                        }
+                    }],
+                    "Plain Jane": [{
+                        "name": "Plain Jane",
+                        "colors": [],
+                        "colorIdentity": [],
+                        "layout": "normal",
+                        "manaValue": 1.0,
+                        "identifiers": {}
+                    }]
+                }
+            }"#,
+        )
+        .expect("inline fixture should deserialize");
+
+        let alchemist = find_card(&data, "Alchemist").expect("Alchemist should exist");
+        assert_eq!(
+            alchemist.related_cards.spellbook,
+            vec!["Brainstorm".to_string(), "Ponder".to_string()],
+            "relatedCards.spellbook must deserialize into related_cards.spellbook"
+        );
+
+        let plain = find_card(&data, "Plain Jane").expect("Plain Jane should exist");
+        assert!(
+            plain.related_cards.spellbook.is_empty(),
+            "a card without relatedCards must default to an empty spellbook, not fail to parse"
+        );
     }
 }

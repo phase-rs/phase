@@ -3,8 +3,9 @@ use rand::Rng;
 use crate::game::players;
 use crate::types::ability::{
     ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetSelectionMode,
+    SeatDirection, TargetSelectionMode,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -70,15 +71,30 @@ pub fn resolve(
         return Ok(());
     }
 
+    let source_id = if persist || choice_type.needs_choice_source_context() {
+        Some(ability.source_id)
+    } else {
+        None
+    };
+    let persist_player = if persist && matches!(choice_type, ChoiceType::Labeled { .. }) {
+        ability.scoped_player
+    } else {
+        None
+    };
+
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
         choice_type,
         options,
-        source_id: if persist {
-            Some(ability.source_id)
-        } else {
-            None
-        },
+        source_id,
+        // CR 607.2d / CR 607.2m (by analogy): `persist_player` is an INDEPENDENT
+        // routing discriminator, not a repurposing of `source_id`. During a
+        // `player_scope: All` fan-out (effects/mod.rs `set_scoped_player_recursive`),
+        // `ability.scoped_player` names the fanned per-player value, so a
+        // persisting choice records the anchor onto that exact player. Outside a
+        // fan-out (Khans Siege), `scoped_player` is `None`, so this stays `None`
+        // and the object-scoped `source_id` binding is preserved unchanged.
+        persist_player,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -147,12 +163,16 @@ pub(crate) fn resolve_random_in_chain(
     let index = state.rng.random_range(0..options.len());
     let chosen = options[index].clone();
 
-    let source_id = if persist {
+    let source_id = if persist || choice_type.needs_choice_source_context() {
         Some(ability.source_id)
     } else {
         None
     };
-    bind_named_choice(state, &choice_type, &chosen, source_id);
+    // Anchor choices are never random-selected today, so the random path keeps
+    // object-scoped behavior; `persist_player: None` makes that a deliberate
+    // decision. A future per-player random anchor would compute
+    // `ability.scoped_player` here explicitly.
+    bind_named_choice(state, &choice_type, &chosen, source_id, None);
 
     // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)` answer binds a
     // resolution-scoped chosen player. Append it to the resolving ability's
@@ -185,21 +205,142 @@ pub(crate) fn resolve_random_in_chain(
 /// Faithfully reproduces the state-side binding the interactive handler
 /// performs (`engine_resolution_choices.rs`): when `source_id` is `Some`, a
 /// persistable choice is pushed onto the source's `chosen_attributes` and (for
-/// the layer-affecting choice kinds) layers are recomputed; `last_named_choice`
-/// is always set. The resolution-scoped `chosen_players` append for
+/// the layer-affecting choice kinds) layers are recomputed. Resolution-scoped
+/// land/nonland choices intentionally keep only `last_named_choice` so the
+/// chosen kind or guess can drive the current resolution without rendering a
+/// lasting source-card badge. The resolution-scoped `chosen_players` append for
 /// `Player`/`Opponent` choices is the CALLER's responsibility because its
 /// destination differs (the interactive path appends to the stashed
 /// continuation chain; the random path mutates the resolving ability directly).
+///
+/// CR 607.2d / CR 607.2m (by analogy): when `persist_player` is `Some(pid)`, the
+/// answer is a PER-PLAYER anchor label — it is pushed onto
+/// `state.players[pid].chosen_attributes` ONLY and the object-push branch is
+/// SKIPPED entirely, so no `Label` lands on `source_id`'s object (an
+/// object-scoped `ChosenLabelIs` must never read a per-player anchor). The two
+/// destinations are mutually exclusive.
 pub(crate) fn bind_named_choice(
     state: &mut GameState,
     choice_type: &ChoiceType,
     choice: &str,
     source_id: Option<ObjectId>,
+    persist_player: Option<PlayerId>,
 ) {
-    if let Some(obj_id) = source_id {
+    if let Some(pid) = persist_player {
+        // CR 607.2d / CR 607.2m (by analogy): per-player anchor label. The
+        // `Player` axis only ever stores `ChosenAttribute::Label`, so no
+        // multi-keyword split is needed here. Replace-on-rechoose (retain-drop
+        // any existing `Label`, then push) mirrors the object-branch Keyword
+        // replace so "last chose" holds exactly one anchor per player.
         if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), choice) {
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
+                player
+                    .chosen_attributes
+                    .retain(|a| !matches!(a, ChosenAttribute::Label(_)));
+                player.chosen_attributes.push(attr);
+            }
+            // CR 613.1: per-player labels feed statics/filters — re-run layers.
+            crate::game::layers::mark_layers_full(state);
+        }
+        state.last_named_choice = ChoiceValue::from_choice(choice_type, choice);
+        return;
+    }
+    if let Some(obj_id) =
+        source_id.filter(|_| !choice_type.is_resolution_scoped_card_predicate_choice())
+    {
+        // CR 608.2d: A multi-keyword choice (`ChoiceType::Keyword { count > 1 }`,
+        // e.g. Greymond's "choose two abilities from among ...") arrives as one
+        // comma-joined answer ("First Strike, Vigilance"). Split it on ',' and
+        // trim each token (tolerating "A, B" / "A,B" / "A ,B" whitespace
+        // variants) and persist one `ChosenAttribute::Keyword` per token so each
+        // chosen ability is independently readable by the `AddChosenKeyword`
+        // plural grant. The single-keyword path (count == 1, and every other
+        // choice type) produces a single attribute, byte-identical to before.
+        let attrs: Vec<ChosenAttribute> = match choice_type {
+            ChoiceType::Keyword { options, count } if *count > 1 => choice
+                .split(',')
+                .filter_map(|token| {
+                    ChosenAttribute::from_choice(
+                        ChoiceType::Keyword {
+                            options: options.clone(),
+                            count: 1,
+                        },
+                        token.trim(),
+                    )
+                })
+                .collect(),
+            // CR 607.2d + CR 508.1c: The directional "choose left or right"
+            // prompt (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric
+            // Tactician) arrives as a two-option `ChoiceType::Labeled`. Hijack
+            // ONLY the exact 2-option {left, right} set (case-insensitive, both
+            // present) into a typed `ChosenAttribute::Direction` so the CR
+            // 508.1c gate can read the seat direction. A Labeled choice that
+            // merely includes "Left" among other options (e.g.
+            // ["Left", "Center", "Right"]) is NOT a directional choice — it
+            // falls through to the generic `Label` path below.
+            ChoiceType::Labeled { options }
+                if options.len() == 2
+                    && options
+                        .iter()
+                        .all(|o| SeatDirection::from_choice_label(o).is_some())
+                    && options.iter().any(|o| {
+                        SeatDirection::from_choice_label(o) == Some(SeatDirection::Left)
+                    })
+                    && options.iter().any(|o| {
+                        SeatDirection::from_choice_label(o) == Some(SeatDirection::Right)
+                    }) =>
+            {
+                match SeatDirection::from_choice_label(choice) {
+                    Some(dir) => vec![ChosenAttribute::Direction(dir)],
+                    None => ChosenAttribute::from_choice(choice_type.clone(), choice)
+                        .into_iter()
+                        .collect(),
+                }
+            }
+            _ => ChosenAttribute::from_choice(choice_type.clone(), choice)
+                .into_iter()
+                .collect(),
+        };
+        if !attrs.is_empty() {
             if let Some(obj) = state.objects.get_mut(&obj_id) {
-                obj.chosen_attributes.push(attr);
+                // CR 608.2d: A keyword choice represents the CURRENT answer set,
+                // not an accumulation. A source that makes a fresh keyword choice
+                // each time its effect resolves (Angelic Skirmisher — "At the
+                // beginning of combat on your turn, choose first strike, vigilance,
+                // or lifelink. Creatures you control gain that ability until end of
+                // turn") must REPLACE its prior keyword answer, otherwise the
+                // `AddChosenKeyword` plural read would grant every historical
+                // choice. Clear only `ChosenAttribute::Keyword` (Greymond's single
+                // as-enters bind clears nothing, so its behavior is unchanged);
+                // every other chosen-attribute kind (Color, Subtype, CardName,
+                // Label, …) is untouched so RemoveChosenKeyword/Urborg and the
+                // anchor-word/Morophon cards keep accumulating per their own rules.
+                if matches!(choice_type, ChoiceType::Keyword { .. }) {
+                    obj.chosen_attributes
+                        .retain(|a| !matches!(a, ChosenAttribute::Keyword(_)));
+                }
+                // CR 608.2d + CR 122.1: A per-iteration counter-kind choice (The
+                // Caves of Androzani) represents the CURRENT answer only —
+                // replace the prior `Counter` so `PutChosenCounter` reads this
+                // iteration's kind, not an accumulation across permanents.
+                if matches!(choice_type, ChoiceType::CounterKind { .. }) {
+                    obj.chosen_attributes
+                        .retain(|a| !matches!(a, ChosenAttribute::Counter(_)));
+                }
+                // CR 607.2d "the last chosen direction": a re-choice (Mystic
+                // Barrier's upkeep re-selection) REPLACES the prior direction.
+                // Clear only `ChosenAttribute::Direction`, mirroring the Keyword
+                // retain above, so exactly one direction (the last) survives.
+                if attrs
+                    .iter()
+                    .any(|a| matches!(a, ChosenAttribute::Direction(_)))
+                {
+                    obj.chosen_attributes
+                        .retain(|a| !matches!(a, ChosenAttribute::Direction(_)));
+                }
+                for attr in attrs {
+                    obj.chosen_attributes.push(attr);
+                }
                 // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card name,
                 // creature type, card type, color, etc.) can gate
                 // source-dependent continuous or rule effects. Layer evaluation
@@ -207,13 +348,23 @@ pub(crate) fn bind_named_choice(
                 if matches!(
                     choice_type,
                     ChoiceType::CardName
-                        | ChoiceType::CreatureType
-                        | ChoiceType::CardType
+                        | ChoiceType::CreatureType { .. }
+                        | ChoiceType::CardType { .. }
                         | ChoiceType::BasicLandType
                         | ChoiceType::Color { .. }
                         | ChoiceType::Keyword { .. }
                         | ChoiceType::Player
                         | ChoiceType::Opponent { .. }
+                        // CR 613.1: A persisted `Label` gates `ChosenLabelIs`
+                        // continuous statics — anchor-word modal permanents
+                        // (Khans Sieges) and the modal as-enters P/T class
+                        // (Primal Plasma/Clay, Corrupted Shapeshifter, Aquamorph
+                        // Entity), whose Layer-7b SetPower/SetToughness apply only
+                        // while the chosen label is active. Without re-running
+                        // layers here the pre-choice printed P/T survives (a modal
+                        // creature that entered printed 0/0 would then die to SBAs
+                        // before its gated static could set its real P/T).
+                        | ChoiceType::Labeled { .. }
                 ) {
                     crate::game::layers::mark_layers_full(state);
                 }
@@ -303,8 +454,14 @@ fn compute_options(
 ) -> Vec<String> {
     match choice_type {
         // CR 205.3m: Creature types are shared between creature and kindred cards.
-        ChoiceType::CreatureType => {
-            if state.all_creature_types.is_empty() {
+        // A non-empty `options` restricts the offered set to an explicit
+        // Oracle-listed candidate list (A Killer Among Us' "secretly choose
+        // Human, Merfolk, or Goblin"), preserving source order; empty ⇒ all
+        // creature types (Morophon / Changeling).
+        ChoiceType::CreatureType { options } => {
+            if !options.is_empty() {
+                options.clone()
+            } else if state.all_creature_types.is_empty() {
                 to_strings(FALLBACK_CREATURE_TYPES)
             } else {
                 let mut types = state.all_creature_types.clone();
@@ -324,13 +481,65 @@ fn compute_options(
         ChoiceType::BasicLandType => to_strings(BASIC_LAND_TYPES),
         // CR 205.2a: The card types are artifact, battle, conspiracy, creature,
         // dungeon, enchantment, instant, land, phenomenon, plane, planeswalker,
-        // scheme, sorcery, kindred, and vanguard.
-        ChoiceType::CardType => to_strings(CARD_TYPES),
+        // scheme, sorcery, kindred, and vanguard. `excluded` narrows the offered
+        // set (e.g. Archon of Valor's Reach restricts to artifact, enchantment,
+        // instant, sorcery, planeswalker by excluding creature and land).
+        ChoiceType::CardType { excluded } => CARD_TYPES
+            .iter()
+            .filter(|name| {
+                name.parse::<CoreType>()
+                    .is_ok_and(|core_type| !excluded.contains(&core_type))
+            })
+            .map(|name| name.to_string())
+            .collect(),
         // CardName options are provided by the frontend from its local card database.
         // The engine sends an empty list to avoid serializing 30k+ names every state update.
         ChoiceType::CardName => Vec::new(),
-        ChoiceType::NumberRange { min, max } => (*min..=*max).map(|n| n.to_string()).collect(),
+        ChoiceType::NumberRange {
+            min,
+            max,
+            distinctness,
+        } => match distinctness {
+            crate::types::ability::NumberDistinctness::Repeatable => {
+                (*min..=*max).map(|n| n.to_string()).collect()
+            }
+            // CR 609.3 + "...that hasn't been chosen": each successive COMMIT
+            // excludes numbers already committed on this source across prior
+            // resolutions. Chosen numbers persist as `ChosenAttribute::Number`
+            // (bind_named_choice when persist), so the legal domain is
+            // (min..=max) minus that history. When all are exhausted, options is
+            // empty → `choose::resolve` sets `cost_payment_failed_flag` and
+            // no-ops, blocking any dependent guess (CR 609.3).
+            //
+            // BOUNDARY: source-global subtraction; safe for the current pool
+            // (only The Toymaker's Trap sets DistinctFromSourceHistory AND
+            // re-chooses). If a card ever persists a number from one choice AND
+            // offers a separate DistinctFromSourceHistory NumberRange on the same
+            // source, scope the read to a per-choice tag.
+            crate::types::ability::NumberDistinctness::DistinctFromSourceHistory => {
+                let used: Vec<u8> = state
+                    .objects
+                    .get(&source_id)
+                    .map(|o| {
+                        o.chosen_attributes
+                            .iter()
+                            .filter_map(|a| match a {
+                                ChosenAttribute::Number(n) => Some(*n),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (*min..=*max)
+                    .filter(|n| !used.contains(n))
+                    .map(|n| n.to_string())
+                    .collect()
+            }
+        },
         ChoiceType::Labeled { options } => options.clone(),
+        ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
+            ChoiceType::card_predicate_labels(options)
+        }
         // CR 205.3i: Land types include the basic land types plus Cave, Desert, Gate, etc.
         ChoiceType::LandType => to_strings(LAND_TYPES),
         // CR 102.3: An opponent is any player not on the choosing player's team
@@ -366,8 +575,23 @@ fn compute_options(
         // CR 608.2d: "Choose an ability the target has, then remove it" —
         // option labels come from the typed `Keyword` list emitted by the
         // converter. Empty option lists are legal (the choice resolves with
-        // no options, and the dependent effect is a no-op).
-        ChoiceType::Keyword { options } => options.iter().map(|kw| kw.to_string()).collect(),
+        // no options, and the dependent effect is a no-op). For `count > 1`
+        // (Greymond's "choose two abilities from among ...") each option is a
+        // comma-joined unordered count-combination of the keyword names, so the
+        // player makes a single selection of the whole group.
+        ChoiceType::Keyword { options, count } => {
+            if *count > 1 {
+                keyword_choice_options(options, *count)
+            } else {
+                options.iter().map(|kw| kw.to_string()).collect()
+            }
+        }
+        // CR 608.2d + CR 122.1: the concrete counter-kind option list is baked
+        // into the `ChoiceType` at resolution by `choose_counter_kind::resolve`
+        // (enumerated from the target object's counters), so render it directly.
+        ChoiceType::CounterKind { options } => {
+            options.iter().map(|k| k.as_str().into_owned()).collect()
+        }
     }
 }
 
@@ -401,6 +625,57 @@ fn two_color_options() -> Vec<String> {
     options
 }
 
+/// CR 608.2d: Generate every comma-joined unordered `count`-combination of the
+/// keyword option list (Greymond's "choose two abilities from among first
+/// strike, vigilance, and lifelink" → `["First Strike, Vigilance", "First
+/// Strike, Lifelink", "Vigilance, Lifelink"]`). Mirrors `two_color_options`:
+/// order within a combination doesn't matter, so combinations use ascending
+/// index tuples (no permutations). The resulting comma-joined string is one
+/// selectable option; `bind_named_choice` splits it back into individual
+/// `ChosenAttribute::Keyword` entries at resolution.
+///
+/// INVARIANT: this `", "`-join / split round-trip is only safe because every
+/// keyword admitted by the parser (`parse_keyword_from_oracle`) has a
+/// comma-free `Display` string. A future "choose N abilities" list that admits
+/// a Debug-fallback keyword whose `Display` contains a comma would mis-tokenize
+/// — keep the parser's keyword allowlist comma-free, or persist structured
+/// tokens instead of a joined string.
+fn keyword_choice_options(
+    options: &[crate::types::keywords::Keyword],
+    count: usize,
+) -> Vec<String> {
+    let names: Vec<String> = options.iter().map(|kw| kw.to_string()).collect();
+    let mut result = Vec::new();
+    let mut indices: Vec<usize> = (0..count).collect();
+    if count == 0 || count > names.len() {
+        return result;
+    }
+    loop {
+        result.push(
+            indices
+                .iter()
+                .map(|&i| names[i].clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        // Advance the combination indices (lexicographic next-combination).
+        let mut i = count;
+        loop {
+            if i == 0 {
+                return result;
+            }
+            i -= 1;
+            if indices[i] != i + names.len() - count {
+                break;
+            }
+        }
+        indices[i] += 1;
+        for j in (i + 1)..count {
+            indices[j] = indices[j - 1] + 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,12 +695,84 @@ mod tests {
         )
     }
 
+    /// CR 607.2d / CR 607.2m (by analogy): `bind_named_choice` routes an anchor
+    /// label to the PLAYER when `persist_player` is set (never to the object),
+    /// to the OBJECT otherwise, and replaces on re-choose per player.
+    #[test]
+    fn bind_named_choice_routes_per_player_vs_object() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = ObjectId(500);
+        let obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            crate::types::identifiers::CardId(500),
+            PlayerId(0),
+            "Anchor Plane".to_string(),
+            crate::types::zones::Zone::Command,
+        );
+        state.objects.insert(obj_id, obj);
+        let labeled = ChoiceType::Labeled {
+            options: vec!["Green anchor".to_string(), "Red waterfall".to_string()],
+        };
+
+        // Per-player: Label lands on players[0], object stays empty.
+        bind_named_choice(
+            &mut state,
+            &labeled,
+            "Green anchor",
+            Some(obj_id),
+            Some(PlayerId(0)),
+        );
+        assert!(crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(0),
+            "Green anchor"
+        ));
+        assert!(
+            state
+                .objects
+                .get(&obj_id)
+                .unwrap()
+                .chosen_attributes
+                .is_empty(),
+            "per-player anchor must NOT land on the plane object"
+        );
+
+        // Re-choose replaces the prior per-player Label (exactly one anchor).
+        bind_named_choice(
+            &mut state,
+            &labeled,
+            "Red waterfall",
+            Some(obj_id),
+            Some(PlayerId(0)),
+        );
+        assert!(crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(0),
+            "Red waterfall"
+        ));
+        assert!(!crate::game::players::player_last_chose_label(
+            &state,
+            PlayerId(0),
+            "Green anchor"
+        ));
+
+        // Object-scoped (persist_player None): Label lands on the object.
+        bind_named_choice(&mut state, &labeled, "Green anchor", Some(obj_id), None);
+        assert!(state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .chosen_attributes
+            .iter()
+            .any(|a| matches!(a, ChosenAttribute::Label(l) if l == "Green anchor")));
+    }
+
     #[test]
     fn choose_creature_type_sets_named_choice() {
         let mut state = GameState::new_two_player(42);
         state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
 
-        let ability = make_choose_ability(ChoiceType::CreatureType);
+        let ability = make_choose_ability(ChoiceType::creature_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -437,7 +784,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*player, PlayerId(0));
-                assert_eq!(*choice_type, ChoiceType::CreatureType);
+                assert_eq!(*choice_type, ChoiceType::creature_type());
                 assert!(options.contains(&"Elf".to_string()));
                 assert!(options.contains(&"Goblin".to_string()));
             }
@@ -524,7 +871,7 @@ mod tests {
     #[test]
     fn choose_card_type_offers_seven_types() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::CardType);
+        let ability = make_choose_ability(ChoiceType::card_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -538,11 +885,35 @@ mod tests {
         }
     }
 
+    // CR 205.2a: Archon of Valor's Reach restricts the card-type choice to
+    // "artifact, enchantment, instant, sorcery, or planeswalker" by excluding
+    // Creature and Land from the offered set.
+    #[test]
+    fn choose_card_type_excludes_restricted_types() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::card_type_excluding(vec![
+            CoreType::Creature,
+            CoreType::Land,
+        ]));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options.len(), 5);
+                assert!(!options.contains(&"Creature".to_string()));
+                assert!(!options.contains(&"Land".to_string()));
+                assert!(options.contains(&"Planeswalker".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
     #[test]
     fn choose_creature_type_with_empty_all_types_uses_fallback() {
         let mut state = GameState::new_two_player(42);
         // all_creature_types is empty by default
-        let ability = make_choose_ability(ChoiceType::CreatureType);
+        let ability = make_choose_ability(ChoiceType::creature_type());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -597,7 +968,11 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
             Effect::Choose {
-                choice_type: ChoiceType::NumberRange { min: 0, max: 5 },
+                choice_type: ChoiceType::NumberRange {
+                    min: 0,
+                    max: 5,
+                    distinctness: crate::types::ability::NumberDistinctness::Repeatable,
+                },
                 persist: false,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
@@ -613,6 +988,49 @@ mod tests {
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn number_range_distinctness_excludes_committed_history() {
+        // CR 609.3: a DistinctFromSourceHistory domain excludes numbers already
+        // committed on the source; Repeatable ignores history.
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let mut obj = crate::game::game_object::GameObject::new(
+            source_id,
+            crate::types::identifiers::CardId(0),
+            PlayerId(0),
+            "Source".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Number(2));
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Number(4));
+        state.objects.insert(source_id, obj);
+
+        let distinct = ChoiceType::NumberRange {
+            min: 1,
+            max: 5,
+            distinctness: crate::types::ability::NumberDistinctness::DistinctFromSourceHistory,
+        };
+        assert_eq!(
+            compute_options(&state, &distinct, PlayerId(0), source_id, &[]),
+            vec!["1", "3", "5"],
+            "committed 2 and 4 are excluded"
+        );
+
+        // Same history under Repeatable: full range is still offered.
+        let repeatable = ChoiceType::NumberRange {
+            min: 1,
+            max: 5,
+            distinctness: crate::types::ability::NumberDistinctness::Repeatable,
+        };
+        assert_eq!(
+            compute_options(&state, &repeatable, PlayerId(0), source_id, &[]),
+            vec!["1", "2", "3", "4", "5"],
+            "Repeatable ignores source history"
+        );
     }
 
     #[test]
@@ -635,6 +1053,53 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options, &["Left", "Right"]);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn land_nonland_guess_carries_source_context_without_persisting() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::CardPredicateGuess {
+                    options: ChoiceType::land_or_nonland_card_predicate_options(),
+                },
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type,
+                options,
+                source_id,
+                persist_player,
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(
+                    *choice_type,
+                    ChoiceType::CardPredicateGuess {
+                        options: ChoiceType::land_or_nonland_card_predicate_options()
+                    }
+                );
+                assert_eq!(
+                    options,
+                    &ChoiceType::card_predicate_labels(
+                        &ChoiceType::land_or_nonland_card_predicate_options()
+                    )
+                );
+                assert_eq!(*source_id, Some(ObjectId(100)));
+                assert_eq!(*persist_player, None);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -743,7 +1208,10 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        let ability = make_choose_ability(ChoiceType::Keyword { options: vec![] });
+        let ability = make_choose_ability(ChoiceType::Keyword {
+            options: vec![],
+            count: 1,
+        });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         assert!(
@@ -795,6 +1263,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability = make_choose_ability(ChoiceType::Keyword {
             options: vec![Keyword::FirstStrike, Keyword::Landwalk("Swamp".to_string())],
+            count: 1,
         });
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -852,5 +1321,229 @@ mod tests {
             &mut ability,
             &mut events
         ));
+    }
+
+    /// V10 (matthewevans regression for PR #4638) — CR 608.2d + CR 613.1f: A
+    /// source that makes a REPEATED single-keyword choice over time (Angelic
+    /// Skirmisher: "At the beginning of each combat, choose first strike,
+    /// vigilance, or lifelink. Creatures you control gain that ability until end
+    /// of turn") must REPLACE its stored keyword answer each time it chooses, not
+    /// accumulate. This drives the PRODUCTION `ChooseOption` / `bind_named_choice`
+    /// path (no manual `chosen_attributes` seed): the real parsed choose+grant
+    /// chain, re-hosted as an activated ability, is fired twice.
+    ///
+    /// Choose First Strike (grant applies), then on a later activation choose
+    /// Lifelink, and assert the granted set is the CURRENT choice ONLY — Lifelink
+    /// granted, First Strike NO LONGER granted. Without the keyword-clear in
+    /// `bind_named_choice`, both historical `ChosenAttribute::Keyword` entries
+    /// survive and the `AddChosenKeyword` plural read grants First Strike AND
+    /// Lifelink — exactly the regression this guards (revert the `.retain(..)` in
+    /// `bind_named_choice` and the final `!has_kw(FirstStrike)` assert fails).
+    #[test]
+    fn repeated_keyword_choice_replaces_prior_answer() {
+        use crate::game::keywords::has_keyword;
+        use crate::game::layers::evaluate_layers;
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::ability::AbilityKind;
+        use crate::types::actions::GameAction;
+        use crate::types::keywords::Keyword;
+        use crate::types::phase::Phase;
+
+        const P0: PlayerId = PlayerId(0);
+
+        /// Re-evaluate layers and report whether `id` currently has `keyword`.
+        fn has_kw(runner: &mut GameRunner, id: ObjectId, keyword: &Keyword) -> bool {
+            runner.state_mut().layers_dirty.mark_full();
+            evaluate_layers(runner.state_mut());
+            has_keyword(&runner.state().objects[&id], keyword)
+        }
+
+        /// Activate `source`'s keyword-choice ability through the REAL pipeline and
+        /// answer the surfaced `NamedChoice` with `keyword` via the production
+        /// `GameAction::ChooseOption` handler (no manual `chosen_attributes` seed).
+        fn drive_keyword_choice(runner: &mut GameRunner, source: ObjectId, keyword: &str) {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .expect("activate the keyword-choice ability");
+            runner.advance_until_stack_empty();
+
+            let WaitingFor::NamedChoice { options, .. } = runner.state().waiting_for.clone() else {
+                panic!(
+                    "must pause on the keyword NamedChoice, got {}",
+                    runner.waiting_for_kind()
+                );
+            };
+            let choice = options
+                .into_iter()
+                .find(|o| o == keyword)
+                .unwrap_or_else(|| panic!("expected a {keyword:?} keyword option"));
+
+            runner
+                .act(GameAction::ChooseOption { choice })
+                .expect("answer the keyword choice");
+            runner.advance_until_stack_empty();
+        }
+
+        // Parse Angelic Skirmisher's real "choose a keyword; creatures you control
+        // gain that ability" chain, then re-host it as an ACTIVATED ability so the
+        // test can drive the same choose+grant twice on demand without staging two
+        // full combat phases. The choose/bind path exercised is identical.
+        let trigger = parse_trigger_line(
+            "At the beginning of each combat, choose first strike, vigilance, or \
+             lifelink. Creatures you control gain that ability until end of turn.",
+            "Angelic Skirmisher",
+        );
+        let mut activated = *trigger
+            .execute
+            .expect("Angelic Skirmisher trigger must have an execute chain");
+        activated.kind = AbilityKind::Activated;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let skirmisher = {
+            let mut b = scenario.add_creature(P0, "Angelic Skirmisher", 4, 4);
+            b.with_subtypes(vec!["Angel"]);
+            b.with_ability_definition(activated);
+            b.id()
+        };
+        let ally = scenario.add_creature(P0, "Footsoldier", 2, 2).id();
+
+        let mut runner = scenario.build();
+
+        // --- First activation: choose First Strike ---
+        drive_keyword_choice(&mut runner, skirmisher, "First Strike");
+        assert!(
+            has_kw(&mut runner, ally, &Keyword::FirstStrike),
+            "after choosing First Strike, the ally must have it"
+        );
+        assert!(
+            !has_kw(&mut runner, ally, &Keyword::Lifelink),
+            "Lifelink was never chosen yet"
+        );
+
+        // --- Second activation (a later combat): choose Lifelink ---
+        drive_keyword_choice(&mut runner, skirmisher, "Lifelink");
+
+        // The stored answer set must now be the CURRENT choice ONLY.
+        let chosen = runner.state().objects[&skirmisher].chosen_keywords();
+        assert_eq!(
+            chosen,
+            vec![&Keyword::Lifelink],
+            "the second choice must REPLACE the first — only Lifelink stored, got {chosen:?}"
+        );
+        assert!(
+            has_kw(&mut runner, ally, &Keyword::Lifelink),
+            "after choosing Lifelink, the ally must have it"
+        );
+        assert!(
+            !has_kw(&mut runner, ally, &Keyword::FirstStrike),
+            "the FIRST choice (First Strike) must NO LONGER be granted — a keyword \
+             choice represents the current answer set, not an accumulation"
+        );
+    }
+
+    /// Create a bare battlefield object to receive a bound choice.
+    #[cfg(test)]
+    fn seed_source(state: &mut GameState) -> ObjectId {
+        use crate::types::identifiers::CardId;
+        crate::game::zones::create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Pramikon, Sky Rampart".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        )
+    }
+
+    /// CR 607.2d: The {Left,Right} hijack fires ONLY for the exact 2-option
+    /// {left,right} set. A Labeled prompt that merely INCLUDES "Left" among other
+    /// options (["Left","Center","Right"]) is an ordinary anchor-word Label, not
+    /// a direction — it must persist as a `Label` and `chosen_direction()` stays
+    /// `None`. Revert the `options.len() == 2` guard → this stores a Direction.
+    #[test]
+    fn labeled_three_options_including_left_stays_a_label() {
+        use crate::types::ability::SeatDirection;
+
+        let mut state = GameState::new_two_player(42);
+        let src = seed_source(&mut state);
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Center".into(), "Right".into()],
+        };
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
+
+        let obj = &state.objects[&src];
+        assert_eq!(
+            obj.chosen_direction(),
+            None,
+            "a 3-option labeled choice must NOT be hijacked into a Direction"
+        );
+        assert_eq!(
+            obj.chosen_label(),
+            Some("Left"),
+            "it must persist as an ordinary anchor-word Label"
+        );
+        // Sanity: SeatDirection typing still recognises the token in isolation.
+        assert_eq!(
+            SeatDirection::from_choice_label("Left"),
+            Some(SeatDirection::Left)
+        );
+    }
+
+    /// CR 607.2d: The exact 2-option {left,right} set is hijacked into a typed
+    /// `Direction` (case-insensitive), and NO `Label` is stored. Revert the
+    /// hijack branch → this stores a `Label` and `chosen_direction()` is `None`.
+    #[test]
+    fn labeled_left_right_binds_direction_not_label() {
+        use crate::types::ability::SeatDirection;
+
+        let mut state = GameState::new_two_player(42);
+        let src = seed_source(&mut state);
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Right".into()],
+        };
+        // Lowercase answer proves case-insensitive typing via from_choice_label.
+        bind_named_choice(&mut state, &choice_type, "left", Some(src), None);
+
+        let obj = &state.objects[&src];
+        assert_eq!(obj.chosen_direction(), Some(SeatDirection::Left));
+        assert_eq!(
+            obj.chosen_label(),
+            None,
+            "the directional choice must NOT also leave a Label"
+        );
+    }
+
+    /// CR 607.2d "the last chosen direction": re-choosing Right after Left leaves
+    /// exactly one `Direction(Right)` — the prior direction is cleared. Revert the
+    /// Direction retain-clear → both directions accumulate and the count is 2.
+    #[test]
+    fn rechoosing_direction_replaces_prior() {
+        use crate::types::ability::{ChosenAttribute, SeatDirection};
+
+        let mut state = GameState::new_two_player(42);
+        let src = seed_source(&mut state);
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Left".into(), "Right".into()],
+        };
+        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
+        bind_named_choice(&mut state, &choice_type, "Right", Some(src), None);
+
+        let obj = &state.objects[&src];
+        let directions: Vec<_> = obj
+            .chosen_attributes
+            .iter()
+            .filter(|a| matches!(a, ChosenAttribute::Direction(_)))
+            .collect();
+        assert_eq!(
+            directions.len(),
+            1,
+            "exactly one Direction must survive a re-choice, got {directions:?}"
+        );
+        assert_eq!(obj.chosen_direction(), Some(SeatDirection::Right));
     }
 }

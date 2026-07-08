@@ -8,7 +8,7 @@ use crate::types::player::PlayerId;
 
 use super::engine::{apply_action_boundary_with_stack_limit, PublicFinalizeMode};
 use super::public_state::finalize_display_state;
-use super::{players, turn_control};
+use super::{topology, turn_control};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,12 +165,19 @@ fn seed_remaining_priority_cycle_passes<F>(
 where
     F: FnMut(&GameState, PlayerId) -> ResolveAllCallbackDecision,
 {
-    let mut seat = players::next_player(state, current_seat);
+    let current_rep = topology::priority_pass_representative(state, current_seat);
+    let participants = topology::priority_pass_participants(state);
+    let Some(current_idx) = participants.iter().position(|&seat| seat == current_rep) else {
+        return PriorityCycleFastForward::CannotSeed;
+    };
     let mut seeded = Vec::new();
 
-    while seat != current_seat {
-        if !state.priority_passes.contains(&seat) {
-            let actor = turn_control::authorized_submitter_for_player(state, seat);
+    for offset in 1..participants.len() {
+        let seat = participants[(current_idx + offset) % participants.len()];
+        let representative = topology::priority_pass_representative(state, seat);
+
+        if !state.priority_passes.contains(&representative) {
+            let actor = turn_control::authorized_submitter_for_player(state, representative);
             if actor != requester {
                 match choose_non_requester_action(state, actor) {
                     ResolveAllCallbackDecision::Action(GameAction::PassPriority) => {}
@@ -180,14 +187,8 @@ where
                     ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
                 }
             }
-            seeded.push(seat);
+            seeded.push(representative);
         }
-
-        let next = players::next_player(state, seat);
-        if next == seat {
-            break;
-        }
-        seat = next;
     }
 
     for seat in seeded {
@@ -220,10 +221,11 @@ mod tests {
         ManaContribution, ManaProduction, ResolvedAbility, TargetFilter,
     };
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{PublicStateDirty, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaColor;
-    use crate::types::phase::Phase;
+    use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use crate::types::zones::Zone;
 
     use super::super::public_state::{finalize_public_state, mark_public_state_all_dirty};
@@ -268,6 +270,17 @@ mod tests {
 
     fn priority_state(semantic_seat: PlayerId, stack: Vec<StackEntry>) -> GameState {
         let mut state = GameState::new_two_player(7);
+        state.waiting_for = WaitingFor::Priority {
+            player: semantic_seat,
+        };
+        state.priority_player = semantic_seat;
+        state.stack = stack.into_iter().collect();
+        state
+    }
+
+    fn two_hg_priority_state(semantic_seat: PlayerId, stack: Vec<StackEntry>) -> GameState {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+        state.active_player = PlayerId(0);
         state.waiting_for = WaitingFor::Priority {
             player: semantic_seat,
         };
@@ -370,6 +383,33 @@ mod tests {
     }
 
     #[test]
+    fn two_hg_resolve_all_seeds_only_opposing_team_representative() {
+        let mut state = two_hg_priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
+        let calls = Cell::new(0);
+
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, actor| {
+            calls.set(calls.get() + 1);
+            assert_eq!(
+                actor,
+                PlayerId(2),
+                "callback should be for the opposing team representative, not active teammate"
+            );
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        });
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.items_resolved, 1);
+        assert!(state.stack.is_empty());
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::PriorityPassed { .. })),
+            "Resolve All should seed the opposing team pass instead of prompting the active teammate"
+        );
+    }
+
+    #[test]
     fn future_non_pass_callback_prevents_priority_cycle_seeding() {
         let mut state = priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
         let calls = Cell::new(0);
@@ -377,7 +417,10 @@ mod tests {
         let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
             calls.set(calls.get() + 1);
             ResolveAllCallbackDecision::Action(GameAction::SetPhaseStops {
-                stops: vec![Phase::PreCombatMain],
+                stops: vec![PhaseStop {
+                    phase: Phase::PreCombatMain,
+                    scope: PhaseStopScope::AllTurns,
+                }],
             })
         });
 
@@ -386,7 +429,10 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
         assert_eq!(
             state.phase_stops.get(&PlayerId(1)),
-            Some(&vec![Phase::PreCombatMain])
+            Some(&vec![PhaseStop {
+                phase: Phase::PreCombatMain,
+                scope: PhaseStopScope::AllTurns,
+            }])
         );
     }
 
@@ -443,7 +489,10 @@ mod tests {
         let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
             calls.set(calls.get() + 1);
             ResolveAllCallbackDecision::Action(GameAction::SetPhaseStops {
-                stops: vec![Phase::PreCombatMain],
+                stops: vec![PhaseStop {
+                    phase: Phase::PreCombatMain,
+                    scope: PhaseStopScope::AllTurns,
+                }],
             })
         });
 
@@ -452,7 +501,10 @@ mod tests {
         assert_eq!(state.stack.len(), 1);
         assert_eq!(
             state.phase_stops.get(&PlayerId(1)),
-            Some(&vec![Phase::PreCombatMain])
+            Some(&vec![PhaseStop {
+                phase: Phase::PreCombatMain,
+                scope: PhaseStopScope::AllTurns,
+            }])
         );
     }
 

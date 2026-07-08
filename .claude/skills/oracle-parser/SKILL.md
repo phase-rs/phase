@@ -286,6 +286,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `6c-altcost-d` | "For each {C} in a cost, you may pay 2 life rather than pay that mana" (K'rrik class, CR 107.4f) | static-line parse | `oracle_static/` |
 | `6c-altcost-e` | "You may [cost] rather than pay [keyword] cost[s]" (New Perspectives / Heart of Kiran class) | `parse_alternative_keyword_cost()` | `oracle_static/cost_mod.rs` |
 | `6d` | Compound "enters tapped and doesn't untap during your untap step" — decomposed into ETB-tapped replacement (CR 614.1c) + CantUntap static (CR 502.3) | both parsers run | `oracle.rs` |
+| `6e` | Cross-layer compound "`<subject>` can't `<P1>` and can't `<P2>`" — each conjunct routed to both layer parsers (Blossombind: Untap-prevention replacement CR 701.26b + AddCounter-prevention replacement CR 614.6) so a conjunct isn't dropped by `is_static_pattern` claiming the whole line | `parse_static_replacement_compound()` | `oracle.rs` |
 | `7` | Static/continuous patterns — `is_static_pattern()`; spell lines with explicit durations and damage verbs are deferred to `9`; copy-replacement lines route to the replacement parser first | `parse_static_line_multi()` family | `oracle_classifier.rs` → `oracle_static/` |
 | `8` | Replacement patterns — `is_replacement_pattern()`; one paragraph can yield multiple ETB replacements | `parse_replacement_line()` | `oracle_classifier.rs` → `oracle_replacement.rs` |
 | `8c` | Leyline clause "If this card is in your opening hand, you may begin the game with it on the battlefield" (CR 103.6) | `parse_begin_game_clause()` | `oracle.rs` |
@@ -720,7 +721,9 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - [ ] Update `is_static_pattern()` or `is_replacement_pattern()` in `oracle_classifier.rs` if text is routed to the wrong parser
 
 **Phase 6 — Tests & Verification**
-- [ ] Parser unit tests for each new pattern
+- [ ] Parser unit tests for each new pattern — using the card's **verbatim Oracle text**, never a paraphrase (a paraphrase can take a different parser branch than the real card)
+- [ ] Negative tests carry a positive reach-guard: any `!detector(...)` / "does not parse to X" assertion must also prove the input parsed past upstream short-circuits (zero `Effect::Unimplemented`, expected positive shape) — otherwise an early-return makes it pass vacuously
+- [ ] Runtime discriminating test when the change claims runtime behavior (see `/card-test`): parser shape tests alone are acceptable ONLY when unsupported semantics remain honestly `Unimplemented`/red in coverage
 - [ ] Snapshot tests: `oracle_ir/snapshot_tests.rs` (IR + lowered parity, insta), plus per-module `snapshot_tests.rs` in `oracle_static/`
 - [ ] `cargo coverage` — Unimplemented count should decrease
 - [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.

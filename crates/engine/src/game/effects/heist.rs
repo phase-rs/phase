@@ -213,11 +213,14 @@ pub fn resolve_exile(
                         granted_to: controller,
                         frequency: CastFrequency::Unlimited,
                         source_id: Some(source_id),
+                        invalidation: None,
                         exiled_by_ability_controller: Some(controller),
                         mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                         card_filter: None,
                         single_use_group: None,
                         single_use: false,
+                        cast_cost_raise: None,
+                        land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     });
             }
         }

@@ -44,6 +44,10 @@ pub fn resolve(
         Zone::Battlefield,
     );
 
+    // CR 613.7d: the Incubator token enters the battlefield, so it receives a
+    // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+    let entry_timestamp = state.next_timestamp();
+
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         obj.is_token = true;
         obj.display_source = DisplaySource::Token;
@@ -57,10 +61,18 @@ pub fn resolve(
         obj.color = vec![];
         obj.base_color = vec![];
         // CR 400.7 + CR 302.6: Single authority for ETB state.
-        obj.reset_for_battlefield_entry(state.turn_number);
+        obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
     }
 
-    // CR 701.53a: The Incubator enters with N +1/+1 counters.
+    // CR 701.53a: The Incubator enters with N +1/+1 counters — apply these
+    // through the replacement pipeline BEFORE battlefield-entry bookkeeping
+    // and the ZoneChanged event, mirroring token.rs's canonical order
+    // (counters → bookkeeping → ZoneChanged). A replacement effect
+    // (Doubling Season, etc.) may pause for a player choice; on that path the
+    // entry bookkeeping/event must not fire yet (the token hasn't finished
+    // entering with its actual counter count) — `InjectPredefinedTokenAbilities`
+    // defers that work to `apply_pending_counter_post_action` in counters.rs,
+    // which runs once the counter choice resolves.
     if n > 0
         && !add_counter_with_replacement(
             state,
@@ -79,6 +91,38 @@ pub fn resolve(
         );
         return Ok(());
     }
+
+    // Battlefield entry: incremental re-derive candidate for this Incubator
+    // token (escalates to a full pass if it sources effects, carries
+    // counters, etc.).
+    crate::game::layers::mark_layers_entered(state, obj_id);
+    crate::game::restrictions::record_battlefield_entry(state, obj_id);
+    crate::game::restrictions::record_token_created(state, obj_id);
+
+    // CR 603.6a: The Incubator token enters the battlefield as a zone change
+    // from outside the game (`from: None`) — emit `ZoneChanged` so every ETB
+    // trigger matcher (Altar of the Brood's "another permanent you control
+    // enters", Soul Warden, Panharmonicon, etc.) fires for it through the
+    // same code path used for normal token creation, and observes the
+    // Incubator with its final (post-replacement) counter count already on
+    // it. Without this the Incubator enters silently and no ETB ability ever
+    // triggers (issue #4238). Mirrors
+    // `token.rs::apply_create_token_after_replacement_with_created_ids` and
+    // `conjure.rs`'s identical fix for the same bug class.
+    let zone_change_record = state
+        .objects
+        .get(&obj_id)
+        .expect("incubator token was just created")
+        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
+    state
+        .zone_changes_this_turn
+        .push(zone_change_record.clone());
+    events.push(GameEvent::ZoneChanged {
+        object_id: obj_id,
+        from: None,
+        to: Zone::Battlefield,
+        record: Box::new(zone_change_record),
+    });
 
     super::token::inject_predefined_token_abilities(state, obj_id);
 
@@ -104,6 +148,192 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn incubate_records_zone_change_for_etb_triggers() {
+        let mut state = GameState::new_two_player(7);
+        let mut events = Vec::new();
+        let ability = make_incubate_ability(QuantityExpr::Fixed { value: 1 });
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let zone_change = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } => Some((*object_id, *from, *to)),
+                _ => None,
+            })
+            .expect("incubate emits ZoneChanged so ETB triggers (e.g. Altar of the Brood) fire");
+
+        assert_eq!(zone_change.1, None);
+        assert_eq!(zone_change.2, Zone::Battlefield);
+        assert_eq!(state.zone_changes_this_turn.len(), 1);
+        assert_eq!(state.zone_changes_this_turn[0].object_id, zone_change.0);
+        assert_eq!(state.zone_changes_this_turn[0].from_zone, None);
+        assert_eq!(state.zone_changes_this_turn[0].to_zone, Zone::Battlefield);
+    }
+
+    /// PR review on #4238: a CR 616.1 ordering choice between two
+    /// non-commuting counter-quantity replacements (Doubling Season +
+    /// Hardened Scales, mirroring
+    /// `replacement::tests::quantity_modification_field_collision_prompts_for_order`)
+    /// must pause the Incubator's ZoneChanged/bookkeeping until the counters
+    /// actually finish — not leak it early with a pre-replacement snapshot.
+    #[test]
+    fn incubate_paused_counter_replacement_defers_zone_changed_until_resolved() {
+        use crate::game::effects::counters::{
+            apply_counter_addition, drain_pending_counter_additions,
+        };
+        use crate::game::game_object::GameObject;
+        use crate::game::replacement::{continue_replacement, ReplacementResult};
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        let mut doubling_season = GameObject::new(
+            ObjectId(10),
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        doubling_season.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::DOUBLE)]
+            .into();
+        let mut hardened_scales = GameObject::new(
+            ObjectId(20),
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        hardened_scales.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::Plus { value: 1 })]
+            .into();
+        state.objects.insert(ObjectId(10), doubling_season);
+        state.objects.insert(ObjectId(20), hardened_scales);
+        state.battlefield.push_back(ObjectId(10));
+        state.battlefield.push_back(ObjectId(20));
+
+        let ability = make_incubate_ability(QuantityExpr::Fixed { value: 1 });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Paused on the CR 616.1 ordering prompt: no ZoneChanged should have
+        // leaked into `events` yet, and the entry bookkeeping is stashed as a
+        // pending post-action rather than already applied.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ZoneChanged { .. })),
+            "ZoneChanged must not fire before the paused counter replacement resolves"
+        );
+        assert!(state.pending_counter_additions.is_some());
+
+        // Resolve the player's replacement-ordering choice for the paused AddCounter.
+        let result = continue_replacement(&mut state, 0, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::AddCounter {
+            placement:
+                CounterPlacement::Object {
+                    actor,
+                    object_id,
+                    counter_type,
+                },
+            count,
+            ..
+        }) = result
+        else {
+            panic!("expected resumed AddCounter execute, got {result:?}");
+        };
+        apply_counter_addition(
+            &mut state,
+            actor,
+            object_id,
+            counter_type,
+            count,
+            &mut events,
+        );
+        drain_pending_counter_additions(&mut state, &mut events);
+
+        let zone_change = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } => Some((*object_id, *from, *to)),
+                _ => None,
+            })
+            .expect("ZoneChanged must fire once the paused counter replacement resolves");
+        assert_eq!(zone_change.1, None);
+        assert_eq!(zone_change.2, Zone::Battlefield);
+
+        // The ZoneChanged snapshot must observe the token's final
+        // (post-replacement) counter count, not a pre-resolution state.
+        let incubator = state.objects.get(&zone_change.0).unwrap();
+        assert_eq!(
+            incubator.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(count)
+        );
+    }
+
+    /// Issue #4238: Altar of the Brood's "another permanent you control
+    /// enters" trigger must fire when Incubate creates the Incubator token.
+    /// Mirrors `token::tests::catalog_pest_dies_trigger_fires_through_zone_pipeline`'s
+    /// pattern of resolving an effect, then calling `process_triggers`
+    /// directly on the resulting events (the same chokepoint every
+    /// cast/resolve path uses) to confirm the trigger is queued.
+    #[test]
+    fn incubate_token_fires_another_permanent_enters_trigger() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::triggers::process_triggers;
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let altar_id = scenario
+            .add_creature(P0, "Altar Stand-in", 0, 0)
+            .from_oracle_text(
+                "Whenever another permanent you control enters, each opponent mills a card.",
+            )
+            .id();
+
+        let mut runner = scenario.build();
+        let ability = ResolvedAbility::new(
+            Effect::Incubate {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(runner.state_mut(), &ability, &mut events).unwrap();
+        process_triggers(runner.state_mut(), &events);
+
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "Altar's ETB trigger should be queued on the stack"
+        );
+        let triggered = runner.state().stack[0]
+            .ability()
+            .expect("triggered ability");
+        assert_eq!(runner.state().stack[0].source_id, altar_id);
+        assert!(matches!(triggered.effect, Effect::Mill { .. }));
     }
 
     #[test]

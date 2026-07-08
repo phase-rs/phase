@@ -9,7 +9,7 @@
 // present in the TS WaitingFor union but absent from this set deliberately
 // surface the diagnostic modal instead of silently hanging.
 
-import type { WaitingFor } from "../adapter/types";
+import type { GameState, WaitingFor } from "../adapter/types";
 
 /**
  * CR 601.2g + CR 107.4f: WaitingFor variants resolved by the single
@@ -101,6 +101,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "SearchPartitionChoice",
     "OutsideGameChoice",
     "ChooseFromZoneChoice",
+    // CR 701.4a: behold a [quality] — single-pick from a mixed-zone candidate
+    // list (BeholdChoiceModal, rendered via CardChoiceModal).
+    "BeholdChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
@@ -120,8 +123,13 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "TimeTravelChoice",
     "ChooseObjectsSelection",
     "CategoryChoice",
+    "EachPlayerCopyChosenSelection",
+    "KeepWithinTotalPowerChoice",
     "DistributeAmong",
     "MoveCountersDistribution",
+    // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) — rendered by
+    // MoveCountersDistributionModal in no-destination removal mode.
+    "RemoveCountersChoice",
     "RetargetChoice",
     "CopyRetarget",
     "DamageSourceChoice",
@@ -145,10 +153,14 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseDungeon",
     "ChooseDungeonRoom",
     "SpecializeColor",
+    // CR 709.5f-g: lock/unlock-door resolution choice (RoomDoorChoiceModal).
+    "ChooseRoomDoor",
     "ChooseLegend",
     "CommanderZoneChoice",
     "BattleProtectorChoice",
     "NamedChoice",
+    "OpponentGuess",
+    "CostTypeChoice",
     "UntapChoice",
     "ChooseUntapSubset",
     "ExertChoice",
@@ -157,7 +169,6 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Game lifecycle
     "GameOver",
     "MulliganDecision",
-    "MulliganBottomCards",
     "OpeningHandBottomCards",
     "BetweenGamesSideboard",
     "BetweenGamesChoosePlayDraw",
@@ -173,4 +184,96 @@ export function isWaitingForHandled(
 ): boolean {
   if (!waitingFor) return true;
   return HANDLED_WAITING_FOR_TYPES.has(waitingFor.type);
+}
+
+/** A localized-reason descriptor: an i18n key plus optional interpolation params. */
+export interface WaitingReason {
+  key: string;
+  params?: Record<string, unknown>;
+}
+
+/**
+ * Map a pending decision to a human-readable *reason* (an i18n key under
+ * `status.reason.*`) describing WHY the game is waiting. This is display
+ * formatting over engine-provided facts (the `waiting_for` variant, plus
+ * `phase` / `stack` for the generic priority window) — it labels a state the
+ * engine already decided; it never infers game state.
+ *
+ * Returns `null` when there is nothing to narrate (no pending decision or the
+ * game is over). Unknown variants fall through to a generic key so a new
+ * engine `WaitingFor` variant degrades gracefully instead of breaking the
+ * build (coverage of the common variants is asserted in tests, not via a
+ * compile-time exhaustiveness check).
+ */
+export function waitingForReason(
+  waitingFor: WaitingFor | null,
+  gameState: GameState | null,
+): WaitingReason | null {
+  if (!waitingFor || waitingFor.type === "GameOver") return null;
+
+  switch (waitingFor.type) {
+    case "DeclareAttackers":
+      return { key: "status.reason.declareAttackers" };
+    case "DeclareBlockers":
+      return { key: "status.reason.declareBlockers" };
+    case "AssignCombatDamage":
+    case "AssignBlockerDamage":
+    case "DistributeAmong":
+      return { key: "status.reason.assigningDamage" };
+    case "TargetSelection":
+    case "TriggerTargetSelection":
+    case "MultiTargetSelection":
+    case "CopyRetarget":
+    case "RetargetChoice":
+      return { key: "status.reason.choosingTargets" };
+    case "ManaPayment":
+    case "PhyrexianPayment":
+    case "PayCost":
+    case "PayManaAbilityMana":
+    case "UnlessPayment":
+      return { key: "status.reason.payingCost" };
+    case "MulliganDecision":
+    case "OpeningHandBottomCards":
+      return { key: "status.reason.mulligan" };
+    case "DiscardToHandSize":
+    case "DiscardChoice":
+      return { key: "status.reason.discarding" };
+    case "OrderTriggers":
+      return { key: "status.reason.orderingTriggers" };
+    case "Priority": {
+      // CR 117: the priority window. The engine-provided stack depth and phase
+      // tell us what kind of window this is — purely descriptive labeling.
+      if ((gameState?.stack.length ?? 0) > 0) {
+        return { key: "status.reason.respondingToStack" };
+      }
+      switch (gameState?.phase) {
+        case "BeginCombat":
+        case "DeclareAttackers":
+        case "DeclareBlockers":
+        case "CombatDamage":
+        case "EndCombat":
+          return { key: "status.reason.priorityCombat" };
+        case "PreCombatMain":
+        case "PostCombatMain":
+          return { key: "status.reason.priorityMain" };
+        default:
+          return { key: "status.reason.priority" };
+      }
+    }
+    default:
+      return { key: "status.reason.thinking" };
+  }
+}
+
+/**
+ * Map a reason to its standalone seat-badge key. `status.seat.*` mirrors
+ * `status.reason.*` key-for-key but holds self-contained chip labels
+ * ("Responding") instead of sentence fragments meant for composition
+ * ("Your priority — responding to the stack").
+ */
+export function seatStatusKey(reason: WaitingReason | null): string {
+  return (reason?.key ?? "status.reason.thinking").replace(
+    "status.reason.",
+    "status.seat.",
+  );
 }

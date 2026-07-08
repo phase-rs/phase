@@ -95,6 +95,13 @@ pub fn resolve(
                 destination,
             );
 
+            // CR 613.7d: an object receives a timestamp when it enters a zone.
+            // Stage 2 stamps battlefield entries only, so only draw one when the
+            // conjured card lands on the battlefield. Drawn before the `get_mut`
+            // borrow (`next_timestamp` takes `&mut self`).
+            let entry_timestamp =
+                (destination == Zone::Battlefield).then(|| state.next_timestamp());
+
             if let Some(obj) = state.objects.get_mut(&obj_id) {
                 // Conjured cards are real cards, not tokens.
                 obj.is_token = false;
@@ -119,7 +126,10 @@ pub fn resolve(
                     // battlefield entry — otherwise a conjured creature could attack or
                     // tap for {T} costs the turn it appears. Delegate to the single
                     // authority rather than setting flags ad hoc.
-                    obj.reset_for_battlefield_entry(state.turn_number);
+                    obj.reset_for_battlefield_entry(
+                        state.turn_number,
+                        entry_timestamp.expect("battlefield entry draws a timestamp"),
+                    );
 
                     // Apply tapped state for "onto the battlefield tapped" patterns.
                     if tapped {

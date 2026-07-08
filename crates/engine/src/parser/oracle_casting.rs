@@ -159,6 +159,7 @@ pub(crate) fn parse_spell_casting_option_line(
     let body_lower = primary_body.to_lowercase();
 
     parse_self_flash_option(primary_body, &body_lower, card_name)
+        .or_else(|| parse_self_has_flash_option(&body_lower))
         .or_else(|| parse_self_alternative_cost_option(primary_body, &body_lower, card_name))
         .and_then(|mut option| {
             if option.condition.is_none() {
@@ -257,6 +258,42 @@ fn parse_self_flash_option(
         return Some(option);
     }
 
+    Some(option)
+}
+
+/// CR 702.8a + CR 601.3d: Parse a self-referential conditional flash grant of the
+/// form "~ has flash as long as <condition>" (Take for a Ride: "Take for a Ride
+/// has flash as long as you've committed a crime this turn"). The spell grants
+/// ITSELF flash — a conditional casting permission — rather than the
+/// "you may cast ~ as though it had flash" framing handled by
+/// `parse_self_flash_option`. Self-references are normalized to `~` upstream
+/// (CR 201.4b), so the subject is matched as the `~` token.
+///
+/// As with the sibling conditional-flash arm, an unrecognized predicate refuses
+/// to emit the option entirely (the `?` on `parse_restriction_condition`): CR
+/// 601.3d only grants flash "if those conditions are met", so degrading to an
+/// unconditional permission would be strictly more permissive than the printed
+/// text. The bare "~ has flash" form (no condition) emits an unconditional
+/// permission.
+fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
+    // `body_lower` is already lowercase, so parse it directly with combinators
+    // (no `nom_on_lower` case-bridge needed — the condition text is delegated to
+    // `parse_restriction_condition`, which lowercases internally).
+    let (rest, _) = preceded(
+        tag::<_, _, OracleError<'_>>("~ has flash"),
+        opt(tag(" as long as ")),
+    )
+    .parse(body_lower)
+    .ok()?;
+    let mut option = SpellCastingOption::as_though_had_flash();
+    // Strip trailing sentence punctuation so a bare "~ has flash." parses as an
+    // unconditional grant (condition empty) and a trailing period on a condition
+    // clause does not reach `parse_restriction_condition`.
+    let condition_text = rest.trim().trim_end_matches(['.', ',']).trim();
+    if condition_text.is_empty() {
+        return Some(option);
+    }
+    option = option.condition(parse_restriction_condition(condition_text)?);
     Some(option)
 }
 
@@ -574,6 +611,7 @@ fn parse_timing_restriction(
     alt((
         preceded(tag("during "), parse_during_phrase),
         preceded(tag("before "), parse_before_phrase),
+        preceded(tag("after "), parse_after_phrase),
         preceded(
             tag("on "),
             alt((
@@ -581,7 +619,6 @@ fn parse_timing_restriction(
                 value(CastingRestriction::DuringYourTurn, tag("your turn")),
             )),
         ),
-        value(CastingRestriction::AfterCombat, tag("after combat")),
         value(CastingRestriction::AsSorcery, tag("as a sorcery")),
     ))
     .parse(input)
@@ -675,6 +712,24 @@ fn parse_before_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, Or
     .parse(input)
 }
 
+/// Sub-dispatch for "after [rest]" — blockers declared, combat. Mirror of
+/// `parse_before_phrase`: `after blockers are declared` opens the post-blockers
+/// combat window (CR 509.1, CR 510.1, and CR 511.1), while `after combat` (folded in from
+/// the former standalone leaf) is the post-combat-phase window. Backs the class
+/// printing "Cast this spell only during combat after blockers are declared."
+/// (Aleatory, Chaotic Strike, Curtain of Light, Flash Foliage) alongside the
+/// separately-scanned `DuringCombat`.
+fn parse_after_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
+    alt((
+        value(
+            CastingRestriction::AfterBlockersDeclared,
+            tag("blockers are declared"),
+        ),
+        value(CastingRestriction::AfterCombat, tag("combat")),
+    ))
+    .parse(input)
+}
+
 /// Walk `text` word-by-word, collecting all timing restrictions found via nom combinators.
 /// Tries `parse_timing_restriction` at each word boundary — on match, consumes the phrase
 /// and advances; on miss, skips to the next word.
@@ -705,6 +760,7 @@ mod tests {
         ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
         TargetFilter, TypeFilter,
     };
+    use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
 
@@ -903,6 +959,34 @@ mod tests {
         assert!(restrictions.contains(&CastingRestriction::BeforeBlockersDeclared));
     }
 
+    /// CR 509.1 + CR 510.1 + CR 511.1: the "after blockers are declared" window
+    /// used to be dropped — `during combat` matched and stranded the remainder,
+    /// leaving the spell castable during all of combat. The line must now emit
+    /// both `DuringCombat` and `AfterBlockersDeclared` (and NOT the opposite
+    /// `BeforeBlockersDeclared` window). Backs Aleatory, Chaotic Strike, Curtain
+    /// of Light, and Flash Foliage, which all print this exact line.
+    #[test]
+    fn spell_cast_restriction_handles_combat_after_blockers() {
+        let restrictions = parse_casting_restriction_line(
+            "Cast this spell only during combat after blockers are declared.",
+        )
+        .expect("restrictions should parse");
+        assert!(restrictions.contains(&CastingRestriction::DuringCombat));
+        assert!(restrictions.contains(&CastingRestriction::AfterBlockersDeclared));
+        assert!(!restrictions.contains(&CastingRestriction::BeforeBlockersDeclared));
+    }
+
+    /// Regression: folding the former standalone `after combat` leaf into the
+    /// `after` prefix sub-dispatch (`parse_after_phrase`) must preserve the
+    /// post-combat-phase window.
+    #[test]
+    fn spell_cast_restriction_after_combat_still_parses() {
+        let restrictions =
+            parse_casting_restriction_line("Cast this spell only after combat on your turn.")
+                .expect("restrictions should parse");
+        assert!(restrictions.contains(&CastingRestriction::AfterCombat));
+    }
+
     #[test]
     fn parse_additional_cost_optional_blight() {
         let lower = "as an additional cost to cast this spell, you may blight 1.";
@@ -945,6 +1029,7 @@ mod tests {
                         count: 1,
                         filter: TargetFilter::Typed(filter),
                         action: BeholdCostAction::ChooseOrReveal,
+                        ..
                     },
                 repeatability: AdditionalCostRepeatability::Once,
             }) => {
@@ -970,6 +1055,7 @@ mod tests {
                     count: 1,
                     filter: TargetFilter::Typed(filter),
                     action: BeholdCostAction::ChooseOrReveal,
+                    ..
                 },
                 AbilityCost::Mana { cost },
             )) => {
@@ -995,6 +1081,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ExileChosen,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -1020,6 +1107,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             })) => {
                 assert!(
                     filter
@@ -1069,6 +1157,7 @@ mod tests {
                 count: 3,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             })) => {
                 assert!(filter
                     .type_filters
@@ -1660,6 +1749,153 @@ mod tests {
         }
     }
 
+    /// CR 508.1 + CR 118.9: Lethargy Trap — leading "If three or more creatures
+    /// are attacking, " gates the {U} alternative casting cost.
+    #[test]
+    fn alt_cost_leading_if_attacking_creatures_count_ge_binds() {
+        let option = parse_spell_casting_option_line(
+            "If three or more creatures are attacking, you may pay {U} rather than pay this spell's mana cost.",
+            "Lethargy Trap",
+        )
+        .expect("alt-cost should parse with leading-if attacking-creatures gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 3 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!("expected QuantityComparison GE 3 attacking creatures, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 105.1 + CR 118.9: Nemesis Trap — leading "If a white
+    /// creature is attacking, " gates the {B}{B} alternative casting cost on a
+    /// color-filtered attacker presence check (not a bare/count one).
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a white creature is attacking, you may pay {B}{B} rather than pay this spell's mana cost.",
+            "Nemesis Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::White
+                            }
+                        )),
+                        "expected HasColor(White) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => {
+                panic!("expected QuantityComparison GE 1 white attacking creature, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 508.1 + CR 702.9 + CR 118.9: Slingbow Trap — leading "If a black
+    /// creature with flying is attacking, " stacks a color filter and a
+    /// keyword filter onto the {G} alternative casting cost's gate.
+    #[test]
+    fn alt_cost_leading_if_filtered_attacking_creature_color_and_keyword_binds() {
+        let option = parse_spell_casting_option_line(
+            "If a black creature with flying is attacking, you may pay {G} rather than pay this spell's mana cost.",
+            "Slingbow Trap",
+        )
+        .expect("alt-cost should parse with leading-if filtered-attacker gate");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                ..
+            } => {
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::Black
+                            }
+                        )),
+                        "expected HasColor(Black) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::WithKeyword {
+                                value: Keyword::Flying
+                            }
+                        )),
+                        "expected WithKeyword(Flying) filter, got {tf:?}"
+                    );
+                    assert!(
+                        tf.properties
+                            .iter()
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        "expected Attacking filter, got {tf:?}"
+                    );
+                } else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                }
+            }
+            other => panic!(
+                "expected QuantityComparison GE 1 black flying attacking creature, got {other:?}"
+            ),
+        }
+    }
+
     #[test]
     fn alt_cost_leading_if_unrecognized_predicate_drops_option() {
         // CR 118.9 + CR 601.3d: when the leading-if predicate cannot decompose
@@ -1674,6 +1910,53 @@ mod tests {
         assert!(
             option.is_none(),
             "unrecognized leading-if predicate must drop the alt-cost option, got: {option:?}"
+        );
+    }
+
+    /// Take for a Ride (std long-tail): "~ has flash as long as you've committed
+    /// a crime this turn" — a self-referential conditional flash grant. The line
+    /// (self-ref normalized to `~` upstream) must emit an `AsThoughHadFlash`
+    /// casting option gated on the crime condition, not `Effect::Unimplemented`.
+    /// Revert-discriminating: removing `parse_self_has_flash_option` makes
+    /// `parse_spell_casting_option_line` return `None`.
+    /// CR 702.8a (Flash); CR 601.3d (conditional flash); CR 700.13 (crime).
+    #[test]
+    fn spell_self_has_flash_conditional_on_crime() {
+        let option = parse_spell_casting_option_line(
+            "~ has flash as long as you've committed a crime this turn.",
+            "Take for a Ride",
+        )
+        .expect("self conditional-flash grant should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        match option.condition {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CrimesCommittedThisTurn,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => {}
+            other => panic!("expected CrimesCommittedThisTurn GE 1 condition, got {other:?}"),
+        }
+    }
+
+    /// Bare "~ has flash" (no condition) emits an unconditional flash option.
+    #[test]
+    fn spell_self_has_flash_unconditional() {
+        let option = parse_spell_casting_option_line("~ has flash.", "Some Spell")
+            .expect("bare self-flash grant should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        assert!(
+            option.condition.is_none(),
+            "bare '~ has flash' must be unconditional, got {:?}",
+            option.condition
         );
     }
 
@@ -1717,6 +2000,7 @@ mod tests {
                 count: 1,
                 filter: TargetFilter::Typed(filter),
                 action: BeholdCostAction::ChooseOrReveal,
+                ..
             }) => {
                 assert!(filter
                     .type_filters

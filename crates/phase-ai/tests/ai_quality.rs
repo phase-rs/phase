@@ -443,6 +443,7 @@ fn does_not_cast_redundant_removal() {
                         amount: QuantityExpr::Fixed { value: 3 },
                         target: TargetFilter::Any,
                         damage_source: None,
+                        excess: None,
                     },
                     vec![TargetRef::Object(target)],
                     ObjectId(300),
@@ -507,6 +508,7 @@ fn counterspell_entry(count: u32) -> DeckEntry {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             )],
             ..Default::default()

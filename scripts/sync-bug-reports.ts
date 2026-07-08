@@ -20,6 +20,7 @@ import {
   type DiscordMessage,
 } from "./lib/discord.ts";
 import { extractReports } from "./lib/extract.ts";
+import { normalizeCardName } from "./lib/cardNames.ts";
 import { triageReports } from "./lib/triage.ts";
 import { renderDashboard, renderTriageDashboard } from "./lib/render.ts";
 import { crossReference, type CrossrefItem } from "./lib/crossref.ts";
@@ -582,6 +583,16 @@ function containsCardReference(text: string, card: string, allowSingleWord: bool
   const bracketed = new RegExp(`\\[\\[\\s*${escapeRegex(card)}\\s*\\]\\]`, "i");
   if (bracketed.test(text)) return true;
 
+  // Punctuation-tolerant bracket match: the card-data key can spell punctuation
+  // differently from what the user typed (key "welcome to . . ." vs the message
+  // "[[welcome to...]]"). Compare normalized forms of every [[...]] reference.
+  const normalizedCard = normalizeCardName(card);
+  if (normalizedCard !== "") {
+    for (const match of text.matchAll(/\[\[(.+?)\]\]/g)) {
+      if (normalizeCardName(match[1]) === normalizedCard) return true;
+    }
+  }
+
   const cardWords = card.trim().split(/\s+/);
   if (!allowSingleWord && cardWords.length === 1) return false;
 
@@ -596,9 +607,14 @@ function selectRelevantOracleCards(item: TriageItem): string[] {
     .join("\n");
   const searchableText = `${item.thread_name}\n${item.summary}\n${rawText}`;
   const threadTitle = item.thread_name.trim().toLowerCase();
+  // Cards named explicitly via [[...]] / Scryfall links are trusted — they were
+  // resolved against card-data at extraction time, so they bypass the text
+  // re-scan (which can't re-match a truncated/punctuation-variant reference).
+  const explicit = new Set((item.explicitCards ?? []).map((card) => card.trim().toLowerCase()));
 
   return [...new Set(item.cards.map((card) => card.trim()).filter(Boolean))].filter((card) => {
     const normalized = card.toLowerCase();
+    if (explicit.has(normalized)) return true;
     const exactThreadTitle = normalized === threadTitle;
     return exactThreadTitle || containsCardReference(searchableText, card, false);
   });
@@ -661,9 +677,14 @@ function buildIssueBody(item: TriageItem): string {
   // Keep the Discord source URL anchor in the body — it is the stable handle the
   // LLM operator greps for when checking whether a report was already filed.
   const lines = [
+    `<!-- phase-discord-thread-id: ${item.thread_id} -->`,
+    `<!-- phase-discord-message-id: ${item.message_id} -->`,
+    ``,
     `Reported in Discord: ${item.source_url}`,
     ``,
     `**Thread:** ${item.thread_name}`,
+    `**Discord thread id:** \`${item.thread_id}\``,
+    `**Discord message id:** \`${item.message_id}\``,
     `**Cards:** ${relevantCards.length > 0 ? relevantCards.join(", ") : "_none detected_"}`,
     `**Parser status:** ${item.parser_status}`,
     `**Extraction confidence:** ${item.extraction_confidence.toFixed(2)}`,
@@ -739,25 +760,41 @@ function resolveIssue(
 }
 
 // Phase 2 of publish: react 👀 on the thread starter, post the tracking link.
-// Does NOT auto-unarchive: in this server, archive is the maintainer's manual
-// "resolved" signal. If we hit Discord error 50083 (Thread is archived) at
-// this point it means the operator archived the thread between the LLM's
+// Does NOT auto-unarchive: at PUBLISH time a live thread is expected, so an
+// already-archived thread means the operator archived it between the LLM's
 // judgment and the publish call — that's a strong "skip, leave it alone"
-// signal, and the caller logs it without touching the archive state.
+// signal, and the caller logs the Discord error 50083 without touching the
+// archive state.
+//
+// NOTE: archiving means "resolved" here, but the two ends of the pipeline reach
+// it differently. At publish (issue OPEN) the thread should stay live, so we
+// never archive and treat an archive as a manual skip. At issue CLOSE the loop
+// is done, so `scripts/notify-discord-issue-closed.ts` DOES archive the thread
+// (unarchiving first if needed) to mark the report resolved. Same end-state,
+// opposite trigger — don't "fix" this asymmetry into a contradiction.
 async function writeDiscordTracking(
-  item: TriageItem,
+  threadId: string,
   issueUrl: string,
   dryRun: boolean,
 ): Promise<string> {
   const replyContent = `${TRACKED_REPLY_PREFIX} ${issueUrl}`;
   if (dryRun) {
-    console.log(`    [dry-run] would: react ${REACTION_EMOJI} on ${item.thread_id}`);
-    console.log(`    [dry-run] would: post "${replyContent}" in ${item.thread_id}`);
+    console.log(`    [dry-run] would: react ${REACTION_EMOJI} on ${threadId}`);
+    console.log(`    [dry-run] would: post "${replyContent}" in ${threadId}`);
     return "DRY";
   }
-  await addReaction(item.thread_id, item.thread_id, REACTION_EMOJI);
-  const posted = await createMessage(item.thread_id, replyContent);
+  await addReaction(threadId, threadId, REACTION_EMOJI);
+  const posted = await createMessage(threadId, replyContent);
   return posted.id;
+}
+
+function hasDiscordWriteBack(record: PublishedThread): boolean {
+  return (
+    record.issue_number > 0 &&
+    record.issue_url !== "" &&
+    record.reacted_message_id !== "" &&
+    record.reply_message_id !== ""
+  );
 }
 
 async function cmdMarkHandled(): Promise<void> {
@@ -990,13 +1027,36 @@ async function cmdPublish(): Promise<void> {
   }
 
   let created = 0;
+  let repairedDiscordWriteBacks = 0;
   let skippedAlreadyPublished = 0;
   let skippedNoItems = 0;
   let failed = 0;
 
   for (const threadId of targets) {
-    if (published[threadId] !== undefined) {
-      console.log(`  [skip] ${threadId} — already in published_threads (#${published[threadId].issue_number})`);
+    const existing = published[threadId];
+    if (existing !== undefined) {
+      if (existing.issue_number > 0 && existing.issue_url !== "" && !hasDiscordWriteBack(existing)) {
+        console.log(`  [repair] ${threadId} — issue #${existing.issue_number} exists, Discord write-back is incomplete`);
+        try {
+          const replyId = await writeDiscordTracking(threadId, existing.issue_url, dryRun);
+          if (!dryRun) {
+            published[threadId] = {
+              ...existing,
+              reacted_message_id: threadId,
+              reply_message_id: replyId,
+            };
+            state.published_threads = published;
+            await saveSyncState(state);
+          }
+          repairedDiscordWriteBacks++;
+        } catch (err) {
+          console.error(`    failed (discord repair): ${(err as Error).message}`);
+          failed++;
+        }
+        continue;
+      }
+
+      console.log(`  [skip] ${threadId} — already in published_threads (#${existing.issue_number})`);
       skippedAlreadyPublished++;
       continue;
     }
@@ -1040,7 +1100,7 @@ async function cmdPublish(): Promise<void> {
     // Phase 2: Discord write-back. Failures (including 50083 archived-thread)
     // leave the GH record intact and surface the error to the operator.
     try {
-      const replyId = await writeDiscordTracking(item, issue.url, dryRun);
+      const replyId = await writeDiscordTracking(item.thread_id, issue.url, dryRun);
       if (!dryRun) {
         published[threadId] = {
           ...published[threadId],
@@ -1061,6 +1121,7 @@ async function cmdPublish(): Promise<void> {
   console.log(`Publish complete${dryRun ? " (dry-run)" : ""}.`);
   console.log(`  Targets:                    ${targets.size}`);
   console.log(`  Created:                    ${created}`);
+  console.log(`  Repaired Discord write-back: ${repairedDiscordWriteBacks}`);
   console.log(`  Skipped (already published): ${skippedAlreadyPublished}`);
   console.log(`  Skipped (no triage items):   ${skippedNoItems}`);
   console.log(`  Failed:                     ${failed}`);
@@ -1248,8 +1309,11 @@ Commands:
             because it once mass-suppressed unresolved bugs.
             Flags: --thread=<id>[,<id>], --notes='...', --dry-run
   publish   Create a GH issue for each --thread=<id> the operator listed, then
-            react 👀 + post tracking link in the Discord thread. Mechanics only
-            — the operator has already decided these threads are worth filing.
+            include Discord ids in the issue body, react 👀 + post tracking
+            link in the Discord thread. If a previous run created the issue but
+            missed Discord write-back, rerunning repairs the missing reply.
+            Mechanics only — the operator has already decided these threads are
+            worth filing.
             Flags:
               --dry-run                 preview without side effects
               --thread=<id>[,<id>...]   thread ids to publish (required)

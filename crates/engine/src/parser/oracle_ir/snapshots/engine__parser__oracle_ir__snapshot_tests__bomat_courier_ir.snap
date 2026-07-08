@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 806
 expression: "&ir"
 ---
 {
@@ -27,9 +28,12 @@ expression: "&ir"
       "PreLoweredSpell": {
         "kind": "Activated",
         "effect": {
-          "type": "Unimplemented",
-          "name": "put",
-          "description": "Put all cards exiled with ~ into their owners' hands"
+          "type": "ChangeZoneAll",
+          "origin": "Exile",
+          "destination": "Hand",
+          "target": {
+            "type": "ExiledBySource"
+          }
         },
         "cost": {
           "type": "Composite",

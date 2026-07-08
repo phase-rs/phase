@@ -1,10 +1,16 @@
 import type { CastPaymentMode, GameAction } from "../adapter/types";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useUiStore } from "../stores/uiStore";
 
 const MANUAL_CAST_PAYMENT_MODE: CastPaymentMode = { type: "Manual" };
 
 export function applySpellPaymentPreference(action: GameAction): GameAction {
-  if (usePreferencesStore.getState().spellPaymentMode !== "manual") return action;
+  // Two intended sources of truth: the durable `spellPaymentMode` preference and
+  // the ephemeral per-game `manualManaOverride` toggle. Manual wins if EITHER is on.
+  const manual =
+    usePreferencesStore.getState().spellPaymentMode === "manual" ||
+    useUiStore.getState().manualManaOverride;
+  if (!manual) return action;
 
   switch (action.type) {
     case "CastSpell":

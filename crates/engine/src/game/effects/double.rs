@@ -213,23 +213,26 @@ fn resolve_double_mana(
     };
 
     // CR 701.10f: Add equal amount of each mana type
-    let player = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == player_id)
-        .ok_or(EffectError::PlayerNotFound)?;
+    if !state.players.iter().any(|p| p.id == player_id) {
+        return Err(EffectError::PlayerNotFound);
+    }
 
     for (mana_type, count) in mana_to_add {
         for _ in 0..count {
-            player.mana_pool.add(ManaUnit {
-                color: mana_type,
-                source_id: ability.source_id,
-                supertype: None,
-                source_could_produce_two_or_more_colors: false,
-                restrictions: vec![],
-                grants: vec![],
-                expiry: None,
-            });
+            // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
+            state.add_mana_to_pool(
+                player_id,
+                ManaUnit {
+                    color: mana_type,
+                    source_id: ability.source_id,
+                    pip_id: crate::types::mana::ManaPipId(0),
+                    supertype: None,
+                    source_could_produce_two_or_more_colors: false,
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            );
 
             events.push(GameEvent::ManaAdded {
                 player_id,
@@ -314,6 +317,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(100),
             source_incarnation: None,
+            source_card_id: None,
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -326,6 +330,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
+            amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             optional_targeting: false,
@@ -345,9 +350,11 @@ mod tests {
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
+            replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         }
     }
 
@@ -393,7 +400,7 @@ mod tests {
     fn double_counters_replacement_choice_stashes_remaining_counter_additions() {
         let mut state = GameState::default();
         for (id, modification) in [
-            (ObjectId(90), QuantityModification::Double),
+            (ObjectId(90), QuantityModification::DOUBLE),
             (ObjectId(91), QuantityModification::Plus { value: 1 }),
         ] {
             let mut source = GameObject::new(
@@ -599,7 +606,7 @@ mod tests {
         );
         let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
         repl.valid_card = Some(TargetFilter::Any);
-        repl.quantity_modification = Some(QuantityModification::Double);
+        repl.quantity_modification = Some(QuantityModification::DOUBLE);
         doubler.replacement_definitions.push(repl);
         state.objects.insert(doubler_id, doubler);
         state.battlefield.push_back(doubler_id);
@@ -697,16 +704,21 @@ mod tests {
     fn double_mana_pool() {
         let mut state = GameState::default();
         // Add 3 red mana to player 0's pool
+        let p0 = state.players[0].id;
         for _ in 0..3 {
-            state.players[0].mana_pool.add(ManaUnit {
-                color: ManaType::Red,
-                source_id: ObjectId(50),
-                supertype: None,
-                source_could_produce_two_or_more_colors: false,
-                restrictions: vec![],
-                grants: vec![],
-                expiry: None,
-            });
+            state.add_mana_to_pool(
+                p0,
+                ManaUnit {
+                    color: ManaType::Red,
+                    source_id: ObjectId(50),
+                    pip_id: crate::types::mana::ManaPipId(0),
+                    supertype: None,
+                    source_could_produce_two_or_more_colors: false,
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            );
         }
 
         let mut events = Vec::new();

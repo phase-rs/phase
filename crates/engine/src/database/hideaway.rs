@@ -28,7 +28,8 @@
 //!    `visibility.rs` grants the controller the CR 702.75a look-permission.
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, DigSource, Effect, QuantityExpr, TargetFilter,
+    TriggerDefinition,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::Keyword;
@@ -79,6 +80,7 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             count: QuantityExpr::Fixed { value: n as i32 },
             destination: Some(Zone::Exile),
             keep_count: Some(1),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             // CR 702.75a: "put the rest on the bottom of your library."
@@ -86,6 +88,7 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             // CR 701.20e: the cards are looked at privately, not revealed.
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         },
     )
     // CR 608.2c: continuation — conceal the just-exiled card (ParentTarget).

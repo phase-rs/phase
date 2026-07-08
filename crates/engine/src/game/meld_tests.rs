@@ -313,32 +313,13 @@ fn etb_fires_on_meld() {
 /// face the same way production does. SKIPped if `card-data.json` is absent.
 #[test]
 fn meld_production_shaped_real_cards_single_permanent() {
-    use crate::database::card_db::CardDatabase;
     use crate::game::scenario_db::GameScenarioDbExt;
-    use std::path::Path;
 
-    let candidates = [
-        Path::new("client/public/card-data.json"),
-        Path::new("../../client/public/card-data.json"),
-    ];
-    let Some(path) = candidates.iter().find(|p| p.exists()).copied() else {
-        eprintln!(
-            "SKIP meld_production_shaped_real_cards_single_permanent: card-data.json missing \
-             (primary CI lanes regenerate it; local runs without it skip)"
-        );
-        return;
-    };
-    let db = match CardDatabase::from_export(path) {
-        Ok(db) => db,
-        Err(err) => {
-            eprintln!("SKIP meld_production_shaped_real_cards_single_permanent: load error: {err}");
-            return;
-        }
-    };
+    let db = crate::test_support::shared_card_db();
 
     let mut sc = GameScenario::new();
-    let source = sc.add_real_card(P0, "Gisela, the Broken Blade", Zone::Battlefield, &db);
-    let partner = sc.add_real_card(P0, "Bruna, the Fading Light", Zone::Battlefield, &db);
+    let source = sc.add_real_card(P0, "Gisela, the Broken Blade", Zone::Battlefield, db);
+    let partner = sc.add_real_card(P0, "Bruna, the Fading Light", Zone::Battlefield, db);
     let mut state = sc.state;
     // `add_real_card` does NOT seed `card_face_registry`; `perform_meld` no-ops
     // without the Brisela result face, so seed it explicitly.

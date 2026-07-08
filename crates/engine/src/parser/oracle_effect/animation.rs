@@ -69,7 +69,10 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     // Covers Obuun, Mul Daya Ancestor and similar patterns.
     // allow-noncombinator: case-insensitive phrase scan - nom lacks case-insensitive take_until
     if let Some(where_x_pos) = rest.to_lowercase().find("where x is ") {
-        let before_where = rest[..where_x_pos].trim_end_matches(',').trim();
+        // Trim whitespace first so the trailing comma (from ", where X is") is
+        // exposed for removal. Without this, "reach, " keeps the comma because
+        // trim_end_matches(',') doesn't see past the trailing space.
+        let before_where = rest[..where_x_pos].trim().trim_end_matches(',').trim();
         let after_where = &rest[where_x_pos + "where x is ".len()..];
         let after_where_lower = after_where.to_lowercase();
         rest = parse_cost_x_become_pt_prefix(before_where).unwrap_or(before_where);
@@ -657,6 +660,12 @@ fn parse_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
         tag("in addition to "),
         alt((tag("its"), tag("their"), tag("his"), tag("her"))),
         tag(" other "),
+        // CR 105.3 + CR 205.1b: the "in addition" clause can enumerate colors
+        // and/or types — "in addition to its other colors and types" (Possessed
+        // Goat), "in addition to its other types". `opt(tag("colors and "))`
+        // makes the color scope an independent axis (compose, don't enumerate);
+        // `opt(tag("creature "))` keeps the type-scope axis order-independent.
+        opt(tag("colors and ")),
         opt(tag("creature ")),
         tag("types"),
     ))
@@ -668,12 +677,27 @@ fn parse_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
 /// lifetime elision binds the parser's borrow to the `input` parameter;
 /// inlining the combinator over a local `String` tripped E0597 on the
 /// temporary parser's drop.
-fn locate_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
+///
+/// `pub(crate)` so the replacement handler (`parse_as_enters_becomes`) and the
+/// classifier recognizer (`parse_as_enters_becomes_in_addition`) share the same
+/// CR 205.1b/105.3 marker class instead of reimplementing bespoke literal tags.
+pub(crate) fn locate_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
     preceded(
         take_until("in addition to "),
         parse_in_addition_other_types_marker,
     )
     .parse(input)
+}
+
+/// CR 105.3: detect the additive-color reading of a "becomes" descriptor —
+/// "in addition to its other colors [and types]". When present, the granted
+/// color is ADDED to the object's existing colors (CR 105.3 "in addition")
+/// rather than replacing them. Used by `build_become_clause` to convert the
+/// default `SetColor` (CR 105.3 replacement) into per-color `AddColor`.
+pub(crate) fn has_in_addition_to_other_colors(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    nom_primitives::scan_contains(&lower, "in addition to ")
+        && nom_primitives::scan_contains(&lower, "other colors")
 }
 
 pub(crate) fn has_in_addition_to_other_types(text: &str) -> bool {
@@ -1442,6 +1466,33 @@ mod test_den_bugbear {
         assert!(
             spec.types.contains(&"Creature".to_string()),
             "must infer Creature"
+        );
+    }
+
+    /// #833 Cactus Preserve: "an X/X green Plant creature with reach, where X is ..."
+    /// — the trailing comma before "where X is" must not leak into the keyword
+    /// extraction, or the keyword clause is silently dropped.
+    #[test]
+    fn animation_spec_x_x_with_keyword_and_where_clause() {
+        let spec = parse_animation_spec(
+            "an X/X green Plant creature with reach, where X is the greatest mana value among your commanders",
+            &mut ParseContext::default(),
+        )
+        .expect("Cactus Preserve animation phrase must parse");
+
+        assert!(
+            // allow-raw-authority: test asserts the parser-output AnimationSpec.keywords vec; no GameState/live object exists at parse time
+            spec.keywords.contains(&Keyword::Reach),
+            "must include Reach keyword, got: {:?}",
+            spec.keywords
+        );
+        assert!(
+            spec.types.contains(&"Creature".to_string()),
+            "must include Creature"
+        );
+        assert!(
+            spec.types.contains(&"Plant".to_string()),
+            "must include Plant"
         );
     }
 

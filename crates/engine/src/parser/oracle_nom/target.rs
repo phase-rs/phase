@@ -6,13 +6,13 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
-use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::combinator::{map, not, opt, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
-use crate::parser::oracle_util::{parse_subtype, OUTLAW_SUBTYPES};
+use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
 use crate::types::ability::{
     Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -92,16 +92,21 @@ fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
-/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow")
-/// without consuming any trailing boundary. Shared building block for both the
-/// adjective-prefix form (`parse_supertype_prefix`, word + space) and trailing
-/// relative-clause forms ("that aren't legendary", where the word is at
-/// end-of-string). Callers that need a boundary apply their own check.
+/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow",
+/// "world", "ongoing") without consuming any trailing boundary. Shared building
+/// block for both the adjective-prefix form (`parse_supertype_prefix`, word +
+/// space) and trailing relative-clause forms ("that aren't legendary", where
+/// the word is at end-of-string). Callers that need a boundary apply their own
+/// check. Covers the full CR 205.4a set the engine `Supertype` enum models
+/// (Host is set-supplemental / not CR 205.4a and is excluded here). None of the
+/// five words is a prefix of another, so `alt` ordering is boundary-safe.
 pub fn parse_supertype_word(input: &str) -> OracleResult<'_, Supertype> {
     alt((
         value(Supertype::Legendary, tag("legendary")),
         value(Supertype::Basic, tag("basic")),
         value(Supertype::Snow, tag("snow")),
+        value(Supertype::World, tag("world")),
+        value(Supertype::Ongoing, tag("ongoing")),
     ))
     .parse(input)
 }
@@ -162,6 +167,11 @@ pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
         value(ControllerRef::Opponent, tag("an opponent controls")),
         value(ControllerRef::Opponent, tag("your opponents control")),
         value(ControllerRef::TargetPlayer, tag("target player controls")),
+        // CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained target-player scope.
+        value(
+            ControllerRef::TargetOpponent,
+            tag("target opponent controls"),
+        ),
     ))
     .parse(input)
 }
@@ -207,6 +217,10 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         ("planeswalker", TypeFilter::Planeswalker),
         ("lands", TypeFilter::Land),
         ("land", TypeFilter::Land),
+        // Plural before singular (longest-match-first): the word-boundary guard
+        // rejects "battle" + trailing 's', and BATTLE_SUBTYPES has no "Battle"
+        // entry, so the plural must be an explicit head-noun word here.
+        ("battles", TypeFilter::Battle),
         ("battle", TypeFilter::Battle),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
@@ -228,7 +242,15 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
 
     for &(word, ref tf) in TYPE_WORDS {
         if let Some(rest) = input.strip_prefix(word) {
-            return Ok((rest, tf.clone()));
+            // Word-boundary guard (mirrors parse_outlaw_type below and
+            // parse_subtype_entry in oracle_util.rs): a head-noun type word must
+            // be followed by end-of-input or a non-alphanumeric char. Without
+            // this, a TYPE_WORD that prefixes a longer subtype shadows it — e.g.
+            // "land" eating "lander" or "spell" eating "spellshaper" instead of
+            // falling through to the boundary-guarded subtype table.
+            if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric()) {
+                return Ok((rest, tf.clone()));
+            }
         }
     }
 
@@ -271,8 +293,15 @@ fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
 /// "this artifact".
 ///
 /// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
+///
+/// CR 201.5a: a granted body's by-name reference to its GRANTING object is
+/// masked to [`GRANTING_SELF_PLACEHOLDER`] by `normalize_card_name_refs` and
+/// recognized here (first alt) as `TargetFilter::GrantingObject` — distinct
+/// from the host `SelfRef`. This single edit covers the effect-target channel
+/// (`parse_target` → here) for "Return/Destroy/gains control of <self>".
 pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
+        parse_granting_object_ref,
         value(TargetFilter::SelfRef, tag("~")),
         parse_it_self_reference,
         // CR 201.5: "itself" is a self-reference to the object the ability is on.
@@ -282,9 +311,33 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this spell")),
         value(TargetFilter::SelfRef, tag("this card")),
         value(TargetFilter::SelfRef, tag("this enchantment")),
+        value(TargetFilter::SelfRef, tag("this aura")),
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
         value(TargetFilter::SelfRef, tag("this attraction")),
+    ))
+    .parse(input)
+}
+
+/// CR 201.5a: Single recognition authority for the granting-object by-name
+/// self-reference placeholder emitted by the quote masker in
+/// `normalize_card_name_refs`. Used as the first alt in both
+/// [`parse_self_reference`] (effect-target channel) and
+/// [`parse_cost_self_reference`] (cost channel).
+pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::GrantingObject, tag(GRANTING_SELF_PLACEHOLDER)).parse(input)
+}
+
+/// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
+/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand").
+/// Recognizes the granter placeholder → `GrantingObject` and the host tokens
+/// (`~`, "cardname") → `SelfRef`, in one authority so every cost site routes
+/// through the same logic instead of an ad-hoc per-site `tag("~")` copy.
+pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        parse_granting_object_ref,
+        value(TargetFilter::SelfRef, tag("~")),
+        value(TargetFilter::SelfRef, tag("cardname")),
     ))
     .parse(input)
 }
@@ -350,7 +403,16 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         ),
         value(TargetFilter::TriggeringSource, tag("that spell")),
         value(TargetFilter::TriggeringSource, tag("that creature")),
-        value(TargetFilter::TriggeringSource, tag("that permanent")),
+        value(
+            TargetFilter::TriggeringSource,
+            terminated(
+                tag("that permanent"),
+                not(preceded(
+                    tag(" "),
+                    alt((tag("or player"), tag("or a player"))),
+                )),
+            ),
+        ),
         value(TargetFilter::TriggeringSource, tag("that card")),
         parse_attacking_player_event_ref,
         // CR 506.3d: "that opponent" before the shorter "that player" arm.
@@ -359,6 +421,16 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         // CR 506.3d: "defending player" / "the defending player"
         value(TargetFilter::DefendingPlayer, tag("the defending player")),
         value(TargetFilter::DefendingPlayer, tag("defending player")),
+        // CR 603.7c + CR 109.4: "the attacking player" on a DamageReceived
+        // trigger — the controller of the creature that dealt combat damage
+        // (Contested Game Ball). Distinct from "that attacking player" (an
+        // attack-declared referent → TriggeringPlayer): the wanted player here
+        // is the controller of the triggering damage *source*, not the
+        // damaged player. Ordered before the bare "the player" arm.
+        value(
+            TargetFilter::TriggeringSourceController,
+            tag("the attacking player"),
+        ),
         // CR 608.2k: "the player" in trigger context is synonymous with
         // "that player" — anaphoric reference to the triggering player.
         // Ordered after "the defending player" so longest-match-first is
@@ -831,6 +903,30 @@ mod tests {
         }
     }
 
+    /// CR 205.4a: the shared supertype-word recognizer is the building block for
+    /// every CR 205.4a supertype the engine `Supertype` enum models. World and
+    /// Ongoing were previously missing, so the "general" supertype-grant path
+    /// silently dropped them; this pins that the recognizer now maps all five
+    /// (Host is set-supplemental and intentionally excluded). None of the five
+    /// words is a prefix of another, so the `alt` order is boundary-safe.
+    #[test]
+    fn test_parse_supertype_word_covers_world_and_ongoing() {
+        assert_eq!(parse_supertype_word("world").unwrap().1, Supertype::World);
+        assert_eq!(
+            parse_supertype_word("ongoing").unwrap().1,
+            Supertype::Ongoing
+        );
+        // pre-existing arms remain recognized (no regression).
+        assert_eq!(
+            parse_supertype_word("legendary").unwrap().1,
+            Supertype::Legendary
+        );
+        assert_eq!(parse_supertype_word("basic").unwrap().1, Supertype::Basic);
+        assert_eq!(parse_supertype_word("snow").unwrap().1, Supertype::Snow);
+        // Host is NOT a CR 205.4a word here, so the recognizer must reject it.
+        assert!(parse_supertype_word("host").is_err());
+    }
+
     #[test]
     fn test_parse_type_phrase_nonland() {
         // "nonland" → Non(Land) with trailing text unconsumed
@@ -940,6 +1036,13 @@ mod tests {
         let (rest8, f8) = parse_event_context_ref("that opponent.").unwrap();
         assert_eq!(rest8, ".");
         assert_eq!(f8, TargetFilter::DefendingPlayer);
+
+        let (rest9, f9) = parse_event_context_ref("that permanent").unwrap();
+        assert_eq!(rest9, "");
+        assert_eq!(f9, TargetFilter::TriggeringSource);
+
+        assert!(parse_event_context_ref("that permanent or player").is_err());
+        assert!(parse_event_context_ref("that permanent or a player").is_err());
     }
 
     #[test]
@@ -995,6 +1098,127 @@ mod tests {
                 "outlawry must not parse as the outlaw disjunction"
             );
         }
+    }
+
+    // --- TYPE_WORDS word-boundary guard (the head-noun-prefix class) ---
+    //
+    // Without the boundary guard on the TYPE_WORDS scan, a head-noun entry like
+    // "land" or "spell" strip_prefix-matches longer subtypes ("lander",
+    // "spellshaper") and returns the wrong card-type filter instead of falling
+    // through to the boundary-guarded subtype table. "Plan" itself is an
+    // enchantment subtype (CR 205.3h), so it resolves via that subtype table.
+
+    #[test]
+    fn test_type_word_plant_is_subtype_not_plan() {
+        // The "plant" head noun resolves to the Plant subtype; no head-noun
+        // TYPE_WORD prefix shadows it.
+        let (rest, tf) = parse_type_filter_word("plant").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plant".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_plants_is_subtype_not_plan() {
+        // Regular plural: "plants" must resolve to the Plant subtype, not Plan.
+        let (rest, tf) = parse_type_filter_word("plants").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plant".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_planet_is_subtype_not_plan() {
+        // "planet" is a land subtype; the "plan" prefix must not shadow it.
+        let (rest, tf) = parse_type_filter_word("planet").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Planet".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_power_plant_never_plan() {
+        // "power-plant" is a land subtype (Power-Plant). The hyphenated form must
+        // resolve as a subtype.
+        let (_, tf) = parse_type_filter_word("power-plant").unwrap();
+        assert!(
+            matches!(tf, TypeFilter::Subtype(_)),
+            "power-plant must be a Subtype, got {tf:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_word_power_space_plant_never_plan() {
+        // The space-separated "power plant" head noun must never classify as the
+        // "Plan" subtype. Either it fails to parse or it resolves to a non-Plan
+        // filter — both are acceptable; "Plan" is the prohibited result.
+        if let Ok((_, tf)) = parse_type_filter_word("power plant") {
+            assert_ne!(
+                tf,
+                TypeFilter::Subtype("Plan".to_string()),
+                "power plant must never be the Plan subtype"
+            );
+        }
+    }
+
+    #[test]
+    fn test_type_word_plan_still_plan() {
+        // "Plan" is an enchantment subtype (CR 205.3h): bare "plan" resolves to
+        // Subtype("Plan") via the subtype table.
+        let (rest, tf) = parse_type_filter_word("plan").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plan".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_plan_trailing_space_still_plan() {
+        // "plan" followed by a space boundary resolves to the Plan subtype and
+        // leaves the trailing context unconsumed.
+        let (rest, tf) = parse_type_filter_word("plan you control").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plan".to_string()));
+        assert_eq!(rest, " you control");
+    }
+
+    #[test]
+    fn test_type_word_spellshaper_is_subtype_not_card() {
+        // Class-lock: pre-fix the "spell" entry (→ Card) eats "spellshaper".
+        // Post-fix the boundary guard lets the subtype table resolve Spellshaper.
+        let (rest, tf) = parse_type_filter_word("spellshaper").unwrap();
+        assert_ne!(tf, TypeFilter::Card, "spellshaper must not be Card");
+        assert_eq!(tf, TypeFilter::Subtype("Spellshaper".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_lander_is_subtype_not_land() {
+        // Class-lock: pre-fix the "land" entry (→ Land) eats "lander".
+        // Post-fix the boundary guard lets the subtype table resolve Lander.
+        let (_, tf) = parse_type_filter_word("lander").unwrap();
+        assert_ne!(tf, TypeFilter::Land, "lander must not be Land");
+        assert!(
+            matches!(tf, TypeFilter::Subtype(_)),
+            "lander must be a Subtype, got {tf:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_word_battles_is_battle() {
+        // Regression guard for the word-boundary fix: "battle" is the only
+        // TYPE_WORDS entry that was missing its plural sibling. The boundary
+        // guard rejects "battle" + trailing 's', and BATTLE_SUBTYPES has no
+        // "Battle" entry, so parse_subtype cannot recover it — without the
+        // explicit "battles" TYPE_WORDS entry this returns Err.
+        let (rest, tf) = parse_type_filter_word("battles").unwrap();
+        assert_eq!(tf, TypeFilter::Battle);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_battles_trailing_context() {
+        // Regression guard for the word-boundary fix: "battles you control" is a
+        // supported head-noun phrase (see oracle_static grammar/type_change/
+        // restriction). The "battles" plural entry must classify as Battle and
+        // leave the trailing context unconsumed.
+        let (rest, tf) = parse_type_filter_word("battles you control").unwrap();
+        assert_eq!(tf, TypeFilter::Battle);
+        assert_eq!(rest, " you control");
     }
 
     // --- parse_stack_object_target (CR 701.6a + CR 115.1) ---

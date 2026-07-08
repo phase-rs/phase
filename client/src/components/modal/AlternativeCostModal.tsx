@@ -167,6 +167,28 @@ function keywordCopy(
         showOracleText: false,
         subtitle: t("alternativeCost.spectacleSubtitle", { name: cardName }),
       };
+    // CR 702.76a: Prowl — pay the prowl cost if the caster's matching creature
+    // dealt combat damage to a player this turn. Pure cost substitution.
+    case "Prowl":
+      return {
+        eyebrow: t("alternativeCost.prowlEyebrow"),
+        normalLabel: t("alternativeCost.prowlNormalLabel"),
+        altLabel: t("alternativeCost.prowlAltLabel"),
+        showOracleText: false,
+        subtitle: t("alternativeCost.prowlSubtitle", { name: cardName }),
+      };
+    // CR 702.37c / CR 702.168a + CR 708.4: Morph/Megamorph/Disguise — cast face
+    // down as a blank 2/2 creature spell for a fixed {3}. The card's real Oracle
+    // text (including its turn-face-up cost) helps the caster decide, so show it.
+    case "FaceDown":
+      return {
+        eyebrow: t("alternativeCost.faceDownEyebrow"),
+        normalLabel: t("alternativeCost.faceDownNormalLabel"),
+        altLabel: t("alternativeCost.faceDownAltLabel"),
+        altSuffix: t("alternativeCost.faceDownAltSuffix"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.faceDownSubtitle", { name: cardName }),
+      };
   }
   return assertNever(keyword);
 }

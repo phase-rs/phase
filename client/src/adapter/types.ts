@@ -47,6 +47,8 @@ export type GameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "Archenemy"
+  | "Planechase"
   | "Limited"
   | "Momir";
 
@@ -80,6 +82,8 @@ export interface FormatConfig {
    * fixed-deck formats client-side.
    */
   supplies_fixed_deck?: boolean;
+  /** Configured archenemy seat for default Archenemy. Absent outside Archenemy. */
+  archenemy_player?: PlayerId | null;
   /**
    * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
    * from any player in the `debug_permitted` set. Off by default. Orthogonal
@@ -198,6 +202,10 @@ export type MatchPhase = "InGame" | "BetweenGames" | "Completed";
 
 export interface MatchConfig {
   match_type: MatchType;
+  /** CR 732.2a: combo (infinite-loop) detector opt-in, chosen at match creation and
+   *  immutable during play. Optional on the wire — omitted means `Off` (the engine's
+   *  `#[serde(default)]`), so existing payloads are unchanged. */
+  loop_detection?: LoopDetectionMode;
 }
 
 export interface MatchScore {
@@ -282,6 +290,16 @@ export type Phase =
   | "End"
   | "Cleanup";
 
+/** Turn-direction scope for a phase stop (mirrors engine `PhaseStopScope`). */
+export type PhaseStopScope = "AllTurns" | "OwnTurn" | "OpponentsTurns";
+
+/** A single phase stop: the phase to pause at plus its turn-direction scope
+ *  (mirrors engine `PhaseStop`). */
+export interface PhaseStop {
+  phase: Phase;
+  scope: PhaseStopScope;
+}
+
 export type Zone =
   | "Library"
   | "Hand"
@@ -349,6 +367,16 @@ export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless
 export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise" | "Delve";
 export type RoomDoor = "Left" | "Right";
 
+// CR 709.5f-g: Operation a lock/unlock-door effect performs on a Room door
+// (half). Mirrors the engine `DoorLockOp` enum (`#[serde(tag = "type")]` —
+// internally tagged, so serializes as `{ "type": "Unlock" }`). `LockOrUnlock`
+// is the "lock or unlock a door" disjunction where the player chooses both the
+// operation and the half at resolution (Keys to the House, Marina Vendrell).
+export type DoorLockOp =
+  | { type: "Unlock" }
+  | { type: "Lock" }
+  | { type: "LockOrUnlock" };
+
 /**
  * Display-layer projection of the engine's `ManaProduction` enum. One variant
  * per producer shape so colorless and commander-identity producers reach the
@@ -411,6 +439,9 @@ export type ManaSpellGrant =
 export interface ManaUnit {
   color: ManaType;
   source_id: ObjectId;
+  // CR 118.3a: stable per-unit id used to pin which pool unit pays a cost.
+  // `0` is the unstamped sentinel (convoke markers / detached preview pools).
+  pip_id: number;
   snow: boolean;
   restrictions: ManaRestriction[];
   // `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — absent when empty.
@@ -424,7 +455,8 @@ export interface ManaPool {
 export type ManaCost =
   | { type: "NoCost" }
   | { type: "Cost"; shards: string[]; generic: number }
-  | { type: "SelfManaCost" };
+  | { type: "SelfManaCost" }
+  | { type: "SelfManaValue" };
 
 export type CastFrequency =
   | "Unlimited"
@@ -465,6 +497,7 @@ export type CastingVariant =
   | { type: "Awaken" }
   | { type: "Cleave" }
   | { type: "MoreThanMeetsTheEye" }
+  | { type: "Freerunning" }
   | { type: "Fuse" };
 
 export interface CastingVariantChoiceOption {
@@ -548,6 +581,12 @@ export type CounterCostChoice = {
   count: number;
 };
 
+// CR 107.1c: one per-type entry of a "remove any number of counters" selection.
+export type CounterRemoveChoice = {
+  counter_type: CounterType;
+  count: number;
+};
+
 export type PlayerCounterKind =
   | "Poison"
   | "Experience"
@@ -589,6 +628,15 @@ export interface TokenImageRef {
   preset_id: string;
 }
 
+export type TokenPtProvenance =
+  | "FixedOrAbsent"
+  | {
+      SourceDefinedOrDynamic: {
+        power?: string | null;
+        toughness?: string | null;
+      };
+    };
+
 // ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
 
 export type CastChoice = { type: "Cast" } | { type: "Decline" };
@@ -616,19 +664,41 @@ export type CastingPermission =
 
 // ── Game Restriction ────────────────────────────────────────────────────
 
-export type RestrictionExpiry = { type: "EndOfTurn" } | { type: "EndOfCombat" };
+export type RestrictionExpiry =
+  | { type: "EndOfTurn" }
+  | { type: "EndOfCombat" }
+  | { type: "UntilPlayerNextTurn"; player: PlayerId }
+  | { type: "UntilEndOfNextTurnOf"; player: PlayerId };
 
 export type RestrictionScope =
   | { type: "SourcesControlledBy"; data: PlayerId }
   | { type: "SpecificSource"; data: ObjectId }
   | { type: "DamageToTarget"; data: ObjectId };
 
-export type GameRestriction = {
-  type: "DamagePreventionDisabled";
-  source: ObjectId;
-  expiry: RestrictionExpiry;
-  scope?: RestrictionScope | null;
-};
+export type GameRestriction =
+  | {
+      type: "DamagePreventionDisabled";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      scope?: RestrictionScope | null;
+    }
+  | {
+      // CR 101.2 + CR 601.2a: player-scoped activity prohibition. Mirrored
+      // loosely — the display layer never inspects the nested activity axis.
+      type: "ProhibitActivity";
+      source: ObjectId;
+      affected_players: Record<string, unknown>;
+      expiry: RestrictionExpiry;
+      activity: Record<string, unknown>;
+    }
+  | {
+      // CR 611.2a + CR 614.1d: floating "cards can't enter the battlefield from
+      // <zone>" restriction (Bad Wolf Bay). Mirrors the engine variant.
+      type: "CantEnterBattlefieldFrom";
+      source: ObjectId;
+      expiry: RestrictionExpiry;
+      filter: TargetFilter;
+    };
 
 export interface SerializedManaProduction {
   type: string;
@@ -931,6 +1001,15 @@ export interface ResolvedAbility {
   sub_ability?: ResolvedAbility;
   else_ability?: ResolvedAbility;
   description?: string;
+  /**
+   * CR 400.7 identity latch + CR 704.5d token cessation: the source's card
+   * identity snapshotted at trigger push, so an `AllCopies` priority yield can
+   * be matched by card identity after the source object has ceased to exist (a
+   * token that left the battlefield is removed from `objects` before priority is
+   * next offered). Set only for triggered abilities; absent otherwise (serde
+   * `skip_serializing_if`).
+   */
+  source_card_id?: CardId;
 }
 
 // ── Stack ────────────────────────────────────────────────────────────────
@@ -989,6 +1068,7 @@ export interface TriggerContextDisplay {
 
 export interface StackEntryDisplay {
   source_name: string;
+  token_image_ref?: TokenImageRef | null;
   kind_label: string;
   ability_description?: string;
   targets?: StackTargetDisplay[];
@@ -1006,6 +1086,9 @@ export interface PendingCast {
   activation_cost?: SerializedAbilityCost;
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
+  // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
+  // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
+  pinned_pool_units?: number[];
 }
 
 export interface TargetSelectionSlot {
@@ -1023,6 +1106,9 @@ export type TargetSelectionConstraint =
   | { type: "DifferentTargetPlayers" }
   // CR 115.1 + CR 601.2c: object targets must be controlled by different players.
   | { type: "DifferentObjectControllers" }
+  // CR 115.1 + CR 601.2c + CR 400.1: object targets must come from the same
+  // player-owned zone of the given kind.
+  | { type: "SameZoneOwner"; zone: Zone }
   // CR 202.3 + CR 601.2c: the chosen target set's combined mana value must satisfy
   // `comparator` against `value`. `value` is an engine `QuantityExpr` (internally
   // tagged); the frontend never evaluates it — legality is delivered via
@@ -1076,12 +1162,28 @@ export interface ModalChoice {
    */
   mode_pawprints?: number[];
   constraints?: Array<{ type: string }>;
+  /**
+   * CR 700.2 + CR 107.3m: Engine-internal dynamic "choose up to X —" cap
+   * descriptor (a serialized QuantityExpr). Resolved live by the engine into
+   * `max_choices` before the choice is offered; the UI never reads this field.
+   */
+  dynamic_max_choices?: unknown;
 }
 
 // CR 603.3b: Display payload for one collected-but-not-yet-stacked trigger
 // awaiting its controller's ordering choice. Engine-derived; the overlay
 // must NOT re-derive name/description from state.objects.
 export interface PendingTriggerSummary {
+  source_id: ObjectId;
+  source_name: string;
+  description: string;
+}
+
+// CR 616.1 / CR 614: Display payload for one replacement-effect option — an
+// ordering candidate, or one branch (accept/decline) of an optional "you may".
+// Engine-derived; the modal must NOT re-derive name/description from
+// state.objects. Optional branches share the same source_id.
+export interface ReplacementCandidateSummary {
   source_id: ObjectId;
   source_name: string;
   description: string;
@@ -1100,6 +1202,15 @@ export type CastOfferKind =
   | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number }
   | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] }
   | {
+      type: "GraveyardPaidCast";
+      hit_card: ObjectId;
+      // Mirrors the engine `ManaSpendPermission` enum (single fieldless variant,
+      // serialized as a bare string). Not consumed by the modal — the paid-cast
+      // copy is fixed — but carried to mirror the serialized shape.
+      mana_spend_permission?: "AnyTypeOrColor";
+      cast_transformed?: boolean;
+    }
+  | {
       type: "FreeCastWindow";
       candidates: ObjectId[];
       remaining_casts: number;
@@ -1109,19 +1220,28 @@ export type CastOfferKind =
       exile_instead_of_graveyard?: boolean;
     };
 
+// CR 103.5b: Which declare-point action a pending BottomCards obligation
+// completes once resolved. Field-flattened under `type` (no `data:` wrapper) to
+// mirror the Rust `#[serde(tag = "type")]` no-content shape — intentionally
+// different from MulliganChoice's TS shape (which nests under `data:`).
+export type PendingMulliganAction =
+  | { type: "Keep" }
+  | { type: "UseSerumPowder"; object_id: ObjectId };
+
+// CR 103.5 + 103.5b: Per-entry sub-state for the declare-point mulligan flow.
+export type MulliganDecisionPhase =
+  | { type: "Declare" }
+  | { type: "BottomCards"; count: number; then: PendingMulliganAction };
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
       data: {
-        pending: { player: PlayerId; mulligan_count: number }[];
+        pending: { player: PlayerId; mulligan_count: number; phase: MulliganDecisionPhase }[];
         free_first_mulligan: boolean;
       };
-    }
-  | {
-      type: "MulliganBottomCards";
-      data: { pending: { player: PlayerId; count: number }[] };
     }
   | {
       type: "OpeningHandBottomCards";
@@ -1146,15 +1266,15 @@ export type WaitingFor =
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
-  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidate_descriptions?: string[] } }
+  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
-  | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[] } }
+  | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
-  | { type: "SaddleMount"; data: { player: PlayerId; mount_id: ObjectId; saddle_power: number; eligible_creatures: ObjectId[] } }
+  | { type: "SaddleMount"; data: { player: PlayerId; mount_id: ObjectId; saddle_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
@@ -1164,16 +1284,18 @@ export type WaitingFor =
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
-  | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
+  | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
+  | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source_id: ObjectId; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
+  | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
   | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
@@ -1181,7 +1303,7 @@ export type WaitingFor =
   // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.
   // Keep this union exhaustive with the engine enum so the modal's keyword
   // switch is type-checked against every variant the engine can emit.
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" } | { type: "FaceDown" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -1258,7 +1380,9 @@ export type WaitingFor =
   | { type: "AssignBlockerDamage"; data: { player: PlayerId; blocker_id: ObjectId; total_damage: number; attackers: ObjectId[] } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
+  | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
+  | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
       cards: ObjectId[];
@@ -1313,10 +1437,23 @@ export type WaitingFor =
       actor:
         | { type: "SubjectActs" }
         | { type: "Delegated"; data: PlayerId };
+      // CR 701.38b: For object-pool votes (Council's Judgment, Prime
+      // Minister's Cabinet Room) the candidate battlefield objects, parallel
+      // to `options`/`option_labels`. Empty (`[]`) for named votes. When
+      // non-empty, the modal dispatches `SubmitVoteCandidate { candidate_index }`
+      // (index into this array) instead of `ChooseOption`.
+      candidate_objects: ObjectId[];
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
   | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
+  // CR 709.5f-g: Resolving lock/unlock-door effect needs the player to choose
+  // which door (half) of the targeted Room to act on. `options` is the engine's
+  // `Vec<(DoorLockOp, RoomDoor)>` — each tuple serializes as a JSON array
+  // `[op, door]`. A fixed-op effect (Unlock / Lock) lists one operation across
+  // eligible doors; a "lock or unlock" effect lists both. Answered with
+  // `GameAction::ChooseRoomDoor`.
+  | { type: "ChooseRoomDoor"; data: { player: PlayerId; object_id: ObjectId; options: [DoorLockOp, RoomDoor][] } }
   | { type: "CategoryChoice"; data: {
       player: PlayerId;
       target_player: PlayerId;
@@ -1327,6 +1464,37 @@ export type WaitingFor =
       source_controller?: PlayerId;
       eligible_per_category: ObjectId[][];
       source_id: ObjectId;
+      remaining_players: PlayerId[];
+      all_kept: ObjectId[];
+      scoped_players: PlayerId[];
+    } }
+  | { type: "EachPlayerCopyChosenSelection"; data: {
+      player: PlayerId;
+      eligible: TargetRef[];
+      min: number;
+      max: number;
+      choose_filter: TargetFilter;
+      copy_modifications?: unknown[];
+      scale?: unknown;
+      source_id: ObjectId;
+      source_controller: PlayerId;
+      remaining_players: PlayerId[];
+      all_choices: { player: PlayerId; chosen: ObjectId[] }[];
+      scoped_players: PlayerId[];
+      trigger_event?: GameEvent;
+    } }
+  // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any number of eligible
+  // creatures whose combined power is at most `cap`; the rest are sacrificed.
+  | { type: "KeepWithinTotalPowerChoice"; data: {
+      player: PlayerId;
+      target_player: PlayerId;
+      eligible: ObjectId[];
+      cap: number;
+      choose_filter?: TargetFilter;
+      sacrifice_filter?: TargetFilter;
+      chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
+      source_id: ObjectId;
+      source_controller?: PlayerId;
       remaining_players: PlayerId[];
       all_kept: ObjectId[];
       scoped_players: PlayerId[];
@@ -1455,6 +1623,8 @@ export type DebugTokenRequest =
       data: {
         preset_id: string;
         owner: PlayerId;
+        power_override?: number | null;
+        toughness_override?: number | null;
         enter_with_counters?: [CounterType, number][];
       };
     }
@@ -1521,8 +1691,38 @@ export type DebugAction =
     }
   | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
 
+// CR 117.3d: priority-yield preference types, mirroring the engine's
+// `YieldScope` / `YieldTarget` / `PriorityYieldOp` / `PriorityYield`. The
+// frontend never constructs an incarnation or card_id — it names a stack source
+// and scope for `Add`, and echoes a stored `YieldTarget` verbatim for `Remove`.
+export type YieldScope = "ThisObject" | "AllCopies";
+
+export type YieldTarget =
+  | {
+      ThisObject: {
+        source_id: ObjectId;
+        // `null` for synthetic/delayed triggers that never latched an incarnation.
+        incarnation: number | null;
+        // Absent/`null` = source-level wildcard (legacy/coarse yields); a value
+        // scopes the yield to one of a source's distinct triggers.
+        trigger_description?: string | null;
+      };
+    }
+  | { AllCopies: { card_id: CardId; trigger_description?: string | null } };
+
+export type PriorityYieldOp =
+  | { type: "Add"; data: { source_id: ObjectId; scope: YieldScope } }
+  | { type: "Remove"; data: { target: YieldTarget } }
+  | { type: "ClearAll" };
+
+export interface PriorityYield {
+  player: PlayerId;
+  target: YieldTarget;
+}
+
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "RollPlanarDie" }
   | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode?: CastPaymentMode } }
@@ -1534,6 +1734,9 @@ export type GameAction =
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
+  // CR 118.3a: pin / unpin a specific pool unit during manual mana payment.
+  | { type: "SpendPoolMana"; data: { pip_id: number } }
+  | { type: "UnspendPoolMana"; data: { pip_id: number } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectCoinFlips"; data: { keep_indices: number[] } }
@@ -1554,6 +1757,9 @@ export type GameAction =
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
+  // CR 701.38b: Cast a vote for one object candidate in an object-pool vote.
+  // `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`.
+  | { type: "SubmitVoteCandidate"; data: { candidate_index: number } }
   | { type: "SubmitSpellbookDraft"; data: { card: string } }
   | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
   | { type: "ChoosePile"; data: { pile: PileSide } }
@@ -1596,6 +1802,7 @@ export type GameAction =
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
+  | { type: "GraveyardPaidCastChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "RippleChoice"; data: { choice: CastChoice } }
   | { type: "FreeCastWindowChoice"; data: { selection?: ObjectId } }
@@ -1607,23 +1814,36 @@ export type GameAction =
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
-  | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
+  | {
+      type: "SetAutoPass";
+      data: {
+        mode:
+          | { type: "UntilStackEmpty" }
+          | { type: "UntilTurnBoundary"; until: TurnBoundary };
+      };
+    }
   | { type: "CancelAutoPass" }
-  | { type: "SetPhaseStops"; data: { stops: Phase[] } }
+  | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
+  | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
   | { type: "ChooseRemoveCounterCostDistribution"; data: { distribution: CounterCostChoice[] } }
   | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
+  | { type: "ChooseCountersToRemove"; data: { selections: CounterRemoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
   | { type: "ChooseDungeon"; data: { dungeon: DungeonId } }
   | { type: "ChooseDungeonRoom"; data: { room_index: number } }
   | { type: "ChooseSpecializeColor"; data: { color: ManaColor } }
   | { type: "UnlockRoomDoor"; data: { object_id: ObjectId; door: RoomDoor } }
+  // CR 709.5f-g: Answer to WaitingFor::ChooseRoomDoor — the chosen (op, door)
+  // pair, which must be one of the prompt's `options`.
+  | { type: "ChooseRoomDoor"; data: { object_id: ObjectId; op: DoorLockOp; door: RoomDoor } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
+  | { type: "ChooseKeptCreatures"; data: { kept: ObjectId[] } }
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
@@ -1656,7 +1876,8 @@ export type ShardChoice =
 export type PayableResource =
   | { type: "Energy" }
   | { type: "ManaGeneric"; data: { per_x: number } }
-  | { type: "Counters" };
+  | { type: "Counters" }
+  | { type: "Speed" };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }
@@ -1668,6 +1889,8 @@ export interface PhyrexianShard {
   color: ManaColor;
   options: ShardOptions;
 }
+
+export type PlanarDieFace = "Planeswalk" | "Chaos" | "Blank";
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
@@ -1696,6 +1919,7 @@ export type GameEvent =
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
+  | { type: "DamagePrevented"; data: { source_id: ObjectId; target: TargetRef; amount: number } }
   | { type: "SpellCountered"; data: { object_id: ObjectId; countered_by: ObjectId } }
   | { type: "CounterAdded"; data: { object_id: ObjectId; counter_type: string; count: number } }
   | { type: "ObjectIntensified"; data: { object_id: ObjectId; amount: number } }
@@ -1703,6 +1927,7 @@ export type GameEvent =
   | { type: "TokenCreated"; data: { object_id: ObjectId; name: string; source_id: ObjectId } }
   | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
+  | { type: "ArmyAmassed"; data: { object_id: ObjectId; source_id: ObjectId; controller: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
   | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId; attacks?: [ObjectId, AttackTarget][] } }
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
@@ -1711,8 +1936,13 @@ export type GameEvent =
   | { type: "Transformed"; data: { object_id: ObjectId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
+  | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }
   | { type: "CardsRevealed"; data: { player: PlayerId; card_ids?: ObjectId[]; card_names: string[] } }
   | { type: "Regenerated"; data: { object_id: ObjectId } }
+  | {
+      type: "CombatDamageDealtToPlayer";
+      data: { player_id: PlayerId; source_amounts?: [ObjectId, number][]; total_damage: number };
+    }
   | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
   | { type: "Detained"; data: { object_id: ObjectId } }
   | { type: "CaseSolved"; data: { object_id: ObjectId } }
@@ -1729,9 +1959,13 @@ export type GameEvent =
   | { type: "BecomesPlotted"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
+  | { type: "CardPredicateGuessMade"; data: { player_id: PlayerId; source_id: ObjectId | null; choice: string } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
+  | { type: "Planeswalked"; data: { player_id: PlayerId; from: ObjectId | null; to: ObjectId | null } }
+  | { type: "ChaosEnsued"; data: { plane_id: ObjectId } }
+  | { type: "PlanarDieRolled"; data: { player_id: PlayerId; face: PlanarDieFace } }
   // CR 706: a die was rolled. Animated by DiceRollOverlay. `sides`/`result` are
   // the engine's authoritative roll (1..=sides after modifiers). `result` is
   // `null` for the symbolic planar die (CR 901.9d / CR 706.7), which has no
@@ -1791,6 +2025,99 @@ export interface PlayerStatusView {
   source?: ObjectId | null;
 }
 
+export interface PlanechaseView {
+  active_plane?: ObjectId | null;
+  planar_controller?: PlayerId | null;
+  planar_deck_count: number;
+  current_roll_cost: ManaCost;
+  can_roll: boolean;
+}
+
+export interface ArchenemyView {
+  archenemy: PlayerId;
+  scheme_deck_count: number;
+  active_scheme_ids?: ObjectId[];
+  hero_player_ids?: PlayerId[];
+}
+
+/** Mirrors `engine::analysis::resource::ObjectClass` (unit variants → strings). */
+export type ObjectClass = "Creature" | "Planeswalker" | "Battle" | "Player" | "Other";
+
+/** Mirrors `engine::analysis::resource::CounterClass` (unit variants → strings). */
+export type CounterClass =
+  | "Plus1Plus1"
+  | "Minus1Minus1"
+  | "Loyalty"
+  | "Defense"
+  | "Poison"
+  | "Energy"
+  | "Other";
+
+/** Mirrors `engine::analysis::resource::TriggerKind` (unit variants → strings). */
+export type TriggerKind = "Proliferate" | "Magecraft" | "Constellation" | "Landfall" | "Other";
+
+/**
+ * One unbounded-resource axis a CR 732.2a net-progress loop pumps. Mirrors
+ * `engine::analysis::resource::ResourceAxis` (serde externally-tagged: unit
+ * variants serialize as bare strings, data variants as a single-key object,
+ * tuple variants as an array). The frontend only formats each axis to a display
+ * family — it never derives which axes are unbounded or decides attribution.
+ */
+export type ResourceAxis =
+  | { Mana: ManaType }
+  | { Life: PlayerId }
+  | { DamageDealt: PlayerId }
+  | { LibraryDelta: PlayerId }
+  | { Counter: [CounterClass, ObjectClass] }
+  | { Trigger: TriggerKind }
+  | "TokensCreated"
+  | "CardsDrawn"
+  | "Casts"
+  | "LandfallTriggers"
+  | "CombatPhases"
+  | "ExtraTurns"
+  | "DeathTriggers"
+  | "EtbTriggers"
+  | "LtbTriggers"
+  | "SacTriggers";
+
+/** The externally-tagged discriminant of a `ResourceAxis` (its variant name).
+ *  Exhaustive over `ResourceAxis` so a new engine axis forces a TS update. */
+export type ResourceAxisTag =
+  | "Mana"
+  | "Life"
+  | "DamageDealt"
+  | "LibraryDelta"
+  | "Counter"
+  | "Trigger"
+  | "TokensCreated"
+  | "CardsDrawn"
+  | "Casts"
+  | "LandfallTriggers"
+  | "CombatPhases"
+  | "ExtraTurns"
+  | "DeathTriggers"
+  | "EtbTriggers"
+  | "LtbTriggers"
+  | "SacTriggers";
+
+/**
+ * One `∞` HUD row. Mirrors `engine::game::derived_views::UnboundedResourceView`.
+ * `player` is the engine-decided HUD attribution (NOT necessarily the loop
+ * controller); `axis` is the engine-provided identity the FE maps to a family.
+ */
+export interface UnboundedResourceView {
+  player: PlayerId;
+  axis: ResourceAxis;
+}
+
+/** Mirrors `engine::game::derived_views::TurnOrderSlotView`. */
+export interface TurnOrderSlotView {
+  player: PlayerId;
+  slot_index: number;
+  turns_from_now: number;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -1836,6 +2163,32 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::player_status`.
    */
   player_status?: PlayerStatusView[];
+  /**
+   * CR 118.3a + CR 601.2g: during the viewing player's own manual mana payment
+   * for a spell, the portion of the locked cost still UNPAID by the pool units
+   * they have pinned (selected). The payment UI renders this as the cost shrinks
+   * while the player picks mana; an empty/`NoCost` value means their selection
+   * alone covers the whole cost. Omitted outside a non-convoke spell payment the
+   * viewer controls. Mirrors
+   * `engine::game::derived_views::DerivedViews::pending_payment_remaining`.
+   */
+  pending_payment_remaining?: ManaCost;
+  /** Engine-authored Planechase state and planar-die legality. */
+  planechase?: PlanechaseView | null;
+  /** Engine-authored Archenemy state. */
+  archenemy?: ArchenemyView | null;
+  /**
+   * Engine-authored multiplayer turn-order rows. Duplicate players are
+   * intentional when extra turns put the same player in multiple slots.
+   */
+  turn_order?: TurnOrderSlotView[];
+  /**
+   * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
+   * of every unbounded-resource loop. Empty/omitted when no loop is active. The
+   * FE maps each axis to a display family and never re-derives attribution.
+   * Mirrors `engine::game::derived_views::DerivedViews::unbounded_resources`.
+   */
+  unbounded_resources?: UnboundedResourceView[];
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
@@ -1917,6 +2270,27 @@ export interface GameState {
   max_lands_per_turn: number;
   priority_pass_count: number;
   /**
+   * Mirrors `engine::types::game_state::GameState::unimplemented_oracle_ids`.
+   * Oracle ids (fallback: object names) of cards whose abilities hit an
+   * unimplemented effect at resolution this game. Diagnostics only — forwarded
+   * verbatim to the `game_end` telemetry event. Distinct from the per-object
+   * `unimplemented_mechanics` static parse-coverage projection. Absent when the
+   * set is empty (serde `skip_serializing_if`).
+   */
+  unimplemented_oracle_ids?: string[];
+  /**
+   * Mirrors `engine::types::game_state::GameState::pending_trigger_abandons`.
+   * Descriptors (source name + dead stack-entry id) of push-first triggered
+   * abilities whose in-construction stack entry vanished before selection
+   * completed, forcing the engine to abandon construction. Diagnostics only —
+   * records recovery from an unidentified state-coherence defect (a dangling
+   * push-first construction cursor) that previously panicked and poisoned the
+   * WASM engine. Forwarded to the `game_end` telemetry event; an `Array` (not a
+   * set) because the raw occurrence count matters. Absent when empty (serde
+   * `skip_serializing_if`).
+   */
+  pending_trigger_abandons?: string[];
+  /**
    * Engine-authored derived projections, attached by adapters from the
    * wire-format `ClientGameState.derived` sibling field. Optional because
    * some wire paths (legacy cached state, older server builds) may not
@@ -1997,7 +2371,9 @@ export interface GameState {
   day_night?: DayNight | null;
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
-  phase_stops?: Record<number, Phase[]>;
+  phase_stops?: Record<number, PhaseStop[]>;
+  /** CR 117.3d: the viewer's standing priority-yield preferences. */
+  priority_yields?: PriorityYield[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
     target_player: PlayerId;
@@ -2005,11 +2381,23 @@ export interface GameState {
     grant_extra_turn_after?: boolean;
   }>;
   debug_mode?: boolean;
+  /** CR 732.2a: opt-in gate for the live combo-detector (default Off). Set from the
+   *  match's immutable `MatchConfig` at game creation; not mutable mid-game. */
+  loop_detection?: LoopDetectionMode;
 }
+
+export type TurnBoundary = "EndOfCurrentTurn" | "MyNextTurnStart";
 
 export type AutoPassMode =
   | { type: "UntilStackEmpty"; initial_stack_len: number }
-  | { type: "UntilEndOfTurn" };
+  | { type: "UntilTurnBoundary"; until: TurnBoundary };
+
+/**
+ * CR 732.2a: user-controllable opt-in gate for the live combo (infinite-loop)
+ * detector. `Off` (default) restores pre-detector behavior; `On` enables it.
+ * Mirrors `engine::types::game_state::LoopDetectionMode`.
+ */
+export type LoopDetectionMode = { type: "Off" } | { type: "On" };
 
 // ── Source attribution (CR 613 layers) ───────────────────────────────────
 
@@ -2136,11 +2524,32 @@ export const AdapterErrorCode = {
    * offer a pre-filled bug report.
    */
   ENGINE_PANIC: "ENGINE_PANIC",
+  /**
+   * A gameplay round-trip to the engine Web Worker never returned within the
+   * timeout window (see `ENGINE_REQUEST_TIMEOUT_MS` in engine-worker-client).
+   * Without this, a wedged worker call hangs forever and leaves the dispatch
+   * mutex held, silently dropping every subsequent click. This code is kept for
+   * legacy adapter failures; current worker watchdogs surface `notifyEngineSlow`
+   * and keep the pending request alive so a late worker reply can complete the
+   * original dispatch.
+   */
+  ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
+  /**
+   * The engine's actor-authorization guards (`check_actor_authorization` /
+   * priority checks, CR 117 priority / CR 500 turn structure) rejected the
+   * action because the submitting seat is no longer the authorized submitter
+   * (`EngineError::WrongPlayer`) or no longer holds priority
+   * (`EngineError::NotYourPriority`). Both are the same benign race — a click
+   * lands in the same tick that priority/turn shifts — not a bug: the engine
+   * correctly refused a stale action. Dispatch treats it as a no-op rather
+   * than surfacing it as a crash.
+   */
+  STALE_ACTION: "STALE_ACTION",
 } as const;
 
 /**
@@ -2150,6 +2559,18 @@ export const AdapterErrorCode = {
  */
 export function isStateLostMessage(message: string): boolean {
   return message.startsWith("NOT_INITIALIZED:");
+}
+
+/**
+ * Detect the engine's actor-authorization rejections. `submit_action` in
+ * `engine-wasm/src/lib.rs` formats `EngineError::WrongPlayer` (Display: "Wrong
+ * player") and `EngineError::NotYourPriority` (Display: "Not your priority")
+ * as `Engine error: <display>`. Match the exact strings — these are the benign
+ * stale-action race (see `AdapterErrorCode.STALE_ACTION`), never a state-loss
+ * or panic.
+ */
+export function isStaleActionMessage(message: string): boolean {
+  return message === "Engine error: Wrong player" || message === "Engine error: Not your priority";
 }
 
 /**
@@ -2223,6 +2644,16 @@ export interface BatchResolveResult {
    *  chunk's value as the "resolving X of Y" denominator. */
   total: number;
 }
+
+/**
+ * Engine-built game-scoped AI card-DB subset descriptor (the `build_ai_card_subset`
+ * WASM export, serialized as a tagged union). `full` means the game's card
+ * universe is not statically bounded (today: Momir) and AI workers must load the
+ * full database; `subset` carries the minimal card-data JSON for this game.
+ */
+export type AiCardSubsetResult =
+  | { kind: "full" }
+  | { kind: "subset"; json: string; count: number };
 
 export interface EngineAdapter {
   initialize(): Promise<void>;

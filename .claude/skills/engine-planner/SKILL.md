@@ -19,6 +19,14 @@ A task description: parser enhancement/fix, or engine mechanic enhancement/fix. 
 
 Complete every step. Do not skip any.
 
+### Step 0: Verify the premise — confirm the card's actual Oracle text
+
+**Hard gate, before any other step.** If the task references a specific card's abilities, fetch that card's real, current Oracle text from an authoritative source (Scryfall API: `https://api.scryfall.com/cards/named?exact=<URL_ENCODED_NAME>`, or MTGJSON) and compare it verbatim against what the task description claims. Do not proceed on memory, on assumed similarity to other cards, or on a task brief's paraphrase of the card's abilities without this independent check.
+
+A downloaded game-state's stored ability `description` field is a second, usually-reliable source, but it is not a substitute for checking Scryfall — a game state only reflects abilities the parser already produced (correctly or not), and can be silent about clauses that don't exist at all.
+
+**Why this is a hard gate:** a wrong premise about what a card does invalidates every subsequent step even if plan review, implementation review, and CI all pass — those loops verify that a design is *executed correctly*, not that its starting premise is *real*. A fabricated ability can survive multiple rounds of architectural review because reviewers by default trust the task brief's description of what the card does; they are not designed to fact-check the card itself. If the plan or implementation review process turns up something that looks off (e.g. a clause with no analogous card, or a CR citation that doesn't fit any existing rule), re-verify the premise before re-deriving the design.
+
 ### Step 1: Identify applicable skills
 
 Determine which skill(s) apply and read each that does:
@@ -37,6 +45,7 @@ Determine which skill(s) apply and read each that does:
 | `/add-frontend-component` | React components for WaitingFor overlays, board elements, or any UI that dispatches `GameAction`s |
 | `/add-card-data-pipeline` | Card export shape changes, synthesis functions, coverage-report changes |
 | `/add-engine-variant` | Any new enum variant on engine types (mandatory gate) |
+| `/card-test` | Any plan whose verification matrix includes a cast-pipeline runtime test (canonical GameScenario/GameRunner recipe + the six test foot-guns) |
 
 Use the skill checklist(s) as the skeleton of the final plan. Every checklist step must appear.
 
@@ -60,7 +69,8 @@ The plan MUST include these sections with substantive, specific answers:
 - **Extension vs Creation** — Does this extend an existing pattern or create a new one? Justify any new pattern.
 - **Analogous Trace** — Name the traced feature and the full file path (e.g., "Traced `Scry` through `types/ability.rs` → `parser/oracle_effect/imperative.rs` → `game/effects/scry.rs` → `game/effects/mod.rs`").
 - **Variant Discoverability** (if adding any enum variant) — Confirm `cargo engine-inventory` was consulted and run the `/add-engine-variant` checklist.
-- **Verification Matrix** — For every behavioral claim, specify the changed seam/function, production entry point, runtime test to add or update, revert-failing assertion, sibling/negative cases, and coverage status impact. For parser changes, explicitly state whether any Oracle text is accepted while semantics remain deferred; if yes, plan how coverage remains red/honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged unsupported coverage.
+- **Verification Matrix** — For every behavioral claim, specify the changed seam/function, production entry point, runtime test to add or update, revert-failing assertion, sibling/negative cases, hostile fixtures, and coverage status impact. Cast-pipeline runtime tests must follow the `/card-test` recipe (GameScenario + `GameRunner::cast(..).resolve()` + `CastOutcome` deltas, verbatim Oracle text). Every planned negative assertion must name its paired positive reach-guard — a bare negative that an upstream short-circuit (e.g. `Effect::Unimplemented` early-return) can satisfy vacuously is not a test. Hostile fixtures are per-claim/per-seam, not a single global negative test: include the applicable negative sibling / adjacent grammar or enum variant, empty/decline/no-legal-choice path, multi-authority case (two permissions/sources/costs, source or controller change, owner vs controller, prior tracked-set producer, etc.), and the first production branch the fixture reaches (`is_empty`, `is_none`, enum match arm, variant guard). If a hostile row is unreachable, prove why from code. For parser changes, explicitly state whether any Oracle text is accepted while semantics remain deferred; if yes, plan how coverage remains red/honest via `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged unsupported coverage.
+- **Identity / Provenance Contract** — For any "this way", "that source", "chosen", "cast using", "from among them", selected target/mode, replacement predicate, duration-bound effect, or controller/owner-relative text, specify the source phrase/rules concept, selected authority type and id/value, binding time, live vs snapshotted/latched semantics, storage location, consuming function, invalidation/expiration behavior, and the multi-authority hostile fixture that proves the binding.
 
 ### Step 5: Write the plan
 

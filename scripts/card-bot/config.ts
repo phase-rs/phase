@@ -19,7 +19,7 @@ export function isBuild(value: string): value is Build {
 
 /** Public R2 base, overridable for self-host / testing. No trailing slash. */
 const R2_BASE = (
-  Bun.env.CARD_BOT_R2_BASE ?? "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+  Bun.env.CARD_BOT_R2_BASE ?? "https://data.phase-rs.dev"
 ).replace(/\/+$/, "");
 
 /** Per-build path prefix under the R2 base. */

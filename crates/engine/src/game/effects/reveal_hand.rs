@@ -21,13 +21,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (card_filter, count, random, choice_optional, is_reveal) = match &ability.effect {
+    let (card_filter, count, random, choice_optional, is_reveal, target) = match &ability.effect {
         Effect::RevealHand {
             card_filter,
             count,
             selection,
             choice_optional,
             reveal,
+            target,
             ..
         } => (
             card_filter.clone(),
@@ -35,17 +36,48 @@ pub fn resolve(
             selection.is_random(),
             *choice_optional,
             *reveal,
+            target.clone(),
         ),
-        _ => (TargetFilter::Any, None, false, false, true),
+        _ => (
+            TargetFilter::Any,
+            None,
+            false,
+            false,
+            true,
+            TargetFilter::Any,
+        ),
     };
 
-    // Find the target player from resolved targets
+    // Find the target player from resolved targets. Targeted RevealHand
+    // (Thoughtseize, Duress) builds a real `TargetRef::Player` slot — keep that
+    // fast path unchanged (zero regression).
     let target_player = ability
         .targets
         .iter()
         .find_map(|t| match t {
             TargetRef::Player(pid) => Some(*pid),
             _ => None,
+        })
+        // CR 608.2d + CR 608.2c: "an opponent" is a choice the controller
+        // announces while resolving the effect. For the as-enters look-at-hand
+        // class (Anointed Peacekeeper, Sorcerous Spyglass), the parser's as-enters
+        // composition (`parse_as_enters_choose` →
+        // `front_opponent_choice_for_nontargeted_look`) now FRONTS an explicit
+        // `Choose(Opponent)` step and rebinds this look's player filter to
+        // `ControllerRef::ChosenPlayer { index: 0 }` (CR 608.2c "that player").
+        // So by the time control reaches here, `collect_player_targets` resolves
+        // that filter to exactly the single chosen opponent — a 1-element vec — and
+        // `.first()` is EXACT, not a multiplayer simplification (CR 608.2d
+        // satisfied by the fronted choice, not by picking the first opponent here).
+        // Any residual non-fronted `Typed`/`Controller` opponent filter that still
+        // reaches this arm (a hand-look shape outside the as-enters seam) falls
+        // back to the first opponent, exact in two-player. `TargetFilter::Any`
+        // (RevealAll/RevealPartial) hits `collect_player_targets`' empty arm → still
+        // `MissingParam`, so those reveals are unchanged.
+        .or_else(|| {
+            crate::game::ability_utils::collect_player_targets(state, ability, &target)
+                .first()
+                .copied()
         })
         .ok_or(EffectError::MissingParam("target player".to_string()))?;
 
@@ -167,6 +199,147 @@ mod tests {
             ObjectId(100),
             controller,
         )
+    }
+
+    /// CR 701.20e + CR 608.2d: A non-targeted "look at an opponent's hand"
+    /// (Anointed Peacekeeper) carries a controller-scoped `Typed(Opponent)`
+    /// target and an Object source slot (no explicit player target). The
+    /// resolver must fall back to `collect_player_targets` and privately look at
+    /// the OPPONENT's hand — never the controller's, even when both are
+    /// non-empty (multi-authority hostile fixture). Reverting the `.or_else`
+    /// fallback makes this return `MissingParam` and the assertions below fail.
+    #[test]
+    fn look_at_an_opponents_hand_falls_back_to_opponent_controller_choice() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        // Controller (PlayerId(0)) also holds a card — must NOT be looked at.
+        let own_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "My Secret".to_string(),
+            Zone::Hand,
+        );
+        let opp_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Their Secret".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            // Source object slot only — no explicit player target.
+            vec![TargetRef::Object(ObjectId(100))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("opponent-hand look should resolve");
+
+        assert_eq!(
+            state.private_look_ids,
+            vec![opp_card],
+            "must privately look at the opponent's hand"
+        );
+        assert!(
+            !state.private_look_ids.contains(&own_card),
+            "must never look at the controller's own hand"
+        );
+        assert_eq!(
+            state.private_look_player,
+            Some(PlayerId(0)),
+            "the looker is the ability controller"
+        );
+    }
+
+    /// An explicit `TargetRef::Player` slot (Thoughtseize-style) still wins the
+    /// fast path even when the effect also carries a `Typed(Opponent)` filter
+    /// that would resolve to a different player — zero regression for targeted
+    /// RevealHand.
+    #[test]
+    fn explicit_player_target_wins_over_controller_filter() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let controller_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Card".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                // Filter would resolve to the opponent (PlayerId(1))…
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            // …but the explicit player target is the controller itself.
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.private_look_ids,
+            vec![controller_card],
+            "explicit player target must win over the filter fallback"
+        );
+    }
+
+    /// R2: `TargetFilter::Any` (RevealAll/RevealPartial shapes) with no explicit
+    /// player target hits `collect_player_targets`' empty arm, so the resolver
+    /// still errors `MissingParam` — the fallback is strictly additive.
+    #[test]
+    fn any_target_without_player_slot_still_missing_param() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+            vec![TargetRef::Object(ObjectId(100))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(
+            matches!(result, Err(EffectError::MissingParam(_))),
+            "Any-target reveal without a player slot must still be MissingParam, got {result:?}"
+        );
     }
 
     #[test]
@@ -302,6 +475,94 @@ mod tests {
             other => panic!("Expected RevealChoice, got {:?}", other),
         }
         assert_eq!(state.revealed_cards.len(), 1);
+    }
+
+    /// CR 701.20a + CR 107.1: A compound `Offset` reveal count (Klaw — "one plus
+    /// the number of creature cards in your graveyard") resolves to inner+1 and
+    /// truncates the revealed set to exactly that many cards. The controller
+    /// (PlayerId(0)) has 2 creature cards in graveyard, so the count resolves to
+    /// 2 + 1 = 3; the 5-card hand must be truncated to 3 revealed cards. Before
+    /// the parser fix this count was dropped (None) at synthesis, so the whole
+    /// hand would have been revealed — this asserts the Offset both resolves and
+    /// is consumed by the resolver.
+    #[test]
+    fn reveal_hand_offset_count_truncates_to_inner_plus_one() {
+        use crate::types::ability::{CountScope, QuantityExpr, QuantityRef, TypeFilter, ZoneRef};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Controller (PlayerId(0)) graveyard: 2 creature cards.
+        for cid in 10..12 {
+            let gy = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(0),
+                "Dead Bear".to_string(),
+                Zone::Graveyard,
+            );
+            state
+                .objects
+                .get_mut(&gy)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // Target (PlayerId(1)) hand: 5 cards (M > N+1 = 3).
+        for cid in 1..6 {
+            create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(1),
+                format!("Card {cid}"),
+                Zone::Hand,
+            );
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::Any,
+                count: Some(QuantityExpr::Offset {
+                    offset: 1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            card_types: vec![TypeFilter::Creature],
+                            filter: None,
+                            scope: CountScope::Controller,
+                        },
+                    }),
+                }),
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // 2 creatures in graveyard + 1 = 3 cards revealed (not the full 5).
+        assert_eq!(
+            state.revealed_cards.len(),
+            3,
+            "Offset count must resolve to inner(2) + 1 = 3 revealed cards"
+        );
+        match &state.waiting_for {
+            WaitingFor::RevealChoice { cards, .. } => {
+                assert_eq!(
+                    cards.len(),
+                    3,
+                    "choice set is limited to the 3 revealed cards"
+                );
+            }
+            other => panic!("Expected RevealChoice, got {other:?}"),
+        }
     }
 
     #[test]

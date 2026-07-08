@@ -38,6 +38,7 @@ export interface PrintingEntry {
   set: string;
   set_name: string;
   collector_number: string;
+  released_at: string;
   border_color: string;
   frame_effects: string[];
   full_art: boolean;
@@ -121,7 +122,8 @@ export function resolvePrintingImageUrl(
   size: ImageSize,
 ): string | null {
   const face = printing.faces[faceIndex] ?? printing.faces[0];
-  return face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
+  const url = face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
+  return url && !isPlaceholderImageUrl(url) ? url : null;
 }
 
 export function findPrintingById(
@@ -129,6 +131,17 @@ export function findPrintingById(
   scryfallId: string,
 ): PrintingEntry | undefined {
   return printings.find((p) => p.id === scryfallId);
+}
+
+/** Pick the earliest printing by release date, breaking ties by collector number. */
+export function pickOldestPrinting(printings: PrintingEntry[]): PrintingEntry {
+  return [...printings].sort((a, b) => {
+    const byDate = a.released_at.localeCompare(b.released_at);
+    if (byDate !== 0) return byDate;
+    return a.collector_number.localeCompare(b.collector_number, undefined, {
+      numeric: true,
+    });
+  })[0];
 }
 
 export function resolveOracleIdSync(cardName: string): string | null {
@@ -214,6 +227,7 @@ export interface ScryfallCard {
 }
 
 const SCRYFALL_LEGALITY_KEY_OVERRIDES: Partial<Record<GameFormat, string | null>> = {
+  Archenemy: null,
   Brawl: "standardbrawl",
   DuelCommander: "duel",
   FreeForAll: null,
@@ -364,7 +378,23 @@ function resolveNameLookupKey(name: string): string {
   if (!scryfallDataResolved) return normalized;
   if (scryfallDataResolved[normalized]) return normalized;
   const folded = foldDiacritics(normalized);
-  return scryfallFoldedNameIndex?.get(folded) ?? normalized;
+  const foldedHit = scryfallFoldedNameIndex?.get(folded);
+  if (foldedHit) return foldedHit;
+  // A combined multi-face name ("Front // Back", or a hand-typed glued
+  // "Front//Back") is not itself an export key — multi-face cards are keyed by
+  // oracle id, spaced display name, and front-face name. When the combined form
+  // misses, fall back to the front face so the card still resolves to its
+  // entry. A single card whose own name contains "//" (e.g. "SP//dr, Piloted by
+  // Peni") is a primary key and already returned above, so it never splits here.
+  if (normalized.includes("//")) {
+    const frontFace = normalized.split("//")[0].trim();
+    if (frontFace && frontFace !== normalized) {
+      if (scryfallDataResolved[frontFace]) return frontFace;
+      const frontFolded = scryfallFoldedNameIndex?.get(foldDiacritics(frontFace));
+      if (frontFolded) return frontFolded;
+    }
+  }
+  return normalized;
 }
 
 function lookupEntryByName(name: string): ScryfallDataEntry | undefined {
@@ -463,7 +493,7 @@ export async function fetchCardImageAsset(
     throw new Error(`Card image not in local data: "${normalizeCardName(cardName)}"`);
   }
   const name = resolveNameLookupKey(cardName);
-  return resolveImageAsset(entry, faceIndex, size, name);
+  return resolveImageAssetWithPrintingFallback(entry, faceIndex, size, name);
 }
 
 /**
@@ -503,7 +533,7 @@ export async function fetchCardImageAssetByOracleId(
   const faceIndex = faceName
     ? Math.max(0, entry.face_names.indexOf(faceName.toLowerCase()))
     : 0;
-  return resolveImageAsset(entry, faceIndex, size, entry.name);
+  return resolveImageAssetWithPrintingFallback(entry, faceIndex, size, entry.name);
 }
 
 function resolveImageAsset(
@@ -516,6 +546,38 @@ function resolveImageAsset(
     src: resolveImageUrl(entry, faceIndex, size, diagnosticName),
     isRotated: isSidewaysLayout(entry.layout),
   };
+}
+
+function isPlaceholderImageUrl(url: string): boolean {
+  return url === "https://errors.scryfall.com/soon.jpg";
+}
+
+function resolvePrintingFallbackImageUrl(
+  oracleId: string,
+  faceIndex: number,
+  size: ImageSize,
+): string | null {
+  const printings = printingsDataResolved?.[oracleId.toLowerCase()] ?? [];
+  for (const printing of printings) {
+    if (printing.set === "plst") continue;
+    const url = resolvePrintingImageUrl(printing, faceIndex, size);
+    if (url && !isPlaceholderImageUrl(url)) return url;
+  }
+  return null;
+}
+
+async function resolveImageAssetWithPrintingFallback(
+  entry: ScryfallDataEntry,
+  faceIndex: number,
+  size: ImageSize,
+  diagnosticName: string,
+): Promise<CardImageAsset> {
+  const asset = resolveImageAsset(entry, faceIndex, size, diagnosticName);
+  if (!isPlaceholderImageUrl(asset.src)) return asset;
+
+  await loadPrintingsData();
+  const fallback = resolvePrintingFallbackImageUrl(entry.oracle_id, faceIndex, size);
+  return fallback ? { ...asset, src: fallback } : asset;
 }
 
 function resolveImageUrl(

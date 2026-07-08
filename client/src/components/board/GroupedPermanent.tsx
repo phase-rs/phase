@@ -1,4 +1,13 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
@@ -37,6 +46,18 @@ type PickerContext =
   | { mode: "attackers" | "blockers" | "equip" | "target" | "tap"; eligibleIds: ObjectId[] }
   | { mode: "boardChoice"; eligibleIds: ObjectId[]; choice: BoardChoiceView };
 
+const COLLAPSED_PICKER_WIDTH_PX = 208;
+const COLLAPSED_PICKER_GAP_PX = 8;
+const COLLAPSED_PICKER_VIEWPORT_PADDING_PX = 8;
+
+interface CollapsedPickerPosition {
+  top: number | "auto";
+  bottom: number | "auto";
+  left: number;
+  width: number;
+  maxHeight: number;
+}
+
 function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | null {
   switch (waitingFor?.type) {
     case "TargetSelection":
@@ -59,6 +80,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "StationTarget":
     case "SaddleMount":
     case "HarmonizeTapChoice":
+    case "KeepWithinTotalPowerChoice":
       return waitingFor.data.player;
     default:
       return null;
@@ -73,6 +95,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 }: GroupedPermanentProps) {
   const { t } = useTranslation("game");
   const [pickerOpen, setPickerOpen] = useState(false);
+  const collapsedAnchorRef = useRef<HTMLDivElement | null>(null);
   const playerId = usePlayerId();
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const combatMode = useUiStore((s) => s.combatMode);
@@ -213,7 +236,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 
   if (renderMode === "collapsed") {
     return (
-      <div className="relative">
+      <div ref={collapsedAnchorRef} className={`relative ${canOpenPicker ? "z-40" : ""}`}>
         <div className={`relative rounded-lg ${aggregateRingClass}`}>
           <PermanentCard
             objectId={group.ids[0]}
@@ -261,6 +284,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         />
         {pickerOpen && pickerContext && (
           <CollapsedGroupPicker
+            anchorEl={collapsedAnchorRef.current}
             context={pickerContext}
             group={group}
             selectedAttackers={selectedAttackers}
@@ -367,6 +391,7 @@ function CollapsedGroupBadges({
 }
 
 interface CollapsedGroupPickerProps {
+  anchorEl: HTMLElement | null;
   context: PickerContext;
   group: GroupedPermanentType;
   selectedAttackers: ObjectId[];
@@ -379,6 +404,7 @@ interface CollapsedGroupPickerProps {
 }
 
 function CollapsedGroupPicker({
+  anchorEl,
   context,
   group,
   selectedAttackers,
@@ -391,8 +417,52 @@ function CollapsedGroupPicker({
 }: CollapsedGroupPickerProps) {
   const { t } = useTranslation("game");
   const objects = useGameStore((s) => s.gameState?.objects);
+  const [position, setPosition] = useState<CollapsedPickerPosition | null>(null);
   const selectedAttackerCount = context.eligibleIds.filter((id) => selectedAttackers.includes(id)).length;
   const selectedTapCount = context.eligibleIds.filter((id) => selectedCardIds.includes(id)).length;
+
+  const updatePosition = useCallback(() => {
+    if (!anchorEl) return;
+    const rect = anchorEl.getBoundingClientRect();
+    const viewportPadding = COLLAPSED_PICKER_VIEWPORT_PADDING_PX;
+    const width = Math.max(
+      0,
+      Math.min(COLLAPSED_PICKER_WIDTH_PX, window.innerWidth - viewportPadding * 2),
+    );
+    const left = Math.max(
+      viewportPadding,
+      Math.min(
+        rect.left + rect.width / 2 - width / 2,
+        window.innerWidth - width - viewportPadding,
+      ),
+    );
+    const spaceBelow = window.innerHeight - rect.bottom - COLLAPSED_PICKER_GAP_PX - viewportPadding;
+    const spaceAbove = rect.top - COLLAPSED_PICKER_GAP_PX - viewportPadding;
+    const openUp = spaceAbove > spaceBelow;
+    const maxHeight = Math.max(0, openUp ? spaceAbove : spaceBelow);
+
+    setPosition({
+      top: openUp ? "auto" : rect.bottom + COLLAPSED_PICKER_GAP_PX,
+      bottom: openUp ? window.innerHeight - rect.top + COLLAPSED_PICKER_GAP_PX : "auto",
+      left,
+      width,
+      maxHeight,
+    });
+  }, [anchorEl]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [updatePosition]);
+
+  useEffect(() => {
+    if (!anchorEl) return undefined;
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [anchorEl, updatePosition]);
 
   const selectAttackerCount = (count: number) => {
     setGroupSelectedAttackers(group.ids, context.eligibleIds.slice(0, count));
@@ -411,8 +481,21 @@ function CollapsedGroupPicker({
     return Math.min(context.eligibleIds.length, Math.max(0, waitingFor.data.count - selectedOutsideGroup));
   }, [context.eligibleIds.length, group.ids, selectedCardIds, waitingFor]);
 
-  return (
-    <div className="absolute left-1/2 top-full z-50 mt-2 w-52 -translate-x-1/2 rounded border border-slate-500 bg-slate-950/95 p-2 text-xs text-white shadow-2xl">
+  if (!anchorEl || !position) return null;
+
+  return createPortal(
+    <div
+      className="fixed z-[160] overflow-y-auto overscroll-contain rounded border border-slate-500 bg-slate-950/95 p-2 text-xs text-white shadow-2xl"
+      style={{
+        top: position.top,
+        bottom: position.bottom,
+        left: position.left,
+        width: position.width,
+        maxHeight: position.maxHeight,
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="truncate font-semibold">{group.name}</span>
         <button
@@ -481,7 +564,8 @@ function CollapsedGroupPicker({
           }}
         />
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -509,31 +593,56 @@ function BoardChoiceGroupControls({
   const selectedInGroup = eligibleIds.filter((id) => selectedCardIds.includes(id));
   const maxSelection = boardChoiceMaxSelection(choice);
 
-  const toggleId = (id: ObjectId) => {
-    const selected = new Set(selectedInGroup);
-    if (selected.has(id)) {
-      selected.delete(id);
-    } else if (maxSelection == null || selectedForChoice.length < maxSelection) {
-      selected.add(id);
-    }
-    setGroupSelectedCards(groupIds, eligibleIds.filter((eligibleId) => selected.has(eligibleId)));
-  };
+  // Every eligible id in a collapsed group is visually identical to the others
+  // (same name, P/T, counters, keywords, tap/flip state — that's why they're
+  // stacked). Distinguishing them with a #1..#N list (the old UI) forced the
+  // player to pick among indistinguishable tokens, e.g. choosing which of five
+  // Food tokens to sacrifice. Resolve by quantity instead.
 
+  // Immediate single pick: nothing to distinguish — resolve with one click on a
+  // labelled action button using the first eligible id.
   if (isBoardChoiceImmediate(choice)) {
+    // Guard against an empty eligible list: the picker only opens when there is
+    // at least one eligible id, but defending here avoids ever dispatching an
+    // action with an undefined id payload.
+    const firstId = eligibleIds[0];
+    if (firstId === undefined) return null;
     return (
-      <ObjectChoiceList
-        eligibleIds={eligibleIds}
-        onChoose={(id) => {
-          dispatchAction(buildBoardChoiceAction(choice, [id]));
+      <button
+        type="button"
+        className="w-full rounded bg-sky-700 px-2 py-1.5 font-bold text-white hover:bg-sky-600"
+        onClick={() => {
+          dispatchAction(buildBoardChoiceAction(choice, [firstId]));
           onClose();
         }}
-      />
+      >
+        {t(`boardChoice.actions.${choice.intent}`)}
+      </button>
     );
   }
 
+  // Multi-select: a quantity stepper that maps to the first N eligible ids.
+  // The cap accounts for selections already made in other groups so the
+  // choice-wide count limit can't be exceeded.
+  const selectedOutsideGroup = Math.max(
+    0,
+    selectedForChoice.length - selectedInGroup.length,
+  );
+  const groupCeiling =
+    maxSelection == null ? eligibleIds.length : Math.max(0, maxSelection - selectedOutsideGroup);
+  const effectiveMax = Math.min(eligibleIds.length, groupCeiling);
+
+  const setCount = (n: number) => {
+    const clamped = Math.max(0, Math.min(n, effectiveMax));
+    setGroupSelectedCards(groupIds, eligibleIds.slice(0, clamped));
+  };
+
   const canConfirm = canConfirmBoardChoice(choice, selectedForChoice, objects);
   const requiredPower =
-    choice.selection.type === "totalPowerAtLeast" ? choice.selection.power : null;
+    choice.selection.type === "totalPowerAtLeast" ||
+    choice.selection.type === "totalPowerAtMost"
+      ? choice.selection.power
+      : null;
   const power =
     requiredPower != null
       ? boardChoiceSelectedPower(choice, selectedForChoice, objects)
@@ -541,12 +650,10 @@ function BoardChoiceGroupControls({
 
   return (
     <div className="space-y-2">
-      <ObjectToggleList
-        eligibleIds={eligibleIds}
-        objects={objects}
-        selectedIds={selectedInGroup}
-        showPower={choice.selection.type === "totalPowerAtLeast"}
-        onToggle={toggleId}
+      <CountPickerControls
+        count={selectedInGroup.length}
+        max={effectiveMax}
+        onChange={setCount}
       />
       <div className="text-center text-[11px] text-slate-300">
         {power == null
@@ -641,46 +748,6 @@ function ObjectChoiceList({ eligibleIds, onChoose }: ObjectChoiceListProps) {
           #{index + 1}
         </button>
       ))}
-    </div>
-  );
-}
-
-interface ObjectToggleListProps {
-  eligibleIds: ObjectId[];
-  objects: Record<ObjectId, GameObject> | undefined;
-  selectedIds: ObjectId[];
-  showPower: boolean;
-  onToggle: (id: ObjectId) => void;
-}
-
-function ObjectToggleList({
-  eligibleIds,
-  objects,
-  selectedIds,
-  showPower,
-  onToggle,
-}: ObjectToggleListProps) {
-  return (
-    <div className="grid max-h-48 grid-cols-2 gap-1 overflow-auto">
-      {eligibleIds.map((id, index) => {
-        const selected = selectedIds.includes(id);
-        const power = Math.max(objects?.[id]?.power ?? 0, 0);
-        return (
-          <button
-            key={id}
-            type="button"
-            className={`rounded px-2 py-1 font-semibold ${
-              selected
-                ? "bg-sky-500 text-sky-950"
-                : "bg-slate-800 hover:bg-slate-700"
-            }`}
-            onClick={() => onToggle(id)}
-          >
-            #{index + 1}
-            {showPower ? ` (${power})` : ""}
-          </button>
-        );
-      })}
     </div>
   );
 }

@@ -278,6 +278,17 @@ fn payment_cost(
         },
         PayCostKind::RemoveCounter { .. } => permanent_value(state, obj_id) * 0.5,
         PayCostKind::TapCreatures { .. } => permanent_value(state, obj_id) * 0.35,
+        // CR 117.1 + CR 601.2b: "exile any number" aggregate-threshold cost
+        // (Baron Helmut Zemo's Boast). `AbilityCost::ExileWithAggregate` is a
+        // zone-parameterized building block, so value the chosen card by its
+        // source `zone` — mirroring `ExileFromManaZone` — rather than assuming
+        // graveyard fuel: a hand/battlefield aggregate exile spends real cards.
+        PayCostKind::ExileAggregate { zone, .. } => match zone {
+            Zone::Battlefield => permanent_value(state, obj_id),
+            Zone::Hand => card_value(state, obj_id) * 1.2,
+            Zone::Graveyard => 0.1 + card_value(state, obj_id) * 0.2,
+            _ => card_value(state, obj_id) * 0.5,
+        },
         PayCostKind::Behold { .. } => card_value(state, obj_id) * 0.1,
         PayCostKind::Sacrifice => sacrifice_cost(state, obj_id, penalties),
     }
@@ -375,6 +386,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         PaymentSelectionPolicy.score(&ctx)
     }
@@ -410,6 +422,10 @@ mod tests {
         eligible_creatures: Vec<ObjectId>,
         creature_ids: Vec<ObjectId>,
     ) -> f64 {
+        let contributions = eligible_creatures
+            .iter()
+            .map(|&id| object_crew_power_contribution(state, id, CrewAction::Crew))
+            .collect();
         score_for_action(
             state,
             WaitingFor::CrewVehicle {
@@ -417,6 +433,7 @@ mod tests {
                 vehicle_id,
                 crew_power,
                 eligible_creatures,
+                contributions,
             },
             GameAction::CrewVehicle {
                 vehicle_id,
@@ -432,6 +449,10 @@ mod tests {
         eligible_creatures: Vec<ObjectId>,
         creature_ids: Vec<ObjectId>,
     ) -> f64 {
+        let contributions = eligible_creatures
+            .iter()
+            .map(|&id| object_crew_power_contribution(state, id, CrewAction::Saddle))
+            .collect();
         score_for_action(
             state,
             WaitingFor::SaddleMount {
@@ -439,6 +460,7 @@ mod tests {
                 mount_id,
                 saddle_power,
                 eligible_creatures,
+                contributions,
             },
             GameAction::SaddleMount {
                 mount_id,
@@ -579,6 +601,47 @@ mod tests {
         let creature_score = score_for(&state, waiting_for(vec![blank, creature]), vec![creature]);
 
         assert!(blank_score > creature_score);
+    }
+
+    // The aggregate-exile cost (`PayCostKind::ExileAggregate`) is zone-parameterized,
+    // so its payment must be valued by the source `zone`: a graveyard exile is cheap
+    // fuel (0.1 + card_value*0.2) while a hand exile spends a real card
+    // (card_value*1.2). The AI must therefore prefer paying a graveyard aggregate
+    // over an otherwise-identical hand one.
+    //
+    // Discrimination: the pre-fix arm valued every `ExileAggregate` as graveyard,
+    // making these two scores equal — so `assert!(graveyard > hand)` flips red.
+    #[test]
+    fn exile_aggregate_cost_values_by_source_zone() {
+        use engine::types::ability::{AggregateFunction, Comparator, ObjectProperty, TargetFilter};
+        use engine::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let hand_card = make_creature(&mut state, "Hand Card", Zone::Hand, 5);
+        let gy_card = make_creature(&mut state, "Graveyard Card", Zone::Graveyard, 5);
+        let agg = |zone, choices| WaitingFor::PayCost {
+            player: AI,
+            kind: PayCostKind::ExileAggregate {
+                zone,
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaSymbolCount(ManaColor::Black),
+                comparator: Comparator::GE,
+                value: 15,
+                filter: TargetFilter::Any,
+            },
+            choices,
+            count: 1,
+            min_count: 1,
+            resume: CostResume::Spell { spell: pending() },
+        };
+
+        let hand_score = score_for(&state, agg(Zone::Hand, vec![hand_card]), vec![hand_card]);
+        let gy_score = score_for(&state, agg(Zone::Graveyard, vec![gy_card]), vec![gy_card]);
+
+        assert!(
+            gy_score > hand_score,
+            "graveyard aggregate exile must be cheaper (preferred) than hand: gy={gy_score} hand={hand_score}"
+        );
     }
 
     #[test]

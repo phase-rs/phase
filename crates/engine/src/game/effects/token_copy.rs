@@ -10,7 +10,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCopyTokenBatch, PendingCopyTokenResolution, PendingCounterPostAction,
@@ -462,6 +462,10 @@ pub(crate) fn apply_copy_token_after_replacement(
             Zone::Battlefield,
         );
 
+        // CR 613.7d: a copy token enters the battlefield, so it receives a
+        // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
+        let entry_timestamp = state.next_timestamp();
+
         let token = state.objects.get_mut(&token_id).unwrap();
         token.is_token = true;
         token.display_source = display_source;
@@ -499,7 +503,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted
         // below via `extra_keywords` (Twinflame, etc.) is folded in at query
         // time by `has_summoning_sickness`.
-        token.reset_for_battlefield_entry(state.turn_number);
+        token.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
 
         // CR 707.2 + CR 702: "except it has [keyword]" — grant additional
         // keywords on top of the copied characteristics. Twinflame's haste
@@ -820,8 +824,12 @@ pub(crate) fn compute_copy_batch_prefix(
 ///   bodies that share grammar with `BecomeCopy`).
 /// - `SetCardTypes` — Myrkul, Lord of Bones: "it's an enchantment and loses
 ///   all other card types" replaces the copied core card-type set (CR 613.1d).
-/// - `AddKeyword` is NOT consumed here — keywords flow through the typed
-///   `extra_keywords` channel earlier in the resolver.
+/// - `AddKeyword` — dual-path: keywords in the typed `extra_keywords` channel
+///   are applied earlier in the resolver, and an `AddKeyword` that instead lands
+///   in `additional_modifications` (e.g. an "except it has menace" body, or a
+///   keyword adjacent to a quoted-ability grant) is applied here too, on the
+///   `AddKeyword` arm below (CR 707.9a). Both routes add to the copiable keyword
+///   set idempotently.
 ///
 /// Modifications not relevant to token-copy semantics (e.g. `CopyValues`,
 /// `ChangeController`, dynamic P/T) are skipped silently — they have no
@@ -1459,6 +1467,80 @@ mod tests {
         );
     }
 
+    /// CR 707.2 + CR 111.10: a copy token sourced from a card with only a
+    /// runtime name, no printed ref, and no source-related token ids remains a
+    /// card-display copy even if the copied body matches a catalog token preset.
+    #[test]
+    fn copy_token_of_name_only_card_does_not_bind_catalog_preset() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fanatic of Rhonas".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.display_source = DisplaySource::Card;
+            source.base_power = Some(4);
+            source.base_toughness = Some(4);
+            source.power = Some(4);
+            source.toughness = Some(4);
+            source.base_color = vec![ManaColor::Black];
+            source.color = vec![ManaColor::Black];
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![
+                    "Zombie".to_string(),
+                    "Snake".to_string(),
+                    "Druid".to_string(),
+                ],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert_eq!(token.name, "Fanatic of Rhonas");
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(4));
+        assert_eq!(token.color, vec![ManaColor::Black]);
+        assert_eq!(token.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(
+            token.card_types.subtypes,
+            vec![
+                "Zombie".to_string(),
+                "Snake".to_string(),
+                "Druid".to_string()
+            ]
+        );
+        assert_eq!(token.display_source, DisplaySource::Card);
+        assert_eq!(token.token_image_ref, None);
+    }
+
     /// CR 614.1a + CR 707.2: A token-count-doubling replacement (Doubling
     /// Season / Adrix and Nev / Parallel Lives / Anointed Procession / Mondrak)
     /// applies to a token that's a *copy* of a permanent, exactly as it applies
@@ -1485,7 +1567,7 @@ mod tests {
             let doubler = state.objects.get_mut(&doubler_id).unwrap();
             let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             doubler.base_replacement_definitions = Arc::new(vec![def.clone()]);
             doubler.replacement_definitions = vec![def].into();
         }
@@ -1585,7 +1667,7 @@ mod tests {
             let doubler = state.objects.get_mut(&doubler_id).unwrap();
             let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .quantity_modification(QuantityModification::Double);
+                .quantity_modification(QuantityModification::DOUBLE);
             doubler.base_replacement_definitions = Arc::new(vec![def.clone()]);
             doubler.replacement_definitions = vec![def].into();
         }
@@ -2603,6 +2685,338 @@ mod tests {
         assert!(copied.is_token);
     }
 
+    #[test]
+    fn copy_token_source_filter_copies_graveyard_quest_counter_creature_card() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Altaïr Ibn-La'Ahad".to_string(),
+            Zone::Battlefield,
+        );
+        let quest_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Quest Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&quest_creature).unwrap();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Assassin".to_string()],
+            };
+            obj.card_types = obj.base_card_types.clone();
+            obj.counters
+                .insert(CounterType::Generic("quest".to_string()), 1);
+        }
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::None,
+                owner: TargetFilter::Controller,
+                source_filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature, TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                        FilterProp::Counters {
+                            counters: CounterMatch::OfType(CounterType::Generic(
+                                "quest".to_string(),
+                            )),
+                            comparator: crate::types::ability::Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                })),
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.last_created_token_ids.len(), 1);
+        let copied = state.objects.get(&state.last_created_token_ids[0]).unwrap();
+        assert_eq!(copied.name, "Quest Creature");
+        assert!(copied.is_token);
+    }
+
+    #[test]
+    fn copy_token_source_filter_copies_each_matching_graveyard_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Battlefield,
+        );
+        let stale_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Stale Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&stale_token).unwrap().is_token = true;
+        state.last_created_token_ids = vec![stale_token];
+
+        let first_match = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "First Match".to_string(),
+            Zone::Graveyard,
+        );
+        let second_match = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Second Match".to_string(),
+            Zone::Graveyard,
+        );
+        let wrong_counter = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Wrong Counter".to_string(),
+            Zone::Graveyard,
+        );
+        for (id, counter) in [
+            (first_match, "quest"),
+            (second_match, "quest"),
+            (wrong_counter, "lore"),
+        ] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.card_types = obj.base_card_types.clone();
+            obj.counters
+                .insert(CounterType::Generic(counter.to_string()), 1);
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::None,
+                owner: TargetFilter::Controller,
+                source_filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature, TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                        FilterProp::Counters {
+                            counters: CounterMatch::OfType(CounterType::Generic(
+                                "quest".to_string(),
+                            )),
+                            comparator: crate::types::ability::Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                })),
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.last_created_token_ids.len(), 2);
+        assert!(!state.last_created_token_ids.contains(&stale_token));
+        let names: Vec<&str> = state
+            .last_created_token_ids
+            .iter()
+            .map(|id| state.objects[id].name.as_str())
+            .collect();
+        assert!(names.contains(&"First Match"));
+        assert!(names.contains(&"Second Match"));
+        assert!(!names.contains(&"Wrong Counter"));
+    }
+
+    #[test]
+    fn copy_token_source_filter_ignores_wrong_zone_and_wrong_counter() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Battlefield,
+        );
+        let battlefield_quest = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Battlefield Quest".to_string(),
+            Zone::Battlefield,
+        );
+        let graveyard_lore = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard Lore".to_string(),
+            Zone::Graveyard,
+        );
+        for (id, counter) in [(battlefield_quest, "quest"), (graveyard_lore, "lore")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.card_types = obj.base_card_types.clone();
+            obj.counters
+                .insert(CounterType::Generic(counter.to_string()), 1);
+        }
+        let next_before = state.next_object_id;
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::None,
+                owner: TargetFilter::Controller,
+                source_filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature, TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                        FilterProp::Counters {
+                            counters: CounterMatch::OfType(CounterType::Generic(
+                                "quest".to_string(),
+                            )),
+                            comparator: crate::types::ability::Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                })),
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.next_object_id, next_before);
+        assert!(state.last_created_token_ids.is_empty());
+    }
+
+    #[test]
+    fn copy_token_zero_match_clears_stale_last_created_before_cleanup() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Battlefield,
+        );
+        let stale_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Stale Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&stale_token).unwrap().is_token = true;
+        state.last_created_token_ids = vec![stale_token];
+
+        let mut events = Vec::new();
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::None,
+                owner: TargetFilter::Controller,
+                source_filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature, TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                        FilterProp::Counters {
+                            counters: CounterMatch::OfType(CounterType::Generic(
+                                "quest".to_string(),
+                            )),
+                            comparator: crate::types::ability::Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                })),
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+        assert!(state.last_created_token_ids.is_empty());
+
+        let cleanup = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::LastCreated,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        crate::game::effects::change_zone::resolve(&mut state, &cleanup, &mut events).unwrap();
+        assert_eq!(state.objects[&stale_token].zone, Zone::Battlefield);
+    }
+
     /// CR 205.4 + CR 707.9b + CR 704.5j: Miirym, Sentinel Wyrm class —
     /// `additional_modifications: [RemoveSupertype(Legendary)]` strips the
     /// Legendary supertype from the synthesized token. The legend rule
@@ -2673,6 +3087,59 @@ mod tests {
                 .contains(&Supertype::Legendary),
             "token's base_card_types must not contain Legendary; got {:?}",
             token.base_card_types.supertypes
+        );
+    }
+
+    /// CR 205.4 + CR 707.9d: Adagia, Windswept Bastion class —
+    /// `additional_modifications: [AddSupertype(Legendary)]` grants Legendary
+    /// to a token copy of a non-legendary permanent.
+    #[test]
+    fn copy_token_add_supertype_grants_legendary_to_nonlegendary_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source_id).unwrap();
+            s.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::AddSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert!(
+            token.card_types.supertypes.contains(&Supertype::Legendary),
+            "token must be Legendary; got {:?}",
+            token.card_types.supertypes
         );
     }
 
@@ -3551,5 +4018,128 @@ mod tests {
         assert_eq!(token.toughness, Some(2));
         assert_eq!(token.name, "Sawed Beast");
         assert!(token.is_token);
+    }
+
+    /// Count copy-tokens of `copied_name` controlled by `player` on the
+    /// battlefield (CR 111.2 — the player who creates a token is its owner and
+    /// the token enters under that player's control).
+    fn copy_tokens_for(state: &GameState, player: PlayerId, copied_name: &str) -> usize {
+        state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token && obj.name == copied_name && obj.controller == player)
+            .count()
+    }
+
+    /// CR 707.2 + CR 608.2c + CR 109.4 + CR 608.2h: Fractured Identity end-to-end
+    /// in a 3-player game. Exile a permanent P1 controls, then EACH PLAYER OTHER
+    /// THAN ITS CONTROLLER (P1) creates a token copy. P0 and P2 each get exactly
+    /// one copy; P1 (the exiled permanent's controller) gets none. The exclusion
+    /// anchor resolves through the ability-aware `players_for_filter` using the
+    /// exiled object's preserved last-known controller.
+    #[test]
+    fn fractured_identity_three_player_excludes_exiled_controller() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let p2 = PlayerId(2);
+
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // The exile target: a creature P1 owns and controls.
+        let creature = scenario.add_creature(p1, "Grizzly Bears", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Fractured Identity",
+                false,
+                "Exile target nonland permanent. Each player other than its controller \
+                 creates a token that's a copy of it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+
+        let outcome = runner.cast(spell).target_object(creature).resolve();
+        let state = outcome.state();
+
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Exile,
+            "the targeted permanent must be exiled"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p0, "Grizzly Bears"),
+            1,
+            "P0 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p2, "Grizzly Bears"),
+            1,
+            "P2 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p1, "Grizzly Bears"),
+            0,
+            "P1 (the exiled permanent's controller) must NOT create a copy"
+        );
+    }
+
+    /// CR 109.4 + CR 608.2h: "its controller" should anchor on the exiled
+    /// permanent's last-known battlefield CONTROLLER, not its owner. A creature
+    /// P1 owns but P0 controls (Mind Control style) is exiled; "each player other
+    /// than its controller" should exclude P0, so only P1 creates a copy.
+    ///
+    /// `parent_target_controller` now prefers the LKI snapshot (captured before
+    /// `reset_for_battlefield_exit` reverts the controller to the owner) for any
+    /// object that is no longer on the battlefield (CR 608.2h).
+    #[test]
+    fn fractured_identity_its_controller_excludes_controller_not_owner() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::phase::Phase;
+
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // A creature P1 OWNS but P0 CONTROLS.
+        let creature = scenario.add_creature(p1, "Grizzly Bears", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Fractured Identity",
+                false,
+                "Exile target nonland permanent. Each player other than its controller \
+                 creates a token that's a copy of it.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        // Simulate a stolen-control effect: P0 controls the P1-owned creature.
+        // `base_controller` is the layer-stable control anchor (layers reset
+        // `controller` to `base_controller.unwrap_or(owner)`), so both must be set
+        // for the control change to survive recomputation.
+        {
+            let obj = runner.state_mut().objects.get_mut(&creature).unwrap();
+            obj.base_controller = Some(p0);
+            obj.controller = p0;
+        }
+
+        let outcome = runner.cast(spell).target_object(creature).resolve();
+        let state = outcome.state();
+
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+        assert_eq!(
+            copy_tokens_for(state, p1, "Grizzly Bears"),
+            1,
+            "P1 (not the controller) must create one copy"
+        );
+        assert_eq!(
+            copy_tokens_for(state, p0, "Grizzly Bears"),
+            0,
+            "P0 (the controller of the exiled permanent) must NOT create a copy"
+        );
     }
 }

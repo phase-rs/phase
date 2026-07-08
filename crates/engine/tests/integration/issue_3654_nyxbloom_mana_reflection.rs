@@ -3,22 +3,12 @@
 //!
 //! https://github.com/phase-rs/phase/issues/3654
 
-use engine::database::card_db::CardDatabase;
+use crate::support::shared_card_db as load_db;
 use engine::game::mana_payment::produce_mana;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::mana::ManaType;
 use engine::types::zones::Zone;
-
-fn load_db() -> Option<&'static CardDatabase> {
-    static DB: std::sync::OnceLock<Option<CardDatabase>> = std::sync::OnceLock::new();
-    DB.get_or_init(|| {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../client/public/card-data.json");
-        CardDatabase::from_export(&path).ok()
-    })
-    .as_ref()
-}
 
 /// CR 106.12b + CR 616.1: Tapping a land with both Mana Reflection (×2) and
 /// Nyxbloom Ancient (×3) on the battlefield produces six mana of the tapped type.

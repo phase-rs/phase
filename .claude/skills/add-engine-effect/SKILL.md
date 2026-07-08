@@ -268,6 +268,7 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 
 Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification pattern"):
 
+- [ ] **Discriminating runtime test** — At least one test drives the real pipeline via the `/card-test` recipe (`GameScenario` + `GameRunner::cast(..).resolve()` + `CastOutcome` deltas, verbatim Oracle text) and would FAIL if the change were reverted. Parser AST-shape tests (Phase 4) and snapshots do NOT satisfy this — they are shape tests, not regression tests. Negative assertions need a paired positive reach-guard (see `/card-test` foot-gun 6).
 - [ ] **`cargo fmt --all`** — Always direct (Tilt doesn't auto-format).
 - [ ] **Clippy + tests** — If `tilt get uiresource clippy >/dev/null 2>&1` succeeds: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine`. Otherwise: `cargo clippy --all-targets -- -D warnings` followed by `cargo test -p engine`.
 - [ ] **Snapshot test** — If the effect changes a card's parsed abilities, update or add an `insta` snapshot in `crates/engine/tests/oracle_parser.rs`.
@@ -293,6 +294,8 @@ Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification
 | Effect reveals info but no `filter.rs` update | Opponent sees hidden cards in multiplayer, or revealed cards stay hidden | Update `filter_state_for_player` in `server-core/src/filter.rs` |
 | Building a multi-step mega-effect | One-off variant that only works for one card template | Decompose into `sub_ability` chain of single-purpose effects |
 | Missing AI legal action generation | AI hangs on `WaitingFor` with no valid response | Add the `WaitingFor` variant to `engine/src/ai_support/candidates.rs` |
+| Shape-only or vacuous-negative tests | Effect parses but is never proven to resolve; negatives pass via `Effect::Unimplemented` early-returns | Add a `/card-test` runtime test with a revert-failing assertion; pair every negative with a positive reach-guard |
+| New field on an existing variant dropped at one seam | Field parses but is a silent no-op in production (resume paths, batch handlers, adapter constructors) | Grep every construction/consumption site of the variant; thread the field or justify the default at each |
 
 ---
 

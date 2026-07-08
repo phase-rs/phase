@@ -4,9 +4,22 @@ import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
-import { ACTIVE_DECK_KEY, listSavedDeckNames, getDeckMeta, deleteDeck } from "../../constants/storage";
+import {
+  ACTIVE_DECK_KEY,
+  RANDOM_DECK_SELECTION,
+  listSavedDeckNames,
+  getDeckMeta,
+  deleteDeck,
+  MAX_FOLDER_NAME_LENGTH,
+  type DeckFolder,
+} from "../../constants/storage";
 import { PROFILE_REPLACED_EVENT } from "../../stores/cloudSyncStore";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useDeckFolders } from "../../hooks/useDeckFolders";
+import { DeckActionsMenu } from "./DeckActionsMenu";
+import { FolderActionsMenu } from "./FolderActionsMenu";
+import { DeckSection } from "./DeckSection";
+import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import {
   getDeckFeedOrigin,
   listSubscriptions,
@@ -18,6 +31,7 @@ import {
   useFeedCacheSnapshot,
 } from "../../services/feedPersistence";
 import { FeedManagerModal } from "./FeedManagerModal";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { ManaSymbol } from "../mana/ManaSymbol";
 import { useCardImage } from "../../hooks/useCardImage";
 import {
@@ -26,8 +40,13 @@ import {
 } from "../../services/deckCompatibility";
 import {
   buildDeckCatalog,
+  savedDeckCatalogId,
   type DeckCatalogCandidate,
 } from "../../services/deckCatalog";
+import {
+  pickRandomDeckCandidate,
+  type RandomDeckCandidate,
+} from "../../services/randomDeckSelection";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
 import { savePreconDeck } from "../../services/preconDecks";
@@ -44,23 +63,37 @@ import {
 import { BASIC_LAND_NAMES } from "../../constants/game";
 import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
 import { MenuSelect } from "../ui/MenuSelect";
+import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
+/** Sentinel section ids for the virtual/system folders in the collapse set. */
+const STARRED_SECTION_ID = "__starred__";
+const UNFILED_SECTION_ID = "__unfiled__";
+const STARTER_SECTION_ID = "__starter__";
+const PRECON_SECTION_ID = "__precon__";
+const DECK_GRID_CLASS = "grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]";
 const DECK_SCAN_BATCH_SIZE = 1;
 const COVERAGE_SCAN_BATCH_SIZE = 6;
 
+type SelectableRandomDeckCandidate = RandomDeckCandidate & { deckName: string };
+
+type FolderPromptRequest =
+  | { kind: "create" }
+  | { kind: "create-and-assign"; deckName: string }
+  | { kind: "rename"; folderId: string; currentName: string };
+
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
-  ...FORMAT_REGISTRY.flatMap((m) => [
+  ...DECK_CONSTRUCTION_FORMATS.flatMap((m) => [
     m.format.toLowerCase(),
     m.label.toLowerCase(),
     m.short_label.toLowerCase(),
   ]),
   "metagame",
 ]);
-const DECK_FORMATS = FORMAT_REGISTRY.filter((m) => m.group !== "Multiplayer");
+const DECK_FORMATS = DECK_CONSTRUCTION_FORMATS;
 const BASIC_LAND_COLORS: Record<string, string> = {
   Plains: "W",
   Island: "U",
@@ -77,6 +110,7 @@ const COLOR_ORDER = ["W", "U", "B", "R", "G"];
 
 type DeckFilter = "all" | GameFormat;
 type DeckSort = "alpha" | "recent" | "format";
+type SelectDeckSourceFilter = "all" | "user" | "feed" | "precon";
 
 function coverageFromPct(coveragePct: number | null | undefined): DeckCompatibilityResult["coverage"] {
   if (coveragePct == null) return null;
@@ -126,6 +160,18 @@ const FORMAT_FILTERS: Array<{ key: DeckFilter; label: string; aetherhubUrl?: str
           : undefined,
   })),
 ];
+
+const PRECON_SET_ALL = "__all__";
+
+function savedPreconSetCode(deckName: string): string | null {
+  if (!deckName.startsWith(PRECON_PREFIX)) return null;
+  return deckName.slice(PRECON_PREFIX.length).match(/\(([^()]+)\)$/)?.[1] ?? null;
+}
+
+function savedPreconMatchesSetFilter(deckName: string, setFilter: string): boolean {
+  const code = savedPreconSetCode(deckName);
+  return code != null && (setFilter === PRECON_SET_ALL || code === setFilter);
+}
 
 function DeckArtTile({ cardName }: { cardName: string | null }) {
   const { src, isLoading } = useCardImage(cardName ?? "", { size: "art_crop" });
@@ -178,9 +224,11 @@ interface DeckTileProps {
   /** Catalog candidate — when provided and the deck is Commander format, renders
    *  a BracketEstimateChip in the tile's footer. */
   catalogCandidate?: DeckCatalogCandidate;
+  /** Organize control (star + move-to-folder kebab) rendered next to Edit. */
+  actionsMenu?: ReactNode;
 }
 
-const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride, catalogCandidate }: DeckTileProps) {
+const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride, catalogCandidate, actionsMenu }: DeckTileProps) {
   const { t } = useTranslation("menu");
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -314,6 +362,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
               </svg>
             </button>
           )}
+          {actionsMenu}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <span className="font-display text-xs text-slate-400 tabular-nums">{t("deckTile.cardCount", { count })}</span>
@@ -395,6 +444,20 @@ interface SavedDeckTileProps {
   preconCandidate?: DeckCatalogCandidate;
   /** Non-precon catalog candidate — provides deck + format data for bracket chip. */
   catalogCandidate?: DeckCatalogCandidate;
+  /**
+   * Organize props — passed flat (not wrapped in an object) so each one keeps a
+   * stable identity across re-renders and `SavedDeckTile`'s memo holds during
+   * coverage-scan storms. The star + move-to-folder kebab renders only when the
+   * organize callbacks are present (manage mode, user decks); `folders` and the
+   * callbacks are stable refs from the parent, `starred`/`currentFolderId` are
+   * primitives read from the deck's metadata.
+   */
+  folders?: DeckFolder[];
+  starred?: boolean;
+  currentFolderId?: string;
+  onToggleStar?: (deckName: string) => void;
+  onAssignFolder?: (deckName: string, folderId: string | null) => void;
+  onNewFolder?: (deckName: string) => void;
 }
 
 const SavedDeckTile = memo(function SavedDeckTile({
@@ -406,6 +469,12 @@ const SavedDeckTile = memo(function SavedDeckTile({
   onDeleteDeck,
   preconCandidate,
   catalogCandidate,
+  folders,
+  starred,
+  currentFolderId,
+  onToggleStar,
+  onAssignFolder,
+  onNewFolder,
 }: SavedDeckTileProps) {
   const handleClick = useCallback(() => onTileClick(deckName), [deckName, onTileClick]);
   const handleEdit = useMemo(
@@ -418,6 +487,20 @@ const SavedDeckTile = memo(function SavedDeckTile({
     [preconCandidate],
   );
 
+  // The four narrow together, so TS proves the callbacks defined inside — no
+  // non-null assertions needed. Present only in manage mode for user decks.
+  const actionsMenu =
+    folders && onToggleStar && onAssignFolder && onNewFolder ? (
+      <DeckActionsMenu
+        starred={!!starred}
+        folders={folders}
+        currentFolderId={currentFolderId}
+        onToggleStar={() => onToggleStar(deckName)}
+        onAssignFolder={(folderId) => onAssignFolder(deckName, folderId)}
+        onNewFolder={() => onNewFolder(deckName)}
+      />
+    ) : undefined;
+
   return (
     <DeckTile
       deckName={deckName}
@@ -428,6 +511,7 @@ const SavedDeckTile = memo(function SavedDeckTile({
       onClick={handleClick}
       onEdit={handleEdit}
       onDelete={handleDelete}
+      actionsMenu={actionsMenu}
     />
   );
 });
@@ -497,6 +581,7 @@ interface MyDecksProps {
   confirmAction?: ReactNode;
   onCreateDeck?: () => void;
   onEditDeck?: (deckName: string) => void;
+  randomSelectionMode?: "resolveImmediately" | "defer";
   /** When true, render without the MenuPanel wrapper and header (for embedding). */
   bare?: boolean;
   /**
@@ -522,6 +607,7 @@ export function MyDecks({
   confirmAction,
   onCreateDeck,
   onEditDeck,
+  randomSelectionMode = "resolveImmediately",
   bare = false,
   onActiveDeckCompatChange,
 }: MyDecksProps) {
@@ -534,6 +620,7 @@ export function MyDecks({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [isPickingRandomDeck, setIsPickingRandomDeck] = useState(false);
   const [compatibilityStatus, setCompatibilityStatus] = useState<string | null>(null);
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
   const pendingCompatibility = useRef(new Set<string>());
@@ -554,6 +641,8 @@ export function MyDecks({
       : null;
   }, [selectedFormat]);
   const [activeFilter, setActiveFilter] = useState<DeckFilter>(contextualFilter ?? "all");
+  const [selectSourceFilter, setSelectSourceFilter] = useState<SelectDeckSourceFilter>("all");
+  const [preconSetFilter, setPreconSetFilter] = useState(PRECON_SET_ALL);
   const selectedFormatForCompatibility = selectedFormat ?? (activeFilter === "all" ? null : activeFilter);
   const activeFilterOption = FORMAT_FILTERS.find((option) => option.key === activeFilter);
   const formatMenuItems = useMemo(
@@ -566,6 +655,18 @@ export function MyDecks({
   );
   const formatMenuLabel =
     activeFilter === "all" ? t("myDecks.filterAll") : (activeFilterOption?.label ?? t("myDecks.filterAll"));
+  const selectSourceMenuItems = useMemo(
+    () => [
+      { value: "all", label: t("myDecks.sourceFilter.all") },
+      { value: "user", label: t("myDecks.sourceFilter.user") },
+      { value: "feed", label: t("myDecks.sourceFilter.feed") },
+      { value: "precon", label: t("myDecks.sourceFilter.precon") },
+    ],
+    [t],
+  );
+  const selectSourceMenuLabel =
+    selectSourceMenuItems.find((item) => item.value === selectSourceFilter)?.label
+    ?? t("myDecks.sourceFilter.all");
   const requiresCompatibilityFilter = activeFilter !== "all";
   const [activeSort, setActiveSort] = useState<DeckSort>(
     mode === "select" ? (selectedFormat ? "format" : "recent") : "alpha",
@@ -584,6 +685,80 @@ export function MyDecks({
     sortMenuItems.find((item) => item.value === activeSort)?.label ?? t("myDecks.sortName");
   const [sortAsc, setSortAsc] = useState(mode !== "select");
   const [searchQuery, setSearchQuery] = useState("");
+  const [folderPrompt, setFolderPrompt] = useState<FolderPromptRequest | null>(null);
+
+  // Folder/star organization (user decks only). The grouping authority +
+  // mutators come from useDeckFolders; collapse state lives in preferences so
+  // it persists and cloud-syncs.
+  const { folders, group, createFolder, renameFolder, deleteFolder, assignDeck, toggleStar } =
+    useDeckFolders();
+  const collapsedFolderIds = usePreferencesStore((s) => s.collapsedFolderIds);
+  const toggleFolderCollapsed = usePreferencesStore((s) => s.toggleFolderCollapsed);
+  const setCollapsedFolderIds = usePreferencesStore((s) => s.setCollapsedFolderIds);
+
+  const handleToggleStar = useCallback((name: string) => toggleStar(name), [toggleStar]);
+  const handleAssignFolder = useCallback(
+    (name: string, folderId: string | null) => assignDeck(name, folderId),
+    [assignDeck],
+  );
+  const handleNewFolderForDeck = useCallback(
+    (name: string) => {
+      setFolderPrompt({ kind: "create-and-assign", deckName: name });
+    },
+    [],
+  );
+  const handleCreateFolder = useCallback(() => {
+    setFolderPrompt({ kind: "create" });
+  }, []);
+  const handleRenameFolder = useCallback((id: string, currentName: string) => {
+    setFolderPrompt({ kind: "rename", folderId: id, currentName });
+  }, []);
+  const handleFolderPromptConfirm = useCallback(
+    (folderName: string) => {
+      if (!folderPrompt) return;
+      switch (folderPrompt.kind) {
+        case "create": {
+          createFolder(folderName);
+          break;
+        }
+        case "create-and-assign": {
+          const folder = createFolder(folderName);
+          if (folder) assignDeck(folderPrompt.deckName, folder.id);
+          break;
+        }
+        case "rename": {
+          renameFolder(folderPrompt.folderId, folderName);
+          break;
+        }
+      }
+      setFolderPrompt(null);
+    },
+    [folderPrompt, createFolder, assignDeck, renameFolder],
+  );
+  const handleFolderPromptCancel = useCallback(() => {
+    setFolderPrompt(null);
+  }, []);
+  const [folderPendingDelete, setFolderPendingDelete] = useState<{ id: string; name: string } | null>(
+    null,
+  );
+  const handleDeleteFolder = useCallback((id: string, name: string) => {
+    // Defer until after the popover menu click finishes so the portaled backdrop
+    // doesn't receive the tail of the same pointer event.
+    requestAnimationFrame(() => {
+      setFolderPendingDelete({ id, name });
+    });
+  }, []);
+  const confirmDeleteFolder = useCallback(() => {
+    if (!folderPendingDelete) return;
+    const { id } = folderPendingDelete;
+    deleteFolder(id);
+    // Drop the now-dead id from the persisted collapse set so it can't leak.
+    setCollapsedFolderIds(collapsedFolderIds.filter((existing) => existing !== id));
+    setFolderPendingDelete(null);
+  }, [folderPendingDelete, deleteFolder, setCollapsedFolderIds, collapsedFolderIds]);
+  const cancelDeleteFolder = useCallback(() => {
+    setFolderPendingDelete(null);
+  }, []);
 
   useEffect(() => {
     setActiveFilter(contextualFilter ?? "all");
@@ -793,6 +968,17 @@ export function MyDecks({
     return filteredDeckNames;
   }, [filteredDeckNames]);
 
+  const sourceFilteredDeckNames = useMemo(() => {
+    if (mode !== "select" || selectSourceFilter === "all") return searchFiltered;
+    return searchFiltered.filter((deckName) => {
+      const feedOrigin = getDeckFeedOrigin(deckName);
+      const savedPrecon = savedPreconSetCode(deckName) != null;
+      if (selectSourceFilter === "feed") return feedOrigin != null;
+      if (selectSourceFilter === "user") return feedOrigin == null && !savedPrecon;
+      return feedOrigin == null && savedPreconMatchesSetFilter(deckName, preconSetFilter);
+    });
+  }, [mode, preconSetFilter, searchFiltered, selectSourceFilter]);
+
   const filteredPreconCandidates = useMemo(() => {
     const saved = new Set(deckNames);
     const q = searchQuery.toLowerCase();
@@ -814,13 +1000,48 @@ export function MyDecks({
     return selectedFormatForCompatibility === "Commander" ? filteredPreconCandidates : [];
   }, [filteredPreconCandidates, selectedFormatForCompatibility]);
 
+  const preconSetMenuItems = useMemo(() => {
+    const codes = Array.from(new Set(
+      [
+        ...legalPreconCandidates.flatMap((candidate) =>
+          candidate.source.type === "precon" ? [candidate.source.code] : [],
+        ),
+        ...searchFiltered.flatMap((deckName) => savedPreconSetCode(deckName) ?? []),
+      ],
+    )).sort((a, b) => a.localeCompare(b));
+    return [
+      { value: PRECON_SET_ALL, label: t("myDecks.preconSetFilterAll") },
+      ...codes.map((code) => ({ value: code, label: code })),
+    ];
+  }, [legalPreconCandidates, searchFiltered, t]);
+
+  const preconSetMenuLabel =
+    preconSetMenuItems.find((item) => item.value === preconSetFilter)?.label
+    ?? t("myDecks.preconSetFilterAll");
+
+  useEffect(() => {
+    if (preconSetFilter === PRECON_SET_ALL) return;
+    if (preconSetMenuItems.some((item) => item.value === preconSetFilter)) return;
+    setPreconSetFilter(PRECON_SET_ALL);
+  }, [preconSetFilter, preconSetMenuItems]);
+
+  const visiblePreconCandidates = useMemo(() => {
+    if (mode === "select" && selectSourceFilter !== "all" && selectSourceFilter !== "precon") {
+      return [];
+    }
+    if (preconSetFilter === PRECON_SET_ALL) return legalPreconCandidates;
+    return legalPreconCandidates.filter((candidate) =>
+      candidate.source.type === "precon" && candidate.source.code === preconSetFilter,
+    );
+  }, [legalPreconCandidates, mode, preconSetFilter, selectSourceFilter]);
+
   const legalPreconByName = useMemo(() => {
-    const entries = legalPreconCandidates.map((candidate) => [
+    const entries = visiblePreconCandidates.map((candidate) => [
       PRECON_PREFIX + candidate.name,
       candidate,
     ] as const);
     return new Map(entries);
-  }, [legalPreconCandidates]);
+  }, [visiblePreconCandidates]);
 
   const preconDeckNames = useMemo(() => {
     return Array.from(legalPreconByName.keys());
@@ -856,7 +1077,7 @@ export function MyDecks({
 
     const user: string[] = [];
     const bundled: string[] = [];
-    for (const name of searchFiltered) {
+    for (const name of sourceFilteredDeckNames) {
       if (isBundledDeck(name)) {
         bundled.push(name);
       } else {
@@ -867,17 +1088,43 @@ export function MyDecks({
       userDecks: sortNames(user),
       bundledDecks: sortNames(bundled),
     };
-  }, [searchFiltered, activeSort, sortAsc, compatibilities]);
+  }, [sourceFilteredDeckNames, activeSort, sortAsc, compatibilities]);
 
+  const randomDeckSelected = activeDeckName === RANDOM_DECK_SELECTION;
   const noDeckSelected = mode === "select"
-    ? !activeDeckName || (!searchFiltered.includes(activeDeckName) && !preconDeckNames.includes(activeDeckName))
+    ? !activeDeckName || (
+      !randomDeckSelected &&
+      !sourceFilteredDeckNames.includes(activeDeckName) &&
+      !preconDeckNames.includes(activeDeckName)
+    )
     : false;
   const selectedDeckLabel = mode === "select"
     && activeDeckName
-    && (searchFiltered.includes(activeDeckName) || preconDeckNames.includes(activeDeckName))
-    ? activeDeckName
+    && (randomDeckSelected || sourceFilteredDeckNames.includes(activeDeckName) || preconDeckNames.includes(activeDeckName))
+    ? (randomDeckSelected ? t("myDecks.randomDeckTile") : activeDeckName)
     : null;
-  const visibleDeckCount = searchFiltered.length + preconDeckNames.length;
+  const visibleDeckCount = sourceFilteredDeckNames.length + preconDeckNames.length;
+  const randomSelectableCandidates = useMemo<SelectableRandomDeckCandidate[]>(() => {
+    if (mode !== "select") return [];
+    return [...sourceFilteredDeckNames, ...preconDeckNames].map((deckName) => {
+      const candidate = deckCandidatesByName.get(deckName) ?? legalPreconByName.get(deckName);
+      return {
+        id: candidate?.id ?? savedDeckCatalogId(deckName),
+        name: deckName,
+        deckName,
+        source: candidate?.source ?? { type: "saved" },
+        knownFormat: candidate?.knownFormat,
+        compatibility: compatibilities[deckName] ?? null,
+      };
+    });
+  }, [
+    compatibilities,
+    deckCandidatesByName,
+    legalPreconByName,
+    mode,
+    preconDeckNames,
+    sourceFilteredDeckNames,
+  ]);
   const userDeckScanTotal = requiresCompatibilityFilter ? unknownFormatDeckNames.length : 0;
   const userDeckScanCompleted = Math.min(deckScanIndex, userDeckScanTotal);
   const isScanningUserDecks = userDeckScanCompleted < userDeckScanTotal;
@@ -1032,6 +1279,66 @@ export function MyDecks({
     onSelectDeck?.(deckName);
   }, [materializePreconDeck, mode, onEditDeck, onSelectDeck]);
 
+  const handleRandomDeckClick = useCallback(async () => {
+    if (mode !== "select" || randomSelectableCandidates.length === 0 || isPickingRandomDeck) return;
+    if (randomSelectionMode === "defer") {
+      onSelectDeck?.(RANDOM_DECK_SELECTION);
+      return;
+    }
+
+    setIsPickingRandomDeck(true);
+    let nextCompatibilities = compatibilities;
+    try {
+      if (selectedFormatForCompatibility) {
+        const unknownCandidates = randomSelectableCandidates.flatMap(({ deckName }) => {
+          const candidate = deckCandidatesByName.get(deckName) ?? legalPreconByName.get(deckName);
+          if (!candidate || candidate.knownFormat != null) return [];
+          if (compatibilities[deckName]?.selected_format_compatible != null) return [];
+          return [{ name: deckName, deck: candidate.deck }];
+        });
+
+        if (unknownCandidates.length > 0) {
+          setCompatibilityStatus(t("myDecks.status.checkingRandom"));
+          const results = await evaluateDeckCompatibilityBatch(unknownCandidates, {
+            selectedFormat: selectedFormatForCompatibility,
+            selectedMatchType,
+            summaryOnly: true,
+          });
+          nextCompatibilities = { ...compatibilities, ...results };
+          setCompatibilities(nextCompatibilities);
+          setCompatibilityError(null);
+        }
+      }
+    } catch (error) {
+      setCompatibilityError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCompatibilityStatus(null);
+      setIsPickingRandomDeck(false);
+    }
+
+    const pick = pickRandomDeckCandidate(
+      randomSelectableCandidates.map((candidate) => ({
+        ...candidate,
+        compatibility: nextCompatibilities[candidate.deckName] ?? candidate.compatibility,
+      })),
+      { selectedFormat: selectedFormatForCompatibility },
+    );
+    if (pick) handleTileClick(pick.deckName);
+  }, [
+    compatibilities,
+    deckCandidatesByName,
+    handleTileClick,
+    isPickingRandomDeck,
+    legalPreconByName,
+    mode,
+    onSelectDeck,
+    randomSelectableCandidates,
+    randomSelectionMode,
+    selectedFormatForCompatibility,
+    selectedMatchType,
+    t,
+  ]);
+
   const handleImported = (name: string, names: string[]) => {
     setDeckNames(names);
     if (mode === "select") {
@@ -1066,6 +1373,98 @@ export function MyDecks({
     setDeckNames(listSavedDeckNames());
   };
 
+  // Group the user's own decks into Starred / folders / Unfiled. Bundled and
+  // precon decks are separate immutable system folders, handled below.
+  const groupedUserDecks = useMemo(() => group(userDecks), [group, userDecks]);
+  const hasUserOrganization =
+    folders.length > 0 || groupedUserDecks.starred.length > 0;
+  const searching = searchQuery.trim().length > 0;
+
+  const renderedSectionIds = useMemo(() => {
+    const ids: string[] = [];
+    if (hasUserOrganization) {
+      if (groupedUserDecks.starred.length > 0) ids.push(STARRED_SECTION_ID);
+      for (const { folder } of groupedUserDecks.folders) ids.push(folder.id);
+      ids.push(UNFILED_SECTION_ID);
+    }
+    if (bundledDecks.length > 0) ids.push(STARTER_SECTION_ID);
+    if (preconDeckNames.length > 0) ids.push(PRECON_SECTION_ID);
+    return ids;
+  }, [hasUserOrganization, groupedUserDecks, bundledDecks.length, preconDeckNames.length]);
+
+  // A section is collapsed only when explicitly collapsed AND not overridden by
+  // an active search (force-expand) or, in select mode, by holding the active
+  // deck (so the current selection is never hidden).
+  const isSectionCollapsed = useCallback(
+    (id: string, sectionDeckNames: string[]): boolean => {
+      if (searching) return false;
+      if (
+        mode === "select" &&
+        activeDeckName != null &&
+        sectionDeckNames.includes(activeDeckName)
+      ) {
+        return false;
+      }
+      return collapsedFolderIds.includes(id);
+    },
+    [searching, mode, activeDeckName, collapsedFolderIds],
+  );
+
+  // While a search is active every section is force-expanded (see
+  // isSectionCollapsed), so toggling collapse would only mutate the persisted
+  // set with no visible effect — and surprise the user once the search clears.
+  // Make the chevron an honest no-op during search.
+  const handleToggleSection = useCallback(
+    (id: string) => {
+      if (searching) return;
+      toggleFolderCollapsed(id);
+    },
+    [searching, toggleFolderCollapsed],
+  );
+
+  const renderUserDeckTile = useCallback(
+    (deckName: string) => {
+      // Manage mode supplies the organize props (stable callbacks + folders ref,
+      // primitive star/folder reads) so the tile's memo holds during scans;
+      // select mode passes none, hiding the kebab.
+      const manage = mode === "manage";
+      const meta = manage ? getDeckMeta(deckName) : null;
+      return (
+        <SavedDeckTile
+          key={deckName}
+          deckName={deckName}
+          isActive={deckName === activeDeckName}
+          compatibility={compatibilities[deckName]}
+          onTileClick={handleTileClick}
+          onEditDeck={onEditDeck}
+          onDeleteDeck={handleDeleteDeck}
+          preconCandidate={legalPreconByName.get(deckName)}
+          catalogCandidate={deckCandidatesByName.get(deckName)}
+          folders={manage ? folders : undefined}
+          starred={meta?.starred}
+          currentFolderId={meta?.folderId}
+          onToggleStar={manage ? handleToggleStar : undefined}
+          onAssignFolder={manage ? handleAssignFolder : undefined}
+          onNewFolder={manage ? handleNewFolderForDeck : undefined}
+        />
+      );
+    },
+    [
+      mode,
+      activeDeckName,
+      compatibilities,
+      handleTileClick,
+      onEditDeck,
+      handleDeleteDeck,
+      legalPreconByName,
+      deckCandidatesByName,
+      folders,
+      handleToggleStar,
+      handleAssignFolder,
+      handleNewFolderForDeck,
+    ],
+  );
+
   const Wrapper = bare ? "div" : MenuPanel;
   const wrapperClass = bare
     ? "flex w-full min-w-0 flex-col items-center gap-4"
@@ -1080,10 +1479,16 @@ export function MyDecks({
             {mode === "manage" ? t("myDecks.headingManage") : t("myDecks.headingSelect")}
           </h2>
           {mode === "manage" && (
-            <div className="flex rounded-lg border border-white/10">
+            <div
+              role="group"
+              aria-label={t("myDecks.headingManage")}
+              className="inline-flex w-fit max-w-full rounded-lg border border-white/10 p-0.5"
+            >
               <button
+                type="button"
+                aria-pressed={activeTab === "decks"}
                 onClick={() => setActiveTab("decks")}
-                className={`rounded-l-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`rounded-md px-3 py-3.5 text-xs font-medium whitespace-nowrap transition-colors sm:py-1.5 ${
                   activeTab === "decks"
                     ? "bg-white/10 text-white"
                     : "text-slate-400 hover:text-white"
@@ -1092,8 +1497,10 @@ export function MyDecks({
                 {t("myDecks.tabDecks")}
               </button>
               <button
+                type="button"
+                aria-pressed={activeTab === "subscriptions"}
                 onClick={() => setActiveTab("subscriptions")}
-                className={`rounded-r-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`rounded-md px-3 py-3.5 text-xs font-medium whitespace-nowrap transition-colors sm:py-1.5 ${
                   activeTab === "subscriptions"
                     ? "bg-white/10 text-white"
                     : "text-slate-400 hover:text-white"
@@ -1113,7 +1520,7 @@ export function MyDecks({
           </button>
         )}
         {mode === "manage" && activeTab === "subscriptions" && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2 self-start sm:self-auto">
             <button
               onClick={handleRefreshAll}
               disabled={isRefreshing}
@@ -1217,6 +1624,37 @@ export function MyDecks({
         </div>
         </div>
         )}
+
+        {mode === "select" && (
+          <div className="flex w-full min-w-0 flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <MenuSelect
+              ariaLabel={t("myDecks.sourceFilterLabel")}
+              label={selectSourceMenuLabel}
+              selectedValue={selectSourceFilter}
+              items={selectSourceMenuItems}
+              menuLayout="dropdown"
+              onSelect={(value) => setSelectSourceFilter(value as SelectDeckSourceFilter)}
+              wrapperClassName="min-w-0 sm:w-36"
+              className="min-h-[30px] rounded bg-black/30 px-2 py-1 text-xs text-slate-300 ring-1 ring-white/10 focus-visible:ring-white/20"
+            />
+            {(selectSourceFilter === "all" || selectSourceFilter === "precon") &&
+              preconSetMenuItems.length > 1 && (
+                <MenuSelect
+                  ariaLabel={t("myDecks.preconSetFilterLabel")}
+                  label={preconSetMenuLabel}
+                  selectedValue={preconSetFilter}
+                  items={preconSetMenuItems}
+                  menuLayout="dropdown"
+                  filterable
+                  filterPlaceholder={t("myDecks.preconSetSearchPlaceholder")}
+                  noMatchesLabel={t("myDecks.preconSetNoMatches")}
+                  onSelect={setPreconSetFilter}
+                  wrapperClassName="min-w-0 sm:w-32"
+                  className="min-h-[30px] rounded bg-black/30 px-2 py-1 text-xs text-slate-300 ring-1 ring-white/10 focus-visible:ring-white/20"
+                />
+              )}
+          </div>
+        )}
       </div>
 
       {/* Format-filter banner: in select mode, when the caller pins a format
@@ -1298,15 +1736,49 @@ export function MyDecks({
         </div>
       ) : (
         <div className="flex w-full flex-col gap-6">
-          {/* User decks section */}
-          <div>
-            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
-              {t("myDecks.sectionMyDecks")}
-              {userDecks.length > 0 && (
-                <span className="ml-2 text-slate-600">{userDecks.length}</span>
+          {/* Quick actions: import/precon entry points + folder controls. */}
+          <div className="flex flex-col gap-3">
+            {mode === "manage" && (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCreateFolder}
+                  className={menuButtonClass({ tone: "neutral", size: "sm" })}
+                >
+                  {t("folder.newFolder")}
+                </button>
+                {renderedSectionIds.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setCollapsedFolderIds(renderedSectionIds)}
+                      className="rounded px-2 py-1 text-xs text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white"
+                    >
+                      {t("myDecks.collapseAll")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCollapsedFolderIds([])}
+                      className="rounded px-2 py-1 text-xs text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white"
+                    >
+                      {t("myDecks.expandAll")}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            <div className={DECK_GRID_CLASS}>
+              {mode === "select" && (
+                <AddDeckTile
+                  label={isPickingRandomDeck ? t("myDecks.randomDeckTileBusy") : t("myDecks.randomDeckTile")}
+                  onClick={() => void handleRandomDeckClick()}
+                  disabled={randomSelectableCandidates.length === 0 || isPickingRandomDeck}
+                  active={randomDeckSelected}
+                  icon={
+                    <path d="M5.75 3.5a3.25 3.25 0 0 0-3.25 3.25.75.75 0 0 0 1.5 0A1.75 1.75 0 0 1 5.75 5h6.69l-1.22 1.22a.75.75 0 1 0 1.06 1.06l2.5-2.5a.75.75 0 0 0 0-1.06l-2.5-2.5a.75.75 0 1 0-1.06 1.06L12.44 3.5H5.75Zm8.25 9.75A1.75 1.75 0 0 1 12.25 15H5.56l1.22-1.22a.75.75 0 1 0-1.06-1.06l-2.5 2.5a.75.75 0 0 0 0 1.06l2.5 2.5a.75.75 0 0 0 1.06-1.06L5.56 16.5h6.69a3.25 3.25 0 0 0 3.25-3.25.75.75 0 0 0-1.5 0Z" />
+                  }
+                />
               )}
-            </h3>
-            <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
               <AddDeckTile
                 label={t("myDecks.importDeckTile")}
                 onClick={() => setShowImport(true)}
@@ -1321,39 +1793,80 @@ export function MyDecks({
                   <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5v13a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 16.5v-13Zm11.25.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-1.5 0V4.75a.75.75 0 0 1 .75-.75Zm2.5 1.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-1.5 0v-8.5a.75.75 0 0 1 .75-.75Z" />
                 }
               />
-
-              {userDecks.map((deckName) => (
-                <SavedDeckTile
-                  key={deckName}
-                  deckName={deckName}
-                  isActive={deckName === activeDeckName}
-                  compatibility={compatibilities[deckName]}
-                  onTileClick={handleTileClick}
-                  onEditDeck={onEditDeck}
-                  onDeleteDeck={handleDeleteDeck}
-                  preconCandidate={legalPreconByName.get(deckName)}
-                  catalogCandidate={deckCandidatesByName.get(deckName)}
-                />
-              ))}
             </div>
           </div>
 
-          {/* Bundled decks section */}
+          {/* User decks: a flat grid until the user creates a folder or stars a
+              deck, then collapsible Starred / folder / Unfiled sections. */}
+          {!hasUserOrganization ? (
+            userDecks.length > 0 && (
+              <div className={DECK_GRID_CLASS}>{userDecks.map(renderUserDeckTile)}</div>
+            )
+          ) : (
+            <>
+              {groupedUserDecks.starred.length > 0 && (
+                <DeckSection
+                  title={t("myDecks.sectionStarred")}
+                  count={groupedUserDecks.starred.length}
+                  icon={<SectionStarIcon />}
+                  collapsed={isSectionCollapsed(STARRED_SECTION_ID, groupedUserDecks.starred)}
+                  onToggleCollapsed={() => handleToggleSection(STARRED_SECTION_ID)}
+                >
+                  <div className={DECK_GRID_CLASS}>
+                    {groupedUserDecks.starred.map(renderUserDeckTile)}
+                  </div>
+                </DeckSection>
+              )}
+              {groupedUserDecks.folders.map(({ folder, decks }) => (
+                <DeckSection
+                  key={folder.id}
+                  title={folder.name}
+                  count={decks.length}
+                  collapsed={isSectionCollapsed(folder.id, decks)}
+                  onToggleCollapsed={() => handleToggleSection(folder.id)}
+                  emptyHint={t("folder.emptyHint")}
+                  headerAction={
+                    <FolderActionsMenu
+                      onRename={() => handleRenameFolder(folder.id, folder.name)}
+                      onDelete={() => handleDeleteFolder(folder.id, folder.name)}
+                    />
+                  }
+                >
+                  <div className={DECK_GRID_CLASS}>{decks.map(renderUserDeckTile)}</div>
+                </DeckSection>
+              ))}
+              <DeckSection
+                title={t("myDecks.sectionUnfiled")}
+                count={groupedUserDecks.unfiled.length}
+                collapsed={isSectionCollapsed(UNFILED_SECTION_ID, groupedUserDecks.unfiled)}
+                onToggleCollapsed={() => handleToggleSection(UNFILED_SECTION_ID)}
+                emptyHint={t("folder.unfiledEmptyHint")}
+              >
+                <div className={DECK_GRID_CLASS}>
+                  {groupedUserDecks.unfiled.map(renderUserDeckTile)}
+                </div>
+              </DeckSection>
+            </>
+          )}
+
+          {/* Starter decks — an immutable system folder. */}
           {bundledDecks.length > 0 && (
-            <div>
-              <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  {t("myDecks.sectionStarterDecks")}
-                  <span className="ml-2 text-slate-600">{bundledDecks.length}</span>
-                </h3>
+            <DeckSection
+              title={t("myDecks.sectionStarterDecks")}
+              count={bundledDecks.length}
+              icon={<SectionLockIcon />}
+              collapsed={isSectionCollapsed(STARTER_SECTION_ID, bundledDecks)}
+              onToggleCollapsed={() => handleToggleSection(STARTER_SECTION_ID)}
+              headerAction={
                 <button
                   onClick={() => setShowFeedManager(true)}
                   className="text-[11px] text-slate-500 transition-colors hover:text-slate-300"
                 >
                   {t("myDecks.manageFeeds")}
                 </button>
-              </div>
-              <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
+              }
+            >
+              <div className={DECK_GRID_CLASS}>
                 {bundledDecks.map((deckName) => (
                   <SavedDeckTile
                     key={deckName}
@@ -1368,39 +1881,39 @@ export function MyDecks({
                   />
                 ))}
               </div>
-            </div>
+            </DeckSection>
           )}
 
+          {/* Legal precons — an immutable system folder. */}
           {preconDeckNames.length > 0 && (
-            <div className="rounded-[18px] border border-white/8 bg-black/10 p-3">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  {t("myDecks.sectionLegalPrecons")}
-                  <span className="ml-2 text-slate-600">{preconDeckNames.length}</span>
-                </h3>
+            <DeckSection
+              title={t("myDecks.sectionLegalPrecons")}
+              count={preconDeckNames.length}
+              icon={<SectionLockIcon />}
+              collapsed={isSectionCollapsed(PRECON_SECTION_ID, displayedPreconDeckNames)}
+              onToggleCollapsed={() => handleToggleSection(PRECON_SECTION_ID)}
+              headerAction={
                 <button
                   onClick={() => setShowPrecon(true)}
                   className="text-[11px] text-slate-500 transition-colors hover:text-slate-300"
                 >
                   {t("myDecks.browseAll")}
                 </button>
-              </div>
-              <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
-                {displayedPreconDeckNames.map((deckName) => {
-                  const candidate = legalPreconByName.get(deckName);
-                  return (
-                    <SavedDeckTile
-                      key={deckName}
-                      deckName={deckName}
-                      isActive={deckName === activeDeckName}
-                      compatibility={compatibilities[deckName]}
-                      onTileClick={handleTileClick}
-                      onEditDeck={onEditDeck}
-                      onDeleteDeck={handleDeleteDeck}
-                      preconCandidate={candidate}
-                    />
-                  );
-                })}
+              }
+            >
+              <div className={DECK_GRID_CLASS}>
+                {displayedPreconDeckNames.map((deckName) => (
+                  <SavedDeckTile
+                    key={deckName}
+                    deckName={deckName}
+                    isActive={deckName === activeDeckName}
+                    compatibility={compatibilities[deckName]}
+                    onTileClick={handleTileClick}
+                    onEditDeck={onEditDeck}
+                    onDeleteDeck={handleDeleteDeck}
+                    preconCandidate={legalPreconByName.get(deckName)}
+                  />
+                ))}
               </div>
               {displayedPreconDeckNames.length < preconDeckNames.length && (
                 <div className="mt-4 flex justify-center">
@@ -1413,7 +1926,7 @@ export function MyDecks({
                   </button>
                 </div>
               )}
-            </div>
+            </DeckSection>
           )}
         </div>
       )}
@@ -1463,6 +1976,39 @@ export function MyDecks({
       <FeedManagerModal
         open={showFeedManager}
         onClose={handleFeedManagerClose}
+      />
+      <ConfirmDialog
+        open={folderPendingDelete !== null}
+        title={t("folder.delete")}
+        message={t("folder.deleteConfirm", { name: folderPendingDelete?.name ?? "" })}
+        confirmLabel={t("folder.delete")}
+        onConfirm={confirmDeleteFolder}
+        onCancel={cancelDeleteFolder}
+        tone="danger"
+      />
+      <TextPromptDialog
+        open={folderPrompt != null}
+        title={
+          folderPrompt?.kind === "rename"
+            ? t("folder.rename")
+            : t("folder.newFolder")
+        }
+        label={
+          folderPrompt?.kind === "rename"
+            ? t("folder.renamePrompt")
+            : t("folder.newFolderPrompt")
+        }
+        initialValue={
+          folderPrompt?.kind === "rename" ? folderPrompt.currentName : ""
+        }
+        confirmLabel={
+          folderPrompt?.kind === "rename"
+            ? t("common:actions.save")
+            : t("folder.createButton")
+        }
+        maxLength={MAX_FOLDER_NAME_LENGTH}
+        onConfirm={handleFolderPromptConfirm}
+        onCancel={handleFolderPromptCancel}
       />
     </Wrapper>
   );
@@ -1545,28 +2091,53 @@ interface AddDeckTileProps {
   label: string;
   icon: ReactNode;
   onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
 }
 
 /** Shared call-to-action tile used for "Import Deck" and "Preconstructed" in
  * the deck grid. Keeps the two entry points visually identical so the only
  * thing that differs is the icon + label. */
-function AddDeckTile({ label, icon, onClick }: AddDeckTileProps) {
+function AddDeckTile({ label, icon, onClick, disabled = false, active = false }: AddDeckTileProps) {
   return (
     <button
       onClick={onClick}
-      className="group relative flex h-full min-h-[11rem] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl border border-dashed border-white/12 transition hover:bg-white/5 hover:border-white/25"
+      disabled={disabled}
+      className={`group relative flex h-full min-h-[11rem] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl border border-dashed transition ${
+        disabled
+          ? "cursor-not-allowed opacity-50"
+          : active
+            ? "border-indigo-300/70 bg-indigo-500/10 ring-2 ring-indigo-300/45"
+            : "border-white/12 hover:bg-white/5 hover:border-white/25"
+      }`}
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"
         viewBox="0 0 20 20"
         fill="currentColor"
-        className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
+        className={`h-8 w-8 transition-colors ${active ? "text-indigo-200" : "text-gray-500"} ${disabled || active ? "" : "group-hover:text-gray-300"}`}
       >
         {icon}
       </svg>
-      <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
+      <span className={`text-xs font-medium transition-colors ${active ? "text-indigo-100" : "text-gray-500"} ${disabled || active ? "" : "group-hover:text-gray-300"}`}>
         {label}
       </span>
     </button>
+  );
+}
+
+function SectionStarIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-amber-300">
+      <path d="M8 1.5l1.9 3.85 4.25.62-3.07 3 .72 4.23L8 11.2l-3.8 2 .72-4.23-3.07-3 4.25-.62L8 1.5Z" />
+    </svg>
+  );
+}
+
+function SectionLockIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-slate-500">
+      <path fillRule="evenodd" d="M4.5 7V5.5a3.5 3.5 0 1 1 7 0V7h.25A1.25 1.25 0 0 1 13 8.25v4.5A1.25 1.25 0 0 1 11.75 14h-7.5A1.25 1.25 0 0 1 3 12.75v-4.5A1.25 1.25 0 0 1 4.25 7H4.5Zm1.5-1.5a2 2 0 1 1 4 0V7H6V5.5Z" clipRule="evenodd" />
+    </svg>
   );
 }

@@ -15,18 +15,21 @@ vi.mock("framer-motion", async (importOriginal) => {
   };
 });
 
-import type { AnimationStep } from "../../../animation/types.ts";
-import type { GameState } from "../../../adapter/types.ts";
+import {
+  GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
+  type AnimationStep,
+} from "../../../animation/types.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { LifeTotal } from "../LifeTotal.tsx";
 
 function setLife(playerId: number, life: number) {
   useGameStore.setState((s) => {
-    const prev = (s.gameState ?? { players: [{ life: 20 }, { life: 20 }] }) as GameState;
+    const prev = s.gameState ?? buildGameState();
     const players = prev.players.map((p, i) => (i === playerId ? { ...p, life } : p));
-    return { gameState: { ...prev, players } as GameState };
+    return { gameState: { ...prev, players } };
   });
 }
 
@@ -55,10 +58,33 @@ function combatDamageStep(playerId: number, amount: number): AnimationStep {
   };
 }
 
+function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): AnimationStep {
+  return {
+    duration: 900,
+    effects: [
+      {
+        event: {
+          type: "GroupedDamageFlurry",
+          data: { player_id: playerId, source_ids: [1, 2, 3], total_damage: 3, hit_count: 3 },
+        },
+        duration: 900,
+      },
+      ...(lifeAmount == null
+        ? []
+        : [{
+            event: { type: "LifeChanged" as const, data: { player_id: lifePlayerId, amount: lifeAmount } },
+            duration: 300,
+            displayOnly: true as const,
+          }]),
+    ],
+  };
+}
+
 describe("LifeTotal", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     useGameStore.setState({
-      gameState: { players: [{ life: 20 }, { life: 20 }] } as unknown as GameState,
+      gameState: buildGameState(),
     });
     useAnimationStore.setState({ activeStep: null });
     usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
@@ -67,6 +93,7 @@ describe("LifeTotal", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
   it("renders the current life total", () => {
@@ -115,5 +142,66 @@ describe("LifeTotal", () => {
     });
 
     expect(screen.getByText("15")).toBeInTheDocument();
+  });
+
+  it("delays grouped flurry displayOnly life movement until the shared impact time", () => {
+    render(<LifeTotal playerId={0} />);
+    expect(screen.getByText("20")).toBeInTheDocument();
+
+    act(() => {
+      useAnimationStore.setState({ activeStep: groupedDamageStep(0, -3) });
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS - 1);
+    });
+    expect(screen.getByText("20")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText("17")).toBeInTheDocument();
+  });
+
+  it("reconciles grouped flurry displayOnly life movement if the impact timer is cancelled", () => {
+    render(<LifeTotal playerId={0} />);
+
+    act(() => {
+      useAnimationStore.setState({ activeStep: groupedDamageStep(0, -3) });
+      useAnimationStore.setState({ activeStep: null });
+      setLife(0, 17);
+    });
+
+    expect(screen.getByText("17")).toBeInTheDocument();
+  });
+
+  it("does not move life for grouped flurry without a consumed LifeChanged effect", () => {
+    render(<LifeTotal playerId={0} />);
+
+    act(() => {
+      useAnimationStore.setState({ activeStep: groupedDamageStep(0) });
+      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS);
+    });
+
+    expect(screen.getByText("20")).toBeInTheDocument();
+  });
+
+  it("delays grouped flurry displayOnly lifelink gain until the shared impact time", () => {
+    render(<LifeTotal playerId={1} />);
+    expect(screen.getByText("20")).toBeInTheDocument();
+
+    act(() => {
+      useAnimationStore.setState({ activeStep: groupedDamageStep(0, 3, 1) });
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS - 1);
+    });
+    expect(screen.getByText("20")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText("23")).toBeInTheDocument();
   });
 });

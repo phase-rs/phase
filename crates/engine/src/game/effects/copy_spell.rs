@@ -231,12 +231,40 @@ fn apply_spell_copy_modifications(
     source_ability: Option<&ResolvedAbility>,
 ) {
     for modification in modifications {
-        if let ContinuousModification::RemoveSupertype { supertype } = modification {
-            copy_obj.card_types.supertypes.retain(|s| s != supertype);
-            copy_obj
-                .base_card_types
-                .supertypes
-                .retain(|s| s != supertype);
+        match modification {
+            ContinuousModification::RemoveSupertype { supertype } => {
+                copy_obj.card_types.supertypes.retain(|s| s != supertype);
+                copy_obj
+                    .base_card_types
+                    .supertypes
+                    .retain(|s| s != supertype);
+            }
+            // CR 702.10a + CR 608.3f / CR 707.10f: "the copy gains haste" — a
+            // keyword granted to a spell copy must ride the copy through the
+            // stack→token transition. Stamp BOTH the live and base keyword store
+            // (mirroring RemoveSupertype), so it survives the layer reset when
+            // the copy resolves into a token permanent.
+            ContinuousModification::AddKeyword { keyword } => {
+                // allow-raw-authority: copy-construction — dedupe the detached stack-copy's OWN keyword store (characteristic snapshot, CR 707.10f), not an effective-keyword query.
+                if !copy_obj.keywords.contains(keyword) {
+                    copy_obj.keywords.push(keyword.clone());
+                }
+                // allow-raw-authority: same copy-construction snapshot — the base-store twin of the live stamp above.
+                if !copy_obj.base_keywords.contains(keyword) {
+                    copy_obj.base_keywords.push(keyword.clone());
+                }
+            }
+            // CR 603.1 + CR 604.1 + CR 608.3f / CR 707.10f: a triggered ability
+            // granted to the copy ("...\"At the beginning of the end step,
+            // sacrifice ~.\"") lands in the separate `trigger_definitions` store.
+            // Stamp base + live (mirroring blitz's dies-trigger seeding) so the
+            // trigger persists once the copy becomes a token permanent.
+            ContinuousModification::GrantTrigger { trigger } => {
+                std::sync::Arc::make_mut(&mut copy_obj.base_trigger_definitions)
+                    .push((**trigger).clone());
+                copy_obj.trigger_definitions.push((**trigger).clone());
+            }
+            _ => {}
         }
     }
     if starting_loyalty_from_casualty_sacrifice {
@@ -391,12 +419,18 @@ fn resolve_copier_player(
             .next(),
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
-        | ControllerRef::TriggeringPlayer => None,
+        | ControllerRef::TriggeringPlayer
+        // CR 303.4b: Enchanted-player scope cannot resolve a copier. Fail closed.
+        | ControllerRef::EnchantedPlayer
+        // CR 102.1: no card scopes "the active player copies this spell";
+        // fail closed (mirrors DefendingPlayer / EnchantedPlayer).
+        | ControllerRef::ActivePlayer => None,
     }
 }
 
@@ -452,7 +486,7 @@ pub(crate) fn copy_count_with_replacements(
             continue;
         }
         count = match def.quantity_modification {
-            Some(QuantityModification::Double) => count.saturating_mul(2),
+            Some(QuantityModification::Times { factor }) => count.saturating_mul(factor as usize),
             Some(QuantityModification::Half) => count / 2,
             Some(QuantityModification::Plus { value }) => count.saturating_add(value as usize),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value as usize),
@@ -774,6 +808,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -841,6 +876,106 @@ mod tests {
         }
     }
 
+    /// GATE #2 — CR 702.10a + CR 603.1 + CR 608.3f / CR 707.10f: a spell copy's
+    /// `additional_modifications` carrying `AddKeyword(Haste)` + `GrantTrigger`
+    /// (Choreographed Sparks / Nalfeshnee's "the copy gains haste and \"...\"")
+    /// must be stamped onto the copy's BOTH live and base keyword/trigger stores.
+    /// The base stores are what survive the layer reset when the copy resolves
+    /// into a token permanent, so this is the copy→token persistence proof.
+    /// Reverting the `apply_spell_copy_modifications` AddKeyword/GrantTrigger arms
+    /// drops the mods and fails every assertion below.
+    #[test]
+    fn spell_copy_applies_granted_haste_and_trigger_to_base_and_live_stores() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+        use crate::types::keywords::Keyword;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // A creature spell on the stack (a permanent spell — CR 608.3f).
+        let creature_spell = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Vanilla Beast",
+            creature_spell,
+            CastingVariant::Normal,
+        );
+
+        // The end-step sacrifice trigger the parser fold produces.
+        let sac_trigger =
+            TriggerDefinition::new(TriggerMode::Phase).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+            ));
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    },
+                    ContinuousModification::GrantTrigger {
+                        trigger: Box::new(sac_trigger.clone()),
+                    },
+                ],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack[1].id;
+        let copy_obj = state.objects.get(&copy_id).expect("copy object exists");
+
+        // Haste stamped into both live and base keyword stores (base survives the
+        // battlefield-entry layer reset).
+        assert!(
+            // allow-raw-authority: test — asserts the copy object's OWN live keyword store.
+            copy_obj.keywords.contains(&Keyword::Haste),
+            "the copy must gain haste (live store)"
+        );
+        assert!(
+            // allow-raw-authority: test — asserts the copy object's OWN base keyword store.
+            copy_obj.base_keywords.contains(&Keyword::Haste),
+            "the copy must gain haste in its BASE store so it survives copy→token"
+        );
+        // The end-step sacrifice trigger stamped into both stores.
+        assert!(
+            copy_obj
+                .trigger_definitions
+                .iter_all()
+                .any(|t| *t == sac_trigger),
+            "the copy must gain the granted end-step-sacrifice trigger (live store)"
+        );
+        assert!(
+            copy_obj.base_trigger_definitions.contains(&sac_trigger),
+            "the granted trigger must be in the BASE store so it survives copy→token"
+        );
+    }
+
     /// CR 702.144a + CR 707.10: a `CopySpell { copier: Some(Opponent) }` puts the
     /// copy onto the stack under an OPPONENT's control (Demonstrate's
     /// opponent-copy). In a two-player game the single opponent is chosen
@@ -855,6 +990,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -918,6 +1054,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1004,6 +1141,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1049,6 +1187,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1095,6 +1234,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1254,6 +1394,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(50))],
             ObjectId(10),
@@ -1304,6 +1445,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(50))],
             ObjectId(10),
@@ -1468,7 +1610,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(10),
@@ -1805,6 +1949,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1877,6 +2022,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -1953,6 +2099,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: basalt,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -2025,6 +2172,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -2672,6 +2820,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(60))],
             ObjectId(10),
@@ -2752,6 +2901,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(60))],
             ObjectId(10),
@@ -2809,6 +2959,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         let mut imprint_obj = GameObject::new(
@@ -2973,6 +3124,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrifice".to_string(),
+                token_image_ref: None,
                 power: Some(4),
                 toughness: Some(4),
                 base_power: Some(4),
@@ -2987,6 +3139,8 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: vec![],
                 counters: Default::default(),
+                tapped: false,
+                is_suspected: false,
             },
         });
 

@@ -6,6 +6,15 @@ import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameState,
+  buildPendingCast,
+  buildTargetSelectionProgress,
+  buildTargetSelectionSlot,
+  buildTargetSelectionWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
+import { toCardProps } from "../../../viewmodel/cardProps.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../../viewmodel/battlefieldProps.ts";
 import { BattlefieldRow } from "../BattlefieldRow.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -22,58 +31,30 @@ vi.mock("../../card/CardImage.tsx", () => ({
 }));
 
 function makeObject(id: number): GameObject {
-  return {
+  return buildGameObject({
     id,
     card_id: 100,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Saproling",
     power: 1,
     toughness: 1,
-    loyalty: null,
     card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Green"],
     base_power: 1,
     base_toughness: 1,
-    base_keywords: [],
     base_color: ["Green"],
     timestamp: id,
-    entered_battlefield_turn: null,
-  };
+  });
 }
 
 function makeState(waitingFor: WaitingFor): GameState {
-  const objects = Object.fromEntries(
-    [1, 2, 3, 4, 5].map((id) => [id, makeObject(id)]),
+  const objects = buildObjectMap(
+    ...[1, 2, 3, 4, 5].map((id) => makeObject(id)),
   );
-  return {
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
+  return buildGameState({
     objects,
     battlefield: [1, 2, 3, 4, 5],
-    exile: [],
-    stack: [],
-    combat: null,
     waiting_for: waitingFor,
-  } as unknown as GameState;
+  });
 }
 
 function makeGroup(): GroupedPermanentType {
@@ -81,7 +62,7 @@ function makeGroup(): GroupedPermanentType {
     name: "Saproling",
     ids: [1, 2, 3, 4, 5],
     count: 5,
-    representative: {} as GroupedPermanentType["representative"],
+    representative: toCardProps(makeObject(1)),
   };
 }
 
@@ -207,18 +188,20 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
   });
 
   it("dispatches a concrete target choice from the picker", () => {
-    const waitingFor = {
-      type: "TargetSelection",
+    const waitingFor = buildTargetSelectionWaitingFor({
       data: {
         player: 0,
-        pending_cast: {},
-        target_slots: [],
-        selection: {
+        pending_cast: buildPendingCast(),
+        target_slots: [
+          buildTargetSelectionSlot({
+            legal_targets: [{ Object: 1 }, { Object: 2 }, { Object: 3 }],
+          }),
+        ],
+        selection: buildTargetSelectionProgress({
           current_legal_targets: [{ Object: 1 }, { Object: 2 }, { Object: 3 }],
-          selected_targets: [],
-        },
+        }),
       },
-    } as unknown as WaitingFor;
+    });
     useGameStore.setState({
       gameState: makeState(waitingFor),
       waitingFor,
@@ -274,11 +257,79 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     renderGroup({ boardChoiceObjectIds: new Set([1, 2, 3]) });
 
     fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
-    fireEvent.click(screen.getByRole("button", { name: "#2" }));
+    // All eligible creatures in a collapsed group are visually identical, so the
+    // picker resolves with a single labelled action instead of a #1..#N list.
+    fireEvent.click(screen.getByRole("button", { name: "Station" }));
 
     expect(dispatchAction).toHaveBeenCalledWith({
       type: "ActivateStation",
-      data: { spacecraft_id: 42, creature_id: 2 },
+      data: { spacecraft_id: 42, creature_id: 1 },
+    });
+  });
+
+  it("sacrifices one of many identical tokens with a single action (no #1-#N list) — #4375", () => {
+    const waitingFor: WaitingFor = {
+      type: "EffectZoneChoice",
+      data: {
+        player: 0,
+        cards: [1, 2, 3, 4, 5],
+        count: 1,
+        source_id: 99,
+        effect_kind: "Sacrifice",
+        zone: "Battlefield",
+        destination: null,
+      },
+    };
+    useGameStore.setState({
+      gameState: makeState(waitingFor),
+      waitingFor,
+    });
+    renderGroup({ boardChoiceObjectIds: new Set([1, 2, 3, 4, 5]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+
+    // No numbered per-token list — the indistinguishable tokens collapse to one
+    // action button labelled by intent.
+    expect(screen.queryByRole("button", { name: "#1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "#5" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Sacrifice" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [1] },
+    });
+  });
+
+  it("picks a quantity of identical tokens via the stepper for a multi sacrifice — #4375", () => {
+    const waitingFor: WaitingFor = {
+      type: "EffectZoneChoice",
+      data: {
+        player: 0,
+        cards: [1, 2, 3, 4, 5],
+        count: 2,
+        source_id: 99,
+        effect_kind: "Sacrifice",
+        zone: "Battlefield",
+        destination: null,
+      },
+    };
+    useGameStore.setState({
+      gameState: makeState(waitingFor),
+      waitingFor,
+    });
+    renderGroup({ boardChoiceObjectIds: new Set([1, 2, 3, 4, 5]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+
+    // Count stepper replaces the #1..#N toggle grid.
+    expect(screen.queryByRole("button", { name: "#1" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [1, 2] },
     });
   });
 

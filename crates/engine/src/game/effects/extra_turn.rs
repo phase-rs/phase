@@ -32,6 +32,10 @@ pub fn resolve(
         }
     };
 
+    // CR 805.8: With shared team turns, an extra turn for a player is taken by
+    // that player's team; store the team's seat-order representative as anchor.
+    let player = crate::game::topology::normalize_shared_turn_recipient(state, player);
+
     // CR 500.7: Push to end of Vec (LIFO — pop from end takes most recent first)
     state.extra_turns.push(player);
 
@@ -47,6 +51,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, SpellContext, TargetRef};
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -59,6 +64,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             source_incarnation: None,
+            source_card_id: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -78,6 +84,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
+            amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
@@ -90,9 +97,11 @@ mod tests {
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
+            replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         }
     }
 
@@ -137,6 +146,30 @@ mod tests {
     #[test]
     fn extra_turn_targeted_player() {
         let mut state = GameState::default();
+        let mut events = Vec::new();
+        let mut ability = make_ability(TargetFilter::Any, PlayerId(0));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.extra_turns, vec![PlayerId(1)]);
+    }
+
+    #[test]
+    fn two_hg_extra_turn_normalizes_to_team_representative() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        let mut events = Vec::new();
+        let mut ability = make_ability(TargetFilter::Any, PlayerId(2));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.extra_turns, vec![PlayerId(0)]);
+    }
+
+    #[test]
+    fn standard_extra_turn_targeted_player_is_not_normalized() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 0);
         let mut events = Vec::new();
         let mut ability = make_ability(TargetFilter::Any, PlayerId(0));
         ability.targets = vec![TargetRef::Player(PlayerId(1))];

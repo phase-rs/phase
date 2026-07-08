@@ -1,15 +1,83 @@
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::{
+    matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
+};
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, collect_shared_active_continuous_effects,
     evaluate_condition_with_recipient, order_active_continuous_effects,
 };
 use crate::game::quantity::resolve_quantity;
-use crate::types::ability::ContinuousModification;
+use crate::types::ability::{ContinuousModification, TargetFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::zones::Zone;
+
+thread_local! {
+    /// CR 613.1f self-reference guard: the set of object ids whose off-zone
+    /// keyword set is currently being computed on this call stack. A keyword
+    /// grant may be gated on a keyword-presence predicate over the SAME object
+    /// (Dream Devourer: "Each nonland card in your hand WITHOUT FORETELL has
+    /// foretell"). Evaluating that predicate re-enters off-zone keyword
+    /// computation for the same object; without a guard this recurses forever.
+    /// While an object is in this set, a nested query resolves against the base
+    /// (printed) keywords only — the grant cannot use its own output as its
+    /// applicability input, which is exactly the rules-correct behavior.
+    static OFF_ZONE_KEYWORD_STACK: std::cell::RefCell<Vec<ObjectId>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// CR 613.1f self-reference guard, RAII form. Constructing the guard records
+/// this frame's `object_id` in `OFF_ZONE_KEYWORD_STACK` iff it is not already
+/// present. `entered` is `true` only for the frame that actually inserted the
+/// id (the outermost frame for that object); re-entrant frames construct a
+/// guard with `entered == false` and thus own no removal. `Drop` pops the id
+/// unconditionally on every exit path — normal return, early return, or unwind
+/// — so a panic or early-return in nested keyword computation can never leave
+/// the thread-local set poisoned for the rest of the thread's life.
+struct OffZoneRecursionGuard {
+    object_id: ObjectId,
+    entered: bool,
+}
+
+impl OffZoneRecursionGuard {
+    fn enter(object_id: ObjectId) -> Self {
+        let entered = OFF_ZONE_KEYWORD_STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if stack.contains(&object_id) {
+                false
+            } else {
+                stack.push(object_id);
+                true
+            }
+        });
+        Self { object_id, entered }
+    }
+
+    /// `true` when this is a re-entrant frame for the same object — the caller
+    /// must resolve against base (printed) keywords only.
+    fn is_reentrant(&self) -> bool {
+        !self.entered
+    }
+}
+
+impl Drop for OffZoneRecursionGuard {
+    fn drop(&mut self) {
+        // Only the inserting frame owns removal; a re-entrant guard leaves the
+        // outer frame's entry intact.
+        if self.entered {
+            OFF_ZONE_KEYWORD_STACK.with(|stack| {
+                let mut stack = stack.borrow_mut();
+                let popped = stack.pop();
+                debug_assert_eq!(
+                    popped,
+                    Some(self.object_id),
+                    "off-zone keyword guard imbalance"
+                );
+            });
+        }
+    }
+}
 
 pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Vec<Keyword> {
     let Some(obj) = state.objects.get(&object_id) else {
@@ -19,12 +87,21 @@ pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Ve
         return obj.keywords.clone();
     }
 
+    // CR 613.1f: re-entrant computation for the same object returns base
+    // (printed) keywords only, breaking the self-referential grant cycle. The
+    // RAII guard cleans up the thread-local set on every exit path (including
+    // panics/early returns), so the set can never be left poisoned.
+    let _guard = OffZoneRecursionGuard::enter(object_id);
+    if _guard.is_reentrant() {
+        return obj.base_keywords.clone();
+    }
+
     let mut keywords = obj.base_keywords.clone();
     let effects = collect_applicable_off_zone_keyword_effects(state, object_id);
     let ordered = order_active_continuous_effects(Layer::Ability, &effects, state);
 
     for effect in ordered {
-        apply_keyword_modification(state, &mut keywords, &effect);
+        apply_keyword_modification(state, object_id, &mut keywords, &effect);
     }
 
     keywords
@@ -66,16 +143,16 @@ fn collect_applicable_off_zone_keyword_effects(
     effects
         .into_iter()
         .filter(|effect| {
+            let ctx =
+                FilterContext::from_source_with_controller(effect.source_id, effect.controller);
             effect.layer == Layer::Ability
                 && supports_off_zone_keyword_query(&effect.modification)
-                && matches_target_filter(
+                && matches_off_zone_keyword_recipient(
                     state,
                     object_id,
+                    obj.zone,
                     &effect.affected_filter,
-                    &FilterContext::from_source_with_controller(
-                        effect.source_id,
-                        effect.controller,
-                    ),
+                    &ctx,
                 )
                 && effect.condition.as_ref().is_none_or(|condition| {
                     evaluate_condition_with_recipient(
@@ -90,12 +167,37 @@ fn collect_applicable_off_zone_keyword_effects(
         .collect()
 }
 
+fn matches_off_zone_keyword_recipient(
+    state: &GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if is_owner_scoped_zone(zone) {
+        matches_target_filter_in_owner_zone(state, object_id, filter, ctx)
+    } else {
+        matches_target_filter(state, object_id, filter, ctx)
+    }
+}
+
+fn is_owner_scoped_zone(zone: Zone) -> bool {
+    // CR 109.5 + CR 400.3: "your" cards in hand/library/graveyard are scoped
+    // by owner, not stale object controller/LKI.
+    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+}
+
 fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> bool {
     matches!(
         modification,
         ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::AddDynamicKeyword { .. }
+            // CR 702.143d: derived-cost cast-from-off-zone keyword grants are
+            // realized exclusively through this path (the recipient lives in a
+            // non-battlefield zone), so they must be retained by the off-zone
+            // collector.
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::RemoveAllAbilities
             // CR 608.2d + CR 613.1f: `RemoveChosenKeyword` strips by
             // discriminant the keyword stored in the source's
@@ -112,11 +214,26 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
 
 fn apply_keyword_modification(
     state: &GameState,
+    object_id: ObjectId,
     keywords: &mut Vec<Keyword>,
     effect: &ActiveContinuousEffect,
 ) {
     match &effect.modification {
         ContinuousModification::AddKeyword { keyword } => upsert_keyword(keywords, keyword.clone()),
+        // CR 702.143d + CR 702 (alt-cost off-zone family): grant a cost-bearing
+        // keyword whose cost is DERIVED from the recipient's mana cost. The
+        // "without foretell" clause is enforced per-recipient here: if the
+        // recipient already carries a keyword of this family (printed or granted),
+        // no-op so its existing cost is preserved (Singing Towers of Darillium).
+        ContinuousModification::AddKeywordWithDerivedCost { kind, derivation } => {
+            if keywords.iter().any(|k| kind.matches_keyword(k)) {
+                return;
+            }
+            if let Some(recipient) = state.objects.get(&object_id) {
+                let derived = derivation.derive(&recipient.mana_cost);
+                upsert_keyword(keywords, kind.with_cost(derived));
+            }
+        }
         ContinuousModification::RemoveKeyword { keyword } => {
             keywords.retain(|existing| {
                 std::mem::discriminant(existing) != std::mem::discriminant(keyword)
@@ -146,17 +263,20 @@ fn apply_keyword_modification(
                 keywords.retain(|existing| existing != kw);
             }
         }
-        // CR 608.2d + CR 613.1f: Grant the *exact* keyword chosen at
-        // resolution time — the additive mirror of `RemoveChosenKeyword`,
-        // matching the `AddKeyword` upsert semantics above. No-op when the
-        // source has no stored chosen keyword.
+        // CR 608.2d + CR 613.1f: Grant EACH keyword chosen at resolution time —
+        // the additive mirror of `RemoveChosenKeyword`, matching the `AddKeyword`
+        // upsert semantics above. Reads the PLURAL list so a multi-keyword choice
+        // (Greymond's "each of the chosen abilities") grants every chosen ability
+        // off-zone, not just the first. No-op when the source has no stored
+        // chosen keyword. Source-scoped via `effect.source_id`.
         ContinuousModification::AddChosenKeyword => {
-            if let Some(kw) = state
+            let chosen: Vec<Keyword> = state
                 .objects
                 .get(&effect.source_id)
-                .and_then(|src| src.chosen_keyword())
-            {
-                upsert_keyword(keywords, kw.clone());
+                .map(|src| src.chosen_keywords().into_iter().cloned().collect())
+                .unwrap_or_default();
+            for kw in chosen {
+                upsert_keyword(keywords, kw);
             }
         }
         _ => {}
@@ -190,11 +310,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, Duration, QuantityExpr, StaticCondition, StaticDefinition,
-        TargetFilter,
+        ContinuousModification, ControllerRef, CostDerivation, Duration, FilterProp, QuantityExpr,
+        StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::identifiers::CardId;
-    use crate::types::keywords::{DynamicKeywordKind, FlashbackCost, Keyword, KeywordKind};
+    use crate::types::keywords::{
+        CostBearingKeywordKind, DynamicKeywordKind, FlashbackCost, Keyword, KeywordKind,
+    };
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -335,6 +457,99 @@ mod tests {
                 ManaCost::SelfManaCost
             )))
         );
+    }
+
+    /// V8 — CR 608.2d + CR 613.1f: the off-zone `AddChosenKeyword` arm must read
+    /// the PLURAL chosen-keyword list off the granting source (Greymond's two
+    /// chosen abilities), not just the first. A battlefield source carrying TWO
+    /// `ChosenAttribute::Keyword` grants both to an off-battlefield recipient.
+    #[test]
+    fn add_chosen_keyword_off_zone_reads_all_chosen_keywords() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(&mut state, PlayerId(0), "Greymond", Zone::Battlefield);
+        let target_id = create_card(&mut state, PlayerId(0), "Exiled Human", Zone::Exile);
+
+        // Two abilities chosen as Greymond entered.
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::FirstStrike));
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::Lifelink));
+        }
+
+        state.add_transient_continuous_effect(
+            source_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::AddChosenKeyword],
+            None,
+        );
+
+        let kws = effective_off_zone_keywords(&state, target_id);
+        assert!(
+            kws.contains(&Keyword::FirstStrike) && kws.contains(&Keyword::Lifelink),
+            "off-zone AddChosenKeyword must surface BOTH chosen keywords, got {kws:?}"
+        );
+    }
+
+    /// CR 702.138a + CR 601.2g/h: a transient `AddKeyword(Escape)` carrying the
+    /// COMPOUND granted cost (mana sub-cost + "exile N other cards from your
+    /// graveyard" residual) makes a graveyard card castable via escape —
+    /// `effective_escape_data` resolves the mana sub-cost (CR 601.2g) and surfaces
+    /// the exile residual for `pay_additional_cost` (CR 601.2h). Runtime proof for
+    /// the parser front door `try_parse_grant_graveyard_keyword_to_target`
+    /// (Confession Dial / Desdemona). Tests the building block — a transient
+    /// off-zone Escape grant — not a single card.
+    #[test]
+    fn transient_granted_compound_escape_makes_graveyard_card_castable() {
+        use crate::types::ability::AbilityCost;
+        use crate::types::keywords::EscapeCost;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Snapcaster Mage",
+            Zone::Battlefield,
+        );
+        let target_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Scrubland Mongoose",
+            Zone::Graveyard,
+        );
+
+        let exile_residual = AbilityCost::Exile {
+            count: 3,
+            zone: Some(Zone::Graveyard),
+            filter: None,
+        };
+
+        state.add_transient_continuous_effect(
+            source_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::SelfManaCost,
+                        },
+                        exile_residual.clone(),
+                    ],
+                })),
+            }],
+            None,
+        );
+
+        let (_, residual) = crate::game::keywords::effective_escape_data(&state, target_id)
+            .expect("granted compound escape must make the graveyard card castable");
+        assert_eq!(residual, exile_residual);
     }
 
     #[test]
@@ -511,6 +726,54 @@ mod tests {
             target_id,
             KeywordKind::Flashback
         ));
+    }
+
+    #[test]
+    fn off_zone_keyword_static_matches_owner_scoped_hand_card_with_stale_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Singing Towers Source",
+            Zone::Battlefield,
+        );
+        let target_id = create_card(&mut state, PlayerId(0), "Expensive Spell", Zone::Hand);
+        {
+            let target = state.objects.get_mut(&target_id).unwrap();
+            target.controller = PlayerId(1);
+            target.mana_cost = ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Blue],
+            };
+        }
+
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Hand],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeywordWithDerivedCost {
+                        kind: CostBearingKeywordKind::Foretell,
+                        derivation: CostDerivation::ManaCostReducedBy(ManaCost::generic(2)),
+                    }]),
+            );
+
+        assert_eq!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Foretell),
+            Some(Keyword::Foretell(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Blue],
+            }))
+        );
     }
 
     #[test]

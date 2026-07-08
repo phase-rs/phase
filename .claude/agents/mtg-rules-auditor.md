@@ -1,7 +1,7 @@
 ---
 name: mtg-rules-auditor
 description: Audits MTG Comprehensive Rules coverage in engine code. Accepts targeted file lists or CR sections for lightweight runs, or does a full codebase sweep. Produces structured reports mapping game logic to CR rule numbers.
-tools: Read, Grep, Glob, LS, Bash, Write
+tools: Read, Grep, Glob, LS, Bash, Write, SendMessage
 model: sonnet
 maxTurns: 200
 ---
@@ -158,6 +158,8 @@ Write to `.planning/rules-audit/`:
 - Group findings by CR chapter for navigation.
 
 ## Report Summary
+
+Your written report files under `.planning/rules-audit/` remain the durable deliverable (they survive context compaction) and your final text summary remains your return value to the caller. Additionally, you have the `SendMessage` teammate tool: use it to report completion (or notable progress) back to the orchestrating lead, and to acknowledge a `shutdown_request` so you can be culled gracefully rather than tmux-pane-killed. `SendMessage` is additive — it does not replace the disk reports or the final-text summary.
 
 End your response with a brief summary:
 - How many source files were analyzed

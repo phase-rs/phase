@@ -231,6 +231,12 @@ pub enum KeywordKind {
     Escape,
     Morph,
     Megamorph,
+    /// CR 702.35a: Madness — see `Keyword::Madness`.
+    Madness,
+    /// CR 702.168: Disguise — see `Keyword::Disguise`. A discriminant-level kind
+    /// (like Morph/Mutate) so `FilterProp::HasKeywordKind { Disguise }` can name
+    /// the class regardless of the `Disguise(ManaCost)` parameter payload.
+    Disguise,
     /// CR 702.187: Mayhem — see `Keyword::Mayhem`.
     Mayhem,
     Suspend,
@@ -322,6 +328,73 @@ impl DynamicKeywordKind {
         match name {
             "annihilator" => Some(Self::Annihilator),
             "modular" => Some(Self::Modular),
+            _ => None,
+        }
+    }
+}
+
+/// CR 702 cast-from-off-zone-for-alternative-cost keyword family whose cost is a
+/// plain `ManaCost`. Used by `ContinuousModification::AddKeywordWithDerivedCost`
+/// to construct the runtime keyword from a per-recipient DERIVED cost — the
+/// derived-cost mirror of `DynamicKeywordKind` (numeric-parameter grants).
+///
+/// The compound-cost members Flashback/Escape/Evoke/Bestow carry their own cost
+/// types (`FlashbackCost`/`EscapeCost`/`EvokeCost`/`BestowCost`), so they are out
+/// of this constructor's domain; they would belong to a future richer-cost kind
+/// if a card ever grants them a derived cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CostBearingKeywordKind {
+    Foretell,
+    Madness,
+    Disturb,
+    Mayhem,
+    Dash,
+    Unearth,
+}
+
+impl CostBearingKeywordKind {
+    /// Parallel to `DynamicKeywordKind::with_value(u32)`: construct the concrete
+    /// `Keyword` from a per-recipient DERIVED `ManaCost`. Infallible — every
+    /// variant maps to a `Keyword::X(ManaCost)`.
+    pub fn with_cost(&self, cost: ManaCost) -> Keyword {
+        match self {
+            Self::Foretell => Keyword::Foretell(cost),
+            Self::Madness => Keyword::Madness(cost),
+            Self::Disturb => Keyword::Disturb(cost),
+            Self::Mayhem => Keyword::Mayhem(cost),
+            Self::Dash => Keyword::Dash(cost),
+            Self::Unearth => Keyword::Unearth(cost),
+        }
+    }
+
+    /// True when `kw` is a keyword of this family (regardless of its cost). Used
+    /// by the off-zone applier's per-recipient "without <kw>" dedup check.
+    /// Compares by concrete `Keyword` shape rather than `KeywordKind` because
+    /// several of these families (e.g. Madness) share `KeywordKind::Unknown`,
+    /// which would over-match under a `kind()` comparison.
+    pub fn matches_keyword(&self, kw: &Keyword) -> bool {
+        matches!(
+            (self, kw),
+            (Self::Foretell, Keyword::Foretell(_))
+                | (Self::Madness, Keyword::Madness(_))
+                | (Self::Disturb, Keyword::Disturb(_))
+                | (Self::Mayhem, Keyword::Mayhem(_))
+                | (Self::Dash, Keyword::Dash(_))
+                | (Self::Unearth, Keyword::Unearth(_))
+        )
+    }
+
+    /// Parse a keyword name into a `CostBearingKeywordKind`, if it is one of the
+    /// plain-`ManaCost` cast-from-off-zone family. Lets a single parser branch
+    /// select the family from the granted keyword's name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "foretell" => Some(Self::Foretell),
+            "madness" => Some(Self::Madness),
+            "disturb" => Some(Self::Disturb),
+            "mayhem" => Some(Self::Mayhem),
+            "dash" => Some(Self::Dash),
+            "unearth" => Some(Self::Unearth),
             _ => None,
         }
     }
@@ -807,16 +880,16 @@ pub enum Keyword {
     Toxic(u32),
     /// CR 702.171a: Saddle N — tap creatures with total power N+ to saddle this Mount.
     Saddle(u32),
-    /// Teamwork N — "As an additional cost to cast this spell, you may tap any
-    /// number of creatures you control with total power N or more." The spell's
-    /// body then references whether this optional cost was paid ("if this spell
-    /// was cast using teamwork, ...").
+    /// CR 702.194a: Teamwork N — "As an additional cost to cast this spell, you
+    /// may tap any number of creatures you control with total power N or more."
+    /// The spell's body then references whether this optional cost was paid —
+    /// "if this spell was cast using teamwork, ..." (CR 702.194b).
     ///
-    /// Teamwork is not yet in the printed Comprehensive Rules (Marvel Super
-    /// Heroes set keyword). Its tap-any-number-with-total-power-N cost is
-    /// structurally identical to Crew (CR 702.122a) and Saddle (CR 702.171a); it
-    /// is an optional additional cast cost per CR 601.2b/f, and is a keyword
-    /// ability per CR 702.
+    /// Added to the printed Comprehensive Rules in the June 19, 2026 update
+    /// (Marvel Super Heroes set keyword). Its tap-any-number-with-total-power-N
+    /// cost is structurally identical to Crew (CR 702.122a) and Saddle
+    /// (CR 702.171a); paying it follows the additional-cost rules CR 601.2b and
+    /// CR 601.2f–h (CR 702.194a).
     ///
     /// Runtime: `database::synthesis::synthesize_teamwork` builds an
     /// `AdditionalCost::Optional { cost: TapCreatures { requirement:
@@ -1159,6 +1232,11 @@ impl Keyword {
             Keyword::Escape(_) => KeywordKind::Escape,
             Keyword::Morph(_) => KeywordKind::Morph,
             Keyword::Megamorph(_) => KeywordKind::Megamorph,
+            Keyword::Madness(_) => KeywordKind::Madness,
+            // CR 702.168: Disguise — its own discriminant kind (mirrors Morph)
+            // so `HasKeywordKind { Disguise }` selects face-up disguise creatures
+            // rather than being folded into the shared `Unknown` catch-all.
+            Keyword::Disguise(_) => KeywordKind::Disguise,
             Keyword::Mayhem(_) => KeywordKind::Mayhem,
             Keyword::Suspend { .. } => KeywordKind::Suspend,
             Keyword::Blitz(_) => KeywordKind::Blitz,
@@ -1226,7 +1304,6 @@ impl Keyword {
             | Keyword::Demonstrate
             | Keyword::Dethrone
             | Keyword::Discover(_)
-            | Keyword::Disguise(_)
             | Keyword::DoubleTeam
             | Keyword::Echo(_)
             | Keyword::Emerge(_)
@@ -1244,7 +1321,6 @@ impl Keyword {
             | Keyword::Ingest
             | Keyword::LevelUp(_)
             | Keyword::LivingMetal
-            | Keyword::Madness(_)
             | Keyword::Melee
             | Keyword::Mentor
             | Keyword::Mobilize(_)
@@ -1631,7 +1707,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     use crate::parser::oracle_nom::enchant::{
         parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
-        parse_enchant_player_base, parse_enchant_type_leg,
+        parse_enchant_player_base, parse_enchant_qualified_type_leg,
     };
     use crate::parser::oracle_nom::error::OracleResult;
     use crate::parser::oracle_nom::filter::parse_zone_filter;
@@ -1700,7 +1776,7 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     //   "creature card in a graveyard"  (Animate Dead, Dance of the Dead)
     //   "instant card in a graveyard"   (Spellweaver Volute)
     //   "card in your hand"             (Don't Worry About It — no type leg)
-    let (rest, type_filter) = opt(parse_enchant_type_leg).parse(input).ok()?;
+    let (rest, type_leg) = opt(parse_enchant_qualified_type_leg).parse(input).ok()?;
     let (rest, _card_word) = opt(parse_card_word).parse(rest).ok()?;
     let (rest, zone) = opt(parse_leading_zone).parse(rest).ok()?;
     let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
@@ -1708,6 +1784,11 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // another Aura attached to it" (Daybreak Coronet) narrows the legal target
     // set to objects that already carry an attachment of the named kind.
     let (rest, attachment) = opt(parse_enchant_attachment_qualifier).parse(rest).ok()?;
+    let (rest, without_keyword) =
+        match crate::parser::oracle_target::parse_without_keyword_suffix(rest) {
+            Some((props, consumed)) => (&rest[consumed..], props),
+            None => (rest, Vec::new()),
+        };
     if !rest.trim().is_empty() {
         return None;
     }
@@ -1715,20 +1796,27 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // word AND a zone word AND a controller, so it cannot be a meaningful
     // enchant clause. (An attachment qualifier cannot stand alone: its leading
     // space requires a preceding type leg, so it never reaches this guard.)
-    if type_filter.is_none() && zone.is_none() && controller.is_none() {
+    if type_leg.is_none() && zone.is_none() && controller.is_none() {
         return None;
     }
 
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
     let mut props = Vec::new();
+    let type_filter = if let Some(leg) = type_leg {
+        props.extend(leg.properties);
+        leg.type_filter
+    } else {
+        TypeFilter::Card
+    };
     if let Some(z) = zone {
         props.push(FilterProp::InZone { zone: z });
     }
     if let Some(prop) = attachment {
         props.push(prop);
     }
-    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    props.extend(without_keyword);
+    let mut filter = TypedFilter::new(type_filter);
     if !props.is_empty() {
         filter = filter.properties(props);
     }
@@ -2394,12 +2482,16 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
         "black" => HexproofFilter::Color(ManaColor::Black),
         "red" => HexproofFilter::Color(ManaColor::Red),
         "green" => HexproofFilter::Color(ManaColor::Green),
-        "monocolored" | "multicolored" => HexproofFilter::Quality(lower),
+        "colorless" | "monocolored" | "multicolored" => HexproofFilter::Quality(lower),
         // CR 702.11d + CR 105.4 + CR 609.6: "that color" / "the chosen color"
         // anaphors after a preceding `Choose a color` instruction. Resolved at
         // runtime via `ChosenAttribute::Color` on the granting source. Mirrors
         // `ProtectionTarget::ChosenColor` (CR 702.16).
-        "that color" | "the chosen color" | "chosen color" => HexproofFilter::ChosenColor,
+        "that color"
+        | "the chosen color"
+        | "chosen color"
+        | "the color of your choice"
+        | "color of your choice" => HexproofFilter::ChosenColor,
         _ => HexproofFilter::CardType(lower),
     }
 }
@@ -2421,9 +2513,16 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // `source.color.len() == 1`. Multicolored keeps its dedicated variant;
         // monocolored reuses the existing Quality variant (no new variant / no game
         // change). Mirrors parse_hexproof_filter's monocolored→Quality handling.
-        "monocolored" => ProtectionTarget::Quality("monocolored".into()),
-        // CR 702.16: "the chosen color" resolves at runtime from chosen_attributes
-        "the chosen color" | "chosen color" => ProtectionTarget::ChosenColor,
+        "colorless" | "monocolored" => ProtectionTarget::Quality(lower),
+        // CR 702.16 + CR 105.4: "the chosen color" / "the color of your choice"
+        // resolve at runtime from the granting source's `ChosenAttribute::Color`.
+        // "color of your choice" is the as-resolved phrasing (Mother of Runes,
+        // Apostle's Blessing, …); "the chosen color" is the anaphor after a
+        // preceding "choose a color" instruction. Both land on the same variant.
+        "the chosen color"
+        | "chosen color"
+        | "the color of your choice"
+        | "color of your choice" => ProtectionTarget::ChosenColor,
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
@@ -2755,11 +2854,17 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
         "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
-        // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
-        // Placeholder (mana sub-cost, no exile residual) — the Oracle parser
-        // overwrites with the real compound `EscapeCost::NonMana`.
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
-        "Escape" => Ok(Keyword::Escape(EscapeCost::Mana(ManaCost::default()))),
+        // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
+        // Accept both legacy ManaCost format and new EscapeCost tagged format
+        // (Mana / NonMana compound) — mirrors Flashback/Evoke/Bestow.
+        "Escape" => {
+            if let Ok(escape_cost) = serde_json::from_value::<EscapeCost>(data.clone()) {
+                Ok(Keyword::Escape(escape_cost))
+            } else {
+                Ok(Keyword::Escape(EscapeCost::Mana(mana(data)?)))
+            }
+        }
         "Evoke" => {
             // Accept both legacy ManaCost format and new EvokeCost tagged format.
             if let Ok(ev_cost) = serde_json::from_value::<EvokeCost>(data.clone()) {
@@ -3112,6 +3217,34 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 mod tests {
     use super::*;
 
+    /// CR 702.143d + CR 702 (alt-cost family): `with_cost` maps each variant to
+    /// its `Keyword::X(ManaCost)`, and `matches_keyword`/`from_name` round-trip.
+    #[test]
+    fn cost_bearing_keyword_kind_maps_family() {
+        use crate::types::mana::ManaCost;
+        let cost = ManaCost::generic(2);
+        let cases = [
+            (CostBearingKeywordKind::Foretell, "foretell"),
+            (CostBearingKeywordKind::Madness, "madness"),
+            (CostBearingKeywordKind::Disturb, "disturb"),
+            (CostBearingKeywordKind::Mayhem, "mayhem"),
+            (CostBearingKeywordKind::Dash, "dash"),
+            (CostBearingKeywordKind::Unearth, "unearth"),
+        ];
+        for (kind, name) in cases {
+            assert_eq!(CostBearingKeywordKind::from_name(name), Some(kind));
+            let kw = kind.with_cost(cost.clone());
+            // The constructed keyword is recognized by matches_keyword...
+            assert!(kind.matches_keyword(&kw));
+            // ...and NOT confused with a different family member.
+            assert!(!CostBearingKeywordKind::Dash.matches_keyword(&Keyword::Foretell(cost.clone())));
+        }
+        assert_eq!(
+            CostBearingKeywordKind::Foretell.with_cost(cost.clone()),
+            Keyword::Foretell(cost)
+        );
+    }
+
     #[test]
     fn parse_simple_keywords() {
         assert_eq!(Keyword::from_str("Flying").unwrap(), Keyword::Flying);
@@ -3396,6 +3529,10 @@ mod tests {
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Red))
         );
         assert_eq!(
+            Keyword::from_str("Protection:colorless").unwrap(),
+            Keyword::Protection(ProtectionTarget::Quality("colorless".to_string()))
+        );
+        assert_eq!(
             Keyword::from_str("Protection:from everything").unwrap(),
             Keyword::Protection(ProtectionTarget::Quality("from everything".to_string()))
         );
@@ -3462,6 +3599,60 @@ mod tests {
         assert_eq!(
             parse_protection_target("artifacts"),
             ProtectionTarget::CardType("artifacts".to_string())
+        );
+    }
+
+    /// CR 702.16a + CR 105.2c: "protection from colorless" is a color-quality
+    /// predicate (zero colors), NOT a card type. The runtime reads it through
+    /// `source_matches_quality` the same way as monocolored/multicolored.
+    #[test]
+    fn parse_protection_target_colorless_is_quality_not_card_type() {
+        assert_eq!(
+            parse_protection_target("colorless"),
+            ProtectionTarget::Quality("colorless".to_string())
+        );
+        assert_ne!(
+            parse_protection_target("colorless"),
+            ProtectionTarget::CardType("colorless".to_string())
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:colorless").unwrap(),
+            Keyword::Protection(ProtectionTarget::Quality("colorless".to_string()))
+        );
+        assert_eq!(
+            parse_hexproof_filter("colorless"),
+            HexproofFilter::Quality("colorless".to_string())
+        );
+        assert_eq!(
+            Keyword::from_str("hexproof from colorless").unwrap(),
+            Keyword::HexproofFrom(HexproofFilter::Quality("colorless".to_string()))
+        );
+    }
+
+    /// CR 702.16 + CR 105.4: "the color of your choice" / "color of your choice"
+    /// (the as-resolved phrasing on Mother of Runes, Aven Liberator, Blessed
+    /// Breath, …) parse to the runtime-resolved `ChosenColor` variant — NOT a
+    /// literal `CardType("the color of your choice")` that matches no source.
+    /// Issue #4371. The same alias is mirrored on `parse_hexproof_filter` for
+    /// "gains hexproof from the color of your choice".
+    #[test]
+    fn parse_protection_target_color_of_your_choice_is_chosen_color() {
+        assert_eq!(
+            parse_protection_target("the color of your choice"),
+            ProtectionTarget::ChosenColor
+        );
+        assert_eq!(
+            parse_protection_target("color of your choice"),
+            ProtectionTarget::ChosenColor
+        );
+        // Mirror on the hexproof classifier (CR 702.11d).
+        assert_eq!(
+            parse_hexproof_filter("the color of your choice"),
+            HexproofFilter::ChosenColor
+        );
+        assert_eq!(
+            parse_hexproof_filter("color of your choice"),
+            HexproofFilter::ChosenColor
         );
     }
 
@@ -3637,6 +3828,25 @@ mod tests {
 
     /// Regression guard: a plain "Enchant creature" must NOT acquire an
     /// attachment predicate — only the explicit qualifier adds `HasAttachment`.
+    /// CR 702.5a + CR 702.9: Trapped in the Tower / Roots — "Enchant creature
+    /// without flying" must lower to `WithoutKeyword(Flying)` on the Aura target.
+    #[test]
+    fn parse_enchant_creature_without_flying() {
+        use super::super::ability::TypeFilter;
+        let enchant = Keyword::from_str("Enchant:creature without flying").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+            panic!("expected Typed; got {enchant:?}")
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.iter().any(
+                |p| matches!(p, FilterProp::WithoutKeyword { value } if *value == Keyword::Flying)
+            ),
+            "expected WithoutKeyword(Flying); got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn parse_enchant_plain_creature_has_no_attachment_predicate() {
         use super::super::ability::AttachmentKind;
@@ -3666,6 +3876,50 @@ mod tests {
                 TypedFilter::creature().controller(ControllerRef::You)
             ))
         );
+    }
+
+    /// CR 205.4a + CR 702.5a: Supertype-qualified Aura targets ("snow land",
+    /// "basic land", "legendary creature") must lower to the same typed filter
+    /// shape as ordinary target phrases: head type plus `HasSupertype`.
+    #[test]
+    fn parse_enchant_supertype_qualified_targets() {
+        use crate::types::card_type::Supertype;
+
+        let cases = [
+            (
+                "Enchant:snow land you control",
+                TypeFilter::Land,
+                Supertype::Snow,
+                Some(ControllerRef::You),
+            ),
+            (
+                "Enchant:basic land you control",
+                TypeFilter::Land,
+                Supertype::Basic,
+                Some(ControllerRef::You),
+            ),
+            (
+                "Enchant:legendary creature",
+                TypeFilter::Creature,
+                Supertype::Legendary,
+                None,
+            ),
+        ];
+
+        for (text, type_filter, supertype, controller) in cases {
+            let enchant = Keyword::from_str(text).unwrap();
+            let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+                panic!("expected Typed enchant target for {text}, got {enchant:?}");
+            };
+            assert_eq!(tf.type_filters, vec![type_filter], "{text}");
+            assert_eq!(tf.controller, controller, "{text}");
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::HasSupertype { value: supertype }),
+                "expected HasSupertype({supertype:?}) for {text}; got {:?}",
+                tf.properties
+            );
+        }
     }
 
     /// CR 702.5d + CR 303.4: "Enchant player" maps to `TargetFilter::Player`,
@@ -4090,6 +4344,52 @@ mod tests {
         let json = serde_json::to_value(&kw).unwrap();
         let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(kw, deserialized, "round-trip failed for {json}");
+    }
+
+    /// CR 702.138a (#3281): card-data export encodes compound escape costs as
+    /// `EscapeCost::NonMana`; deserializing must not collapse them to the bare
+    /// MTGJSON placeholder.
+    #[test]
+    fn escape_compound_cost_deserializes_from_card_data_export() {
+        use crate::types::ability::{
+            AbilityCost, ControllerRef, FilterProp, TargetFilter, TypedFilter,
+        };
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let expected = Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        generic: 0,
+                        shards: vec![
+                            ManaCostShard::Green,
+                            ManaCostShard::Green,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Blue,
+                        ],
+                    },
+                },
+                AbilityCost::Exile {
+                    count: 5,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .controller(ControllerRef::You)
+                            .properties(vec![
+                                FilterProp::Another,
+                                FilterProp::InZone {
+                                    zone: Zone::Graveyard,
+                                },
+                            ]),
+                    )),
+                },
+            ],
+        }));
+
+        let json = serde_json::to_value(&expected).unwrap();
+        let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(expected, deserialized, "round-trip failed for {json}");
     }
 
     #[test]

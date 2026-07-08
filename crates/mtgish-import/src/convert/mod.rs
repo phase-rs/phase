@@ -1328,6 +1328,10 @@ pub(crate) fn build_ability_from_actions(
                 // CR 700.2a: mtgish modal blocks are controller-chosen.
                 chooser: engine::types::ability::PlayerFilter::Controller,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
+                // Mechanical compile-keep-alive for the shared engine ModalChoice
+                // field add; mtgish does not (yet) author dynamic "choose up to X"
+                // modals. No logic — field only.
+                dynamic_max_choices: None,
             };
             // Each mode body becomes its own `AbilityDefinition` chain.
             let mut mode_abilities = Vec::with_capacity(modes.len());

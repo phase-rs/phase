@@ -122,7 +122,7 @@ After all groups are complete:
    ```
 2. Run `cargo coverage` (one-shot binary, always direct) to verify reduced Unimplemented count
 3. Report results to the user: which mechanics were implemented, coverage delta, any items that couldn't be completed
-4. Clean up the team
+4. Clean up the team — gracefully cull each teammate by sending a `shutdown_request` and waiting for its `shutdown_response` acknowledgment (teammates now carry `SendMessage`, so they can ack a graceful shutdown instead of being tmux-pane-killed, which left zombie roster entries). Only force-terminate a teammate that fails to acknowledge.
 
 ---
 

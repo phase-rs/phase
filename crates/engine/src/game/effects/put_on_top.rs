@@ -37,13 +37,37 @@ pub fn resolve(
         ),
     };
 
+    // CR 401.5 + CR 608.2c (issue #1365): This Dig-tail seam is the one place
+    // "put up to one of them on top … the rest on the bottom" can land with
+    // `target: ParentTarget` and no selection — when the Dig it follows looked
+    // at an empty library. There is nothing to place, and that must NOT fall
+    // back to `resolved_targets`'s generic self-fallback (below), which would
+    // otherwise move the Dig's own source (e.g. a reanimated Thassa's Oracle)
+    // into the library it just found empty, corrupting devotion and
+    // library-count reads for any trailing win condition.
+    //
+    // `ability.dig_found_nothing_for_parent_target` is a typed, per-ability
+    // signal stamped ONLY by `effects::apply_parent_chain_context` at the
+    // exact moment THIS ability is handed off as a Dig's immediate
+    // sub_ability — never copied to grandchildren and never read from raw
+    // global state here. That means every OTHER `ParentTarget` consumer
+    // (Avenging Angel's LTB self-return, etc.) keeps its ordinary
+    // self-fallback regardless of an unrelated Dig anywhere else in the same
+    // resolution, including a second, later `PutAtLibraryPosition` call.
+    let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.targets.is_empty()
+        && ability.dig_found_nothing_for_parent_target;
+
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
     // `None` / `ParentTarget` fall back to the source only when
     // `ability.targets` is empty (the LTB self-return shape — Avenging Angel).
     // This is the post-#323 SelfRef short-circuit applied uniformly.
-    let effective_targets =
-        crate::game::targeting::resolved_targets(ability, &target_filter, state);
+    let effective_targets = if dig_found_nothing_for_parent_target {
+        Vec::new()
+    } else {
+        crate::game::targeting::resolved_targets(ability, &target_filter, state)
+    };
     // CR 608.2c: `effect_object_targets` forwards `ability.targets` verbatim
     // for non-slot filters. A dig hand-keep binds `ParentTarget` on the exile
     // tail but must not pre-fill a `TrackedSet` bottom pick with the kept card.
@@ -62,6 +86,15 @@ pub fn resolve(
             })
             .map(|(id, _)| *id)
             .collect();
+        // CR 701.20e: Look-then-cast tails put uncast looked-at cards on the
+        // bottom via `ExiledBySource`, but those cards remain in the library.
+        if collected_targets.is_empty() && !state.last_revealed_ids.is_empty() {
+            collected_targets = crate::game::filter::last_revealed_library_ids_matching(
+                state,
+                &target_filter,
+                &ctx,
+            );
+        }
     }
     if collected_targets.is_empty()
         && matches!(
@@ -176,9 +209,12 @@ pub fn resolve(
                     track_exiled_by_source: false,
                     // CR 708.2a: library-position selection is not a face-down entry.
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
                     library_position: Some(position.clone()),
                     is_cost_payment: false,
+                    enters_modified_if: None,
                 };
                 return Ok(());
             }
@@ -222,9 +258,12 @@ pub fn resolve(
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position.clone()),
             is_cost_payment: false,
+            enters_modified_if: None,
         };
         return Ok(());
     }
@@ -248,12 +287,20 @@ pub fn resolve(
         &collected_targets[..collected_targets.len().min(expected)]
     };
 
-    let index = match position {
+    let index = match &position {
         // Top = index 0, Bottom = None (push to end), NthFromTop = index n-1
         // ("second from the top" = index 1).
         LibraryPosition::Top => Some(0),
         LibraryPosition::Bottom => None,
         LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+        // CR 401.7 (Unexpectedly Absent class): "just beneath the top N cards"
+        // leaves exactly `depth` cards above the placed object, i.e. the 0-based
+        // insertion index IS the resolved depth (no `-1`, unlike `NthFromTop`).
+        // Per CR 401.7 `move_to_library_at_index` clamps an index past the
+        // library size to the bottom.
+        LibraryPosition::BeneathTop { depth } => {
+            Some(resolve_quantity_with_targets(state, depth, ability).max(0) as usize)
+        }
     };
     match position {
         LibraryPosition::Top => {
@@ -261,7 +308,9 @@ pub fn resolve(
                 zones::move_to_library_at_index(state, *object_id, index, events);
             }
         }
-        LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => {
+        LibraryPosition::Bottom
+        | LibraryPosition::NthFromTop { .. }
+        | LibraryPosition::BeneathTop { .. } => {
             for object_id in to_place {
                 zones::move_to_library_at_index(state, *object_id, index, events);
             }
@@ -432,6 +481,56 @@ mod tests {
         assert_eq!(after_order, vec![id2, id1, id3]);
     }
 
+    /// Issue #2019 — look-then-cast cleanup binds `ExiledBySource` but cards
+    /// remain in the library; the bottom step must read `last_revealed_ids`.
+    #[test]
+    fn exiled_by_source_bottom_cleanup_uses_last_revealed_library_cards() {
+        let mut state = GameState::new_two_player(42);
+        let bottom_marker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bottom Marker".to_string(),
+            Zone::Library,
+        );
+        let looked_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Looked A".to_string(),
+            Zone::Library,
+        );
+        let looked_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Looked B".to_string(),
+            Zone::Library,
+        );
+        state.last_revealed_ids = vec![looked_a, looked_b];
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let lib = &state.players[0].library;
+        assert_eq!(lib[0], bottom_marker, "untouched card stays on top");
+        assert_eq!(lib[lib.len() - 2], looked_a, "first looked card on bottom");
+        assert_eq!(lib[lib.len() - 1], looked_b, "second looked card on bottom");
+        assert_eq!(state.objects[&looked_a].zone, Zone::Library);
+        assert_eq!(state.objects[&looked_b].zone, Zone::Library);
+    }
+
     #[test]
     fn count_zero_places_all_selected_cards_on_top_in_target_order() {
         let mut state = GameState::new_two_player(42);
@@ -589,6 +688,49 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(!state.players[0].graveyard.contains(&obj_id));
+        assert_eq!(state.players[0].library[0], obj_id);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Library);
+    }
+
+    /// Issue #1365 follow-up: this resolver must consult
+    /// `ability.dig_found_nothing_for_parent_target` (a typed field stamped
+    /// ONLY by `effects::apply_parent_chain_context` at a real Dig->child
+    /// hand-off), never `state.last_dig_found_nothing` directly. A freshly
+    /// built `ResolvedAbility` (as in any ordinary LTB self-return trigger)
+    /// never goes through that hand-off, so its field stays `false` no matter
+    /// what stray global state an unrelated, earlier empty-library Dig left
+    /// behind in the same resolution.
+    #[test]
+    fn stale_dig_found_nothing_does_not_suppress_unrelated_ltb_self_return() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Avenging Angel".to_string(),
+            Zone::Graveyard,
+        );
+        // Simulate a stale flag left behind by an unrelated empty-library Dig
+        // earlier in the same top-level resolution.
+        state.last_dig_found_nothing = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.players[0].graveyard.contains(&obj_id),
+            "a stale Dig flag must not suppress this unrelated LTB self-return"
+        );
         assert_eq!(state.players[0].library[0], obj_id);
         assert_eq!(state.objects[&obj_id].zone, Zone::Library);
     }
