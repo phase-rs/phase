@@ -4168,7 +4168,7 @@ mod tests {
                 )),
             ]
             .into();
-        crate::game::layers::apply_continuous_effects(&mut state);
+        crate::game::layers::flush_layers(&mut state);
 
         let opponent_source = create_object(
             &mut state,
@@ -4225,7 +4225,7 @@ mod tests {
                 )),
             ]
             .into();
-        crate::game::layers::apply_continuous_effects(&mut state);
+        crate::game::layers::flush_layers(&mut state);
 
         let source = create_object(
             &mut state,
@@ -4269,7 +4269,7 @@ mod tests {
                 )),
             ]
             .into();
-        crate::game::layers::apply_continuous_effects(&mut state);
+        crate::game::layers::flush_layers(&mut state);
 
         let opponent_source = create_object(
             &mut state,
