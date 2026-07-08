@@ -1113,6 +1113,14 @@ mod tests {
             count: 1,
             applied: HashSet::new(),
         });
+        // CR 121.6b: a paused multi-card draw owned by the LEAVING chooser
+        // (P2) — single-player-scoped, must clear alongside its siblings via
+        // `abandon_post_replacement_continuation` (replacement.rs).
+        state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
+            player: PlayerId(2),
+            remaining: 1,
+            accumulated: 0,
+        });
         // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: o,
@@ -1154,6 +1162,11 @@ mod tests {
              applied seed, not just its established siblings (issue #4886, review #6)"
         );
         assert!(state.pending_connive_reentry.is_none());
+        assert!(
+            state.pending_multi_draw.is_none(),
+            "CR 121.6b: the leaving chooser's paused multi-card draw must be \
+             cleared via abandon_post_replacement_continuation, not stranded"
+        );
         assert!(
             state.pending_spell_resolution.is_none(),
             "the leaving chooser's coupled spell-resolution ctx must be torn down"
@@ -1202,6 +1215,13 @@ mod tests {
             additional_cost_payments: vec![],
             convoked_creatures: vec![],
         });
+        // CR 121.6b: a paused multi-card draw owned by the LIVING chooser (P0)
+        // must survive a different player's departure — no over-clear.
+        state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
+            player: PlayerId(0),
+            remaining: 2,
+            accumulated: 1,
+        });
 
         let mut events = Vec::new();
         eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
@@ -1215,6 +1235,15 @@ mod tests {
         assert!(
             state.pending_spell_resolution.is_some(),
             "an opponent leaving must not tear down the living player's spell-resolution ctx"
+        );
+        assert_eq!(
+            state.pending_multi_draw,
+            Some(crate::types::game_state::PendingMultiDraw {
+                player: PlayerId(0),
+                remaining: 2,
+                accumulated: 1,
+            }),
+            "an opponent leaving must not clear the living chooser's paused multi-card draw"
         );
         assert!(
             matches!(
