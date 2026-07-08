@@ -1429,10 +1429,14 @@ pub fn player_cannot_be_targeted_by(
         return true;
     }
     // CR 702.11c: hexproof on a player — can't be the target of spells or
-    // abilities opponents control.
+    // abilities opponents control. CR 102.2 / CR 102.3: "opponent" is team-aware
+    // (2HG teammates are not opponents), so reuse `players::is_opponent` rather
+    // than a bare `ctrl != player_id` inequality that would treat teammates as
+    // opponents.
     let source_controller = state.objects.get(&source_id).map(|o| o.controller);
     if player_has_hexproof(state, player_id)
-        && source_controller.is_some_and(|ctrl| ctrl != player_id)
+        && source_controller
+            .is_some_and(|ctrl| crate::game::players::is_opponent(state, player_id, ctrl))
     {
         return true;
     }
@@ -3027,6 +3031,60 @@ mod tests {
         assert!(
             !player_cannot_be_targeted_by(&state, PlayerId(0), own_source),
             "hexproof player may still be targeted by their own spells"
+        );
+    }
+
+    /// CR 702.11c + CR 102.2 / CR 102.3: In 2HG, a teammate is not an opponent,
+    /// so player hexproof must not block a teammate source while still blocking
+    /// the opposing team.
+    #[test]
+    fn player_cannot_be_targeted_by_hexproof_allows_2hg_teammate() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        // 2HG seats: P0+P1 one team, P2+P3 the other. Grant hexproof to P0.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let teammate_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Teammate Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(2),
+            "Opposing Team Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_has_hexproof(&state, PlayerId(0)),
+            "P0 must still report player hexproof in 2HG"
+        );
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), teammate_source),
+            "2HG teammate must still be able to target the hexproof player"
+        );
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), opposing_source),
+            "opposing-team source must still be blocked by player hexproof"
         );
     }
 

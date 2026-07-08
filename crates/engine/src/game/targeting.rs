@@ -4408,6 +4408,63 @@ mod tests {
         assert!(targets.contains(&TargetRef::Player(PlayerId(3))));
     }
 
+    /// CR 702.11c + CR 102.2 / CR 102.3: Player hexproof must not exclude a
+    /// 2HG teammate source from targeting the protected player, while still
+    /// blocking an opposing-team source.
+    #[test]
+    fn find_legal_targets_player_hexproof_allows_2hg_teammate_blocks_opposing() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        // Seats: P0+P1 one team, P2+P3 the other. Hexproof on P0.
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        let teammate_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Teammate Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(2),
+            "Opposing Team Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let teammate_targets =
+            find_legal_targets(&state, &TargetFilter::Any, PlayerId(1), teammate_source);
+        assert!(
+            teammate_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "2HG teammate must still be able to target the hexproof player, got {teammate_targets:?}"
+        );
+
+        let opposing_targets =
+            find_legal_targets(&state, &TargetFilter::Any, PlayerId(2), opposing_source);
+        assert!(
+            !opposing_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "opposing-team source must not target the hexproof player, got {opposing_targets:?}"
+        );
+    }
+
     fn make_resolved_with_targets(
         targets: Vec<TargetRef>,
         source: ObjectId,
