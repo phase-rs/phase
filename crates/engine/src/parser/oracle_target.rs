@@ -6235,6 +6235,24 @@ fn parse_except_for_type_list_suffix(
             None => break,
         }
     }
+
+    // GitHub #4710 CI catch (Flame Sweep): "each creature except for
+    // creatures you control with flying" is a FILTERED-SUBSET exception
+    // (creatures you control with flying), not a bare type list — but the
+    // first word "creatures" alone is a recognized type, so the loop above
+    // greedily accepts it and stops at "you", which isn't a valid separator.
+    // Left unchecked, this silently emits `Non(Creature)` alongside the base
+    // `Creature` filter, a self-contradictory filter matching nothing. A
+    // genuine type-list exception ends the clause outright (Scourglass,
+    // Elspeth Tirel both terminate at "."); if trailing text remains beyond
+    // optional whitespace, this isn't a type list — decline the whole clause
+    // rather than partially apply it, mirroring the Subtype-fallback guard
+    // above.
+    let trailing = rest.trim_start();
+    if !trailing.is_empty() && !trailing.starts_with('.') {
+        return None;
+    }
+
     Some((neg_types, props, consumed))
 }
 

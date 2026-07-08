@@ -6223,6 +6223,43 @@ fn elspeth_tirel_minus_five_excludes_lands_and_tokens() {
     );
 }
 
+// GitHub #4710 CI hostile fixture (Flame Sweep, caught by CI's parse-diff
+// coverage report on the PR fixing this class): "Flame Sweep deals 2 damage
+// to each creature except for creatures you control with flying." The
+// exception here is a FILTERED SUBSET ("creatures you control with flying"),
+// not a bare type list — the naive suffix parser accepted "creatures" as a
+// recognized type word and stopped at "you" (not a valid list separator),
+// silently emitting `Non(Creature)` alongside the base `Creature` filter: a
+// self-contradictory filter matching zero creatures, breaking the card's
+// damage effect entirely. `parse_except_for_type_list_suffix` must decline
+// the whole clause when trailing text remains after the parsed list items
+// (this card's flying-exception itself stays an out-of-scope, pre-existing
+// gap — the base filter must simply be left as `Creature`, matching
+// pre-fix/baseline behavior, not made worse).
+#[test]
+fn flame_sweep_filtered_subset_exception_does_not_corrupt_base_filter() {
+    let r = parse(
+        "Flame Sweep deals 2 damage to each creature except for creatures you control with flying.",
+        "Flame Sweep",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let Effect::DamageAll { target, .. } = &*r.abilities[0].effect else {
+        panic!("expected DamageAll effect, got {:?}", r.abilities[0].effect);
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected Typed filter, got {target:?}");
+    };
+    assert_eq!(
+        typed.type_filters,
+        vec![TypeFilter::Creature],
+        "the type-list suffix must decline this filtered-subset exception, \
+         not emit a self-contradictory Non(Creature) alongside Creature"
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_trap_alternative_cost() {
     let r = parse(
