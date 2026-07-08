@@ -3849,7 +3849,9 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
     static_definitions: &[StaticDefinition],
 ) -> Vec<ActiveCombatAssignmentRuleEffect> {
     let mut effects = Vec::new();
-    let source_obj = state.objects.get(&source_id);
+    let Some(source_obj) = state.objects.get(&source_id) else {
+        return effects;
+    };
 
     for def in static_definitions {
         if def.mode != StaticMode::Continuous {
@@ -3860,9 +3862,6 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
         // `active_static_definitions`. Combat-assignment-rule effects are
         // `StaticMode::Continuous`-only (checked above), so the CR 113.6g
         // stack exception is irrelevant here.
-        let Some(source_obj) = source_obj else {
-            continue;
-        };
         if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
             continue;
         }

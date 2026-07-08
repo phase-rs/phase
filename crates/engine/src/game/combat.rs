@@ -1906,8 +1906,8 @@ pub fn compute_combat_tax(
             // `active_zones` excludes — e.g. a battlefield permanent whose
             // static only functions from the graveyard must not tax attacks or
             // blocks. Command-zone emblems are already admitted by the outer
-            // gate; this predicate agrees (empty `active_zones` defaults to
-            // battlefield-only, non-empty restricts to the listed zones).
+            // gate and function from command regardless of `active_zones`;
+            // every other zone follows the default/listed-zone rule.
             if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
                 continue;
             }

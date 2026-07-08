@@ -177,10 +177,10 @@ fn is_self_referential_prohibition(affected: Option<&TargetFilter>) -> bool {
 /// applies that first). Command-zone objects use the emblem-or-opt-in gate;
 /// every other zone uses the CR 113.6 default — empty `active_zones`
 /// restricts the static to the battlefield, non-empty restricts it to
-/// exactly the listed zones. Shared with
-/// `layers::active_continuous_effects_from_static_definitions` and
-/// `layers::active_combat_assignment_rule_effects_from_static_definitions`
-/// so all three gathers agree on zone-of-function.
+/// exactly the listed zones. Shared by the statics gathers that delegate to
+/// this predicate; `layers::active_continuous_effects_from_static_definitions`
+/// remains the documented exception because it applies its own inline
+/// `active_zones` gate.
 pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition) -> bool {
     match obj.zone {
         Zone::Command => obj.is_emblem || non_emblem_command_zone_static_functions(obj, def),
