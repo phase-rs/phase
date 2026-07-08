@@ -385,10 +385,11 @@ fn dream_devourer_removed_after_foretell_latches_cost() {
     );
 }
 
-/// Negatives: a card with PRINTED foretell is NOT re-granted (the
-/// `WithoutKeywordKind{Foretell}` guard excludes it, so no second foretell
-/// keyword is applied); a LAND in hand is never granted foretell; an MV<2 card
-/// floors its foretell cost at {0}.
+/// Negatives: a LAND in hand is never granted foretell; an MV<2 card floors
+/// its foretell cost at {0}. The PRINTED-foretell exclusion is its own
+/// dedicated test below (`dream_devourer_declines_grant_for_printed_foretell_card`)
+/// — it needs the full parsed-static `WithoutKeywordKind{Foretell}` affected
+/// filter plus the off-zone recursion guard, not just this scenario's fixtures.
 #[test]
 fn dream_devourer_foretell_negatives() {
     use engine::game::keywords::effective_foretell_cost;
@@ -421,6 +422,56 @@ fn dream_devourer_foretell_negatives() {
     assert!(
         cheap_cost.is_without_paying_mana(),
         "MV(1) reduced by {{2}} must floor at {{0}}, got {cheap_cost:?}"
+    );
+}
+
+/// CR 613.1f + CR 702.143a/d: A hand card that already has a PRINTED Foretell
+/// keyword must be excluded from Dream Devourer's grant by the PARSED
+/// `WithoutKeywordKind(Foretell)` affected filter (not a hand-built
+/// `SpecificObject` remover), and must keep its OWN printed cost — never
+/// Dream Devourer's MV−2 grant.
+///
+/// This is also the load-bearing regression for the CR 613.1f off-zone
+/// recursion guard (`off_zone_characteristics::OffZoneRecursionGuard`):
+/// deciding whether the "without foretell" filter matches this card requires
+/// asking "does this card already have foretell", which re-enters off-zone
+/// keyword computation for the SAME object the grant is being evaluated for.
+/// Without the guard that query recurses forever; with it, the nested query
+/// resolves against `base_keywords` only, correctly seeing the printed
+/// Foretell and declining the grant. Every other test in this file removes a
+/// keyword via a synthetic `SpecificObject` continuous effect or never
+/// exercises a card with a pre-existing printed keyword at all, so none of
+/// them touch this path.
+///
+/// Revert-failing: if the affected filter's exclusion or the recursion guard
+/// regresses, this either hangs (unguarded infinite recursion) or silently
+/// returns Dream Devourer's MV−2 cost instead of the printed cost.
+#[test]
+fn dream_devourer_declines_grant_for_printed_foretell_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Dream Devourer", 2, 3)
+        .from_oracle_text(DREAM_DEVOURER);
+    // MV(6) so Dream Devourer's grant, if wrongly applied, would compute
+    // {4} — distinct from the printed {5} below, so the two can't be
+    // confused by coincidence.
+    let printed_cost = generic(5);
+    let card = scenario
+        .add_spell_to_hand(P0, "AlreadyForetoldSorcery", false)
+        .with_mana_cost(generic(6))
+        .with_keyword(Keyword::Foretell(printed_cost.clone()))
+        .id();
+
+    let runner = scenario.build();
+
+    let cost = effective_foretell_cost(runner.state(), card)
+        .expect("a card with printed foretell must still be foretellable");
+    assert_eq!(
+        cost, printed_cost,
+        "must keep its own printed foretell cost ({{5}}), not Dream Devourer's \
+         MV-2 grant ({{4}}) — the WithoutKeywordKind(Foretell) filter must \
+         have excluded this card from the grant entirely"
     );
 }
 

@@ -362,7 +362,7 @@ pub(super) fn handle_collect_evidence_cancel(
     resume: &CollectEvidenceResume,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    if let CollectEvidenceResume::Casting { pending_cast } = resume {
+    if let CollectEvidenceResume::Casting { pending_cast, .. } = resume {
         casting::handle_cancel_cast(state, pending_cast, events);
     }
     WaitingFor::Priority { player }
@@ -397,13 +397,9 @@ pub(super) fn handle_harmonize_tap_choice(
 
         let power = obj.power.unwrap_or(0).max(0) as u32;
 
-        if let Some(obj) = state.objects.get_mut(&creature_id) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: creature_id,
-            caused_by: None,
-        });
+        // CR 701.26a + CR 508.1f: route the Harmonize tap through the single
+        // authority so a "can't become tapped" creature is refused.
+        crate::game::restrictions::tap_permanent_for_cost(state, creature_id, events)?;
 
         if let ManaCost::Cost {
             ref mut generic, ..

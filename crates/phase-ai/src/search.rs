@@ -11,7 +11,8 @@ use engine::types::ability::{
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, WaitingFor,
+    CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase,
+    PendingMulliganAction, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -139,17 +140,16 @@ pub fn choose_action_with_session(
         {
             return None;
         }
-        WaitingFor::MulliganBottomCards { pending }
-            if !pending.iter().any(|e| e.player == ai_player) =>
-        {
-            return None;
-        }
         WaitingFor::OpeningHandBottomCards { pending, .. }
             if !pending.iter().any(|e| e.player == ai_player) =>
         {
             return None;
         }
         _ => {}
+    }
+
+    if let Some(action) = random_card_predicate_guess(state, ai_player, rng) {
+        return Some(action);
     }
 
     // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
@@ -200,6 +200,23 @@ pub fn choose_action_with_session(
         }
     }
 
+    // CR 608.2d (hidden information): the guesser has no legal access to the
+    // committed value / chosen-card identity — it is genuinely a guess. The AI
+    // MUST NOT score guess branches via `score_candidates` (eval/search runs on
+    // the UNFILTERED GameState and would read the secret, always guessing
+    // correctly). Uniform random is rules-fair and the information-theoretic
+    // optimum, and uses the caller-owned RNG so seeded measurement runs remain
+    // reproducible. Parallel to the TributeChoice / SearchChoice / ChooseManaColor
+    // pre-emptions above.
+    if let WaitingFor::OpponentGuess { ref options, .. } = state.waiting_for {
+        use rand::seq::IndexedRandom;
+        if let Some(choice) = options.choose(rng) {
+            return Some(GameAction::ChooseOption {
+                choice: choice.clone(),
+            });
+        }
+    }
+
     if let Some(action) = fast_priority_action(state, ai_player) {
         return Some(action);
     }
@@ -222,6 +239,41 @@ pub fn choose_action_with_session(
         emit_decision_trace(state, ai_player, config, action, session);
     }
     chosen
+}
+
+fn random_card_predicate_guess(
+    state: &GameState,
+    ai_player: PlayerId,
+    rng: &mut impl Rng,
+) -> Option<GameAction> {
+    let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        source_id: Some(source_id),
+        persist_player: _,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    if *player != ai_player || !choice_type.is_card_predicate_guess() {
+        return None;
+    }
+    let source = state.objects.get(source_id)?;
+    if source.controller == ai_player || options.is_empty() {
+        return None;
+    }
+    let index = rng.random_range(0..options.len());
+    let choice = options[index].clone();
+    tracing::info!(
+        target: "phase_ai::choice",
+        ai_player = ai_player.0,
+        source_id = source_id.0,
+        source_name = %source.name,
+        guess = %choice,
+        "AI randomly guessed card predicate"
+    );
+    Some(GameAction::ChooseOption { choice })
 }
 
 fn fast_priority_action(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
@@ -774,6 +826,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::UnlessBounceChoice { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
+        // CR 701.4a + CR 608.2d: Behold requires EXACTLY one beholdable object —
+        // an empty selection is illegal. Take the first candidate (any legal pick
+        // resolves the prompt; the evaluated candidate enumerator picks properly).
+        WaitingFor::BeholdChoice { choices, .. } => choices
+            .first()
+            .map(|&id| GameAction::SelectCards { cards: vec![id] }),
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first
         // `keep_count` flips (always in range, since keep_count <= results.len()).
         WaitingFor::CoinFlipKeepChoice { keep_count, .. } => Some(GameAction::SelectCoinFlips {
@@ -905,26 +963,43 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             order: (0..triggers.len()).collect(),
         }),
 
-        // CR 103.5 + 103.5b: Mulligan default = keep, unless the AI has a
-        // Serum Powder in hand, in which case use it first (auto-heuristic —
-        // see `first_serum_powder_in_hand`).
+        // CR 103.5 + 103.5b: Mulligan default. In `Declare`, keep unless the AI
+        // has a Serum Powder in hand, in which case use it first (auto-heuristic
+        // — see `first_serum_powder_in_hand`). In `BottomCards`, submit an empty
+        // `SelectCards` as the deadlock-safe escape hatch.
         WaitingFor::MulliganDecision { pending, .. } => {
             let entry = pending.first()?;
-            Some(match first_serum_powder_in_hand(state, entry.player) {
-                Some(object_id) => GameAction::MulliganDecision {
-                    choice: MulliganChoice::UseSerumPowder { object_id },
-                },
-                None => GameAction::MulliganDecision {
-                    choice: MulliganChoice::Keep,
-                },
-            })
+            match &entry.phase {
+                MulliganDecisionPhase::Declare => {
+                    Some(match first_serum_powder_in_hand(state, entry.player) {
+                        Some(object_id) => GameAction::MulliganDecision {
+                            choice: MulliganChoice::UseSerumPowder { object_id },
+                        },
+                        None => GameAction::MulliganDecision {
+                            choice: MulliganChoice::Keep,
+                        },
+                    })
+                }
+                MulliganDecisionPhase::BottomCards { .. } => {
+                    Some(GameAction::SelectCards { cards: Vec::new() })
+                }
+            }
         }
-        WaitingFor::MulliganBottomCards { .. } | WaitingFor::OpeningHandBottomCards { .. } => {
+        WaitingFor::OpeningHandBottomCards { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
         // Named choice: pick the first option if available.
         WaitingFor::NamedChoice { options, .. } => {
+            options.first().map(|choice| GameAction::ChooseOption {
+                choice: choice.clone(),
+            })
+        }
+
+        // CR 608.2d: opponent-guess fallback — any printed guess is legal. The
+        // hidden-info determinization in `choose_action` already pre-empts this
+        // for the live AI; this is only the deadlock-safe escape hatch.
+        WaitingFor::OpponentGuess { options, .. } => {
             options.first().map(|choice| GameAction::ChooseOption {
                 choice: choice.clone(),
             })
@@ -1201,6 +1276,21 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — an empty pick is
+        // illegal (min >= 1), so pick the first `min` eligible objects.
+        WaitingFor::EachPlayerCopyChosenSelection { eligible, min, .. } => {
+            let targets: Vec<_> = eligible
+                .iter()
+                .take((*min).max(1) as usize)
+                .cloned()
+                .collect();
+            if targets.is_empty() {
+                None
+            } else {
+                Some(GameAction::SelectTargets { targets })
+            }
+        }
+
         // Copy retarget: keep copied targets when all slots already have a
         // current value; freshly cast prepare/paradigm copies start empty, so
         // choose the first legal target for the current slot.
@@ -1455,6 +1545,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
             .into_iter()
             .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),
+        WaitingFor::RemoveCountersChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseCountersToRemove { .. })),
 
         // Remaining pending-cast states are caught by the has_pending_cast
         // guard above. This arm is structurally unreachable but required
@@ -1609,7 +1702,11 @@ pub fn score_candidates_with_session(
         let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
-    finalize_mean(acc, counts, k as usize)
+    let mut out = finalize_mean(acc, counts, k as usize);
+    if config.execution_mode.is_measurement() {
+        out.sort_by_cached_key(|(action, _)| action_order_key(action));
+    }
+    out
 }
 
 /// Core scoring for a single (possibly determinized) state. Byte-identical to
@@ -2044,48 +2141,65 @@ pub(crate) fn deterministic_choice(
             .get(&player)
             .unwrap_or(&default_features);
         let plan = ctx.session.plan.get(&player).unwrap_or(&default_plan);
-        let hand: Vec<_> = state.players[player.0 as usize]
-            .hand
-            .iter()
-            .copied()
-            .collect();
-        let turn_order = crate::policies::mulligan::turn_order_for(state, player);
-        let decision = crate::policies::mulligan::MulliganRegistry::default().evaluate_hand(
-            &hand,
-            state,
-            features,
-            plan,
-            turn_order,
-            mulligan_count,
-        );
-        // CR 103.5b + Serum Powder Oracle text: if the AI would mulligan and
-        // it has a Serum Powder in hand, prefer the Powder — it's a strictly
-        // better action than a mulligan (no bottoming, no mulligan count
-        // increment). When the registry says keep, take the keep — don't burn
-        // a Powder on a hand the policies already endorsed.
-        let choice = if decision.keep {
-            MulliganChoice::Keep
-        } else if let Some(object_id) = first_serum_powder_in_hand(state, player) {
-            MulliganChoice::UseSerumPowder { object_id }
-        } else {
-            MulliganChoice::Mulligan
-        };
-        return Some(GameAction::MulliganDecision { choice });
+
+        match &entry.phase {
+            // CR 103.5: This player's entry owes bottoms at their own declare
+            // point. Bottom the N least valuable cards, using the cached plan
+            // to preserve expected land count and structurally detected payoff
+            // cards. The earmarked Serum Powder (if `then` is `UseSerumPowder`)
+            // is excluded from the selection pool — it's committed to its own
+            // activation.
+            MulliganDecisionPhase::BottomCards { count, then } => {
+                let exclude = match then {
+                    PendingMulliganAction::UseSerumPowder { object_id } => Some(*object_id),
+                    PendingMulliganAction::Keep => None,
+                };
+                let to_bottom = plan_aware_bottom_cards(
+                    state,
+                    player,
+                    *count as usize,
+                    features,
+                    plan,
+                    exclude,
+                );
+                return Some(GameAction::SelectCards { cards: to_bottom });
+            }
+            MulliganDecisionPhase::Declare => {
+                let hand: Vec<_> = state.players[player.0 as usize]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect();
+                let turn_order = crate::policies::mulligan::turn_order_for(state, player);
+                let decision = crate::policies::mulligan::MulliganRegistry::default()
+                    .evaluate_hand(&hand, state, features, plan, turn_order, mulligan_count);
+                // CR 103.5b + Serum Powder Oracle text: if the AI would mulligan
+                // and it has a Serum Powder in hand, prefer the Powder — it's a
+                // strictly better action than a mulligan (no mulligan count
+                // increment). When the registry says keep, take the keep — don't
+                // burn a Powder on a hand the policies already endorsed.
+                let choice = if decision.keep {
+                    MulliganChoice::Keep
+                } else if let Some(object_id) = first_serum_powder_in_hand(state, player) {
+                    MulliganChoice::UseSerumPowder { object_id }
+                } else {
+                    MulliganChoice::Mulligan
+                };
+                return Some(GameAction::MulliganDecision { choice });
+            }
+        }
     }
 
-    // CR 103.5 + TL:R 906.6: Mulligan / opening-hand bottoming. Each pending
-    // player owes a distinct `count`, and several players can be pending at
-    // once (simultaneous bottoming). The AI controller must scope to
-    // `ai_player`'s own entry: the shared candidate pool mixes every pending
-    // player's combos, and `validate_candidates` simulates them as the first
-    // authorized submitter (seat order) rather than `ai_player` — so without
-    // this branch the AI can pick a selection sized for a different player and
-    // the engine rejects it ("Expected N cards to bottom, got M"). Bottom the
-    // N least valuable cards, using the cached plan to preserve expected land
-    // count and structurally detected payoff cards.
-    if let WaitingFor::MulliganBottomCards { pending }
-    | WaitingFor::OpeningHandBottomCards { pending, .. } = &state.waiting_for
-    {
+    // TL:R 906.6: Opening-hand forced bottoming. Each pending player owes a
+    // distinct `count`, and several players can be pending at once. The AI
+    // controller must scope to `ai_player`'s own entry: the shared candidate
+    // pool mixes every pending player's combos, and `validate_candidates`
+    // simulates them as the first authorized submitter (seat order) rather than
+    // `ai_player` — so without this branch the AI can pick a selection sized for
+    // a different player and the engine rejects it. Bottom the N least valuable
+    // cards, using the cached plan to preserve expected land count and
+    // structurally detected payoff cards.
+    if let WaitingFor::OpeningHandBottomCards { pending, .. } = &state.waiting_for {
         let entry = pending.iter().find(|e| e.player == ai_player)?;
         let count = entry.count as usize;
         let owned_ctx;
@@ -2104,7 +2218,7 @@ pub(crate) fn deterministic_choice(
             .get(&ai_player)
             .unwrap_or(&default_features);
         let plan = ctx.session.plan.get(&ai_player).unwrap_or(&default_plan);
-        let to_bottom = plan_aware_bottom_cards(state, ai_player, count, features, plan);
+        let to_bottom = plan_aware_bottom_cards(state, ai_player, count, features, plan, None);
         return Some(GameAction::SelectCards { cards: to_bottom });
     }
 
@@ -2621,7 +2735,11 @@ fn plan_aware_bottom_cards(
     count: usize,
     features: &DeckFeatures,
     plan: &PlanSnapshot,
+    exclude: Option<ObjectId>,
 ) -> Vec<ObjectId> {
+    // The full hand — including any earmarked-Serum-Powder `exclude` object —
+    // drives the hand-size and land-target arithmetic, because the earmarked
+    // card is still physically in hand until its effect runs.
     let hand: Vec<_> = state.players[player.0 as usize]
         .hand
         .iter()
@@ -2641,7 +2759,8 @@ fn plan_aware_bottom_cards(
     let mut surplus_lands = land_count.saturating_sub(land_target);
     let mut scored = Vec::with_capacity(hand.len());
 
-    for id in hand {
+    // Only the candidate selection POOL excludes the earmarked object.
+    for id in hand.into_iter().filter(|id| Some(*id) != exclude) {
         let score = state.objects.get(&id).map_or(0.0, |obj| {
             if is_plan_payoff_name(features, &obj.name) {
                 25.0 + evaluate_card_value(state, id)
@@ -2770,6 +2889,7 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
+    use engine::types::ability::ChoiceType;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
         Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
@@ -4503,6 +4623,77 @@ mod tests {
     }
 
     #[test]
+    fn ai_land_nonland_opponent_guess_uses_rng() {
+        let mut state = make_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+            persist_player: None,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut saw_land = false;
+        let mut saw_nonland = false;
+
+        for seed in 0..64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            match choose_action(&state, PlayerId(1), &config, &mut rng) {
+                Some(GameAction::ChooseOption { choice }) if choice == "Land" => saw_land = true,
+                Some(GameAction::ChooseOption { choice }) if choice == "Nonland" => {
+                    saw_nonland = true;
+                }
+                other => panic!("expected Land/Nonland ChooseOption, got {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_land && saw_nonland,
+            "seeded AI guesses must exercise both Land and Nonland"
+        );
+    }
+
+    #[test]
+    fn ai_regular_land_nonland_choice_does_not_use_guess_randomizer() {
+        let mut state = make_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Abundance".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicate {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source_id: Some(source_id),
+            persist_player: None,
+        };
+        let mut rng = SmallRng::seed_from_u64(1);
+
+        assert!(
+            random_card_predicate_guess(&state, PlayerId(1), &mut rng).is_none(),
+            "ordinary land/nonland kind choices are strategic choices, not random guesses"
+        );
+    }
+
+    #[test]
     fn copy_retarget_fallback_keeps_existing_targets_with_legal_action() {
         let mut state = make_state();
         let original_target = TargetRef::Object(ObjectId(10));
@@ -4913,17 +5104,26 @@ mod tests {
         let mut state = make_state();
         let vanilla = two_player_bottom_fixture(&mut state, 4, 3);
 
-        state.waiting_for = WaitingFor::MulliganBottomCards {
+        state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![
-                engine::types::game_state::MulliganBottomEntry {
+                engine::types::game_state::MulliganDecisionEntry {
                     player: PlayerId(0),
-                    count: 1,
+                    mulligan_count: 1,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 1,
+                        then: PendingMulliganAction::Keep,
+                    },
                 },
-                engine::types::game_state::MulliganBottomEntry {
+                engine::types::game_state::MulliganDecisionEntry {
                     player: PlayerId(1),
-                    count: 3,
+                    mulligan_count: 3,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 3,
+                        then: PendingMulliganAction::Keep,
+                    },
                 },
             ],
+            free_first_mulligan: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -4945,10 +5145,10 @@ mod tests {
         }
     }
 
-    /// The fix's `|`-combined arm must hold for `OpeningHandBottomCards`
-    /// (TL:R 906.6 Tiny Leaders forced bottom), not just `MulliganBottomCards`:
-    /// the AI must still scope to its own owed count when a second player is
-    /// pending. Guards against a future refactor silently dropping one variant.
+    /// The AI must scope to its own owed count for the `OpeningHandBottomCards`
+    /// path (TL:R 906.6 Tiny Leaders forced bottom), not just the folded
+    /// `MulliganDecision` bottoming, when a second player is pending. Guards
+    /// against a future refactor silently dropping one variant.
     #[test]
     fn ai_opening_hand_bottom_scopes_to_own_count_via_choose_action() {
         let mut state = make_state();
@@ -4998,8 +5198,14 @@ mod tests {
 
         let mut plan = PlanSnapshot::default();
         plan.expected_lands[2] = 3;
-        let bottoms =
-            plan_aware_bottom_cards(&state, PlayerId(1), 2, &DeckFeatures::default(), &plan);
+        let bottoms = plan_aware_bottom_cards(
+            &state,
+            PlayerId(1),
+            2,
+            &DeckFeatures::default(),
+            &plan,
+            None,
+        );
         let land_set: std::collections::HashSet<_> = lands.iter().copied().collect();
 
         assert_eq!(bottoms.len(), 2);
@@ -5024,8 +5230,14 @@ mod tests {
             ..Default::default()
         };
 
-        let bottoms =
-            plan_aware_bottom_cards(&state, PlayerId(1), 1, &features, &PlanSnapshot::default());
+        let bottoms = plan_aware_bottom_cards(
+            &state,
+            PlayerId(1),
+            1,
+            &features,
+            &PlanSnapshot::default(),
+            None,
+        );
 
         assert_ne!(bottoms, vec![payoff]);
         assert!(

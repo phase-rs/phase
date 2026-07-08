@@ -87,15 +87,23 @@ pub(crate) fn handle_select_modes(
     // costs layered on top of the base cost. `restrictions::add_mana_cost` treats `NoCost`/
     // zero as identity, so a cast-without-paying path (`pending.cost == zero`) yields exactly
     // the additional costs — alternative-cost permissions never waive them.
-    let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
+    let mut total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
     let mut pending = pending;
     // CR 601.2b + CR 601.2f: Fold the chosen modal mode costs (Spree / Entwine
-    // cost increases, computed against a zero base) into the captured base so
-    // any later post-X cost recompute (`concrete_cost_for_x`) includes them.
-    // Without a captured base (legacy / activated) leave it `None`.
-    if let Some(base) = pending.base_cost.as_ref() {
+    // cost increases, computed against a zero base) into the declared mana
+    // additions so any later pending recompute includes them without rewriting
+    // the tax-inclusive base.
+    if pending.base_cost.is_some() {
         let modal_only = compute_modal_total_cost(&ManaCost::zero(), &modal, &indices);
-        pending.base_cost = Some(restrictions::add_mana_cost(base, &modal_only));
+        if !modal_only.is_without_paying_mana() {
+            pending.declared_mana_additions.push(modal_only);
+            total_cost = super::casting::recompute_pending_mana_total(
+                state,
+                controller,
+                &pending,
+                pending.ability.chosen_x,
+            );
+        }
     }
     if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
     {
@@ -121,6 +129,7 @@ pub(crate) fn handle_select_modes(
         let mut pending_x =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
         pending_x.base_cost = pending.base_cost.clone();
+        pending_x.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_x.target_constraints = pending.target_constraints;
         pending_x.casting_variant = pending.casting_variant;
         pending_x.cast_timing_permission = pending.cast_timing_permission;
@@ -196,6 +205,7 @@ pub(crate) fn handle_select_modes(
         let mut pending_sel =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
         pending_sel.base_cost = pending.base_cost.clone();
+        pending_sel.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
         pending_sel.origin_zone = pending.origin_zone;
@@ -217,6 +227,35 @@ pub(crate) fn handle_select_modes(
 
     // No targets needed -- check additional cost, then pay
     finish_pending_cast_cost_or_pay(state, controller, pending, resolved, total_cost, events)
+}
+
+/// CR 601.2d: After targets are committed on a pending cast, pause for
+/// `WaitingFor::DistributeAmong` when the spell divides a fixed pool among
+/// those targets. Shared by bulk `SelectTargets` and slot-by-slot
+/// `ChooseTarget` completion paths — the client drives the latter.
+fn maybe_pause_for_cast_distribution(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    ability: &ResolvedAbility,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(unit) = &pending.distribute else {
+        return Ok(None);
+    };
+    let Some(total) = extract_distribution_total(state, ability, &ability.effect) else {
+        // X-spell: distribution deferred to after mana payment.
+        return Ok(None);
+    };
+    let assigned_targets = distribution_targets(ability);
+    let mut pending_dist = pending.clone();
+    pending_dist.ability = ability.clone();
+    state.pending_cast = Some(Box::new(pending_dist));
+    Ok(Some(WaitingFor::DistributeAmong {
+        player,
+        total,
+        targets: assigned_targets,
+        unit: unit.clone(),
+    }))
 }
 
 /// Handle target selection for a pending cast.
@@ -252,43 +291,9 @@ pub(crate) fn handle_select_targets(
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
-    // CR 601.2d: If this spell requires distribution among targets, trigger
-    // WaitingFor::DistributeAmong. For non-X spells, extract the fixed total now.
-    // For X-spells, distribution is deferred to after mana payment (engine.rs).
-    if let Some(ref unit) = pending.distribute {
-        if let Some(total) = extract_distribution_total(state, &ability, &ability.effect) {
-            // CR 601.2c + CR 601.2d: Divide only among the distributing effect's
-            // own targets; sibling-effect targets became targets already and are
-            // not part of the division.
-            let assigned_targets = distribution_targets(&ability);
-            // Store ability + targets on pending_cast for post-distribution resumption.
-            let mut pending_dist = PendingCast::new(
-                pending.object_id,
-                pending.card_id,
-                ability,
-                pending.cost.clone(),
-            );
-            pending_dist.base_cost = pending.base_cost.clone();
-            pending_dist.casting_variant = pending.casting_variant;
-            pending_dist.distribute = Some(unit.clone());
-            pending_dist.origin_zone = pending.origin_zone;
-            pending_dist.additional_cost_flow = pending.additional_cost_flow.clone();
-            pending_dist.deferred_target_selection = pending.deferred_target_selection;
-            pending_dist.chosen_modes = pending.chosen_modes.clone();
-            pending_dist.additional_cost_decided = pending.additional_cost_decided;
-            pending_dist.declared_kickers_to_pay = pending.declared_kickers_to_pay.clone();
-            pending_dist.declined_kickers = pending.declined_kickers.clone();
-            state.pending_cast = Some(Box::new(pending_dist));
-            return Ok(WaitingFor::DistributeAmong {
-                player,
-                total,
-                targets: assigned_targets,
-                unit: unit.clone(),
-            });
-        }
-        // X-spell: distribution deferred to after mana payment.
-        // Propagate distribute flag through to pending_cast for the
-        // (ManaPayment, PassPriority) handler.
+    if let Some(waiting_for) = maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
+    {
+        return Ok(waiting_for);
     }
 
     if let Some(ability_index) = pending.activation_ability_index {
@@ -405,6 +410,12 @@ pub(crate) fn handle_choose_target(
             let mut ability = pending.ability.clone();
             assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
+            if let Some(waiting_for) =
+                maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
+            {
+                return Ok(waiting_for);
+            }
+
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(waiting_for) = pay_activation_costs_after_target_selection(
                     state,
@@ -514,6 +525,21 @@ fn pay_activation_costs_after_target_selection(
     }
 
     if let Some(ref activation_cost) = pending.activation_cost {
+        // CR 107.4f + GH #600: Target-first activations store the full cost in
+        // `activation_cost` with `pending.cost = NoCost`; route through the same
+        // Phyrexian pause helper as the no-target activation path.
+        if let Some(waiting) = super::casting::try_pause_activation_phyrexian_payment(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            &assigned_ability,
+            activation_cost,
+            events,
+        ) {
+            return Ok(Some(waiting));
+        }
+
         if let Some((count, zone, filter)) = super::casting::find_non_self_exile(activation_cost) {
             let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
                 .expect("find_non_self_exile restricts zone to Hand or Graveyard");
@@ -621,6 +647,12 @@ fn escalate_cost_for_selected_modes(
         return None;
     }
 
+    // CR 702.120a + CR 702.102b: Reads the spell's own Escalate keyword. Left on the
+    // marker-default (non-fuse-aware) `effective_spell_keywords` deliberately: no
+    // real split card carries Escalate, and the only fuse-sensitive input is a
+    // `CastWithKeyword` `affected` filter keyed on the combined mana value / colors
+    // — a class that does not arise for Escalate. If a fused split spell were ever
+    // granted Escalate by a value-keyed static, this would need the `_for` variant.
     let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
         .into_iter()
         .find_map(|keyword| match keyword {

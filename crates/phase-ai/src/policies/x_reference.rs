@@ -217,6 +217,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveManaCost => false,
     }
 }

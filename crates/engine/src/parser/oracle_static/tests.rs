@@ -8,12 +8,122 @@ use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, Comparator, CountScope,
     DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, TypeFilter, ZoneRef,
+    SharedQualityRelation, SubtypeExclusion, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
+
+/// CR 207.2c: an ability word is italic flavor with no rules meaning. A leading
+/// ability-word label on a subject-anchored static must be stripped so the static
+/// still parses; a leading label that is NOT a recognized ability word must be
+/// left intact so the fallback can't mis-strip a real subject.
+#[test]
+fn ability_word_prefix_is_stripped_from_subject_anchored_statics() {
+    use crate::types::mana::ManaColor;
+
+    // Light from Within (Chroma, whitelisted): the stripped body must produce the
+    // same static it would without the label — creatures-you-control gaining a
+    // dynamic +N/+N equal to the white pips in each recipient's own mana cost.
+    let chroma = parse_static_line_multi(
+        "Chroma — Each creature you control gets +1/+1 for each white mana symbol in its mana cost.",
+    );
+    assert_eq!(chroma.len(), 1, "Chroma prefix must be stripped");
+    let def = &chroma[0];
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.is_empty()),
+        "Chroma affected must be creatures you control: {:?}",
+        def.affected
+    );
+    assert!(def.condition.is_none(), "Chroma carries no condition");
+    assert!(
+        matches!(&def.modifications[..],
+            [
+                ContinuousModification::AddDynamicPower { value: p },
+                ContinuousModification::AddDynamicToughness { value: t },
+            ]
+            if matches!(p, QuantityExpr::Ref { qty: QuantityRef::ManaSymbolsInManaCost { color: Some(ManaColor::White), .. } })
+                && p == t),
+        "Chroma must add dynamic P/T = white pips in mana cost: {:?}",
+        def.modifications
+    );
+
+    // Gavony Ironwright (Fateful hour, whitelisted): a life<=5 gate on an
+    // "other creatures you control" +1/+4 pump.
+    let fateful = parse_static_line_multi(
+        "Fateful hour — As long as you have 5 or less life, other creatures you control get +1/+4.",
+    );
+    assert_eq!(fateful.len(), 1, "Fateful hour prefix must be stripped");
+    let def = &fateful[0];
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&FilterProp::Another)),
+        "Fateful hour affected must be OTHER creatures you control: {:?}",
+        def.affected
+    );
+    assert!(
+        matches!(&def.condition, Some(StaticCondition::QuantityComparison { comparator: Comparator::LE, rhs, .. })
+            if matches!(rhs, QuantityExpr::Fixed { value: 5 })),
+        "Fateful hour must gate on your life <= 5: {:?}",
+        def.condition
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddPower { value: 1 })
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 4 }),
+        "Fateful hour must pump +1/+4: {:?}",
+        def.modifications
+    );
+
+    // Cryptothrall (Protector, newly whitelisted 40K word): an "Other artifact
+    // creatures you control" hexproof grant.
+    let protector =
+        parse_static_line_multi("Protector — Other artifact creatures you control have hexproof.");
+    assert_eq!(protector.len(), 1, "Protector prefix must be stripped");
+    let def = &protector[0];
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature, TypeFilter::Artifact]
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&FilterProp::Another)),
+        "Protector affected must be OTHER artifact creatures you control: {:?}",
+        def.affected
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }],
+        "Protector must grant hexproof"
+    );
+
+    // Clamavus (Proclamator Hailer, newly whitelisted 40K word): still parses.
+    assert_eq!(
+        parse_static_line_multi(
+            "Proclamator Hailer — Each creature you control gets +1/+1 for each +1/+1 counter on it."
+        )
+        .len(),
+        1,
+        "Proclamator Hailer prefix must be stripped"
+    );
+
+    // Safety: a capitalized em-dash label that is NOT a recognized ability word
+    // must never be stripped — the fallback stays whitelist-gated.
+    assert_eq!(
+        parse_static_line_multi("Vigilant Sentry — Other creatures you control have vigilance.")
+            .len(),
+        0,
+        "unknown em-dash label must not be stripped"
+    );
+}
 
 /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
 /// "You and creatures you control have protection from the chosen card
@@ -72,6 +182,84 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
             TypedFilter::default().controller(ControllerRef::You)
         )),
         "player-half must affect the controller"
+    );
+}
+
+// CR 611.3a + CR 604.3 + CR 613.4a: Angry Mob — a two-clause turn-window CDA. "During
+// your turn, ~'s power and toughness are each equal to 2 plus the number of
+// Swamps your opponents control. During turns other than yours, ~'s power and
+// toughness are each 2." Splits into two CDA statics: the on-turn clause is a
+// dynamic P/T (2 + count) gated on DuringYourTurn; the off-turn clause is a
+// constant 2/2 gated on Not{DuringYourTurn}.
+#[test]
+fn static_angry_mob_two_clause_turn_window_cda() {
+    let defs = parse_static_line_multi(
+        "During your turn, Angry Mob's power and toughness are each equal to 2 plus the number of Swamps your opponents control. During turns other than yours, Angry Mob's power and toughness are each 2.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected two turn-window CDA statics, got {defs:?}"
+    );
+
+    // On-turn: dynamic P/T (Offset over opponent Swamp count), gated DuringYourTurn.
+    let on_turn = &defs[0];
+    assert!(
+        on_turn.characteristic_defining,
+        "on-turn clause must be a CDA"
+    );
+    assert_eq!(on_turn.condition, Some(StaticCondition::DuringYourTurn));
+    // Prove the full quantity, not just that *some* dynamic power exists: both
+    // power AND toughness must be set to `2 + <opponent Swamp count>`. Asserting
+    // the entire modification vector by value means the test fails if the offset,
+    // the counted subtype, the controller scope, or the toughness clause regress.
+    let opponent_swamps = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Swamp".to_string()))
+                    .controller(ControllerRef::Opponent),
+            ),
+        },
+    };
+    let two_plus_opponent_swamps = QuantityExpr::Offset {
+        inner: Box::new(opponent_swamps),
+        offset: 2,
+    };
+    assert_eq!(
+        on_turn.modifications,
+        vec![
+            ContinuousModification::SetDynamicPower {
+                value: two_plus_opponent_swamps.clone(),
+            },
+            ContinuousModification::SetDynamicToughness {
+                value: two_plus_opponent_swamps,
+            },
+        ],
+        "on-turn CDA must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
+        on_turn.modifications
+    );
+
+    // Off-turn: constant 2/2, gated Not{DuringYourTurn}.
+    let off_turn = &defs[1];
+    assert!(
+        off_turn.characteristic_defining,
+        "off-turn clause must be a CDA"
+    );
+    assert_eq!(
+        off_turn.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        })
+    );
+    assert!(
+        off_turn
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 2 })
+            && off_turn
+                .modifications
+                .contains(&ContinuousModification::SetToughness { value: 2 }),
+        "off-turn clause must set constant 2/2: {:?}",
+        off_turn.modifications
     );
 }
 
@@ -3123,6 +3311,346 @@ fn static_controlled_compound_subject_shares_continuous_predicate() {
         }));
 }
 
+// CR 611.3a: Verdeloth the Ancient — bare (no-controller) tribal compound anthem
+// "Saproling creatures and other Treefolk creatures get +1/+1." Must OR two
+// battlefield-wide subtype filters (controller: None), with the per-branch
+// "other" applying the Another source exclusion only to the Treefolk branch.
+#[test]
+fn static_bare_compound_tribal_subject_verdeloth() {
+    let def =
+        parse_static_line("Saproling creatures and other Treefolk creatures get +1/+1.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Or { ref filters })
+            if filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(typed)
+                    if typed.controller.is_none()
+                        && typed.type_filters.iter().any(|tf| matches!(
+                            tf, TypeFilter::Subtype(s) if s == "Saproling"
+                        ))
+                        && !typed.properties.contains(&FilterProp::Another)
+            ))
+                && filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.controller.is_none()
+                            && typed.type_filters.iter().any(|tf| matches!(
+                                tf, TypeFilter::Subtype(s) if s == "Treefolk"
+                            ))
+                            && typed.properties.contains(&FilterProp::Another)
+                ))
+    ));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+}
+
+// Life and Limb — dual-subject reciprocal animation on its ACTUAL static text.
+// The subject "All Forests and all Saprolings" mixes a LAND subtype (Forest)
+// with a CREATURE subtype (Saproling); the predicate "1/1 green Saproling
+// creatures and Forest lands in addition to their other types" animates every
+// object in either subject into a 1/1 green creature that is also a land while
+// keeping its other types (CR 611.3 + CR 613.4b + CR 205.1b).
+//
+// Supersedes the earlier #5147 strict-fail guard: that test asserted the line
+// produced NO static, because the only handler that touched it was the ungated
+// bare tribal-compound helper, which mis-read Forest as `creature Forest`.
+// `parse_compound_all_subjects_type_change` now supports the line correctly, so
+// the assertions flip to the positive parse — while still guarding the original
+// intent that the Forest conjunct is a LAND subtype, never a creature subject.
+#[test]
+fn life_and_limb_real_text_dual_subject_animation() {
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaColor;
+
+    let line = "All Forests and all Saprolings are 1/1 green Saproling creatures \
+                and Forest lands in addition to their other types.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(
+        defs.len(),
+        1,
+        "Life and Limb is one compound static: {defs:?}"
+    );
+    let def = &defs[0];
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be an Or of the two subjects: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+    // Forest conjunct: a LAND with subtype Forest.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
+        "Forest conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    // Original #5147 intent preserved: Forest is NEVER a creature subject.
+    assert!(
+        !filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
+        "Forest must never be reinterpreted as a creature subject: {:?}",
+        def.affected
+    );
+    // Saproling conjunct: a CREATURE with subtype Saproling.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Saproling")))),
+        "Saproling conjunct must be a creature subtype: {:?}",
+        def.affected
+    );
+
+    // Uniform modification set shared by both subjects: base 1/1 (layer 7b), set
+    // green (layer 5), additive Creature+Saproling and Land+Forest (layer 4).
+    use ContinuousModification as CM;
+    for expected in [
+        CM::SetPower { value: 1 },
+        CM::SetToughness { value: 1 },
+        CM::SetColor {
+            colors: vec![ManaColor::Green],
+        },
+        CM::AddType {
+            core_type: CoreType::Creature,
+        },
+        CM::AddSubtype {
+            subtype: "Saproling".to_string(),
+        },
+        CM::AddType {
+            core_type: CoreType::Land,
+        },
+        CM::AddSubtype {
+            subtype: "Forest".to_string(),
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+}
+
+// CR 205.1a vs CR 205.1b: compound-subject animation splits across two handlers.
+// Additive predicates ("in addition to their other types") route to
+// `parse_compound_all_subjects_type_change`; bare "are <P/T> <type> creatures"
+// compounds route to `parse_compound_all_subjects_type_replacement` with subtype
+// replacement semantics (RemoveAllSubtypes + AddSubtype).
+#[test]
+fn compound_subject_animation_replacement_predicate() {
+    use crate::types::card_type::{CoreType, SubtypeSet};
+
+    let line = "All Elves and all Goblins are 2/2 Zombie creatures.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "one compound static: {defs:?}");
+    let def = &defs[0];
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or of both subjects: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Elf")))),
+        "Elf conjunct must be creature subtype Elf: {:?}",
+        def.affected
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Goblin")))),
+        "Goblin conjunct must be creature subtype Goblin: {:?}",
+        def.affected
+    );
+
+    use ContinuousModification as CM;
+    for expected in [
+        CM::SetPower { value: 2 },
+        CM::SetToughness { value: 2 },
+        CM::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        },
+        CM::AddType {
+            core_type: CoreType::Creature,
+        },
+        CM::AddSubtype {
+            subtype: "Zombie".to_string(),
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+
+    // The additive form (Life and Limb) still routes to the additive handler.
+    assert_eq!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are 1/1 green Saproling creatures and \
+             Forest lands in addition to their other types."
+        )
+        .len(),
+        1,
+        "additive compound animation must still parse"
+    );
+}
+
+// CR 611.3 + CR 305.7: compound-subject land type-change class — sibling of the
+// compound animation handlers (#5219 / #5293). A single land-type predicate
+// applies uniformly to every object in the `Or` distributed subject set.
+#[test]
+fn compound_subject_land_type_change_replacement_predicate() {
+    let line = "All Mountains and all Forests are Plains.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "one compound static: {defs:?}");
+    let def = &defs[0];
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be Or of both land subjects: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Mountain")))),
+        "Mountain conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Forest")))),
+        "Forest conjunct must be a LAND subtype: {:?}",
+        def.affected
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetBasicLandType {
+            land_type: BasicLandType::Plains,
+        }]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_additive_predicate() {
+    let line = "All Islands and all Swamps are Mountains in addition to their other land types.";
+    let def = parse_static_line(line).expect("additive compound land type-change");
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 2);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Mountain".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_multi_type_predicate() {
+    let line = "All Mountains and all Forests are Mountain, Forest, and Plains.";
+    let def = parse_static_line(line).expect("multi-type compound land type-change");
+    assert!(matches!(
+        def.modifications.as_slice(),
+        [
+            ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Mountain
+            },
+            ContinuousModification::AddSubtype { subtype },
+            ContinuousModification::AddSubtype { subtype: subtype2 },
+        ] if subtype == "Forest" && subtype2 == "Plains"
+    ));
+}
+
+#[test]
+fn compound_subject_land_type_change_triple_subject() {
+    let line = "All Mountains and all Forests and all Islands are Swamps.";
+    let def = parse_static_line(line).expect("triple-subject compound land type-change");
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 3, "three conjuncts: {filters:?}");
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetBasicLandType {
+            land_type: BasicLandType::Swamp,
+        }]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_every_basic_land_type() {
+    let line =
+        "All Mountains and all Forests are every basic land type in addition to their other types.";
+    let def = parse_static_line(line).expect("all-basic-types compound land type-change");
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddAllBasicLandTypes]
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_declines_mixed_land_creature_subjects() {
+    // Life and Limb's mixed land/creature subject must stay with animation handlers.
+    assert!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are Plains in addition to their other land types."
+        )
+        .is_empty(),
+        "mixed land/creature compound must not be land-type-claimed"
+    );
+    assert_eq!(
+        parse_static_line_multi(
+            "All Forests and all Saprolings are 1/1 green Saproling creatures and \
+             Forest lands in addition to their other types."
+        )
+        .len(),
+        1,
+        "Life and Limb must still route to compound animation"
+    );
+}
+
+#[test]
+fn compound_subject_land_type_change_single_subject_falls_through() {
+    // Single-subject lines remain owned by parse_land_type_change.
+    let def = parse_static_line("All Mountains are Plains.").unwrap();
+    assert!(
+        matches!(
+            def.affected,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters.contains(&TypeFilter::Land)
+        ),
+        "single land subject: {:?}",
+        def.affected
+    );
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::Or { .. })),
+        "single subject must not be Or-compound: {:?}",
+        def.affected
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetBasicLandType {
+            land_type: BasicLandType::Plains,
+        }]
+    );
+}
+
 #[test]
 fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     let def = parse_static_line(
@@ -3545,6 +4073,74 @@ fn heliod_warped_eclipse_cost_reduction_counts_opponents_draws() {
     assert!(
         !matches!(dynamic_count, Some(QuantityRef::ObjectCount { .. })),
         "dynamic_count must NOT be the generic ObjectCount{{Card}} misparse"
+    );
+}
+
+/// CR 601.2f + CR 701.9 + CR 702.29: Hollow One. "This spell costs {2} less to
+/// cast for each card you've cycled or discarded this turn." must lower to a
+/// self-spell `ModifyCost { Reduce, dynamic_count: CardsDiscardedThisTurn
+/// { Controller } }`. On the pre-fix parser the compound cycled-or-discarded
+/// phrase fell through to `ObjectCount{Typed{[Card]}}` (a cross-player count of
+/// every card object), the root of the reported over-reduction bug. Pins the
+/// controller-scoped discard shape and asserts it is NOT an `ObjectCount`.
+#[test]
+fn hollow_one_cost_reduction_counts_controller_cycled_or_discarded() {
+    let def = parse_static_line(
+        "This spell costs {2} less to cast for each card you've cycled or discarded this turn.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        dynamic_count,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(amount, ManaCost::generic(2));
+    assert_eq!(
+        dynamic_count,
+        Some(QuantityRef::CardsDiscardedThisTurn {
+            player: PlayerScope::Controller,
+        }),
+        "dynamic_count must be the controller's cycled-or-discarded count, not an ObjectCount; got {dynamic_count:?}"
+    );
+    // Discriminating against the over-reduction bug: the generic-card-count
+    // misparse would surface as an `ObjectCount` here.
+    assert!(
+        !matches!(dynamic_count, Some(QuantityRef::ObjectCount { .. })),
+        "dynamic_count must NOT be the generic ObjectCount{{Card}} misparse"
+    );
+}
+
+/// CR 601.2f + CR 701.9: the reversed compound ordering ("discarded or cycled")
+/// must lower to the identical controller-scoped `CardsDiscardedThisTurn` shape.
+/// Guards the second `alt` arm added for the ordering-insensitive phrase.
+#[test]
+fn hollow_one_cost_reduction_reversed_ordering_matches_controller() {
+    let def = parse_static_line(
+        "This spell costs {2} less to cast for each card you've discarded or cycled this turn.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        dynamic_count,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(
+        dynamic_count,
+        Some(QuantityRef::CardsDiscardedThisTurn {
+            player: PlayerScope::Controller,
+        }),
+        "reversed ordering must lower to the same controller-scoped discard count; got {dynamic_count:?}"
     );
 }
 
@@ -4521,6 +5117,54 @@ fn static_creature_spells_cost_less() {
                 );
             }
             _ => panic!("Expected Typed filter"),
+        }
+    }
+}
+
+// CR 105.1 + CR 601.2f: Prophecy Familiar cycle (Nightscape / Stormscape /
+// Sunscape / Thornscape / Thunderscape Familiar) — "<color> spells and <color>
+// spells you cast cost {1} less to cast." A two-BARE-color compound subject must
+// narrow the reduction to an `Or` of `HasColor` filters, NOT silently drop the
+// color restriction (which would cheapen every spell).
+#[test]
+fn static_compound_bare_color_spells_cost_less_narrows_to_or_of_colors() {
+    let def =
+        parse_static_line("Blue spells and red spells you cast cost {1} less to cast.").unwrap();
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost { generic: 1, .. },
+            ..
+        }
+    ));
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
+    } = def.mode
+    {
+        let filter = spell_filter
+            .as_ref()
+            .expect("compound color must set a spell_filter");
+        match filter {
+            TargetFilter::Or { filters } => {
+                let colors: Vec<_> = filters
+                    .iter()
+                    .filter_map(|f| match f {
+                        TargetFilter::Typed(tf) => tf.properties.iter().find_map(|p| match p {
+                            FilterProp::HasColor { color } => Some(*color),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    colors.contains(&ManaColor::Blue) && colors.contains(&ManaColor::Red),
+                    "must narrow to Blue OR Red HasColor filters: {filters:?}"
+                );
+            }
+            other => panic!("expected Or of HasColor filters, got {other:?}"),
         }
     }
 }
@@ -5627,6 +6271,41 @@ fn static_type_removal_with_nondevotion_condition() {
         }]
     );
     assert!(def.condition.is_some(), "condition must be extracted");
+}
+
+// CR 613.1d (Layer 4) + CR 205.1b/205.2: Luxior — attached-permanent type SWAP.
+// "Equipped permanent isn't a planeswalker and is a creature in addition to its
+// other types" (Luxior, Giada's Gift; Luxior and Shadowspear) removes the
+// Planeswalker card type (RemoveType) and additively grants Creature (AddType),
+// scoped to the equipped permanent — turning an equipped planeswalker into a
+// creature while it keeps its other types.
+#[test]
+fn parse_luxior_equipped_permanent_type_swap() {
+    let def = parse_static_line(
+        "Equipped permanent isn't a planeswalker and is a creature in addition to its other types.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::RemoveType {
+                core_type: CoreType::Planeswalker,
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ],
+        "must remove Planeswalker then additively add Creature: {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::EquippedBy),
+            "affected must be the equipped permanent: {tf:?}"
+        ),
+        other => panic!("expected Typed EquippedBy filter, got {other:?}"),
+    }
 }
 
 #[test]
@@ -7808,14 +8487,80 @@ fn static_each_player_may_play_an_additional_land() {
 }
 
 #[test]
-fn static_anchor_choice_land_drop_stays_unsupported_until_choice_filter_exists() {
-    assert!(
-        parse_static_line(
-            "Each player who last chose green anchor may play an additional land during each of their turns.",
-        )
-        .is_none(),
-        "chosen-word player subjects must not be widened to all players"
+fn static_anchor_choice_land_drop_parses_to_player_who_chose_label() {
+    // CR 607.2d / CR 607.2m (by analogy): the per-player anchor choice filter now
+    // exists, so Two Streams Facility's land-drop grant parses to a player-scoped
+    // `MayPlayAdditionalLand` narrowed to the anchor label — NOT widened to all
+    // players (which is exactly what the previous `is_none()` guard prevented).
+    let def = parse_static_line(
+        "Each player who last chose green anchor may play an additional land during each of their turns.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::MayPlayAdditionalLand);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::PlayerWhoChoseLabel {
+            label: "Green anchor".to_string()
+        })
     );
+}
+
+#[test]
+fn static_anchor_controlled_creature_anthem_parses() {
+    // CR 607.2d / CR 607.2m (by analogy): "creatures controlled by players who
+    // last chose red waterfall get +2/+0 and have haste" → creature filter
+    // carrying ControllerChoseLabel, with the +2/+0 buff and Haste grant.
+    let def = parse_static_line(
+        "Creatures controlled by players who last chose red waterfall get +2/+0 and have haste.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let TargetFilter::Typed(typed) = def.affected.as_ref().unwrap() else {
+        panic!("expected a typed creature filter, got {:?}", def.affected);
+    };
+    assert!(typed
+        .properties
+        .contains(&FilterProp::ControllerChoseLabel {
+            label: "Red waterfall".to_string()
+        }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }));
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddPower { value: 2 })));
+}
+
+#[test]
+fn static_singing_towers_derived_cost_foretell_grant_parses() {
+    // CR 702.143d: "Each nonland card in your hand without foretell has foretell.
+    // Its foretell cost is equal to its mana cost reduced by {2}." → a continuous
+    // AddKeywordWithDerivedCost{Foretell, ManaCostReducedBy({2})} on nonland
+    // cards you own in hand.
+    use crate::types::ability::CostDerivation;
+    use crate::types::keywords::CostBearingKeywordKind;
+    let def = parse_static_line(
+        "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeywordWithDerivedCost {
+            kind: CostBearingKeywordKind::Foretell,
+            derivation: CostDerivation::ManaCostReducedBy(ManaCost::generic(2)),
+        }]
+    );
+    let TargetFilter::Typed(typed) = def.affected.as_ref().unwrap() else {
+        panic!("expected a typed hand-card filter, got {:?}", def.affected);
+    };
+    assert!(typed.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::InAnyZone { zones } if zones == &vec![crate::types::zones::Zone::Hand]
+    )));
 }
 
 #[test]
@@ -11659,20 +12404,35 @@ fn static_self_gets_dynamic_pt_for_each_unspent_green_mana() {
 }
 
 #[test]
-fn for_each_clause_unspent_mana() {
-    // Building-block: the for-each quantity parser maps "unspent <color> mana
-    // you have" to UnspentMana{color}, and the colorless "unspent mana you have"
-    // to UnspentMana{None} (all colors).
-    use crate::types::ability::QuantityRef;
-    assert_eq!(
-        crate::parser::oracle_quantity::parse_for_each_clause("unspent green mana you have"),
-        Some(QuantityRef::UnspentMana {
-            color: Some(ManaColor::Green),
-        }),
+fn equipped_creature_gets_dynamic_pt_for_each_color_among_permanents() {
+    let def = parse_static_line(
+        "Equipped creature gets +1/+1 for each color among permanents you control.",
+    )
+    .expect("Conqueror's Flail dynamic P/T static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctColorsAmongPermanents {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
+                controller: Some(ControllerRef::You),
+                properties: Vec::new(),
+            }),
+        },
+    };
+    assert!(
+        def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicPower { value } if value == &expected)
+        ),
+        "expected AddDynamicPower over distinct colors, got {:?}",
+        def.modifications
     );
-    assert_eq!(
-        crate::parser::oracle_quantity::parse_for_each_clause("unspent mana you have"),
-        Some(QuantityRef::UnspentMana { color: None }),
+    assert!(
+        def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicToughness { value } if value == &expected)
+        ),
+        "expected AddDynamicToughness over distinct colors, got {:?}",
+        def.modifications
     );
 }
 
@@ -13370,6 +14130,56 @@ fn darksteel_mutation_full_modification_set() {
     );
 }
 
+/// CR 205.1a + CR 613.4b + CR 613.1f (issue #5300): Lignify-class subtype-only
+/// type-change auras — "Enchanted creature is a <creature subtype> with base
+/// power and toughness N/N and loses all abilities." The copula names only a
+/// creature SUBTYPE (no core card-type word), Setting a creature subtype replaces
+/// the object's creature subtypes but does NOT set or overwrite its card types
+/// (CR 205.1a), so `SetCardTypes` must NOT be emitted. Before the fix the "is a Treefolk" subtype was
+/// silently dropped (only P/T + loses-abilities survived).
+#[test]
+fn lignify_subtype_only_with_base_pt_type_change() {
+    use crate::types::card_type::SubtypeSet;
+    let def = parse_static_line(
+        "Enchanted creature is a Treefolk with base power and toughness 0/4 and loses all abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    // CR 205.1a: a subtype change does not affect card types — no SetCardTypes,
+    // so an enchanted Artifact/Land creature keeps Artifact/Land.
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "Lignify sets only the subtype; it must NOT emit SetCardTypes (which would \
+         strip other card types like Artifact/Land): {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Treefolk".to_string(),
+        }),
+        "the 'is a Treefolk' subtype must not be dropped: {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+    // CR 613.7 written-order: RemoveAllSubtypes must precede AddSubtype so the
+    // granted creature type survives the subtype wipe.
+    let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+    assert!(
+        pos(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }) < pos(&ContinuousModification::AddSubtype {
+            subtype: "Treefolk".to_string(),
+        }),
+        "RemoveAllSubtypes must precede AddSubtype(Treefolk): {mods:?}"
+    );
+}
+
 #[test]
 fn enchanted_is_type_with_base_pt_preserves_trailing_keyword_clause() {
     // Building-block check: the trailing "and has <kw> ... loses all
@@ -13525,6 +14335,59 @@ fn all_lands_are_creatures_living_plane() {
             assert!(tf.controller.is_none(), "all lands — no controller scope");
         }
         _ => panic!("Expected Typed land filter (all lands)"),
+    }
+}
+
+// CR 205.1b + CR 613.4b: single-subject land animation whose predicate uses the
+// explicit additive marker ("… creatures and <type> lands in addition to their
+// other types") must merge `parse_animation_spec` with
+// `parse_additive_type_clause_modifications` — the same predicate architecture
+// #5219 introduced for compound subjects, factored here via
+// `merge_creature_animation_with_additive_type_modifications`. Distinct from the
+// retention-tail form above ("that are still lands"), which never carries the
+// additive marker and stays on the animation-only path.
+#[test]
+fn land_animation_additive_predicate_merges_animation_and_land_type_grants() {
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaColor;
+
+    let line = "All lands are 1/1 green Saproling creatures and Forest lands \
+                in addition to their other types.";
+    let def = parse_static_line(line).unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf.controller.is_none(), "all lands — no controller scope");
+        }
+        _ => panic!("Expected Typed land filter (all lands)"),
+    }
+
+    use ContinuousModification as CM;
+    for expected in [
+        CM::SetPower { value: 1 },
+        CM::SetToughness { value: 1 },
+        CM::SetColor {
+            colors: vec![ManaColor::Green],
+        },
+        CM::AddType {
+            core_type: CoreType::Creature,
+        },
+        CM::AddSubtype {
+            subtype: "Saproling".to_string(),
+        },
+        CM::AddType {
+            core_type: CoreType::Land,
+        },
+        CM::AddSubtype {
+            subtype: "Forest".to_string(),
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
     }
 }
 
@@ -13739,6 +14602,62 @@ fn omo_nonland_creature_counter_subject_is_all_creature_types() {
         }
         other => panic!("Expected Typed nonland creature with counter prop, got {other:?}"),
     }
+}
+
+// CR 205.1a (issue #5213): Arixmethes, Slumbering Isle — "As long as ~ has a
+// slumber counter on it, it's a land. (It's not a creature.)". A bare "it's a
+// [non-creature type]" with no CR 205.1b retention marker REPLACES the object's
+// card types, so the Kraken stops being a creature while it slumbers. The
+// modification must be a REPLACING `SetCardTypes`, not an additive `AddType`
+// (which left the impossible "Creature Land"). Creature animations, "artifact
+// creature" forms, and "in addition to its other types" stay additive.
+#[test]
+fn arixmethes_bare_is_a_land_replaces_card_types() {
+    use crate::types::card_type::CoreType;
+
+    let def = parse_static_line(
+        "As long as ~ has a slumber counter on it, it's a land. (It's not a creature.)",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Land],
+        }],
+        "bare 'it's a land' must REPLACE card types (remove Creature), not add: {:?}",
+        def.modifications
+    );
+    // The slumber-counter condition is preserved.
+    assert!(
+        matches!(
+            def.condition,
+            Some(StaticCondition::HasCounters { minimum: 1, .. })
+        ),
+        "must gate on having a slumber counter: {:?}",
+        def.condition
+    );
+
+    // Retention forms remain ADDITIVE.
+    let additive = parse_static_line("~ is a land in addition to its other types.").unwrap();
+    assert_eq!(
+        additive.modifications,
+        vec![ContinuousModification::AddType {
+            core_type: CoreType::Land,
+        }],
+        "'in addition to its other types' must stay additive: {:?}",
+        additive.modifications
+    );
+    // An artifact-creature compound retains its prior types (CR 205.1b).
+    let artifact_creature = parse_static_line("~ is an artifact creature.").unwrap();
+    assert!(
+        artifact_creature
+            .modifications
+            .iter()
+            .all(|m| matches!(m, ContinuousModification::AddType { .. })),
+        "'artifact creature' must stay additive: {:?}",
+        artifact_creature.modifications
+    );
 }
 
 // --- CantCastDuring: turn/phase-scoped casting prohibitions ---
@@ -14231,6 +15150,305 @@ fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
     assert!(def
         .modifications
         .contains(&ContinuousModification::SetColor { colors: vec![] }));
+}
+
+// CR 205.1a / CR 205.1b (issue #5213 follow-up): distinct from #5231's land-only
+// coverage — the "it's a <type>" REPLACEMENT and its "in addition to" retention
+// exception are not land-specific. A bare non-land, non-creature type-set
+// ("~ is an artifact") must REPLACE the card types (SetCardTypes), while the same
+// type-set with the retention marker ("~ is an artifact in addition to its other
+// types") must stay ADDITIVE (AddType). Guards against a future change narrowing
+// `maybe_replace_card_types` back to the land case while leaving other
+// "it's a <type>" statics additive (or over-replacing the retention form).
+#[test]
+fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
+    // CR 205.1a: a non-land single non-creature type-set REPLACES.
+    let replace =
+        parse_static_line("~ is an artifact.").expect("\"~ is an artifact\" should parse");
+    assert!(
+        replace
+            .modifications
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Artifact],
+            }),
+        "non-land \"is an artifact\" must REPLACE via SetCardTypes([Artifact]): {:?}",
+        replace.modifications
+    );
+    assert!(
+        !replace
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddType { .. })),
+        "non-land replacement must not stay additive: {:?}",
+        replace.modifications
+    );
+
+    // CR 205.1b: the "in addition to its other types" retention marker keeps the
+    // same non-land type-set additive (the non-land sibling of #5231's land
+    // retention case).
+    let retain = parse_static_line("~ is an artifact in addition to its other types.")
+        .expect("retention form should parse");
+    assert!(
+        retain
+            .modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            }),
+        "\"in addition to\" must stay additive (AddType(Artifact)): {:?}",
+        retain.modifications
+    );
+    assert!(
+        !retain
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "retention form must NOT replace card types: {:?}",
+        retain.modifications
+    );
+}
+
+// Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land
+// with "{T}: Add {C}" and loses all other card types and abilities." Must become
+// a colorless land (SetCardTypes + SetColor), lose its own abilities
+// (RemoveAllAbilities), and gain the quoted mana ability (GrantAbility) — with
+// RemoveAllAbilities BEFORE the grant so the granted ability survives the wipe.
+#[test]
+fn imprisoned_in_the_moon_becomes_colorless_land_with_granted_mana_ability() {
+    let def = parse_static_line(
+        "Enchanted permanent is a colorless land with \"{T}: Add {C}\" and loses all other card types and abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Land],
+        }),
+        "must become a land: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetColor { colors: vec![] }),
+        "must become colorless: {mods:?}"
+    );
+    let remove_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::RemoveAllAbilities))
+        .expect("must strip the permanent's own abilities (issue #4770)");
+    let grant_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("must grant the quoted \"{T}: Add {C}\" ability");
+    assert!(
+        remove_idx < grant_idx,
+        "RemoveAllAbilities must precede GrantAbility so the granted ability survives: {mods:?}"
+    );
+    // Affected = the enchanted permanent.
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::EnchantedBy),
+            "affected must be the enchanted permanent: {tf:?}"
+        ),
+        other => panic!("expected Typed EnchantedBy filter, got {other:?}"),
+    }
+}
+
+// CR 205.1a + CR 702.6: Bram, Baguette Brawler / Bludgeon Brawl — "Each
+// <subject> is an Equipment with equip {N} and "Equipped creature gets +N/+M.""
+// Each matching permanent gains the Equipment subtype (replacing its artifact
+// subtypes), the Equip keyword with the printed cost, and the quoted anthem as a
+// granted static ability.
+#[test]
+fn becomes_equipment_with_equip_cost_and_granted_ability() {
+    use crate::types::keywords::Keyword;
+
+    let def = parse_static_line(
+        "Each noncreature Food you control is an Equipment with equip {1} and \"Equipped creature gets +1/+1.\"",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+
+    // Affected: noncreature Food you control.
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Food")),
+                "affected must be Food: {tf:?}"
+            );
+        }
+        other => panic!("expected Typed Food filter, got {other:?}"),
+    }
+
+    let mods = &def.modifications;
+    // Set the Equipment subtype (CR 205.1a: replace artifact subtypes first).
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Equipment")),
+        "must grant the Equipment subtype: {mods:?}"
+    );
+    // Grant the Equip keyword carrying the printed {1} cost.
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(_)
+            }
+        )),
+        "must grant the Equip keyword: {mods:?}"
+    );
+    // Grant the quoted "Equipped creature gets +1/+1" anthem as a static ability.
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::GrantStaticAbility { .. })),
+        "must grant the quoted equipped-creature anthem: {mods:?}"
+    );
+}
+
+// CR 202.3: Bludgeon Brawl — the dynamic-mana-value member of the become-Equipment
+// class. "equip {X} … where X is that artifact's mana value" binds X to the
+// Equipment's own mana value for BOTH the equip cost and the granted anthem, so
+// the cost lowers to Equip(SelfManaValue) and the anthem's "+X/+0" is rebound
+// from the default cost-X reference to SelfManaValue.
+#[test]
+fn bludgeon_brawl_dynamic_equip_cost_and_anthem_bind_source_mana_value() {
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+
+    let def = parse_static_line(
+        "Each noncreature, non-Equipment artifact is an Equipment with equip {X} and \"Equipped creature gets +X/+0,\" where X is that artifact's mana value.",
+    )
+    .unwrap();
+    let mods = &def.modifications;
+
+    // Equip cost bound to the Equipment's own mana value.
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(ManaCost::SelfManaValue)
+            }
+        )),
+        "equip {{X}} must lower to Equip(SelfManaValue): {mods:?}"
+    );
+    // The granted anthem's dynamic power reads the source's mana value (rebound
+    // from the default cost-X reference).
+    let anthem_ok = mods.iter().any(|m| {
+        matches!(m, ContinuousModification::GrantStaticAbility { definition }
+        if definition.modifications.iter().any(|inner| matches!(
+            inner,
+            ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref { qty: QuantityRef::SelfManaValue }
+            }
+        )))
+    });
+    assert!(
+        anthem_ok,
+        "granted anthem must add dynamic power = SelfManaValue: {mods:?}"
+    );
+}
+
+// The become-Equipment handler models exactly one trailing rider after the quoted
+// ability: the CR 202.3 "where X is that artifact's mana value" binding. Any other
+// rules-bearing tail must fail closed (return no static) rather than silently drop
+// the rider and export a permanent with missing behavior.
+#[test]
+fn becomes_equipment_rejects_unrecognized_trailing_rider() {
+    // Empty tail (Bram) and the recognized where-X binding (Bludgeon) still parse.
+    assert_eq!(
+        parse_static_line_multi(
+            "Each noncreature Food you control is an Equipment with equip {1} and \"Equipped creature gets +1/+1.\""
+        )
+        .len(),
+        1,
+        "fixed-cost form (empty tail) must still parse"
+    );
+    // An unrecognized rider after the closing quote must be declined.
+    assert!(
+        parse_static_line_multi(
+            "Each artifact you control is an Equipment with equip {1} and \"Equipped creature gets +1/+1,\" and it gains flying."
+        )
+        .is_empty(),
+        "an unrecognized trailing rider must fail closed, not be silently dropped"
+    );
+    // A rider AFTER the recognized mana-value binding must also fail closed — the
+    // binding is matched exactly (full consumption), not by substring.
+    assert!(
+        parse_static_line_multi(
+            "Each noncreature artifact is an Equipment with equip {X} and \"Equipped creature gets +X/+0,\" where X is that artifact's mana value, and it gains flying."
+        )
+        .is_empty(),
+        "extra rules text after the mana-value binding must fail closed"
+    );
+}
+
+// Issue #4770 sibling — Sugar Coat: "Enchanted permanent is a colorless Food
+// artifact with "..." and loses all other card types and abilities." Same class
+// as Imprisoned in the Moon but with a SUBTYPE (Food) before the core type. Must
+// emit SetCardTypes(Artifact) + SetColor([]) + AddSubtype(Food) as the Layer-4
+// identity, then RemoveAllAbilities before the granted ability (Layer 6). This
+// is the subtype-before-core-type generalization of the parser.
+#[test]
+fn sugar_coat_becomes_colorless_food_artifact_with_granted_ability() {
+    let def = parse_static_line(
+        "Enchanted permanent is a colorless Food artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life\" and loses all other card types and abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Artifact],
+        }),
+        "must become an artifact: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetColor { colors: vec![] }),
+        "must become colorless: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Food".to_string(),
+        }),
+        "must gain the Food subtype (subtype-before-core-type sibling shape): {mods:?}"
+    );
+    // CR 205.1a: setting a subtype replaces existing subtypes from the same set,
+    // so the artifact subtype set must be wiped BEFORE AddSubtype(Food) — else a
+    // host that was already (say) a Clue would end up "Clue Food artifact".
+    let wipe_idx = mods
+        .iter()
+        .position(|m| {
+            matches!(
+                m,
+                ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Artifact
+                }
+            )
+        })
+        .expect("must wipe the artifact subtype set before adding Food (CR 205.1a)");
+    let add_food_idx = mods
+        .iter()
+        .position(
+            |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Food"),
+        )
+        .expect("must add Food");
+    assert!(
+        wipe_idx < add_food_idx,
+        "RemoveAllSubtypes(Artifact) must precede AddSubtype(Food): {mods:?}"
+    );
+    let remove_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::RemoveAllAbilities))
+        .expect("must strip the permanent's own abilities");
+    let grant_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("must grant the quoted sacrifice ability");
+    assert!(
+        remove_idx < grant_idx,
+        "RemoveAllAbilities must precede GrantAbility so the granted ability survives: {mods:?}"
+    );
 }
 
 #[test]
@@ -16714,6 +17932,55 @@ fn parse_arcane_adaptation_adds_chosen_creature_type() {
     );
 }
 
+// CR 305.6 + CR 205.1b: land-axis counterpart of Arcane Adaptation. Realmwright's
+// "Lands you control are the chosen type in addition to their other types" adds the
+// chosen BASIC LAND TYPE additively (single AddChosenSubtype{BasicLandType}, no
+// wipe) to lands the source's controller controls — mirroring the creature path's
+// AddChosenSubtype{CreatureType}.
+#[test]
+fn parse_chosen_land_type_adds_chosen_basic_land_type() {
+    let def = parse_static_line(
+        "Lands you control are the chosen type in addition to their other types.",
+    )
+    .unwrap();
+    assert_eq!(
+        &def.modifications,
+        &vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::BasicLandType,
+        }],
+        "additive land form must be a single AddChosenSubtype{{BasicLandType}}: {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "affected must be you-control: {tf:?}"
+            );
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Land)),
+                "affected must be lands (not creatures): {tf:?}"
+            );
+        }
+        other => panic!("expected Typed land filter, got {other:?}"),
+    }
+    // The bare-creature form must NOT be claimed by the land handler.
+    assert!(
+        parse_static_line(
+            "Creatures you control are the chosen type in addition to their other types."
+        )
+        .unwrap()
+        .modifications
+        .contains(&ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }),
+        "creature form must still route to the creature-type handler"
+    );
+}
+
 // CR 205.1a + CR 607.2d: full Conspiracy oracle. The battlefield SET static must be
 // present (composed RemoveAllSubtypes + AddChosenSubtype) AND the non-battlefield
 // "the same is true for ..." tail must surface as an Unimplemented residual (the
@@ -18872,6 +20139,38 @@ fn cant_be_activated_self_ref_mana_exemption_suffix() {
 }
 
 #[test]
+fn cant_be_activated_self_ref_typographic_apostrophe_keeps_mana_exemption() {
+    // CR 605.1a (issue #4999 follow-up): the self-reference activation-prohibition
+    // branch must accept the U+2019 apostrophe in BOTH the predicate ("can't be
+    // activated") and the exemption suffix ("unless they're mana abilities"). Before
+    // routing the predicate through the shared dual-apostrophe combinator, a U+2019
+    // printing failed the `activated abilities can't be activated` scan (dropping the
+    // whole static) or recorded `ActivationExemption::None` (wrongly blocking mana
+    // abilities). Revert-failing: restore the straight-only predicate scan/tag and
+    // this parses to `None` or drops the exemption.
+    let def = parse_static_line(
+        "Its activated abilities can\u{2019}t be activated unless they\u{2019}re mana abilities.",
+    )
+    .expect("U+2019 self-reference CantBeActivated with mana exemption should parse");
+    match def.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+        } => {
+            assert_eq!(who, ProhibitionScope::AllPlayers);
+            assert_eq!(source_filter, TargetFilter::SelfRef);
+            assert_eq!(
+                exemption,
+                ActivationExemption::ManaAbilities,
+                "U+2019 predicate + suffix must still carve out mana abilities"
+            );
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+}
+
+#[test]
 fn cant_be_activated_compound_aura_mana_exemption_suffix() {
     let defs = parse_static_line_multi(
         "Enchanted permanent can't attack or block, and its activated abilities can't be activated unless they're mana abilities.",
@@ -19143,6 +20442,59 @@ fn cant_be_activated_pithing_needle_chosen_name_with_mana_exemption() {
         }
         other => panic!("expected CantBeActivated, got {other:?}"),
     }
+}
+
+#[test]
+fn cant_be_activated_chosen_name_typographic_apostrophe_keeps_mana_exemption() {
+    // CR 605.1a (issue #4999): MTGJSON oracle text carries the U+2019 apostrophe.
+    // With the straight-apostrophe-only predicate/suffix, a U+2019 printing dropped
+    // the "unless they're mana abilities" carve-out (or failed to parse entirely),
+    // wrongly blocking mana abilities. Both the predicate ("can't be activated")
+    // and the exemption suffix ("unless they're …") must accept the typographic
+    // glyph. Revert-failing: restore the straight-only tags and this parses to
+    // `None` (predicate) or `ActivationExemption::None` (suffix).
+    let def = parse_static_line(
+        "Activated abilities of sources with the chosen name can\u{2019}t be activated \
+         unless they\u{2019}re mana abilities.",
+    )
+    .expect("U+2019 Pithing Needle Oracle text should parse");
+    match def.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+        } => {
+            assert_eq!(who, ProhibitionScope::AllPlayers);
+            assert_eq!(source_filter, TargetFilter::HasChosenName);
+            assert_eq!(
+                exemption,
+                ActivationExemption::ManaAbilities,
+                "U+2019 exemption suffix must still carve out mana abilities"
+            );
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+}
+
+#[test]
+fn mana_ability_exemption_suffix_accepts_both_apostrophes() {
+    // CR 605.1a (issue #4999): the shared exemption-suffix combinator — the single
+    // authority all "can't be activated" / "cost {N} more to activate" sites route
+    // through — must match either apostrophe glyph and reject a non-mana carve-out.
+    for input in [
+        " unless they're mana abilities",
+        " unless they\u{2019}re mana abilities",
+    ] {
+        let (rest, ()) = super::shared::parse_mana_ability_exemption_suffix(input)
+            .unwrap_or_else(|_| panic!("{input:?} should match the mana-ability exemption"));
+        assert!(rest.is_empty(), "{input:?} should fully consume");
+    }
+    // A non-mana exemption must not match (no false positive).
+    assert!(
+        super::shared::parse_mana_ability_exemption_suffix(" unless they're loyalty abilities")
+            .is_err(),
+        "only the mana-ability carve-out should match"
+    );
 }
 
 #[test]
@@ -23912,6 +25264,69 @@ fn enchanted_permanent_is_ongoing_grants_supertype() {
     );
 }
 
+/// CR 604.1 + CR 611.3a + CR 613.4c + CR 122.1 + CR 109.4: High Sentinels of
+/// Arashin — "~ gets +1/+1 for each other creature you control with a +1/+1
+/// counter on it." The controller scope ("you control") and the counter
+/// qualifier ("with a +1/+1 counter on it") both trail the type word; the "for
+/// each" grammar previously had no combinator for a controller-scoped count
+/// gated on a counter predicate, so this dynamic pump failed to parse and the
+/// whole modification was dropped.
+#[test]
+fn static_self_dynamic_pump_for_each_other_creature_you_control_with_counter() {
+    let def = parse_static_line(
+        "~ gets +1/+1 for each other creature you control with a +1/+1 counter on it.",
+    )
+    .expect("High Sentinels of Arashin's dynamic pump must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    let is_expected_count = |value: &QuantityExpr| -> bool {
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } = value
+        else {
+            return false;
+        };
+        tf.controller == Some(ControllerRef::You)
+            && tf.type_filters == vec![TypeFilter::Creature]
+            && tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another))
+            && tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::Counters {
+                        counters: crate::types::counter::CounterMatch::OfType(
+                            CounterType::Plus1Plus1
+                        ),
+                        ..
+                    }
+                )
+            })
+    };
+
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddDynamicPower { value } if is_expected_count(value))));
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { value } if is_expected_count(value))));
+    assert!(
+        !def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+        def.modifications
+    );
+}
+
 // --- Granted hand-zone alt-cost keyword tests (Dream Devourer foretell,
 // Aminatou miracle; CR 702.143a / CR 702.94a / CR 601.2f / CR 113.6b) ---
 
@@ -24123,5 +25538,136 @@ fn granted_cast_keyword_zone_gate_declines_mismatches() {
         try_parse_graveyard_keyword_grant_clause("Each enchantment card in your hand has miracle.")
             .is_some(),
         "miracle functions from hand -- a hand subject must be accepted"
+    );
+}
+
+// ── Ood Sphere (WHO Planechase plane): "Noncreature spells have convoke." ──
+// CR 702.51a + CR 113.6b: the NON-possessive, all-players casting-keyword grant
+// must emit `StaticMode::CastWithKeyword` (the only mode the casting-keyword
+// path reads) with a CONTROLLER-AGNOSTIC affected filter — NOT the runtime-inert
+// anthem `AddKeyword` continuous static, and NOT `ControllerRef::You` scoping.
+
+#[test]
+fn noncreature_spells_have_convoke_grants_cast_with_keyword_all_players() {
+    // The ability-word "Song of the Ood — " label is stripped before this parser
+    // runs, so it receives the bare grant sentence.
+    let def = parse_static_line("Noncreature spells have convoke.")
+        .expect("noncreature-spells-have-convoke must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Convoke
+        },
+        "must be a casting-keyword grant, not an anthem AddKeyword: {def:?}"
+    );
+    assert!(
+        def.active_zones.contains(&Zone::Battlefield),
+        "active zones must include Battlefield (Command is appended by planechase synthesis): {:?}",
+        def.active_zones
+    );
+    match def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(
+                tf.controller, None,
+                "all-players grant must NOT scope to ControllerRef::You"
+            );
+            assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)
+                )),
+                "affected filter must be noncreature: {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected a Typed affected filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_spells_have_keyword_all_players_building_block() {
+    // Building block: any "[type] spells have [keyword]" (no possessive) form.
+    let def = parse_static_line("Artifact spells have flash.")
+        .expect("artifact-spells-have-flash must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        },
+        "{def:?}"
+    );
+    match def.affected {
+        Some(TargetFilter::Typed(tf)) => assert_eq!(
+            tf.controller, None,
+            "all-players grant stays controller-agnostic"
+        ),
+        other => panic!("expected Typed affected, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_spells_have_keyword_all_players_building_block() {
+    let def = parse_static_line("Spells have flash.").expect("spells-have-flash must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        },
+        "{def:?}"
+    );
+}
+
+#[test]
+fn creatures_you_control_have_flying_stays_anthem_not_cast_keyword() {
+    // Negative: a battlefield anthem ("creatures you control have flying") must
+    // NOT be claimed by the spell-keyword-grant path — its subject is not spells.
+    assert!(
+        parse_spells_have_keyword_for_test("Creatures you control have flying.").is_none(),
+        "creatures-have-flying is a battlefield anthem, not a casting-keyword grant"
+    );
+}
+
+/// CR 205.3 + CR 208.2 + CR 604.3: Subgoyf's full CDA line (self-name → `~`,
+/// reminder text stripped upstream) — power is the distinct non-creature
+/// subtype count across all graveyards; toughness is that number PLUS 1 (the
+/// `*/1+*` split). Reverting the `both`-branch offset makes toughness bare
+/// `qty`, flipping the second assertion.
+#[test]
+fn subgoyf_cda_power_is_bare_count_toughness_is_count_plus_one() {
+    let def = parse_static_line(
+        "~'s power and toughness are each equal to the number of different subtypes \
+         other than creature types among cards in all graveyards and its toughness \
+         is equal to that number plus 1.",
+    )
+    .expect("Subgoyf CDA P/T line must parse");
+
+    let distinct_subtypes = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctSubtypes {
+            source: CardTypeSetSource::Zone {
+                zone: ZoneRef::Graveyard,
+                scope: CountScope::All,
+            },
+            exclude: SubtypeExclusion::CreatureTypes,
+        },
+    };
+
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetDynamicPower {
+                value: distinct_subtypes.clone(),
+            }),
+        "power must be the bare distinct-subtype count, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetDynamicToughness {
+                value: QuantityExpr::Offset {
+                    inner: Box::new(distinct_subtypes),
+                    offset: 1,
+                },
+            }),
+        "toughness must be count + 1 (the +1 offset), got {:?}",
+        def.modifications
     );
 }

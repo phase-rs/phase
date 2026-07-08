@@ -177,9 +177,12 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // NOT registry-keyed (mirrors CantBeBlockedBy). Coverage support is via
     // coverage::is_data_carrying_static; runtime enforcement is direct-match in
     // combat.rs declare-blockers validation.
-    // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
-    // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
-    registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);
+    // CR 509.1c: MustBeBlockedByAll is now a parameterized, data-carrying variant
+    // (`blockers: Option<TargetFilter>` — None = all creatures (Lure), Some =
+    // only matching creatures (Talruum Piper flying, Marble Priest Walls)) — it
+    // cannot be an exact HashMap key, so it is NOT registry-keyed (mirrors
+    // MustBeBlocked). Coverage support is via coverage::is_data_carrying_static;
+    // runtime enforcement is direct-match in combat.rs declare-blockers validation.
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
@@ -1728,7 +1731,9 @@ pub(crate) fn static_filter_matches(
                         // in which to resolve a target player. Fail closed — the
                         // parser never emits this variant for static filters.
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
-                        crate::types::ability::ControllerRef::TargetPlayer => false,
+                        // CR 109.4: TargetOpponent fails closed identically here.
+                        crate::types::ability::ControllerRef::TargetPlayer
+                        | crate::types::ability::ControllerRef::TargetOpponent => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::ParentTargetOwner => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
@@ -1741,6 +1746,11 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TriggeringPlayer => false,
                         // CR 303.4b: Enchanted-player scope has no static context. Fail closed.
                         crate::types::ability::ControllerRef::EnchantedPlayer => false,
+                        // CR 102.1: the active player, resolvable directly from
+                        // `state.active_player`.
+                        crate::types::ability::ControllerRef::ActivePlayer => {
+                            state.active_player == player_id
+                        }
                     };
                 }
                 return true;
@@ -1757,6 +1767,15 @@ pub(crate) fn static_filter_matches(
             // fails open and locks every player whenever any creature carries a
             // granted `CantGainLife`.
             TargetFilter::SpecificObject { .. } | TargetFilter::SelfRef => return false,
+            // CR 607.2d / CR 607.2m (by analogy): a player-scoped static restricted
+            // to "players who last chose <anchor>" (Two Streams Facility's
+            // land-drop grant) admits ONLY the players whose durable per-player
+            // choice records that label. This explicit arm MUST precede the
+            // fail-open `_ => return true` below — otherwise the grant would leak
+            // to every player regardless of their anchor.
+            TargetFilter::PlayerWhoChoseLabel { label } => {
+                return crate::game::players::player_last_chose_label(state, player_id, label)
+            }
             _ => return true,
         }
     }
@@ -1777,10 +1796,13 @@ pub fn additional_land_drops(state: &GameState, player: PlayerId) -> u8 {
 
     let mut total: u8 = 0;
 
-    // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out
-    // / command-zone / condition gate, so Azusa phased out correctly stops
-    // granting land drops.
-    for (obj, def) in battlefield_active_statics(state) {
+    // CR 702.26b + CR 604.1 + CR 311.2 / CR 312.2: `game_active_statics` chains
+    // command-zone sources through `active_static_definitions`, whose command
+    // gate admits an active plane's opt-in land-drop static (Two Streams
+    // Facility) alongside battlefield permanents — while still owning the
+    // phased-out (Azusa) and per-static condition gates, so a phased-out or
+    // condition-failing land-drop grant still stops correctly.
+    for (obj, def) in game_active_statics(state) {
         // CR 305.2: Determine the additional land count from the variant.
         let count = match def.mode {
             StaticMode::MayPlayAdditionalLand => 1,

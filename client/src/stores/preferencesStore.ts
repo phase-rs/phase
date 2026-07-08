@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { GameFormat, MatchType, Phase } from "../adapter/types";
+import type { GameFormat, MatchType, PhaseStop } from "../adapter/types";
 import type { CommanderBracket } from "../types/bracket";
 import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
@@ -306,6 +306,7 @@ function buildDefaultPreferences(): PreferencesState {
     lastPlayerCount: 2,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
+    dismissedReportCardNudge: false,
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
     flexLayout: defaultFlexLayout(),
@@ -333,7 +334,7 @@ interface PreferencesState {
    *  for the full list. Each event's category is resolved via `eventCategory()`
    *  and the matching multiplier scales its base duration. */
   pacingMultipliers: Record<PacingCategory, number>;
-  phaseStops: Phase[];
+  phaseStops: PhaseStop[];
   masterVolume: number;
   sfxVolume: number;
   musicVolume: number;
@@ -396,6 +397,7 @@ interface PreferencesState {
   lastPlayerCount: number;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
+  dismissedReportCardNudge: boolean;
   artChain: ArtChainEntry[];
   artOverrides: Record<string, CardArtOverride>;
   /** Persisted board layout (grid bands + per-widget offsets + active preset).
@@ -428,7 +430,7 @@ interface PreferencesActions {
    *  audio levels, board background — everything except persisted multiplayer
    *  reconnect state, which is owned by `multiplayerStore`. */
   resetAllPreferences: () => void;
-  setPhaseStops: (stops: Phase[]) => void;
+  setPhaseStops: (stops: PhaseStop[]) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
   setMusicVolume: (vol: number) => void;
@@ -468,6 +470,7 @@ interface PreferencesActions {
   setLastPlayerCount: (count: number) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
+  setDismissedReportCardNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
   removeArtChainEntry: (index: number) => void;
   moveArtChainEntry: (fromIndex: number, toIndex: number) => void;
@@ -650,6 +653,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
+      setDismissedReportCardNudge: (dismissed) => set({ dismissedReportCardNudge: dismissed }),
       addArtChainEntry: (entry) =>
         set((state) => {
           const isDuplicate = state.artChain.some((e) =>
@@ -760,7 +764,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 22,
+      version: 24,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -805,6 +809,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v21 → v22: Add telemetryEnabled; legacy stores default to `true` (opt-out,
       //          identity-free crash & usage telemetry) via the shallow merge —
       //          no explicit migration block needed (see flexLayout precedent).
+      // v22 → v23: phaseStops gained a turn-direction scope; each legacy bare
+      //          Phase string maps to a scoped stop defaulting to "AllTurns"
+      //          (fire on every turn = the old behavior).
+      // v23 → v24: Add dismissedReportCardNudge; legacy stores default to `false`
+      //          (nudge not yet dismissed) via the shallow merge — no explicit
+      //          migration block needed (see telemetryEnabled precedent).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -943,6 +953,19 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
 
         if (version < 21) {
           migrated = { ...migrated, multiplayerBoardLayout: "focused" };
+        }
+
+        // v22 → v23: phase stops gained a turn-direction scope. Map each legacy
+        // bare Phase string to a scoped stop defaulting to "AllTurns" (fire on
+        // every turn = the old behavior). Non-array values reset to [].
+        if (version < 23) {
+          const legacy = (migrated as { phaseStops?: unknown }).phaseStops;
+          migrated = {
+            ...migrated,
+            phaseStops: Array.isArray(legacy)
+              ? legacy.map((p) => (typeof p === "string" ? { phase: p, scope: "AllTurns" } : p))
+              : [],
+          };
         }
 
         return migrated;

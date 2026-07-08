@@ -17,6 +17,8 @@ export interface TriageItem {
   thread_name: string;
   message_id: string;
   cards: string[];
+  /** Trusted `[[Card]]` / Scryfall-link subset of `cards` (see ./types.ts). */
+  explicitCards?: string[];
   summary: string;
   extraction_confidence: number;
   source_url: string;
@@ -188,6 +190,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -208,6 +211,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -228,6 +232,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -248,6 +253,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -280,6 +286,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -300,6 +307,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           thread_name: r.thread_name,
           message_id: r.message_id,
           cards: r.cards,
+          explicitCards: r.explicitCards,
           summary,
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
@@ -338,6 +346,7 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
         thread_name: r.thread_name,
         message_id: r.message_id,
         cards: r.cards,
+        explicitCards: r.explicitCards,
         summary,
         extraction_confidence: r.extraction_confidence,
         source_url: sourceUrl,

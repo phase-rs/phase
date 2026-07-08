@@ -197,12 +197,15 @@ fn resolve_put_sticker(
         .collect();
     super::choose_one_of::prompt_next(
         state,
-        ability.controller,
-        ability.source_id,
-        branches,
-        ability.targets.clone(),
-        ability.context.clone(),
-        vec![ability.controller],
+        super::choose_one_of::PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            players: vec![ability.controller],
+        },
     );
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::PutSticker,
@@ -259,12 +262,15 @@ fn prompt_count_choice(
 
     super::choose_one_of::prompt_next(
         state,
-        ability.controller,
-        ability.source_id,
-        branches,
-        ability.targets.clone(),
-        ability.context.clone(),
-        vec![ability.controller],
+        super::choose_one_of::PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            replacement_applied: ability.replacement_applied.clone(),
+            players: vec![ability.controller],
+        },
     );
 }
 

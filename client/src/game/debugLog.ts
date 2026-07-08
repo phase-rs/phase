@@ -6,11 +6,15 @@ import { useGameStore } from "../stores/gameStore";
  * Shows up inline with game events, styled distinctly as "Debug" category.
  * Also logs to console for environments where dev tools are available.
  */
-export function debugLog(message: string, level: "warn" | "error" = "error"): void {
+type DebugLogLevel = "info" | "warn" | "error";
+
+export function debugLog(message: string, level: DebugLogLevel = "error"): void {
   if (level === "error") {
     console.error(`[Debug] ${message}`);
-  } else {
+  } else if (level === "warn") {
     console.warn(`[Debug] ${message}`);
+  } else {
+    console.info(`[Debug] ${message}`);
   }
 
   const store = useGameStore.getState();

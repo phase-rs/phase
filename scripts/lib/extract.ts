@@ -1,4 +1,6 @@
 import type { RawDiscordMessage, ReportItem } from "./types.ts";
+import { extractCardReferences, loadCardNameIndex } from "./cardNames.ts";
+import type { CardNameIndex } from "./cardNames.ts";
 
 const MECHANIC_KEYWORDS = [
   "mana",
@@ -76,16 +78,6 @@ const MECHANIC_KEYWORDS = [
   "proliferate",
 ];
 
-let cardNamesCache: Set<string> | null = null;
-
-async function loadCardNames(): Promise<Set<string>> {
-  if (cardNamesCache !== null) return cardNamesCache;
-  const file = Bun.file("client/public/card-data.json");
-  const data = (await file.json()) as Record<string, unknown>;
-  cardNamesCache = new Set(Object.keys(data));
-  return cardNamesCache;
-}
-
 function detectMechanics(text: string): string[] {
   const lower = text.toLowerCase();
   const found = new Set<string>();
@@ -95,13 +87,25 @@ function detectMechanics(text: string): string[] {
   return [...found];
 }
 
-function detectCards(text: string, cardNames: Set<string>): string[] {
+interface DetectedCards {
+  /** All detected card keys: the substring scan plus explicit references. */
+  cards: string[];
+  /** Keys from `[[...]]` / Scryfall URLs — trusted, no single-word false positives. */
+  explicitCards: string[];
+}
+
+function detectCards(text: string, index: CardNameIndex): DetectedCards {
   const lower = text.toLowerCase();
   const found = new Set<string>();
-  for (const name of cardNames) {
+  for (const name of index.rawKeys) {
     if (lower.includes(name)) found.add(name);
   }
-  return [...found];
+  // Explicit references ([[Card]], Scryfall links) resolve names the substring
+  // scan can't — truncated / punctuation-heavy / brand-new — and are trusted at
+  // publish time. They always join `cards` so parser-status and dedup see them.
+  const explicitCards = extractCardReferences(text, index);
+  for (const key of explicitCards) found.add(key);
+  return { cards: [...found], explicitCards };
 }
 
 function isClarificationOrFollowUp(content: string): boolean {
@@ -151,10 +155,26 @@ function scoreConfidence(
   return 0.4;
 }
 
-function extractSummary(content: string): string {
-  const firstSentenceEnd = content.search(/[.!?]/);
-  if (firstSentenceEnd !== -1 && firstSentenceEnd < 200) {
-    return content.slice(0, firstSentenceEnd + 1).trim();
+export function extractSummary(content: string): string {
+  // Find the first REAL sentence end, ignoring `.` that is not a boundary:
+  // inside a URL, inside a `[[card]]` reference, or part of an ellipsis. Without
+  // this, "[[welcome to...]]" truncates to the garbage summary "[[welcome to.".
+  const masks: Array<[number, number]> = [];
+  const addMasks = (re: RegExp): void => {
+    for (const m of content.matchAll(re)) {
+      if (m.index !== undefined) masks.push([m.index, m.index + m[0].length]);
+    }
+  };
+  addMasks(/https?:\/\/\S+/g);
+  addMasks(/\[\[.+?\]\]/g);
+  addMasks(/\.\s*\.\s*\.|…/g);
+  const inMask = (i: number): boolean => masks.some(([s, e]) => i >= s && i < e);
+
+  for (let i = 0; i < content.length && i < 200; i++) {
+    const ch = content[i];
+    if ((ch === "." || ch === "!" || ch === "?") && !inMask(i)) {
+      return content.slice(0, i + 1).trim();
+    }
   }
   return content.slice(0, 150).trim();
 }
@@ -178,7 +198,7 @@ function contentHash(content: string): string {
 export async function extractReports(
   messages: RawDiscordMessage[],
 ): Promise<ReportItem[]> {
-  const cardNames = await loadCardNames();
+  const cardIndex = await loadCardNameIndex();
   const reports: ReportItem[] = [];
 
   for (const msg of messages) {
@@ -189,7 +209,7 @@ export async function extractReports(
     const isEvidenceOnly = content === "" && msg.attachments.length > 0;
 
     if (isEvidenceOnly) {
-      const cards = detectCards("", cardNames);
+      const { cards, explicitCards } = detectCards("", cardIndex);
       reports.push({
         report_id: `discord:${msg.thread_id}:${msg.message_id}:0`,
         source: "discord",
@@ -200,6 +220,7 @@ export async function extractReports(
         reported_at: msg.timestamp,
         author_name: msg.author_name,
         cards,
+        explicitCards,
         mechanics: [],
         summary: "[evidence only — no text content]",
         actual: "",
@@ -223,7 +244,7 @@ export async function extractReports(
       const text = item.replace(/^\d+[.)]\s/, "").replace(/^[-*•]\s/, "").trim();
       if (text === "") return;
 
-      const cards = detectCards(text, cardNames);
+      const { cards, explicitCards } = detectCards(text, cardIndex);
       const mechanics = detectMechanics(text);
       const hasBugDescription = text.length > 30;
       const confidence = scoreConfidence(text, cards, hasBugDescription, false);
@@ -239,6 +260,7 @@ export async function extractReports(
         reported_at: msg.timestamp,
         author_name: msg.author_name,
         cards,
+        explicitCards,
         mechanics,
         summary,
         actual: text,

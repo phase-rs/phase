@@ -219,6 +219,7 @@ describe("TargetingOverlay", () => {
           vehicle_id: 20,
           crew_power: 4,
           eligible_creatures: [21, 22],
+          contributions: [2, 3],
         },
       },
     });

@@ -3183,6 +3183,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             count: QuantityExpr::Fixed { value: 1 },
             destination: None,
             keep_count: Some(0),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
@@ -4383,6 +4384,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
                     max: max_u8,
+                    distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,
@@ -4583,17 +4585,20 @@ fn future_trigger_to_condition(t: &FutureTrigger) -> ConvResult<DelayedTriggerCo
         F::AtTheBeginningOfPlayersNextUpkeep(p) => DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: future_trigger_player_id(p)?,
+            gate: engine::types::ability::TurnGate::None,
         },
         // CR 513.1: Player-scoped end step.
         F::AtTheBeginningOfPlayersNextEndStep(p) => DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::End,
             player: future_trigger_player_id(p)?,
+            gate: engine::types::ability::TurnGate::None,
         },
         // CR 504.1: Player-scoped draw step.
         F::AtTheBeginningOfPlayersNextDrawStep(p) => {
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::Draw,
                 player: future_trigger_player_id(p)?,
+                gate: engine::types::ability::TurnGate::None,
             }
         }
         // CR 505.1: Player-scoped main phase. Both "next main phase" and
@@ -4605,6 +4610,7 @@ fn future_trigger_to_condition(t: &FutureTrigger) -> ConvResult<DelayedTriggerCo
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
                 player: future_trigger_player_id(p)?,
+                gate: engine::types::ability::TurnGate::None,
             }
         }
         // CR 508.1: Player-scoped declare attackers step.
@@ -4612,6 +4618,7 @@ fn future_trigger_to_condition(t: &FutureTrigger) -> ConvResult<DelayedTriggerCo
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::DeclareAttackers,
                 player: future_trigger_player_id(p)?,
+                gate: engine::types::ability::TurnGate::None,
             }
         }
 
@@ -4830,6 +4837,7 @@ fn convert_look_at_top(
             count,
             destination: None,
             keep_count: Some(0),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
@@ -4849,6 +4857,7 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
@@ -4867,6 +4876,7 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Graveyard),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
@@ -4888,6 +4898,7 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
@@ -4905,6 +4916,7 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Graveyard),
@@ -4965,6 +4977,7 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
@@ -4979,6 +4992,7 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
@@ -4993,6 +5007,7 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
@@ -5008,6 +5023,7 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
@@ -5023,6 +5039,7 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),

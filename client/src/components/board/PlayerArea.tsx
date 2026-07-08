@@ -280,6 +280,7 @@ export function PlayerArea({
             side="left"
             className="justify-start px-0"
             showCollapseControl={isOwnArea}
+            splitOverview={splitOverview}
           />
         </>
       ),
@@ -303,6 +304,7 @@ export function PlayerArea({
           dividerBeforeIndex={supportDividerIndex}
           className="justify-end px-0"
           showCollapseControl={isOwnArea}
+          splitOverview={splitOverview}
         />
       ),
     },
@@ -335,7 +337,9 @@ export function PlayerArea({
   const supportIdx = middleOrder.indexOf("support");
   const dividerCell: MiddleCell | null =
     Math.abs(landsIdx - supportIdx) === 1 ? (landsIdx < supportIdx ? "lands" : "support") : null;
-  const middleRowGap = splitOverview ? "gap-1" : "gap-2";
+  // Split panes get MORE row gap, not less — at a third-width the bands crowd
+  // each other visually, so breathing room does the de-cluttering.
+  const middleRowGap = "gap-2";
   const middleRowClass = `flex min-h-0 min-w-0 items-stretch justify-between ${middleRowGap}`;
   // Drag-to-reorder is enabled only in the viewer's own area while editing; the
   // resulting order persists globally and applies to every area (incl. plain
@@ -420,13 +424,13 @@ export function PlayerArea({
     </div>
   ) : null;
 
-  const areaGap = splitOverview ? "gap-1" : isCompactHeight ? "gap-0.5" : "gap-2";
+  const areaGap = splitOverview ? "gap-2.5" : isCompactHeight ? "gap-0.5" : "gap-2";
   const verticalPlacement = mode === "full"
     ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-8"
     : splitOverview
-      ? "justify-start py-0.5"
+      ? "justify-start py-1"
       : isCompactHeight ? "justify-end py-0" : "justify-end py-1";
-  const mirroredCreatureAlign = splitOverview ? "items-start" : "items-end";
+  const mirroredCreatureAlign = "items-end";
 
   return (
     <div
@@ -455,6 +459,7 @@ export function PlayerArea({
                 zone="creatures"
                 side="left"
                 className="w-full"
+                splitOverview={splitOverview}
               />
             </div>
           </>

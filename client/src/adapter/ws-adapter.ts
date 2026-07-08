@@ -33,8 +33,12 @@ export interface DeckData {
  * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
+ *
+ * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
+ *      into a MulliganDecisionPhase::BottomCards sub-phase on
+ *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 13;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -86,7 +90,7 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
   | { type: "reconnectFailed" }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult }
+  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
@@ -687,7 +691,13 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {
-          this.emit({ type: "stateChanged", state: data.state, events: data.events, legalResult: this._legalActions });
+          this.emit({
+            type: "stateChanged",
+            state: data.state,
+            events: data.events,
+            legalResult: this._legalActions,
+            logEntries: data.log_entries,
+          });
         }
         break;
       }

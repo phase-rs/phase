@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4785
-- **Total card appearances across root causes:** 4819 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4784
+- **Total card appearances across root causes:** 4818 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -41,7 +41,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 17 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 12 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
-| 31 | Other / uncategorized misparse | 6 | manual triage |
+| 31 | Other / uncategorized misparse | 5 | manual triage |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
@@ -4621,7 +4621,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (67 cards)
+### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (55 cards)
 
 **Signature.** 'perpetually' grant emitted with UntilEndOfTurn/null instead of a Perpetual duration; modification expires too soon.
 
@@ -4629,9 +4629,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Bloodsprout Talisman
 - By Elspeth's Command
-- Chronicler of Worship
 - Cottontail Caretaker
 - Courtly Provocateur
 - Creeping Tar Pit
@@ -4640,9 +4638,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Edifice of Authority
 - Effluence Devourer
 - Emperor Apatzec Intli IV
-- Ethereal Escort
 - Garruk, Wrath of the Wilds
-- Geistchanneler
 - Gitrog, Horror of Zhava
 - Goblin Trapfinder
 - Grow Old Together
@@ -4657,27 +4653,19 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Karlach, Tiefling Spellrager
 - Karlach, Tiefling Zealot
 - Kemba's Outfitter
-- Kobold Warcaller
 - Legion of Clay (duration)
-- Leonin Sanctifier
 - Lizardfolk Librarians
 - Lobelia Sackville-Baggins
 - Loose in the Park
 - Lurking Spinecrawler
 - Mapping the Maze
 - Melt Through
-- Mentor of Evos Isle
 - Mischievous Lookout
 - Niambi, Beloved Protector
-- Nightclub Bouncer
 - Paths of Tuinvale
-- Plaguecrafter's Familiar
-- Prairie Survivalist
 - Pull of the Mist Moon
 - Puppet Raiser
 - Ravenous Pursuit
-- Reckless Ringleader
-- Sap Vitality
 - Scrutiny of the Guildpact
 - Shadow of the Enemy
 - Shattered Seraph
@@ -5089,7 +5077,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 27. Cross-target group / shared-quality constraint dropped  (20 cards)
+### 27. Cross-target group / shared-quality constraint dropped  (16 cards)
 
 **Signature.** A multi-target group constraint ('from a single graveyard', 'with different names', same controller, parity) is not carried; the FilterProp/SharedQuality linkage is missing.
 
@@ -5098,10 +5086,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 <details><summary>Cards</summary>
 
 - Cannibalize
-- Carrion Beetles
-- Cease
 - Desecrate Reality
-- Ebony Charm
 - Echoing Courage
 - Echoing Decay
 - Echoing Echo
@@ -5112,7 +5097,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rashmi, Eternities Crafter
 - Soundwave, Superior Captain
 - Thanos, the Mad Titan
-- Unlicensed Hearse
 - V.A.T.S.
 - Valor's Reach Tag Team
 - Void Winnower
@@ -5148,7 +5132,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 30. Token/named-card name corrupted by normalization or overrun  (12 cards)
+### 30. Token/named-card name corrupted by normalization or overrun  (11 cards)
 
 **Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
 
@@ -5159,7 +5143,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Dragonstorm Forecaster
 - Hecatomb
 - High Marshal Arguel
-- Kookus
 - Liu Bei, Lord of Shu
 - Sift Through Sands
 - Thran Golem
@@ -5171,7 +5154,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. Other / uncategorized misparse  (6 cards)
+### 31. Other / uncategorized misparse  (5 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5182,7 +5165,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Cabal Stronghold
 - Flaccify
 - On Thin Ice
-- Open the Omenpaths
 - Rainbow Vale
 - The Great Mound
 

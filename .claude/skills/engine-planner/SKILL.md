@@ -19,6 +19,14 @@ A task description: parser enhancement/fix, or engine mechanic enhancement/fix. 
 
 Complete every step. Do not skip any.
 
+### Step 0: Verify the premise — confirm the card's actual Oracle text
+
+**Hard gate, before any other step.** If the task references a specific card's abilities, fetch that card's real, current Oracle text from an authoritative source (Scryfall API: `https://api.scryfall.com/cards/named?exact=<URL_ENCODED_NAME>`, or MTGJSON) and compare it verbatim against what the task description claims. Do not proceed on memory, on assumed similarity to other cards, or on a task brief's paraphrase of the card's abilities without this independent check.
+
+A downloaded game-state's stored ability `description` field is a second, usually-reliable source, but it is not a substitute for checking Scryfall — a game state only reflects abilities the parser already produced (correctly or not), and can be silent about clauses that don't exist at all.
+
+**Why this is a hard gate:** a wrong premise about what a card does invalidates every subsequent step even if plan review, implementation review, and CI all pass — those loops verify that a design is *executed correctly*, not that its starting premise is *real*. A fabricated ability can survive multiple rounds of architectural review because reviewers by default trust the task brief's description of what the card does; they are not designed to fact-check the card itself. If the plan or implementation review process turns up something that looks off (e.g. a clause with no analogous card, or a CR citation that doesn't fit any existing rule), re-verify the premise before re-deriving the design.
+
 ### Step 1: Identify applicable skills
 
 Determine which skill(s) apply and read each that does:

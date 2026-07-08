@@ -72,11 +72,55 @@ fn issue_4388_gaeas_cradle_offered_on_opponents_turn_with_priority() {
 #[test]
 fn issue_4388_auto_pass_holds_priority_for_mana_on_opponents_turn() {
     use engine::ai_support::{auto_pass_recommended, flat_priority_actions};
+    use engine::types::mana::{ManaCost, ManaCostShard};
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let _cradle = scenario
+    let cradle = scenario
+        .add_creature(P0, "Gaea's Cradle", 0, 0)
+        .as_artifact()
+        .from_oracle_text(GAEAS_CRADLE_ORACLE)
+        .id();
+    let _bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    // A castable {G} instant gives the Cradle mana somewhere to go — this is
+    // what makes the priority window meaningful (CR 117.1d + CR 601.2g).
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Bolt", true, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        });
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    // Reach-guard FIRST: the Cradle mana action must actually be offered, so a
+    // green HOLD assertion below reflects a real opponent-turn priority window.
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    assert!(
+        cradle_has_mana_action(&grouped, cradle),
+        "precondition: Cradle mana is offered; grouped={grouped:?}"
+    );
+    assert!(
+        !auto_pass_recommended(runner.state(), &flat_priority_actions(runner.state())),
+        "CR 117.1d: castable instant + Cradle mana on opponent's turn → hold (#4388)"
+    );
+}
+
+#[test]
+fn issue_4388_auto_pass_releases_priority_for_lone_mana_on_opponents_turn() {
+    use engine::ai_support::{auto_pass_recommended, flat_priority_actions};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let cradle = scenario
         .add_creature(P0, "Gaea's Cradle", 0, 0)
         .as_artifact()
         .from_oracle_text(GAEAS_CRADLE_ORACLE)
@@ -91,10 +135,17 @@ fn issue_4388_auto_pass_holds_priority_for_mana_on_opponents_turn() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
 
-    let flat = flat_priority_actions(runner.state());
+    // Reach-guard FIRST: the Cradle mana is still genuinely activatable...
+    let (_, _, grouped) = legal_actions_full(runner.state());
     assert!(
-        !auto_pass_recommended(runner.state(), &flat),
-        "CR 117.1d: auto-pass must not fire on opponent's turn when mana is activatable (#4388)"
+        cradle_has_mana_action(&grouped, cradle),
+        "precondition: Cradle mana is offered; grouped={grouped:?}"
+    );
+    // ...but with an empty hand there is nothing to spend it on, so auto-pass
+    // fires (#4388 narrowing — mana permission is not an obligation to stop).
+    assert!(
+        auto_pass_recommended(runner.state(), &flat_priority_actions(runner.state())),
+        "lone Cradle with empty hand on opponent's turn → auto-pass (#4388 narrowing)"
     );
 }
 
