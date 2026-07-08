@@ -1695,6 +1695,189 @@ fn wayta_does_not_double_unrelated_triggers() {
     );
 }
 
+/// Install Cloud, Midgar Mercenary with its parsed trigger-doubler static.
+/// The static is `DoubleTriggers{cause:Any}` scoped to `affected =
+/// Or[SelfRef, Typed(Equipment, AttachedToSource)]` and gated on
+/// `condition = SourceIsEquipped` — exercising the real parser output.
+fn install_cloud(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(120),
+        PlayerId(0),
+        "Cloud, Midgar Mercenary".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.static_definitions.push(
+        crate::parser::oracle_static::parse_static_line(
+            "As long as ~ is equipped, if a triggered ability of ~ or an Equipment attached to it triggers, that ability triggers an additional time.",
+        )
+        .expect("expected Cloud trigger-doubler static"),
+    );
+    id
+}
+
+/// Attach an Equipment (subtype "Equipment") to `host`, optionally carrying an
+/// attacks-mode draw trigger that fires on any AttackersDeclared event. When
+/// `with_trigger` is false it only satisfies the `SourceIsEquipped` gate.
+fn attach_equipment(
+    state: &mut GameState,
+    host: ObjectId,
+    card: CardId,
+    with_trigger: bool,
+) -> ObjectId {
+    let id = create_object(
+        state,
+        card,
+        PlayerId(0),
+        "Buster Sword".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.attached_to = Some(host.into());
+        if with_trigger {
+            let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+            trigger.valid_card = Some(TargetFilter::Any);
+            obj.trigger_definitions.push(trigger);
+        }
+    }
+    state.objects.get_mut(&host).unwrap().attachments.push(id);
+    id
+}
+
+fn count_triggers_from(state: &GameState, source: ObjectId) -> usize {
+    state.stack.iter().filter(|e| e.source_id == source).count()
+}
+
+fn attack_event(attacker: ObjectId) -> GameEvent {
+    GameEvent::AttackersDeclared {
+        attacker_ids: vec![attacker],
+        defending_player: PlayerId(1),
+        attacks: vec![(
+            attacker,
+            crate::game::combat::AttackTarget::Player(PlayerId(1)),
+        )],
+    }
+}
+
+/// CR 603.2d + CR 301.5a: An Equipment attached to an equipped Cloud has its
+/// trigger doubled — the `affected` `Typed(Equipment, AttachedToSource)` arm
+/// matches the attachment, and the `SourceIsEquipped` gate holds. Confirms the
+/// narrowed affected filter still covers the attached-Equipment case.
+#[test]
+fn cloud_doubles_attached_equipment_trigger_when_equipped() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    let equip = attach_equipment(&mut state, cloud, CardId(121), true);
+    let attacker = make_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+    process_triggers(&mut state, &[attack_event(attacker)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, equip),
+        2,
+        "Cloud must double an attached Equipment's trigger while equipped"
+    );
+}
+
+/// CR 603.2d: Self-inclusion — Cloud's OWN triggered ability is doubled while
+/// equipped, because its `affected` filter references the source (`~`), so the
+/// self-exclusion carve-out fires. Discriminating: reverting the runtime
+/// `affected_references_self` gate (or the SelfRef affected arm) re-applies the
+/// unconditional self-exclusion and this drops to 1.
+#[test]
+fn cloud_doubles_its_own_trigger_when_equipped_self_inclusion() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    {
+        let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&cloud)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+    }
+    // Equip Cloud (plain Equipment, no trigger of its own) to satisfy the gate.
+    let _equip = attach_equipment(&mut state, cloud, CardId(122), false);
+    let attacker = make_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+    process_triggers(&mut state, &[attack_event(attacker)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, cloud),
+        2,
+        "equipped Cloud must double its OWN triggered ability (self-inclusion)"
+    );
+}
+
+/// CR 301.5a: Unequipped Cloud does NOT double — the `SourceIsEquipped`
+/// condition gates the static off. Discriminating: reverting the dispatch
+/// condition re-attachment leaves `condition: None`, the static stays active,
+/// self-inclusion fires, and Cloud's own trigger doubles to 2.
+#[test]
+fn cloud_does_not_double_when_unequipped() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    {
+        let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&cloud)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+    }
+    // No Equipment attached → SourceIsEquipped is false.
+    let attacker = make_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+    process_triggers(&mut state, &[attack_event(attacker)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, cloud),
+        1,
+        "unequipped Cloud must not double — SourceIsEquipped gate is unmet"
+    );
+}
+
+/// CR 603.2d: An unrelated permanent you control (not Cloud, not an Equipment
+/// attached to Cloud) is NOT doubled even while Cloud is equipped — the
+/// `affected` filter narrows to self + attached Equipment. Discriminating:
+/// reverting the SelfRef/Equipment affected arms leaves `affected: None`, which
+/// over-doubles every controlled trigger and this rises to 2.
+#[test]
+fn cloud_does_not_double_unrelated_controlled_trigger() {
+    let mut state = setup();
+    let cloud = install_cloud(&mut state);
+    let _equip = attach_equipment(&mut state, cloud, CardId(123), false);
+    // Unrelated creature you control with its own attacks-mode trigger.
+    let unrelated = make_creature(&mut state, PlayerId(0), "Chocobo", 2, 2);
+    {
+        let mut trigger = draw_one_trigger(TriggerMode::Attacks);
+        trigger.valid_card = Some(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&unrelated)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+    }
+
+    process_triggers(&mut state, &[attack_event(unrelated)]);
+    super::drain_order_triggers_with_identity(&mut state);
+    assert_eq!(
+        count_triggers_from(&state, unrelated),
+        1,
+        "Cloud must not double an unrelated controlled permanent's trigger"
+    );
+}
+
 /// CR 603.4 + CR 701.9: Intervening-if "if an opponent discarded a card this
 /// turn" evaluates against the per-turn discard counts. Verifies both the
 /// positive (opponent discarded → condition met) and negative (no opponent

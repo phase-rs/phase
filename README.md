@@ -19,19 +19,29 @@
 
 <!-- coverage-badges:start -->
 <p align="center">
-  <img alt="Card Coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fcoverage.json">
-  <img alt="Keywords" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fkeywords.json">
-  <img alt="Cards" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fcards.json">
+  <img alt="Card Coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fcoverage.json">
+  <img alt="Keywords" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fkeywords.json">
+  <img alt="Cards" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fcards.json">
   <br/>
-  <img alt="Pauper" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-pauper.json">
-  <img alt="Pioneer" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-pioneer.json">
-  <img alt="Modern" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-modern.json">
-  <img alt="Standard" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-standard.json">
-  <img alt="Legacy" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-legacy.json">
-  <img alt="Vintage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-vintage.json">
-  <img alt="Commander" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-commander.json">
+  <img alt="Pauper" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-pauper.json">
+  <img alt="Pioneer" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-pioneer.json">
+  <img alt="Modern" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-modern.json">
+  <img alt="Standard" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-standard.json">
+  <img alt="Legacy" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-legacy.json">
+  <img alt="Vintage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-vintage.json">
+  <img alt="Commander" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fdata.phase-rs.dev%2Fbadges%2Fformat-commander.json">
 </p>
 <!-- coverage-badges:end -->
+
+<p align="center">
+  <a href="https://gittensor.io/miners/repository?name=phase-rs%2Fphase">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg">
+      <img src="https://raw.githubusercontent.com/phase-rs/phase/gittensor-impact-assets/gittensor-impact-light.svg" alt="Gittensor contributor impact for phase.rs" width="600">
+    </picture>
+  </a>
+</p>
 
 ---
 
@@ -163,6 +173,7 @@ Docker uses environment variables for the common options:
 | `PHASE_LOBBY_ONLY` | `--lobby-only` | false | Matchmaking broker mode |
 | `PHASE_LOG_JSON` | `--log-json` | false | Emit JSON logs |
 | `PHASE_LOG_DIR` | `--log-dir` | stdout | Write logs to files |
+| `PHASE_ADMIN_TOKEN` | — | unset | Bearer token for `/admin/*` endpoints (environment variable only; no CLI flag). Unset ⇒ admin routes disabled (404). Send as `Authorization: Bearer <token>`. |
 
 You can also pass server flags after the image name:
 

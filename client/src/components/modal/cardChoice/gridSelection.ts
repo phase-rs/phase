@@ -5,9 +5,21 @@ type ObjLookup = Record<ObjectId, GameObject | undefined>;
 
 export type SortKey = "none" | "name" | "cmc" | "type" | "color";
 export type GroupKey = "none" | "type" | "color";
+// Hide-filter dimensions. `"playable"` reads the engine-provided legal-action
+// Set (never re-derived here); the type buckets are principled core-type
+// partitions — the fundamental land/nonland split (CR 305 lands are uncastable,
+// once-per-turn) plus creatures (CR 302). Display-only, like SortKey/GroupKey.
+export type FilterKey = "none" | "playable" | "creatures" | "lands" | "nonland";
 
 function primaryType(obj: GameObject | undefined): string {
   return obj?.card_types.core_types[0] ?? "";
+}
+
+// All core card types of an object (e.g. ["Artifact", "Creature"]). Membership is
+// checked across the WHOLE array — not just the primary type — so an Artifact
+// Creature counts as a creature and Dryad Arbor (a Land Creature) counts as both.
+function coreTypes(obj: GameObject | undefined): readonly string[] {
+  return obj?.card_types.core_types ?? [];
 }
 
 function primaryColor(obj: GameObject | undefined): string {
@@ -62,6 +74,34 @@ export function groupCards(
     byKey.get(k)!.push(id);
   }
   return order.map((k) => ({ key: k, ids: byKey.get(k)! }));
+}
+
+// Pure hide-filter: returns the subset of `cards` matching the active filter,
+// preserving input order; never mutates. Generic over ObjectId[] + lookup,
+// mirroring orderCards/groupCards so every consumer shares one mechanism.
+// `"playable"` consults the engine-provided Set — the engine owns legality
+// (CR 601/602); the client never re-derives what can be cast.
+export function filterCards(
+  cards: ObjectId[],
+  objects: ObjLookup,
+  filter: FilterKey,
+  playableIds: ReadonlySet<ObjectId>,
+): ObjectId[] {
+  // The "none" fast path returns above, so `filter` here is narrowed to the four
+  // active dimensions — the switch is exhaustive over that narrowed union.
+  if (filter === "none") return [...cards];
+  return cards.filter((id) => {
+    switch (filter) {
+      case "playable":
+        return playableIds.has(id);
+      case "creatures":
+        return coreTypes(objects[id]).includes("Creature");
+      case "lands":
+        return coreTypes(objects[id]).includes("Land");
+      case "nonland":
+        return !coreTypes(objects[id]).includes("Land");
+    }
+  });
 }
 
 export function applyBulk(

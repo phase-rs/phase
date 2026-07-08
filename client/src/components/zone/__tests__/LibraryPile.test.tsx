@@ -5,10 +5,11 @@ import {
   HIDDEN_CARD_NAME,
   type GameAction,
   type GameObject,
-  type GameState,
 } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
 import { LibraryPile } from "../LibraryPile.tsx";
 
 vi.mock("../../../hooks/useCardImage", () => ({
@@ -22,40 +23,15 @@ vi.mock("../../../hooks/useGameDispatch.ts", () => ({
 }));
 
 function makeObject(id: number, name: string): GameObject {
-  return {
+  return buildGameObjectWithCoreTypes(["Artifact"], {
     id,
     card_id: id,
-    owner: 0,
-    controller: 0,
     zone: "Library",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name,
-    power: null,
-    toughness: null,
-    loyalty: null,
-    card_types: { supertypes: [], core_types: ["Artifact"], subtypes: [] },
     mana_cost: { type: "Cost", shards: [], generic: 1 },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
-    color: [],
-    base_power: null,
-    base_toughness: null,
-    base_keywords: [],
-    base_color: [],
     timestamp: 1,
     entered_battlefield_turn: null,
-  };
+  });
 }
 
 function setStore({
@@ -70,44 +46,26 @@ function setStore({
   actions: GameAction[];
 }) {
   const top = makeObject(topCardId, topCardName);
-  const gameState = {
+  const gameState = buildGameState({
     active_player: 0,
-    objects: { [topCardId]: top },
-    players: [
+    objects: buildObjectMap(top),
+    players: buildPlayers([
       {
         id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
         library: [topCardId],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: canPeek,
       },
       {
         id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: false,
       },
-    ],
+    ]),
     battlefield: [],
     exile: [],
     stack: [],
-    combat: null,
     revealed_cards: [],
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 
   useGameStore.setState({
     gameState,
@@ -128,14 +86,14 @@ function castAction(objectId: number): GameAction {
   return {
     type: "CastSpell",
     data: { object_id: objectId, card_id: objectId, targets: [] },
-  } as unknown as GameAction;
+  };
 }
 
 function playLandAction(objectId: number): GameAction {
   return {
     type: "PlayLand",
     data: { object_id: objectId, card_id: objectId },
-  } as unknown as GameAction;
+  };
 }
 
 function setOpponentLibraryTop(
@@ -148,46 +106,28 @@ function setOpponentLibraryTop(
 ) {
   const topCardId = 77;
   const top = makeObject(topCardId, topCardName);
-  const gameState = {
+  const gameState = buildGameState({
     active_player: 0,
-    objects: { [topCardId]: top },
-    players: [
+    objects: buildObjectMap(top),
+    players: buildPlayers([
       {
         id: 0,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
-        library: [],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: false,
       },
       {
         id: 1,
-        life: 20,
-        poison_counters: 0,
-        mana_pool: { mana: [] },
         library: [topCardId],
-        hand: [],
-        graveyard: [],
-        has_drawn_this_turn: false,
-        lands_played_this_turn: 0,
-        turns_taken: 0,
         can_look_at_top_of_library: false,
       },
-    ],
+    ]),
     battlefield: [],
     exile: [],
     stack: [],
-    combat: null,
     revealed_cards: reveal.revealedCards ?? [],
     private_look_player: reveal.privateLookPlayer,
     private_look_ids: reveal.privateLookIds ?? [],
-    waiting_for: { type: "Priority", data: { player: 0 } },
-  } as unknown as GameState;
+    waiting_for: buildPriorityWaitingFor(),
+  });
 
   useGameStore.setState({
     gameState,

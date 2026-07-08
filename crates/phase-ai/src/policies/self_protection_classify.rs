@@ -706,6 +706,7 @@ mod tests {
                 amount: engine::types::ability::QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Player,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Player(ai)],
             spell_id,

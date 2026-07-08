@@ -1783,7 +1783,7 @@ fn build_replacement_exec(
         // the native parser shape in `oracle_replacement.rs`
         // (`parse_as_enters_choose`).
         A::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
@@ -1854,6 +1854,7 @@ fn build_replacement_exec(
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
                     max: max_u8,
+                    distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
                 selection: engine::types::ability::TargetSelectionMode::Chosen,

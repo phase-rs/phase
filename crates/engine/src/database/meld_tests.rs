@@ -45,6 +45,7 @@ fn atomic(name: &str, type_line: &str, types: &[&str], text: &str) -> AtomicCard
             scryfall_id: Some(format!("{}-face", name.to_lowercase())),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     }
 }
 

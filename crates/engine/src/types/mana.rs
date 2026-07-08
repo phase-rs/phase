@@ -322,22 +322,18 @@ pub enum PaymentContext<'a> {
 ///
 /// Only special actions that pay a mana cost *through the mana pool* with a
 /// restriction-aware payment context belong here. CR 116.2m / CR 709.5e door
-/// unlock is the first such action (its unlock cost routes through
-/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up's morph/disguise cost
-/// is not yet paid through a restriction-aware pool payment in this engine
-/// (`game::morph::turn_face_up` flips the permanent without charging the cost),
-/// so a `TurnFaceUp`-restricted mana's runtime gate
-/// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) can
-/// never be satisfied yet — it is honest-deferred (conservatively
-/// under-permitting) rather than silently over-permitting the mana. The variant
-/// exists so the restriction stays representable as a typed value even though
-/// the `TurnFaceUp` leaf is dead today: a card whose only spend restriction is
-/// turn-face-up (Overgrown Zealot) is left unabsorbed at the `Effect::Mana`
-/// seam and intentionally surfaces an `Effect::Unimplemented` gap (honest
-/// coverage red) via `ManaSpendRestriction::has_payable_branch`. Once the
-/// turn-face-up morph cost is routed through
-/// `PaymentContext::SpecialAction(TurnFaceUp)` the gate becomes live with no
-/// type change.
+/// unlock is one such action (its unlock cost routes through
+/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up is another: the
+/// `GameAction::TurnFaceUp` handler now derives the morph/disguise/manifest cost
+/// (`game::morph::turn_face_up_prepare`, CR 702.37e / CR 702.168d / CR 701.40b)
+/// and pays it through `PaymentContext::SpecialAction(TurnFaceUp)` before flipping
+/// the permanent, so a `TurnFaceUp`-restricted mana's runtime gate
+/// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) is live
+/// there and correctly rejected for every other context. A card whose spend
+/// restriction names only production-live branches (Overgrown Zealot; Creeping
+/// Peeper; and, since CR 708.4 face-down spell casting, Tin Street Gossip) is
+/// therefore absorbed at the `Effect::Mana` seam and supported via
+/// `ManaSpendRestriction::is_coverage_supported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialAction {
     /// CR 116.2m + CR 709.5e: Paying a locked Room half's unlock cost to give
@@ -350,11 +346,12 @@ pub enum SpecialAction {
     /// that plot cost without conflating plot with generic activated-ability
     /// cost reducers.
     Plot,
-    /// CR 116.2b + CR 702.37e: Paying a face-down permanent's morph/disguise
-    /// cost to turn it face up. No payment site emits
-    /// `PaymentContext::SpecialAction(TurnFaceUp)` yet (turn-face-up is free in
-    /// this engine), so a mana restricted to this action is conservatively
-    /// unspendable rather than over-permitted — see the type-level note above.
+    /// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b: Paying a face-down
+    /// permanent's morph/disguise cost (or a manifested creature card's mana cost)
+    /// to turn it face up. The `GameAction::TurnFaceUp` handler emits
+    /// `PaymentContext::SpecialAction(TurnFaceUp)` when charging that cost, so mana
+    /// restricted to this action is spendable there and rejected elsewhere — see
+    /// the type-level note above.
     TurnFaceUp,
     /// CR 901.9 / CR 116.2i: Paying the escalating generic cost to roll the
     /// planar die as a Planechase special action.
@@ -555,20 +552,16 @@ pub enum ManaRestriction {
     /// `obj.face_down = true` for a card that is nonetheless CAST FACE UP
     /// (CR 702.143c), so the gate correctly REJECTS those concealment casts.
     ///
-    /// The gate is also fail-closed today: no production path casts a face-down
-    /// spell *through spell payment* in this engine. CR 708.4 face-down play is
-    /// modeled by [`GameAction::PlayFaceDown`] → `game::morph::play_face_down`,
-    /// which moves the card hand→battlefield via the zone pipeline and charges no
-    /// mana (the `{3}` face-down cast cost, CR 702.37c, is not yet implemented).
-    /// So `SpellMeta.is_face_down` is never `true` at any `PaymentContext::Spell`
-    /// payment site, and this gate never over-permits — see
-    /// [`ManaRestriction::allows_spell`]. The restriction stays representable as a
-    /// typed value even though it is dead today: a card whose only spend
-    /// restriction is this is left unabsorbed at the `Effect::Mana` seam and
-    /// intentionally surfaces an `Effect::Unimplemented` gap (honest coverage red)
-    /// via `ManaSpendRestriction::has_payable_branch`. Once a real face-down
-    /// CAST routes its cost through `PaymentContext::Spell` with `is_face_down =
-    /// true` the gate becomes live with no type change.
+    /// The gate is now live: CR 708.4 morph/megamorph/disguise face-down spell
+    /// casting (`AlternativeCastKeyword::FaceDown` → `continue_cast_face_down`)
+    /// routes the `{3}` face-down cost (CR 702.37c) through `PaymentContext::Spell`
+    /// with `SpellMeta.is_face_down = true`, so this gate is satisfiable there and
+    /// correctly rejected for every other context — a normal face-up cast, and an
+    /// exile-concealment cast (foretell/hideaway) whose `obj.face_down = true` but
+    /// which is cast face up (CR 702.143c), both report `is_face_down = false` —
+    /// see [`ManaRestriction::allows_spell`]. A card whose spend restriction
+    /// includes this leaf is therefore absorbed at the `Effect::Mana` seam and
+    /// coverage-supported via `ManaSpendRestriction::is_coverage_supported`.
     OnlyForFaceDownSpell,
     /// CR 106.6: Disjunctive spend restriction — the mana may be spent on any
     /// payment that satisfies at least one inner restriction. Composition
@@ -1247,6 +1240,18 @@ pub enum ManaCost {
     /// The card's own mana value (CR 202.3), as generic mana only — used for
     /// "encore {X}, where X is its mana value" (Sliver Gravemother class).
     SelfManaValue,
+    /// The card's own mana cost reduced by `reduction` generic mana — used for
+    /// granted alt-cost keywords whose cost is "its mana cost reduced by {N}"
+    /// (Dream Devourer foretell = MV−2, Aminatou miracle = MV−4).
+    ///
+    /// INVARIANT: this is a pre-resolution placeholder like `SelfManaCost` /
+    /// `SelfManaValue`; it MUST be concretized by `resolve_keyword_mana_cost`
+    /// (game/keywords.rs) into a concrete `Cost` before any arithmetic path
+    /// (`plus` / `scaled` / `concretize_x`) — it never reaches them unresolved.
+    /// CR 601.2f: reduction floors at {0} and only the generic component is reduced.
+    SelfManaCostReduced {
+        reduction: u32,
+    },
 }
 
 impl ManaCost {
@@ -1263,7 +1268,22 @@ impl ManaCost {
         match self {
             ManaCost::NoCost => true,
             ManaCost::Cost { shards, generic } => shards.is_empty() && *generic == 0,
-            ManaCost::SelfManaCost | ManaCost::SelfManaValue => false,
+            ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => false,
+        }
+    }
+
+    /// CR 601.2f: reduce ONLY the generic component, saturating at 0; colored/
+    /// hybrid/X pips (shards) untouched. An alternative cost's mana component
+    /// can't be reduced below {0}.
+    pub fn reduced_by_generic(&self, reduction: u32) -> ManaCost {
+        match self {
+            ManaCost::Cost { shards, generic } => ManaCost::Cost {
+                shards: shards.clone(),
+                generic: generic.saturating_sub(reduction),
+            },
+            other => other.clone(),
         }
     }
 
@@ -1280,11 +1300,34 @@ impl ManaCost {
     /// CR 202.3f: For hybrid symbols, use the largest component.
     pub fn mana_value(&self) -> u32 {
         match self {
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
             ManaCost::Cost { shards, generic } => {
                 let shard_total: u32 = shards.iter().map(|s| s.mana_value_contribution()).sum();
                 shard_total + generic
             }
+        }
+    }
+
+    /// CR 702.143 (foretell-cost reduction) / CR 118.7: return this cost with its
+    /// generic component reduced by `reduction`'s mana value (floored at 0),
+    /// colored pips preserved. "Its foretell cost is equal to its mana cost
+    /// reduced by {2}" applied to `{4}{U}{U}` yields `{2}{U}{U}`; `{U}` yields
+    /// `{U}`; `{1}` reduced by `{2}` yields `{0}`. `NoCost` / `SelfManaCost` /
+    /// `SelfManaValue` return `self` unchanged defensively — a recipient's printed
+    /// cost is always a concrete `Cost`.
+    pub fn reduced_generic_by(&self, reduction: &ManaCost) -> ManaCost {
+        match self {
+            ManaCost::Cost { shards, generic } => ManaCost::Cost {
+                shards: shards.clone(),
+                generic: generic.saturating_sub(reduction.mana_value()),
+            },
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => self.clone(),
         }
     }
 
@@ -1297,7 +1340,10 @@ impl ManaCost {
     /// Gutsy Explorer).
     pub fn has_x(&self) -> bool {
         match self {
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => false,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => false,
             ManaCost::Cost { shards, .. } => shards.iter().any(|s| matches!(s, ManaCostShard::X)),
         }
     }
@@ -1326,7 +1372,10 @@ impl ManaCost {
                     .count();
                 i32::try_from(count).unwrap_or(i32::MAX)
             }
-            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
         }
     }
 
@@ -1689,6 +1738,44 @@ pub fn apply_empty_mana_pool_decisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 702.143: `reduced_generic_by` reduces only the generic component,
+    /// preserving colored pips and flooring at 0.
+    #[test]
+    fn reduced_generic_by_reduces_generic_and_preserves_pips() {
+        // {4}{U}{U} - {2} = {2}{U}{U}
+        let base = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue; 2],
+            generic: 4,
+        };
+        let reduced = base.reduced_generic_by(&ManaCost::generic(2));
+        assert_eq!(
+            reduced,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue; 2],
+                generic: 2,
+            }
+        );
+
+        // {U} - {2} = {U} (no generic to reduce)
+        let mono = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        assert_eq!(mono.reduced_generic_by(&ManaCost::generic(2)), mono);
+
+        // {1} - {2} = {0} (floored)
+        assert_eq!(
+            ManaCost::generic(1).reduced_generic_by(&ManaCost::generic(2)),
+            ManaCost::generic(0)
+        );
+
+        // Non-Cost variants return self unchanged.
+        assert_eq!(
+            ManaCost::NoCost.reduced_generic_by(&ManaCost::generic(2)),
+            ManaCost::NoCost
+        );
+    }
 
     fn make_unit(color: ManaType) -> ManaUnit {
         ManaUnit::new(color, ObjectId(1), false, Vec::new())

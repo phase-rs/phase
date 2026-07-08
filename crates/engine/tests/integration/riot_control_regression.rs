@@ -115,6 +115,7 @@ fn riot_control_chain_gains_life_and_prevents_damage() {
             amount: QuantityExpr::Fixed { value: 4 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Player(PlayerId(0))],
         attacker,

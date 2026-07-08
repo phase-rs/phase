@@ -71,15 +71,18 @@ function currentPromptSummary({
   if (waitingFor.type === "GameOver") return t("help.prompt.gameOver");
 
   if (waitingFor.type === "MulliganDecision") {
-    return waitingFor.data.pending.some((entry) => entry.player === playerId)
-      ? t("help.prompt.mulliganDecide")
+    const entry = waitingFor.data.pending.find((e) => e.player === playerId);
+    if (entry) {
+      return entry.phase.type === "BottomCards"
+        ? t("help.prompt.mulliganBottom")
+        : t("help.prompt.mulliganDecide");
+    }
+    const someoneBottoming = waitingFor.data.pending.some(
+      (e) => e.phase.type === "BottomCards",
+    );
+    return someoneBottoming
+      ? t("help.prompt.mulliganWaitBottom")
       : t("help.prompt.mulliganWaitDecide");
-  }
-
-  if (waitingFor.type === "MulliganBottomCards") {
-    return waitingFor.data.pending.some((entry) => entry.player === playerId)
-      ? t("help.prompt.mulliganBottom")
-      : t("help.prompt.mulliganWaitBottom");
   }
 
   if (waitingFor.type === "OpeningHandBottomCards") {

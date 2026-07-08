@@ -123,6 +123,7 @@ mod tests {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }],
             target,
             duration: None,
@@ -167,6 +168,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         ReactiveSelfProtectionPolicy.verdict(&ctx)
     }
@@ -189,6 +191,7 @@ mod tests {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }],
             target: None,
             duration: None,
@@ -227,6 +230,7 @@ mod tests {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }],
             target: None,
             duration: None,
@@ -309,6 +313,7 @@ mod tests {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
             }],
             target: None,
             duration: None,

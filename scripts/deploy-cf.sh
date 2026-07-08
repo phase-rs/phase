@@ -10,7 +10,7 @@ command -v brotli >/dev/null || { echo "ERROR: brotli required (brew install bro
 
 PROJECT_NAME="${1:-phase-rs}"
 R2_BUCKET="phase-rs-data"
-R2_PUBLIC="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+R2_PUBLIC="https://data.phase-rs.dev"
 
 export CARD_DATA_URL="${CARD_DATA_URL:-$R2_PUBLIC/card-data.json}"
 export COVERAGE_DATA_URL="${COVERAGE_DATA_URL:-$R2_PUBLIC/coverage-data.json}"
@@ -25,7 +25,7 @@ touch "$DEPLOY_CACHE"
 
 # --- Generate lightweight coverage summary for menu page ---
 echo "Generating coverage summary..."
-jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' \
+jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, token_coverage}' \
   client/public/coverage-data.json > client/public/coverage-summary.json
 
 # --- R2 uploads (run in background, parallel to WASM build) ---

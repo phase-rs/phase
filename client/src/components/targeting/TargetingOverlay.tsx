@@ -16,6 +16,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import type { GameEvent, GameObject } from "../../adapter/types.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
@@ -175,7 +176,7 @@ export function TargetingOverlay() {
   return (
     <AnimatePresence>
       <motion.div
-        className="pointer-events-none fixed inset-0 z-40"
+        className={`pointer-events-none fixed inset-0 ${GAME_Z_LAYER.dialogHost}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -188,7 +189,10 @@ export function TargetingOverlay() {
             opponent's face-down hand (low-value space) and clears the
             opponent-HUD tab rail below it — the rail carries life/creature/land
             counts that must stay readable and clickable during targeting. */}
-        <div className="absolute left-0 right-0 top-1 flex flex-col items-center gap-1">
+        <div
+          className="absolute left-0 right-0 flex flex-col items-center gap-1"
+          style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
+        >
           {sourceName && (
             <div className="rounded-md bg-gray-800/90 px-4 py-1 text-sm font-medium text-amber-300 shadow">
               {sourceName}

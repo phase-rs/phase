@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
@@ -25,7 +25,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
     CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
     CopiableValues, Duration, Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope,
-    QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -45,6 +45,7 @@ use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
+use crate::types::zones::Zone;
 
 #[derive(Debug, Clone)]
 struct ActiveCombatAssignmentRuleEffect {
@@ -54,6 +55,26 @@ struct ActiveCombatAssignmentRuleEffect {
     modification: ContinuousModification,
     affected_filter: TargetFilter,
     condition: Option<StaticCondition>,
+}
+
+#[derive(Default)]
+struct LayerZoneObjectCache {
+    ids_by_zone: HashMap<Zone, Vec<ObjectId>>,
+}
+
+impl LayerZoneObjectCache {
+    fn ids_for(&mut self, state: &GameState, zone: Zone) -> &[ObjectId] {
+        self.ids_by_zone.entry(zone).or_insert_with(|| {
+            #[cfg(test)]
+            record_layer_zone_materialization(zone);
+            super::targeting::zone_object_ids(state, zone)
+        })
+    }
+}
+
+struct PreparedIncrementalFlush {
+    recipient_ids: HashSet<ObjectId>,
+    active_effects: Vec<ActiveContinuousEffect>,
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
@@ -296,14 +317,26 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
         }
 
         obj.casting_permissions.retain(|p| match p {
+            // CR 514.2 + CR 611.2a: "until your next turn" expires at the
+            // *granting effect's controller's* next untap step. For a normal
+            // impulse grant `granted_to == exiled_by_ability_controller ==
+            // controller`, so this is unchanged. For a per-owner grant
+            // (`PermissionGrantee::ObjectOwner`) where each card's `granted_to`
+            // is its own owner but "your" refers to the activator (Memory
+            // Vessel: "Until your next turn, players may play cards they exiled
+            // this way"), the expiry must key on the activator, carried by
+            // `exiled_by_ability_controller`. This mirrors the identical
+            // controller-keyed expiry the End-step prune already applies to
+            // `UntilNextStepOf { End }` grants (Rocco, Street Chef).
             CastingPermission::PlayFromExile {
                 duration:
                     Duration::UntilNextTurnOf {
                         player: PlayerScope::Controller,
                     },
                 granted_to,
+                exiled_by_ability_controller,
                 ..
-            } => *granted_to != active_player,
+            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
             // CR 513.1 + CR 611.2a/b: `UntilNextStepOf { step: End }` is
             // expired by `prune_end_step_casting_permissions` at the end
             // step, NOT at the untap step. Retain here.
@@ -1167,7 +1200,10 @@ fn evaluate_condition_with_context(
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::CostPaidObject
             | crate::types::ability::ObjectScope::Anaphoric
-            | crate::types::ability::ObjectScope::Demonstrative => false,
+            // Never produced for a duration tap condition; fails safely.
+            | crate::types::ability::ObjectScope::OtherRevealedCard
+            | crate::types::ability::ObjectScope::Demonstrative
+            | crate::types::ability::ObjectScope::AmassedArmy => false,
         },
         // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
         StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
@@ -1371,6 +1407,46 @@ pub fn evaluate_condition_for_test(
 #[cfg(test)]
 pub(crate) static FULL_EVALUATE_LAYERS_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_EFFECT_COLLECTION_COUNT: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+    static BATTLEFIELD_ZONE_MATERIALIZATION_COUNT: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_active_effect_collection() {
+    ACTIVE_EFFECT_COLLECTION_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_active_effect_collection_count() {
+    ACTIVE_EFFECT_COLLECTION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn active_effect_collection_count() -> usize {
+    ACTIVE_EFFECT_COLLECTION_COUNT.with(core::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_layer_zone_materialization(zone: Zone) {
+    if zone == Zone::Battlefield {
+        BATTLEFIELD_ZONE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
+    }
+}
+
+#[cfg(test)]
+fn reset_battlefield_zone_materialization_count() {
+    BATTLEFIELD_ZONE_MATERIALIZATION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn battlefield_zone_materialization_count() -> usize {
+    BATTLEFIELD_ZONE_MATERIALIZATION_COUNT.with(core::cell::Cell::get)
+}
 
 // Test-only placement toggle for the `StaticSourceIndex` rebuild, used to prove
 // the discriminating regression test goes RED on the (buggy) end-of-pass
@@ -1597,10 +1673,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     }
 
     // Step 2: Apply copy effects first so copied static abilities exist before later layers.
+    let mut zone_cache = LayerZoneObjectCache::default();
     let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
     for effect in &ordered_copy {
-        apply_continuous_effect(state, effect, &mut abilities_suppressed);
+        apply_continuous_effect(state, effect, &mut abilities_suppressed, &mut zone_cache);
     }
     if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids) {
         // Sticker ability text is appended after the top-of-pass reset/copy
@@ -1644,7 +1721,7 @@ pub fn evaluate_layers(state: &mut GameState) {
             };
 
             for effect in &ordered {
-                apply_continuous_effect(state, effect, &mut abilities_suppressed);
+                apply_continuous_effect(state, effect, &mut abilities_suppressed, &mut zone_cache);
             }
         }
 
@@ -1852,6 +1929,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // fresh cache for the next incremental flush's truth-delta consult.
     refresh_static_gate_truth(state);
 
+    // Rebuild the O(1) `StaticModeKind` presence index from the fully-derived board,
+    // immediately after the gate-truth cache and before `layers_dirty = Clean`, so a full
+    // eval always leaves a precise presence index for the next scan-gate consult.
+    refresh_static_mode_presence(state);
+
     // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
     // trigger sets on every battlefield permanent (granted triggers from
     // sliver lords, Changeling, Bramble Sovereign, suppress-triggers statics).
@@ -1870,6 +1952,249 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
     // (Clean / EnteredObjects / Full).
     state.layers_dirty = LayersDirty::Clean;
+}
+
+/// CR 404 + CR 611.3a: Does a `TargetFilter` test membership of a specific
+/// `zone` (a `FilterProp::InZone { zone }`)? Recurses `Or`/`And`/`Not` compounds.
+fn target_filter_reads_zone(filter: &TargetFilter, zone: Zone) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == zone)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(|f| target_filter_reads_zone(f, zone))
+        }
+        TargetFilter::Not { filter } => target_filter_reads_zone(filter, zone),
+        _ => false,
+    }
+}
+
+/// CR 404 + CR 611.3a: Does a static-ability enabling CONDITION depend on which
+/// objects occupy `zone` — an `IsPresent` (or a negated/compound thereof) whose
+/// filter tests `FilterProp::InZone { zone }`? Tarmogoyf / Cairn Wanderer ("as
+/// long as a creature card with <keyword> is in a graveyard, ~ has <keyword>")
+/// are the canonical cases. Such a gate can flip when `zone` membership changes,
+/// so a zone move into/out of `zone` must re-evaluate layers.
+fn static_condition_reads_zone_membership(condition: &StaticCondition, zone: Zone) -> bool {
+    match condition {
+        StaticCondition::IsPresent { filter: Some(f) } => target_filter_reads_zone(f, zone),
+        // CR 404 + CR 611.3a: a count/threshold gate whose either operand reads a
+        // zone's card count — Threshold ("fewer than eight cards in your
+        // graveyard"), `GraveyardSize`, `ZoneCardCount { Graveyard }`, or an
+        // `ObjectCount` over a graveyard-scoped filter — flips when that zone's
+        // membership crosses the threshold, so a move into/out of `zone` must
+        // re-evaluate it too. Distinct from the `IsPresent` presence gate above.
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_reads_zone(lhs, zone) || quantity_expr_reads_zone(rhs, zone)
+        }
+        StaticCondition::Not { condition } => {
+            static_condition_reads_zone_membership(condition, zone)
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| static_condition_reads_zone_membership(c, zone)),
+        _ => false,
+    }
+}
+
+/// CR 404: Does a `ZoneRef` denote the game `zone`?
+fn zone_ref_denotes_zone(zone_ref: &crate::types::ability::ZoneRef, zone: Zone) -> bool {
+    use crate::types::ability::ZoneRef;
+    matches!(
+        (zone_ref, zone),
+        (ZoneRef::Graveyard, Zone::Graveyard)
+            | (ZoneRef::Exile, Zone::Exile)
+            | (ZoneRef::Library, Zone::Library)
+            | (ZoneRef::Hand, Zone::Hand)
+    )
+}
+
+/// CR 404 + CR 611.3a: Does a `QuantityExpr` read the card count / object
+/// population of `zone`? Mirrors the structural recursion of
+/// `crate::game::quantity::quantity_expr_uses_object_count` so composite/nested
+/// aggregates are classified through the same expression tree.
+fn quantity_expr_reads_zone(expr: &QuantityExpr, zone: Zone) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_reads_zone(qty, zone),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_reads_zone(inner, zone),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(|e| quantity_expr_reads_zone(e, zone))
+        }
+        QuantityExpr::UpTo { max } => quantity_expr_reads_zone(max, zone),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_reads_zone(exponent, zone),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_zone(left, zone) || quantity_expr_reads_zone(right, zone)
+        }
+    }
+}
+
+/// CR 404 + CR 611.3a: Leaf classification for `quantity_expr_reads_zone` — does
+/// a `QuantityRef` read the card count / object population of `zone`? EXHAUSTIVE
+/// and wildcard-free (mirroring `quantity_ref_uses_object_count`) so any future
+/// quantity reference that reads a zone must be classified intentionally rather
+/// than silently under-escalating a zone-membership gate.
+fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
+    use crate::types::ability::CardTypeSetSource;
+    match qty {
+        // Direct graveyard card count (CR 404). `player` scope is irrelevant to
+        // the zone identity — any player's graveyard is still the graveyard.
+        QuantityRef::GraveyardSize { .. } => zone == Zone::Graveyard,
+        // Zone-parameterized card counts.
+        QuantityRef::ZoneCardCount {
+            zone: zone_ref,
+            filter,
+            ..
+        } => {
+            zone_ref_denotes_zone(zone_ref, zone)
+                || filter
+                    .as_ref()
+                    .is_some_and(|f| target_filter_reads_zone(f, zone))
+        }
+        QuantityRef::TargetZoneCardCount { zone: zone_ref } => {
+            zone_ref_denotes_zone(zone_ref, zone)
+        }
+        // Filter-based object counts read `zone` iff their filter is zone-scoped
+        // (an `ObjectCount` filter can carry `FilterProp::InZone { zone }`).
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::Aggregate { filter, .. } => target_filter_reads_zone(filter, zone),
+        // Distinct card types read `zone` only when sourced from that zone's cards
+        // (Tarmogoyf: card types among cards in all graveyards).
+        QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+        // CR 613.4a: Distinct subtypes read `zone` when sourced from that zone's
+        // cards (Subgoyf: different subtypes among cards in all graveyards) — layer
+        // 7a CDA P/T must re-derive when that zone changes.
+        QuantityRef::DistinctSubtypes { source, .. } => match source {
+            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. } => false,
+        },
+        // Everything else reads player-level state, single-object state, battle-
+        // field-only population, history records, choices, or tracked sets — none
+        // depend on `zone` membership. Enumerated explicitly (no wildcard) so a
+        // future zone-reading variant is forced through this classification.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::DistinctColorsAmongPermanents { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::TrackedSetAggregate { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        // Per-turn bend-type tracking (Avatar Aang) — turn history, not a zone read.
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::ChosenNumber
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::CostXPaid
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::KickerCount
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::VoteCount { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. } => false,
+    }
+}
+
+/// CR 611.3a: Is any ACTIVE static-ability continuous effect gated on membership
+/// of `zone`? Consulted at the zone-change seam (`zones::move_to_zone`) so a card
+/// entering or leaving `zone` re-evaluates layers ONLY when a matching gate is
+/// live. This keeps routine off-battlefield churn (deaths, mill, discard) cheap
+/// in the common case where no `zone`-membership-gated static exists. Scans the
+/// static-effect-source index — O(generators), not O(zone).
+pub(crate) fn any_active_static_reads_zone_membership(state: &GameState, zone: Zone) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
+        }
+        if obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && (def
+                    .condition
+                    .as_ref()
+                    .is_some_and(|c| static_condition_reads_zone_membership(c, zone))
+                    // CR 604.3 + CR 613: a continuous MODIFICATION whose dynamic
+                    // quantity reads this zone's membership also depends on it —
+                    // e.g. Subgoyf's CDA `SetDynamicPower`/`SetDynamicToughness`
+                    // counting distinct subtypes among cards in all graveyards.
+                    // The static's `condition` is not the only zone-reading surface.
+                    || def.modifications.iter().any(|m| {
+                        continuous_modification_dynamic_quantity(m)
+                            .is_some_and(|q| quantity_expr_reads_zone(q, zone))
+                    }))
+        }) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Mark the layer system as requiring a FULL battlefield re-evaluation. The
@@ -1905,21 +2230,77 @@ pub fn flush_layers(state: &mut GameState) {
             if ids.is_empty() {
                 return;
             }
-            if incremental_flush_must_escalate(state, &ids) {
-                super::perf_counters::record_layers_escalated();
-                super::perf_counters::record_layers_full_eval();
-                evaluate_layers(state);
-                super::public_state::mark_public_state_all_dirty(state);
-            } else {
+            if let Some(prepared) = prepare_incremental_flush(state, &ids) {
                 super::perf_counters::record_layers_incremental();
-                apply_layers_incremental(state, &ids);
+                apply_layers_incremental(state, prepared);
+                // Rebuild the presence index so the incremental arm leaves a PRECISE index
+                // (not a conservative superset). The incremental path is already
+                // O(battlefield): `prepare_incremental_flush` unconditionally calls
+                // `StaticSourceIndex::rebuild_from_state`, so a full presence rebuild here is
+                // DRY, matches the sibling-cache convention, and adds no asymptotic cost.
+                refresh_static_mode_presence(state);
                 for id in &ids {
                     super::public_state::mark_public_state_object_dirty(state, *id);
                 }
                 super::public_state::mark_battlefield_display_dirty(state);
+            } else {
+                super::perf_counters::record_layers_escalated();
+                super::perf_counters::record_layers_full_eval();
+                evaluate_layers(state);
+                super::public_state::mark_public_state_all_dirty(state);
             }
         }
     }
+}
+
+fn prepare_incremental_flush(
+    state: &mut GameState,
+    entered_ids: &HashSet<ObjectId>,
+) -> Option<PreparedIncrementalFlush> {
+    for &id in entered_ids {
+        let obj = state.objects.get(&id)?;
+        if entered_object_blocks_incremental(state, obj) {
+            return None;
+        }
+    }
+
+    let recipient_ids = incremental_recipient_ids(state, entered_ids);
+
+    // CR 613.1: Match the full-pass binding point for generator discovery. A
+    // previous pass may have removed a recipient's live static definitions in
+    // layer 6; reset the recipient set before rebuilding the static-source index
+    // and collecting the prepared effect set so local CDAs are visible again.
+    for &id in &recipient_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.sync_missing_base_characteristics();
+            seed_live_characteristics_from_base(obj);
+            obj.controller = obj.base_controller.unwrap_or(obj.owner);
+            obj.assigns_damage_from_toughness = false;
+            obj.assigns_damage_as_though_unblocked = false;
+            obj.assigns_no_combat_damage = false;
+            derive_suspected_abilities(obj);
+        }
+    }
+
+    crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+
+    let active_effects = collect_shared_active_continuous_effects(state);
+    if active_effects.iter().any(|effect| {
+        recipient_ids.contains(&effect.source_id)
+            && !effect_is_restricted_to_incremental_recipients(effect, &recipient_ids)
+    }) {
+        return None;
+    }
+    if active_effects_force_incremental_escalation(state, entered_ids, &active_effects)
+        || any_active_static_condition_perturbed_by_entry(state, entered_ids)
+    {
+        return None;
+    }
+
+    Some(PreparedIncrementalFlush {
+        recipient_ids,
+        active_effects,
+    })
 }
 
 /// Decide whether an `EnteredObjects` flush must conservatively escalate to a
@@ -1942,6 +2323,7 @@ pub fn flush_layers(state: &mut GameState) {
 ///    object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
 ///    ordering operates on the live set. This scan is O(active-effect-count), NOT
 ///    O(battlefield).
+#[cfg(test)]
 pub(crate) fn incremental_flush_must_escalate(
     state: &GameState,
     entered_ids: &HashSet<ObjectId>,
@@ -1971,38 +2353,8 @@ pub(crate) fn incremental_flush_must_escalate(
     // SOURCE's controller, not the entered object's — so `ctx` is built per-effect
     // from `e.source_id` + `e.controller`. Escalation is `classifier(e) &&
     // any_entered_perturbs(e)`; both required.
-    if collect_shared_active_continuous_effects(state)
-        .iter()
-        .any(|e| {
-            let magnitude = continuous_modification_dynamic_quantity(&e.modification);
-            let magnitude_sensitive =
-                magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
-            let affected_sensitive =
-                crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
-            if !magnitude_sensitive && !affected_sensitive {
-                return false;
-            }
-            let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
-            entered_ids.iter().any(|id| {
-                let Some(entered) = state.objects.get(id) else {
-                    return false;
-                };
-                (magnitude_sensitive
-                    && magnitude.is_some_and(|expr| {
-                        crate::game::quantity::entered_object_perturbs_quantity_expr(
-                            state, entered, &ctx, expr,
-                        )
-                    }))
-                    || (affected_sensitive
-                        && crate::game::filter::entered_object_perturbs_affected_filter(
-                            state,
-                            *id,
-                            &ctx,
-                            &e.affected_filter,
-                        ))
-            })
-        })
-    {
+    let active_effects = collect_shared_active_continuous_effects(state);
+    if active_effects_force_incremental_escalation(state, entered_ids, &active_effects) {
         return true;
     }
 
@@ -2025,6 +2377,42 @@ pub(crate) fn incremental_flush_must_escalate(
     // gate; the truth-delta refinement (below) skips escalation even when an
     // entry perturbs the gate INPUT but does not flip its truth value.
     any_active_static_condition_perturbed_by_entry(state, entered_ids)
+}
+
+fn active_effects_force_incremental_escalation(
+    state: &GameState,
+    entered_ids: &HashSet<ObjectId>,
+    active_effects: &[ActiveContinuousEffect],
+) -> bool {
+    active_effects.iter().any(|e| {
+        let magnitude = continuous_modification_dynamic_quantity(&e.modification);
+        let magnitude_sensitive =
+            magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
+        let affected_sensitive =
+            crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
+        if !magnitude_sensitive && !affected_sensitive {
+            return false;
+        }
+        let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+        entered_ids.iter().any(|id| {
+            let Some(entered) = state.objects.get(id) else {
+                return false;
+            };
+            (magnitude_sensitive
+                && magnitude.is_some_and(|expr| {
+                    crate::game::quantity::entered_object_perturbs_quantity_expr(
+                        state, entered, &ctx, expr,
+                    )
+                }))
+                || (affected_sensitive
+                    && crate::game::filter::entered_object_perturbs_affected_filter(
+                        state,
+                        *id,
+                        &ctx,
+                        &e.affected_filter,
+                    ))
+        })
+    })
 }
 
 /// Scan every live static-ability source for a CONTINUOUS `StaticDefinition`
@@ -2161,6 +2549,19 @@ fn refresh_static_gate_truth(state: &mut GameState) {
     state.static_gate_truth = next;
 }
 
+/// Rebuild the O(1) `StaticModeKind` presence index wholesale from the same
+/// `game_functioning_statics` iterator its consumers would otherwise scan, so the index is
+/// exactly `.any(|(_, d)| d.mode.kind() == kind)` for every kind — no false negatives. The
+/// fold accumulates into a local `StaticModePresence` first (the iterator borrows `state`),
+/// then assigns.
+fn refresh_static_mode_presence(state: &mut GameState) {
+    let mut presence = crate::types::statics::StaticModePresence::empty();
+    for (_, def) in super::functioning_abilities::game_functioning_statics(state) {
+        presence.insert(def.mode.kind());
+    }
+    state.static_mode_presence = presence;
+}
+
 /// CR 613.1: Continuous effects are applied in layers to determine object characteristics.
 /// CR 122.1: Counters can modify object characteristics.
 /// CR 301.5: Equipment attachments can affect equipped creatures.
@@ -2229,6 +2630,17 @@ fn incremental_recipient_ids(
     recipients
 }
 
+fn effect_is_restricted_to_incremental_recipients(
+    effect: &ActiveContinuousEffect,
+    recipient_ids: &HashSet<ObjectId>,
+) -> bool {
+    match &effect.affected_filter {
+        TargetFilter::SelfRef => recipient_ids.contains(&effect.source_id),
+        TargetFilter::SpecificObject { id } => recipient_ids.contains(id),
+        _ => false,
+    }
+}
+
 /// Incremental layer re-derivation for a set of freshly-entered objects.
 ///
 /// Mirrors the PER-OBJECT subset of `evaluate_layers` for `entered_ids` only:
@@ -2244,69 +2656,51 @@ fn incremental_recipient_ids(
 /// `incremental_flush_must_escalate` returned false, which guarantees no active
 /// effect's magnitude or affected set reads board population — so re-deriving
 /// just the entered objects yields a board identical to a full pass (CR 613.1).
-fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectId>) {
-    let recipient_ids = incremental_recipient_ids(state, entered_ids);
+fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
+    let PreparedIncrementalFlush {
+        recipient_ids,
+        active_effects,
+    } = prepared;
     let mut abilities_suppressed = HashSet::new();
-    // Step 1 (per-entered subset): reset computed characteristics to base.
-    for &id in &recipient_ids {
-        if let Some(obj) = state.objects.get_mut(&id) {
-            obj.sync_missing_base_characteristics();
-            obj.name = obj.base_name.clone();
-            obj.power = obj.base_power;
-            obj.toughness = obj.base_toughness;
-            obj.loyalty = obj.base_loyalty;
-            obj.card_types = obj.base_card_types.clone();
-            obj.mana_cost = obj.base_mana_cost.clone();
-            obj.keywords = obj.base_keywords.clone();
-            obj.abilities = Arc::clone(&obj.base_abilities);
-            obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
-            obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
-            obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
-            obj.color = obj.base_color.clone();
-            obj.printed_ref = obj.base_printed_ref.clone();
-            obj.controller = obj.base_controller.unwrap_or(obj.owner);
-            obj.assigns_damage_from_toughness = false;
-            obj.assigns_damage_as_though_unblocked = false;
-            obj.assigns_no_combat_damage = false;
-            // CR 701.60c: re-derive the suspected designation's menace +
-            // "can't block" onto the just-reset live fields (mirrors the full
-            // pass) so the incremental path agrees with `evaluate_layers`.
-            derive_suspected_abilities(obj);
-        }
-    }
-
-    // CR 611.2 + CR 613.1: Rebuild the static-effect-source index before the
-    // incremental gathers. The incremental path only resets `entered_ids` to
-    // base; pre-existing generators keep their already-derived
-    // `static_definitions`, which for a generator still carries its continuous
-    // def — so a full-battlefield rebuild here lists every current generator
-    // (pre-existing + entered). An entered base generator never reaches this
-    // path (`entered_object_blocks_incremental` escalates it to a full eval), so
-    // this is purely a freshness guarantee for the incremental gather. The
-    // `rebuild_static_index_at_top` guard is ALWAYS true in production; togglable
-    // only under `cfg(test)`.
-    if rebuild_static_index_at_top() {
-        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-    }
+    let mut zone_cache = LayerZoneObjectCache::default();
+    // Step 1 (per-recipient subset) ran in `prepare_incremental_flush` before the
+    // static-source index rebuild and shared active-effect collection.
 
     // Step 2: Copy effects first (Layer 1), restricted to recipient objects.
-    let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
+    let copy_effects: Vec<ActiveContinuousEffect> = active_effects
+        .iter()
+        .filter(|effect| effect.layer == Layer::Copy)
+        .cloned()
+        .collect();
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
     for effect in &ordered_copy {
-        apply_continuous_effect_to(state, effect, &recipient_ids, &mut abilities_suppressed);
+        apply_continuous_effect_to(
+            state,
+            effect,
+            &recipient_ids,
+            &mut abilities_suppressed,
+            &mut zone_cache,
+        );
     }
 
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
-    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec) {
+    let stickers_changed =
+        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec);
+    let active_effects = if stickers_changed {
         // Incremental resets clear the entered/attached recipients back to base,
         // so retained stickers must be re-applied before the restricted main
         // gather. If a sticker grants a continuous static ability, refresh the
         // generator index so the recipient can source that effect in this pass.
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-    }
+        collect_shared_active_continuous_effects(state)
+    } else if copy_effects.is_empty() {
+        active_effects
+    } else {
+        collect_shared_active_continuous_effects(state)
+    };
 
     // Step 3-4: Remaining layers in order, restricted to recipient objects.
-    let effects_by_layer = gather_active_continuous_effects(state);
+    let effects_by_layer = bucket_effects_by_layer(active_effects);
     for (layer, layer_bucket) in &effects_by_layer {
         if *layer == Layer::Copy {
             continue;
@@ -2324,6 +2718,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
                     effect,
                     &recipient_ids,
                     &mut abilities_suppressed,
+                    &mut zone_cache,
                 );
             }
         }
@@ -2348,7 +2743,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
     // CR 702.73a: Changeling — entered object gains all creature types if it now
     // has Changeling but no CDA covered it.
     if !state.all_creature_types.is_empty() {
-        for &id in entered_ids {
+        for &id in &recipient_ids {
             let has_changeling = state
                 .objects
                 .get(&id)
@@ -2486,12 +2881,18 @@ fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<
 fn gather_active_continuous_effects(
     state: &GameState,
 ) -> Vec<(Layer, Vec<ActiveContinuousEffect>)> {
+    bucket_effects_by_layer(collect_shared_active_continuous_effects(state))
+}
+
+fn bucket_effects_by_layer(
+    active_effects: impl IntoIterator<Item = ActiveContinuousEffect>,
+) -> Vec<(Layer, Vec<ActiveContinuousEffect>)> {
     let mut effects: Vec<(Layer, Vec<ActiveContinuousEffect>)> = Layer::all()
         .iter()
         .map(|&layer| (layer, Vec::new()))
         .collect();
 
-    for effect in collect_shared_active_continuous_effects(state) {
+    for effect in active_effects {
         push_effect(&mut effects, effect.layer, effect);
     }
 
@@ -2501,6 +2902,9 @@ fn gather_active_continuous_effects(
 pub(crate) fn collect_shared_active_continuous_effects(
     state: &GameState,
 ) -> Vec<ActiveContinuousEffect> {
+    #[cfg(test)]
+    record_active_effect_collection();
+
     let mut effects = Vec::new();
 
     for_each_static_effect_source(state, |state, obj| {
@@ -2588,12 +2992,15 @@ fn for_each_static_effect_source(
         }
         // CR 114.3: command-zone emblems have static abilities that affect the
         // game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
-        // function from the command zone too.
+        // function from the command zone too. CR 311.2 / CR 312.2: an active
+        // plane / phenomenon functions from the command zone via any static that
+        // opts in through `active_zones.contains(Command)`. All admitted through
+        // the single `object_sources_static_from_command_zone` authority.
         for &id in &state.command_zone {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
+            if crate::game::functioning_abilities::object_sources_static_from_command_zone(obj) {
                 visit(state, obj);
             }
         }
@@ -2613,14 +3020,16 @@ fn for_each_static_effect_source(
         }
         // CR 114.3: Emblems in the command zone have static abilities that affect
         // the game. CR 905.4 + CR 113.6b: a face-up conspiracy's static abilities
-        // function from the command zone too. The index already filtered to these
-        // command-zone generators; the gate is re-asserted here for parity with
-        // the fallback path.
+        // function from the command zone too. CR 311.2 / CR 312.2: an active plane
+        // / phenomenon functions from the command zone via any opt-in static. The
+        // index already filtered to these command-zone generators; the gate is
+        // re-asserted here (through the single admission authority) for parity
+        // with the fallback path.
         for &id in &index.command_sources {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            if obj.is_emblem || crate::game::conspiracy::functions_from_command_zone(obj) {
+            if crate::game::functioning_abilities::object_sources_static_from_command_zone(obj) {
                 visit(state, obj);
             }
         }
@@ -2635,8 +3044,10 @@ fn for_each_static_effect_source(
     // safe: battlefield-default statics filter themselves out.
     for obj in state.objects.values() {
         // Battlefield objects were already processed above (phased-out gate
-        // included). Command-zone emblems were handled above; non-emblem
-        // command-zone objects never function (CR 114.4).
+        // included). Command-zone sources (emblems, face-up conspiracies, and
+        // active planes/phenomena that opt in) were fully handled by the two
+        // command loops above via `object_sources_static_from_command_zone`, so
+        // the `Command` arm skips here to avoid double-visiting (CR 114.4).
         match obj.zone {
             crate::types::zones::Zone::Battlefield | crate::types::zones::Zone::Command => continue,
             _ => {}
@@ -2683,13 +3094,42 @@ pub(crate) fn active_continuous_effects_from_base_static_source(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
 ) -> Vec<ActiveContinuousEffect> {
+    let static_definitions: Vec<StaticDefinition> = source
+        .base_static_definitions
+        .iter()
+        .filter(|def| base_static_can_source_off_zone_keyword_query(def, source.zone))
+        .cloned()
+        .collect();
     active_continuous_effects_from_static_definitions(
         state,
         source.id,
         source.controller,
         source.timestamp,
-        &source.base_static_definitions,
+        &static_definitions,
     )
+}
+
+fn base_static_can_source_off_zone_keyword_query(
+    def: &StaticDefinition,
+    source_zone: Zone,
+) -> bool {
+    matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
+        || def.active_zones.contains(&source_zone)
+        || def
+            .condition
+            .as_ref()
+            .is_some_and(static_condition_has_source_zone_gate)
+}
+
+fn static_condition_has_source_zone_gate(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::SourceInZone { .. } => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_has_source_zone_gate)
+        }
+        StaticCondition::Not { condition } => static_condition_has_source_zone_gate(condition),
+        _ => false,
+    }
 }
 
 fn active_continuous_effects_from_static_definitions(
@@ -3645,6 +4085,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
@@ -3765,6 +4206,45 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
     use crate::types::statics::StaticMode;
     match mode {
         StaticMode::CantBeBlockedBy { filter } => target_filter_uses_chosen_color(filter),
+        _ => false,
+    }
+}
+
+/// CR 611.2c + CR 109.5: True when a granted `MustBeBlockedByAll` /
+/// `MustBeBlocked` static carries a controller-relative blocker filter
+/// (`ControllerRef::You`/`Opponent`/… — "your opponents", "you control").
+/// When such a static is grafted onto a TARGET permanent by a one-shot effect
+/// (You Look Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter
+/// relative to the target's controller. This gate is the condition under which
+/// the installing player must be snapshotted as the anchor (mirrors
+/// `static_mode_uses_chosen_color`).
+fn static_mode_uses_controller_relative_blocker_filter(
+    mode: &crate::types::statics::StaticMode,
+) -> bool {
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::MustBeBlockedByAll {
+            blockers: Some(filter),
+        }
+        | StaticMode::MustBeBlocked { by: Some(filter) } => {
+            target_filter_controller_is_relative(filter)
+        }
+        _ => false,
+    }
+}
+
+/// CR 109.5: True when a `TargetFilter` constrains the controller of matched
+/// objects via a `ControllerRef` slot (any variant qualifies — none is a
+/// concrete-player anchor). Recurses through `And`/`Or`/`Not`, modeled on
+/// `ability_utils::filter_references_target_player`.
+fn target_filter_controller_is_relative(filter: &TargetFilter) -> bool {
+    use crate::types::ability::TypedFilter;
+    match filter {
+        TargetFilter::Typed(TypedFilter { controller, .. }) => controller.is_some(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_controller_is_relative)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_is_relative(filter),
         _ => false,
     }
 }
@@ -3892,8 +4372,9 @@ fn apply_continuous_effect(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
     abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
 ) {
-    apply_continuous_effect_filtered(state, effect, None, abilities_suppressed);
+    apply_continuous_effect_filtered(state, effect, None, abilities_suppressed, zone_cache);
 }
 
 /// Apply a continuous effect's modification only to the subset of its affected
@@ -3909,8 +4390,15 @@ fn apply_continuous_effect_to(
     effect: &ActiveContinuousEffect,
     restrict_to: &HashSet<ObjectId>,
     abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
 ) {
-    apply_continuous_effect_filtered(state, effect, Some(restrict_to), abilities_suppressed);
+    apply_continuous_effect_filtered(
+        state,
+        effect,
+        Some(restrict_to),
+        abilities_suppressed,
+        zone_cache,
+    );
 }
 
 fn apply_continuous_effect_filtered(
@@ -3918,6 +4406,7 @@ fn apply_continuous_effect_filtered(
     effect: &ActiveContinuousEffect,
     restrict_to: Option<&HashSet<ObjectId>>,
     abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
 ) {
     // CR 613.1f: A printed static on an object that lost all abilities this
     // pass must not re-apply in later layers (Death's Shadow CDA after
@@ -3929,8 +4418,8 @@ fn apply_continuous_effect_filtered(
     let scan_zone = effect
         .affected_filter
         .extract_in_zone()
-        .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let scan_ids = super::targeting::zone_object_ids(state, scan_zone);
+        .unwrap_or(Zone::Battlefield);
+    let scan_ids = zone_cache.ids_for(state, scan_zone);
     let ctx = FilterContext::from_source(state, effect.source_id);
     let affected_ids: Vec<ObjectId> = scan_ids
         .iter()
@@ -4077,6 +4566,21 @@ fn apply_continuous_effect_filtered(
         None
     };
 
+    // Pre-read chosen card name from source (avoids borrow conflict in the loop).
+    // CR 612.8 + CR 613.1c: `SetChosenName` sets the recipient's name to the
+    // granting source's chosen card name. Read once here (the source's most recent
+    // `ChosenAttribute::CardName`) so the per-recipient loop can assign without
+    // re-borrowing `state` — mirrors the `chosen_color` / `chosen_subtype` /
+    // `chosen_card_type` pre-read blocks above.
+    let chosen_card_name = if matches!(effect.modification, ContinuousModification::SetChosenName) {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_card_name().map(str::to_string))
+    } else {
+        None
+    };
+
     // CR 613.1b: For Layer 2 ChangeController, the new controller is the effect's
     // own `controller` field — set authoritatively by the effect that queued the
     // continuous modification (e.g. gain_control passes `ability.controller`,
@@ -4191,6 +4695,15 @@ fn apply_continuous_effect_filtered(
             // follows `CopyValues` in `add_transient_continuous_effect`).
             ContinuousModification::SetName { name } => {
                 obj.name = name.clone();
+            }
+            // CR 612.8 + CR 613.1c: Layer 3 — set the object's name to the
+            // granting source's chosen card name. Per CR 612.8 the object loses
+            // any other names. No-op until a name has been chosen (`chosen_card_name`
+            // pre-read above is `None`), so the printed name is retained.
+            ContinuousModification::SetChosenName => {
+                if let Some(ref name) = chosen_card_name {
+                    obj.name = name.clone();
+                }
             }
             ContinuousModification::AddPower { value } => {
                 if let Some(ref mut p) = obj.power {
@@ -4565,6 +5078,16 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
+            // CR 702.143a: derived-cost cast-from-off-zone keywords function only
+            // in a non-battlefield zone (foretell in hand, etc.). Their grant is
+            // realized exclusively through the off-zone keyword path
+            // (`off_zone_characteristics::apply_keyword_modification`, reading
+            // `base_keywords`), which is the single authority for a hand/graveyard
+            // card's effective keywords. The battlefield layers characteristic
+            // pass (this function, rebuilding `obj.keywords`) therefore makes no
+            // change — `foretell_cost` reads `effective_off_zone_keywords`, not
+            // `obj.keywords`.
+            ContinuousModification::AddKeywordWithDerivedCost { .. } => {}
             // CR 613.1f: Layer 6 ability-granting effects are applied fresh
             // each layer pass (obj.abilities was reset to base_abilities at the
             // start of the pass). Within a single pass, a duplicate
@@ -4573,8 +5096,16 @@ fn apply_continuous_effect_filtered(
             // or from multiple sources granting the same ability — must not
             // stack. Structural equality dedup keeps the grant idempotent.
             ContinuousModification::GrantAbility { definition } => {
-                if !obj.abilities.iter().any(|a| a == definition.as_ref()) {
-                    Arc::make_mut(&mut obj.abilities).push(*definition.clone());
+                // CR 201.5a + CR 613.1f: concretize any granter by-name
+                // self-reference (`GrantingObject`) in the cloned body to the
+                // live granting object (`effect.source_id`) before dedup/push,
+                // so "Exile/Sacrifice/Return <granter-name>" acts on the
+                // equipment/aura, not on the host it was granted to. Re-minted
+                // each layer pass (CR 613.1f). Dedup on the concretized value.
+                let mut granted = *definition.clone();
+                super::ability_utils::concretize_granting_object(&mut granted, effect.source_id);
+                if !obj.abilities.iter().any(|a| a == &granted) {
+                    Arc::make_mut(&mut obj.abilities).push(granted);
                 }
             }
             // CR 613.1f: Handled entirely at continuous-effect collection time —
@@ -4590,12 +5121,17 @@ fn apply_continuous_effect_filtered(
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
-                if !obj
-                    .trigger_definitions
-                    .iter_all()
-                    .any(|t| t == trigger.as_ref())
-                {
-                    obj.trigger_definitions.push(*trigger.clone());
+                // CR 201.5a + CR 613.1f: concretize a granter by-name
+                // self-reference inside the granted trigger's execute chain
+                // (e.g. "you may sacrifice <granter>") to the live granting
+                // object before dedup/push. Re-minted each layer pass (CR 613.1f).
+                let mut granted = *trigger.clone();
+                super::ability_utils::concretize_granting_object_in_trigger(
+                    &mut granted,
+                    effect.source_id,
+                );
+                if !obj.trigger_definitions.iter_all().any(|t| t == &granted) {
+                    obj.trigger_definitions.push(granted);
                 }
             }
             // CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
@@ -4625,13 +5161,28 @@ fn apply_continuous_effect_filtered(
                 // chosen-color attribute of its own; resolving at apply time
                 // bakes the granting source's choice into the live filter.
                 let resolved_mode = resolve_static_mode_chosen_color(mode, chosen_color);
-                let def =
+                let mut def =
                     StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
-                if !obj
-                    .static_definitions
-                    .iter_all()
-                    .any(|sd| sd.mode == resolved_mode)
-                {
+                // CR 611.2c + CR 109.5: A controller-relative blocker filter
+                // ("your opponents") grafted onto a TARGET permanent would
+                // otherwise resolve "you" as the target's controller. Snapshot
+                // the installing player (`effect.controller`, the single
+                // authority) so combat re-derives the filter context from the
+                // spell controller — the continuous effect's anchor is locked at
+                // materialization. `None` anchor (permanent-static lures) still
+                // resolves from the carrier.
+                if static_mode_uses_controller_relative_blocker_filter(&resolved_mode) {
+                    def = def.source_controller(effect.controller);
+                }
+                // CR 611.2c + CR 509.1c: Idempotency is keyed on the FULL grafted
+                // definition, not just `mode`. Two different casters can install
+                // the same controller-relative lure mode on one permanent with
+                // distinct `source_controller` anchors (each a separate CR 509.1c
+                // requirement — one per opponent-set); a mode-only guard would
+                // silently drop the second caster's requirement. Full-def equality
+                // still collapses the same effect re-applied across layer passes
+                // (identical anchor), so no grant is multiplied.
+                if !obj.static_definitions.iter_all().any(|sd| sd == &def) {
                     obj.static_definitions.push(def);
                 }
             }
@@ -5059,6 +5610,49 @@ mod tests {
             .card_types
             .core_types
             .contains(&CoreType::Creature));
+    }
+
+    /// CR 205.1a (issue #5213): Arixmethes, Slumbering Isle — a `SetCardTypes([Land])`
+    /// replacement on a Legendary Creature Kraken removes the Creature card type
+    /// AND the correlated Kraken creature subtype, leaving a Legendary Land — never
+    /// the impossible "Creature Land" the additive `AddType` produced.
+    #[test]
+    fn set_card_types_land_strips_creature_and_creature_subtype() {
+        use crate::types::card_type::Supertype;
+
+        let mut state = setup();
+        let arixmethes = make_creature(&mut state, "Arixmethes", 12, 12, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&arixmethes).unwrap();
+            obj.card_types.subtypes.push("Kraken".to_string());
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.base_card_types = obj.card_types.clone();
+            let def = StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetCardTypes {
+                    core_types: vec![CoreType::Land],
+                }]);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&arixmethes).unwrap();
+        assert_eq!(
+            obj.card_types.core_types,
+            vec![CoreType::Land],
+            "must be only a Land (Creature removed)"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Kraken"),
+            "correlated Kraken creature subtype must be removed: {:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            obj.card_types.supertypes.contains(&Supertype::Legendary),
+            "Legendary supertype must be retained"
+        );
     }
 
     /// Places a battlefield commander object with the given owner/controller.
@@ -7247,6 +7841,96 @@ mod tests {
         assert!(!evaluate_condition(&state, &condition, PlayerId(0), aura));
     }
 
+    /// CR 611.3a + CR 702: End-to-end runtime proof for the Cairn Wanderer
+    /// graveyard-keyword static (issue #4774). Drives the real layer pipeline
+    /// (`evaluate_layers` + `has_keyword`), not just the parsed AST: the
+    /// conditional grant `~ has Flying as long as a creature card with Flying is in
+    /// a graveyard` must apply ONLY while such a card is present, and must
+    /// re-evaluate as the graveyard changes. This fails on revert of the
+    /// graveyard-presence gate — the pre-fix `Unrecognized`→always-true condition
+    /// would keep Flying even with an empty graveyard.
+    #[test]
+    fn cairn_graveyard_keyword_static_grants_flying_only_while_flyer_in_graveyard() {
+        let mut state = setup();
+
+        let cairn = make_creature(&mut state, "Cairn Wanderer", 4, 4, PlayerId(0));
+        let gate = StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![
+                    FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ],
+            ))),
+        };
+        let cairn_static = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(gate);
+        state
+            .objects
+            .get_mut(&cairn)
+            .unwrap()
+            .static_definitions
+            .push(cairn_static);
+
+        // Empty graveyard → gate unsatisfied → Cairn must NOT have Flying.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&cairn)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "no flying creature card in a graveyard → conditional grant must not apply"
+        );
+
+        // A flying creature CARD in a graveyard → gate satisfied → Cairn gains Flying.
+        let gy_flyer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_flyer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_keywords.push(Keyword::Flying);
+            obj.keywords.push(Keyword::Flying);
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&cairn)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "a flying creature card in a graveyard → conditional grant must apply"
+        );
+
+        // Remove it → gate unsatisfied again → grant falls away (CR 611.3a re-eval).
+        state.objects.get_mut(&gy_flyer).unwrap().zone = Zone::Exile;
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&cairn)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "removing the flyer from the graveyard must drop the conditional Flying grant"
+        );
+    }
+
     /// CR 107.4 + CR 202.1 + CR 613.4c: Light from Within-style statics count
     /// mana symbols in each affected creature's own mana cost. Hybrid and
     /// Phyrexian symbols that contain the color count through
@@ -7528,15 +8212,76 @@ mod tests {
         );
 
         // Suppressor leaves; only the bear is re-derived incrementally.
+        crate::game::perf_counters::reset();
         state.battlefield.retain(|&id| id != suppressor);
         state.objects.remove(&suppressor);
         state.layers_dirty = LayersDirty::EnteredObjects([bear].into());
         flush_layers(&mut state);
 
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "suppression-local CDA restoration must stay on the incremental path"
+        );
+        assert_eq!(counters.layers_escalated, 0);
+        assert_eq!(counters.layers_full_eval, 0);
         assert_eq!(
             state.objects.get(&bear).unwrap().power,
             Some(5),
             "incremental pass must rebuild suppression locally and re-apply the CDA"
+        );
+    }
+
+    /// CR 613.1f: when a suppressed recipient restores a board-wide static, the
+    /// flush must escalate instead of applying only to incremental recipients.
+    #[test]
+    fn restored_recipient_sourced_board_wide_static_escalates_incremental_flush() {
+        let mut state = setup();
+        let anthem_source = make_creature(&mut state, "Suppressed Anthem", 2, 2, PlayerId(0));
+        add_lord_static(&mut state, anthem_source, creature_you_ctrl(), 1, 1);
+
+        let other_creature = make_creature(&mut state, "Other Creature", 2, 2, PlayerId(0));
+        let suppressor = make_creature(&mut state, "Suppressor", 1, 1, PlayerId(0));
+        {
+            let def = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: anthem_source })
+                .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+            state
+                .objects
+                .get_mut(&suppressor)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&other_creature).unwrap().power,
+            Some(2),
+            "suppressed recipient-sourced anthem must not affect other creatures"
+        );
+
+        crate::game::perf_counters::reset();
+        state.battlefield.retain(|&id| id != suppressor);
+        state.objects.remove(&suppressor);
+        state.layers_dirty = LayersDirty::EnteredObjects([anthem_source].into());
+        flush_layers(&mut state);
+
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_escalated, 1,
+            "recipient-sourced non-recipient-restricted effects must force a full layer pass"
+        );
+        assert_eq!(counters.layers_full_eval, 1);
+        assert_eq!(counters.layers_incremental, 0);
+        assert_eq!(
+            state.objects.get(&other_creature).unwrap().power,
+            Some(3),
+            "full escalation must restore the board-wide effect on non-recipient creatures"
+        );
+        assert_eq!(
+            state.objects.get(&other_creature).unwrap().toughness,
+            Some(3)
         );
     }
 
@@ -9394,6 +10139,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -10392,6 +11138,81 @@ mod tests {
         assert!(
             !land.card_types.subtypes.contains(&"Forest".to_string()),
             "Land should no longer have Forest subtype"
+        );
+    }
+
+    /// CR 612.8 + CR 613.7: SetChosenName renames the equipped creature to the
+    /// granting source's chosen card name; with no choice recorded it is a no-op,
+    /// and a re-choice (appended) supersedes the prior name (most recent wins).
+    #[test]
+    fn set_chosen_name_renames_equipped_creature_to_source_choice() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let creature_id = make_creature(&mut state, "Grizzly Bears", 2, 2, p0);
+
+        // An Equipment whose static sets the equipped creature's name to the
+        // Equipment's own chosen card name.
+        let equip_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Psychic Paper".to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&equip_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                    ))
+                    .modifications(vec![ContinuousModification::SetChosenName]),
+            );
+        }
+        state.objects.get_mut(&equip_id).unwrap().attached_to = Some(creature_id.into());
+
+        // No choice recorded yet → printed name retained (no-op).
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature_id).unwrap().name,
+            "Grizzly Bears",
+            "with no chosen name the equipped creature keeps its printed name"
+        );
+
+        // Record a chosen card name on the Equipment → creature is renamed.
+        state
+            .objects
+            .get_mut(&equip_id)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Llanowar Elves".to_string()));
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature_id).unwrap().name,
+            "Llanowar Elves",
+            "the equipped creature takes the source's chosen card name"
+        );
+
+        // A re-choice appends; CR 613.7 — the most recent choice wins.
+        state
+            .objects
+            .get_mut(&equip_id)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Birds of Paradise".to_string()));
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature_id).unwrap().name,
+            "Birds of Paradise",
+            "the latest chosen card name supersedes the prior one"
         );
     }
 
@@ -11943,6 +12764,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -11972,6 +12794,7 @@ mod tests {
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
+            invalidation: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
@@ -11985,6 +12808,7 @@ mod tests {
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
+            invalidation: None,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,
@@ -12026,6 +12850,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -12116,6 +12941,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -12136,6 +12962,7 @@ mod tests {
                 granted_to: PlayerId(1),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -12173,6 +13000,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -13997,6 +14825,7 @@ mod tests {
             dead_source,
             LKISnapshot {
                 name: "Mortician Beetle".to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -14012,6 +14841,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: std::collections::HashMap::new(),
                 tapped: false,
+                is_suspected: false,
             },
         );
 
@@ -14904,6 +15734,136 @@ mod tests {
         id
     }
 
+    #[test]
+    fn incremental_prepare_rebuilds_static_index_before_shared_gather() {
+        let mut state = setup();
+
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "setup must leave a non-empty staleable index containing only anthem A"
+        );
+
+        make_anthem(&mut state, "Anthem B", PlayerId(0));
+        let bear = make_creature(&mut state, "Fresh Bear", 2, 2, PlayerId(0));
+
+        reset_active_effect_collection_count();
+        state.layers_dirty = LayersDirty::EnteredObjects([bear].into());
+        flush_layers(&mut state);
+
+        assert_eq!(
+            active_effect_collection_count(),
+            1,
+            "incremental preparation should gather once, after rebuilding the static-source index"
+        );
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            bear_obj.power,
+            Some(4),
+            "fresh bear must receive both anthem A and anthem B despite the pre-flush index missing B"
+        );
+        assert_eq!(bear_obj.toughness, Some(4));
+    }
+
+    #[test]
+    fn incremental_no_copy_no_sticker_reuses_prepared_shared_gather() {
+        let mut state = setup();
+
+        make_anthem(&mut state, "Anthem", PlayerId(0));
+        evaluate_layers(&mut state);
+
+        let bear = make_creature(&mut state, "Fresh Bear", 2, 2, PlayerId(0));
+        reset_active_effect_collection_count();
+        state.layers_dirty = LayersDirty::EnteredObjects([bear].into());
+        flush_layers(&mut state);
+
+        assert_eq!(
+            active_effect_collection_count(),
+            1,
+            "no-copy/no-sticker incremental flush should use the prepared active-effect set"
+        );
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(3));
+        assert_eq!(bear_obj.toughness, Some(3));
+    }
+
+    #[test]
+    fn layer_zone_cache_materializes_battlefield_once_per_pass() {
+        let mut state = setup();
+
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        make_anthem(&mut state, "Anthem B", PlayerId(0));
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        reset_battlefield_zone_materialization_count();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            battlefield_zone_materialization_count(),
+            1,
+            "all object-affecting layer effects in the pass should share one raw battlefield ID materialization"
+        );
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(4));
+        assert_eq!(bear_obj.toughness, Some(4));
+    }
+
+    #[test]
+    fn layer_zone_cache_keeps_filters_fresh_across_layers() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let anthem = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Flying Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::creature()))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::creature().properties(
+                        vec![FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        }],
+                    )))
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert!(
+            bear_obj.has_keyword(&Keyword::Flying),
+            "layer 6 grant must apply before the layer 7 flying-creature filter is evaluated"
+        );
+        assert_eq!(
+            bear_obj.power,
+            Some(3),
+            "layer 7 must re-run the flying filter against the post-layer-6 board, not reuse filtered IDs"
+        );
+        assert_eq!(bear_obj.toughness, Some(3));
+    }
+
     /// GAP-1 / GAP-B discriminating regression test (FIX B): a SECOND anthem that
     /// ENTERS the battlefield between layer evaluations must be picked up by the
     /// static-source index for its own pass.
@@ -15506,6 +16466,124 @@ mod tests {
         assert_eq!(
             ctrl.name, "Secret Bear",
             "the controller still sees the real back-face identity"
+        );
+    }
+
+    // ── StaticModePresence refresh tests (Verification Matrix D/F) ──
+
+    /// Test D — incremental-arm refresh. A battlefield entrant carrying an `IgnoreHexproof`
+    /// static (a non-`Continuous` static, so the flush takes the incremental fast path) must
+    /// still leave the presence index PRECISE. Advisory A: establish a precise presence=false
+    /// baseline via a FULL flush FIRST, so assertion (2) cannot pass vacuously.
+    #[test]
+    fn incremental_flush_refreshes_static_mode_presence() {
+        use crate::types::statics::StaticModeKind;
+        let mut state = setup();
+        // Baseline: full flush with NO IgnoreHexproof static => precise presence = false.
+        evaluate_layers(&mut state);
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::IgnoreHexproof
+            ),
+            "baseline: no IgnoreHexproof static means presence is precisely false"
+        );
+
+        // Entrant carries an object-scoped IgnoreHexproof static (mode != Continuous => the
+        // incremental fast path handles it, no full escalation).
+        let entrant = make_creature(&mut state, "Nowhere to Run", 2, 2, PlayerId(0));
+        state.objects.get_mut(&entrant).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::IgnoreHexproof).affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                )),
+            ]
+            .into();
+
+        crate::game::perf_counters::reset();
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        // (1) Branch proof: the incremental arm ran (NOT a Full escalation).
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "must take the incremental arm, not escalate"
+        );
+        assert_eq!(counters.layers_full_eval, 0, "must not escalate to full");
+        // (2) Revert guard: presence now reports IgnoreHexproof present. Removing the
+        //     Step 4c refresh_static_mode_presence call leaves this stale-false.
+        assert!(
+            crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::IgnoreHexproof
+            ),
+            "incremental flush must refresh the presence index"
+        );
+        // (3) A kind absent from the board still reports false — the incremental arm builds a
+        //     PRECISE index, not a conservative all-present one.
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::Shroud
+            ),
+            "incremental refresh must remain precise for absent kinds"
+        );
+    }
+
+    /// Test F — building-block equivalence (the Unit 2/3 contract). After a full flush on a
+    /// mixed board (a phased-out static, plus plain battlefield statics of distinct kinds),
+    /// the presence index must equal `game_functioning_statics().any(kind == K)` for EVERY
+    /// kind. `StaticModePresence: PartialEq` compares the whole discriminant array, so a
+    /// single `assert_eq!` IS the "for every K" check.
+    #[test]
+    fn static_mode_presence_equals_functioning_statics_fold() {
+        use crate::types::statics::{StaticModeKind, StaticModePresence};
+        let mut state = setup();
+        // Plain battlefield statics of two distinct kinds.
+        let a = make_creature(&mut state, "Ignore Hexproof Source", 1, 1, PlayerId(0));
+        state.objects.get_mut(&a).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
+        let b = make_creature(&mut state, "CantBeTargeted Source", 1, 1, PlayerId(0));
+        state.objects.get_mut(&b).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::CantBeTargeted)].into();
+        // Phased-out permanent carrying a Shroud static — CR 702.26b excludes it from
+        // game_functioning_statics, so its kind must NOT appear in presence.
+        let phased = make_creature(&mut state, "Phased Shroud Source", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&phased).unwrap();
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::Shroud)].into();
+            obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        }
+
+        evaluate_layers(&mut state);
+
+        // Whole-array equivalence: recompute from the same iterator the consumers scan.
+        let mut expected = StaticModePresence::empty();
+        for (_, def) in crate::game::functioning_abilities::game_functioning_statics(&state) {
+            expected.insert(def.mode.kind());
+        }
+        assert_eq!(
+            expected, state.static_mode_presence,
+            "presence index must equal the game_functioning_statics fold for every kind"
+        );
+        // Explicit spot-checks of the interesting scopings.
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &state,
+            StaticModeKind::IgnoreHexproof
+        ));
+        assert!(crate::game::functioning_abilities::static_kind_present(
+            &state,
+            StaticModeKind::CantBeTargeted
+        ));
+        assert!(
+            !crate::game::functioning_abilities::static_kind_present(
+                &state,
+                StaticModeKind::Shroud
+            ),
+            "phased-out static (CR 702.26b) must not appear in presence"
         );
     }
 }

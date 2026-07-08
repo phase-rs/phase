@@ -4,7 +4,7 @@ use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
-    CounterMoveChoice, ShardChoice,
+    CounterMoveChoice, CounterRemoveChoice, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -300,6 +300,16 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 701.38b: Cast a vote for one object candidate in an object-pool vote
+    /// (`VoteSubject::Objects` — Council's Judgment, Prime Minister's Cabinet
+    /// Room). `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`
+    /// (and the parallel `option_labels`). Index-based — not name-based — so
+    /// two candidates with the same printed name are disambiguated. Named votes
+    /// continue to use `ChooseOption { choice }`; object votes reject the string
+    /// path because their candidates are not canonical option words.
+    SubmitVoteCandidate {
+        candidate_index: u32,
+    },
     /// Alchemy spellbook draft: the player's chosen card name in response to
     /// `WaitingFor::SpellbookDraft`. The named card is conjured into the
     /// pending destination.
@@ -592,11 +602,19 @@ pub enum GameAction {
     /// Cancel any active auto-pass for the acting player.
     CancelAutoPass,
     /// Replace the acting player's phase-stop preference list. Phase stops
-    /// interrupt an `UntilEndOfTurn` auto-pass session and prevent the engine
+    /// interrupt an `UntilTurnBoundary` auto-pass session and prevent the engine
     /// from auto-submitting empty blocker declarations during the named phases.
     /// Legal in any WaitingFor state — pure preference propagation.
     SetPhaseStops {
-        stops: Vec<super::phase::Phase>,
+        stops: Vec<super::phase::PhaseStop>,
+    },
+    /// CR 117.3d: Update the acting player's standing priority-yield preferences —
+    /// a pre-committed decision to pass priority while a class of triggered
+    /// ability is on the stack. Legal in any WaitingFor state and routed to the
+    /// acting player (not necessarily the priority-holder), mirroring
+    /// `SetPhaseStops`. Pure preference propagation.
+    SetPriorityYield {
+        op: PriorityYieldOp,
     },
     /// CR 510.1c/d: Assign damage from an attacker to its blockers (and optionally
     /// the defending player/PW with trample, plus PW controller with trample-over-PW).
@@ -626,6 +644,13 @@ pub enum GameAction {
     /// CR 122.5 + CR 608.2d: Submit resolution-time counter-move distribution.
     ChooseCounterMoveDistribution {
         selections: Vec<CounterMoveChoice>,
+    },
+    /// CR 107.1c + CR 608.2d: Submit the resolution-time "remove any number of
+    /// counters" selection (Rhys, the Evermore; Tetravus). Answers a
+    /// `WaitingFor::RemoveCountersChoice`. An empty `selections` vector removes
+    /// nothing (CR 107.1c: choosing zero is always legal).
+    ChooseCountersToRemove {
+        selections: Vec<CounterRemoveChoice>,
     },
     /// CR 107.1c + CR 107.14: Submit the chosen amount for a
     /// `WaitingFor::PayAmountChoice` prompt ("pay any amount of {E}" and
@@ -744,6 +769,25 @@ pub enum GameAction {
     Concede {
         player_id: PlayerId,
     },
+}
+
+/// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
+/// acting player's standing priority-yield preferences. `Add` names a stack
+/// source and scope; the engine resolves it into a concrete `YieldTarget` by
+/// reading the identity latched on that source's trigger (CR 400.7), so the
+/// frontend never constructs an incarnation or card id. `Remove` echoes a
+/// stored `YieldTarget` verbatim; `ClearAll` drops every yield for the actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PriorityYieldOp {
+    Add {
+        source_id: ObjectId,
+        scope: YieldScope,
+    },
+    Remove {
+        target: YieldTarget,
+    },
+    ClearAll,
 }
 
 /// CR 701.48a: Learn choice — rummage a specific card, or skip entirely.
@@ -948,6 +992,10 @@ pub enum DebugTokenRequest {
     Preset {
         preset_id: String,
         owner: PlayerId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power_override: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness_override: Option<i32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
     },
@@ -1186,13 +1234,25 @@ impl DebugAction {
                         .collect();
                     format!(" with {}", parts.join(", "))
                 };
+                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let token_label = match request {
-                    DebugTokenRequest::Preset { preset_id, .. } => preset_id.as_str(),
+                    DebugTokenRequest::Preset {
+                        preset_id,
+                        power_override,
+                        toughness_override,
+                        ..
+                    } => {
+                        if let (Some(power), Some(toughness)) = (power_override, toughness_override)
+                        {
+                            format!("{preset_id} {power}/{toughness}")
+                        } else {
+                            preset_id.clone()
+                        }
+                    }
                     DebugTokenRequest::Custom {
                         characteristics, ..
-                    } => characteristics.display_name.as_str(),
+                    } => characteristics.display_name.clone(),
                 };
-                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 format!(
                     "CreateToken ({} for {}{}{})",
                     token_label,
@@ -1311,6 +1371,7 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
@@ -1351,10 +1412,12 @@ impl GameAction {
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityYield { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }
             | GameAction::ChooseCounterMoveDistribution { .. }
+            | GameAction::ChooseCountersToRemove { .. }
             | GameAction::SubmitPayAmount { .. }
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }

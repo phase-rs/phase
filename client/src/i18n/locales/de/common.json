@@ -35,11 +35,25 @@
     "off": "Aus"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Ansicht",
+      "tools": "Werkzeuge",
+      "game": "Spiel"
+    },
+    "reportCard": "Karte melden",
     "menu": "Spielmenü",
     "sandboxTools": "Sandbox-Werkzeuge",
     "sandboxToolsTitle": "Sandbox-Werkzeuge — beliebigen Spielzustand einrichten (`)",
+    "openSandboxTools": "Sandbox-Werkzeuge öffnen",
+    "clickModeButton": "Klickmodus-Schaltfläche",
+    "shown": "Sichtbar",
+    "hidden": "Ausgeblendet",
     "resume": "Fortsetzen",
     "settings": "Einstellungen",
+    "boardLayoutSplit": "Geteilt",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Zur geteilten Tischansicht wechseln",
+    "switchToLegacyView": "Zur fokussierten Legacy-Ansicht wechseln",
     "helpShortcuts": "Hilfe & Tastenkürzel",
     "showAiHand": "KI-Hand anzeigen",
     "hideAiHand": "KI-Hand verbergen",
@@ -202,6 +216,12 @@
       "message": "Richte mit den <tools>Sandbox-Werkzeugen</tools> einen beliebigen Spielzustand ein — füge Karten und Spielsteine hinzu, ändere Leben und Marken, kopiere bleibende Karten oder springe zwischen Phasen. Öffne sie jederzeit mit der Taste <key>`</key>.",
       "dismiss": "Schließen",
       "open": "Sandbox-Werkzeuge öffnen"
+    },
+    "reportCardNudge": {
+      "message": "Wird eine Karte falsch dargestellt oder gespielt? Tippe oben links auf die <flag>Melden-Flagge</flag>, um sie zu melden, damit wir sie beheben können.",
+      "dismiss": "Schließen",
+      "open": "Karte melden",
+      "debugPrompt": "Wird eine Karte falsch dargestellt oder gespielt? Melde sie, damit wir sie beheben können."
     }
   },
   "splash": {
@@ -228,5 +248,16 @@
     "settings": "Einstellungen",
     "languageSettings": "Sprache ({{lang}}) — Einstellungen öffnen",
     "languageTitle": "Sprache: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Etwas ist schiefgelaufen",
+    "body": "Die App ist auf einen unerwarteten Fehler gestoßen und kann auf diesem Bildschirm nicht fortfahren. Ein Neuladen behebt das meist.",
+    "reload": "Neu laden"
+  },
+  "actionError": {
+    "title": "{{action}} fehlgeschlagen",
+    "skipTarget": "Ziel überspringen",
+    "genericAction": "Aktion",
+    "unknownEngineError": "Unbekannter Engine-Fehler"
   }
 }

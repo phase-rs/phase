@@ -27,12 +27,18 @@ pub fn resolve(
         return Err(EffectError::InvalidParam("Expected Cascade".to_string()));
     }
 
-    // CR 202.3b + CR 202.3e + CR 702.85a: Read source MV from the stack spell object.
-    // `mana_value_with_x` includes cost_x_paid to reflect the chosen value of X.
+    // CR 202.3b + CR 202.3d + CR 202.3e + CR 702.85a + CR 702.102b: Read the source
+    // spell's mana value from the stack object through the split-aware authority.
+    // `spell_mana_value` returns the COMBINED value of both halves for a FUSED split
+    // spell (CR 202.3d + CR 702.102b) and otherwise the object's own cost with the
+    // chosen X included (`cost_x_paid`, CR 202.3e) — so a fused `Breaking // Entering`
+    // that gained cascade seeds the threshold from its combined MV (8), not the front
+    // half (2). Byte-identical to the prior `mana_value_with_x(zone, cost_x_paid)`
+    // read for every non-fused spell.
     let source_mv = state
         .objects
         .get(&ability.source_id)
-        .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
+        .map(|obj| obj.spell_mana_value())
         .unwrap_or(0);
 
     // CR 603.3a: Re-read the controller from the source spell at resolution
@@ -90,7 +96,10 @@ pub fn resolve(
 
         let is_hit = state.objects.get(&card_id).is_some_and(|obj| {
             let is_land = obj.card_types.core_types.contains(&CoreType::Land);
-            let mv = obj.mana_cost.mana_value();
+            // CR 202.3d + CR 709.4b: the exiled card is off the stack, so a split
+            // card's mana value is its combined halves (front-only would misjudge
+            // the < source_mv hit test). No-ops for single-face cards.
+            let mv = obj.effective_mana_value();
             !is_land && mv < source_mv
         });
 
@@ -238,6 +247,73 @@ mod tests {
                 assert_eq!(*source_mv, 4);
             }
             other => panic!("Expected CascadeChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 202.3d + CR 702.102b + CR 702.85a: A FUSED split spell that gained
+    /// cascade seeds the cascade threshold from its COMBINED mana value, not the
+    /// front half. Breaking // Entering combines to MV 8 (front Breaking {U}{B} = 2,
+    /// back Entering {4}{B}{R} = 6); a nonland whose MV (5) sits BETWEEN the front
+    /// half (2) and the combined value (8) must be a cascade HIT. Reverting the
+    /// resolver to the front-half read seeds `source_mv = 2`, so the MV-5 card is a
+    /// miss (5 !< 2) and the offered `source_mv`/`hit_card` both flip.
+    #[test]
+    fn fused_split_spell_cascades_from_combined_mana_value() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let source = sc.add_real_card(P0, "Breaking", Zone::Battlefield, db);
+        {
+            let obj = sc.state.objects.get_mut(&source).unwrap();
+            assert_eq!(
+                obj.spell_mana_value(),
+                2,
+                "precondition: a non-fused Breaking reads the front-half MV 2"
+            );
+            obj.fused_split_spell = true;
+            obj.keywords.push(Keyword::Cascade);
+        }
+        assert_eq!(
+            sc.state.objects.get(&source).unwrap().spell_mana_value(),
+            8,
+            "a fused Breaking // Entering has combined MV 8"
+        );
+
+        let mut state = sc.state;
+        // A nonland whose MV (5) is strictly between the front half (2) and the
+        // combined value (8): a hit under threshold 8, a miss under threshold 2.
+        let hit = add_library_card(&mut state, PlayerId(0), "Mid MV", 5, false);
+        state.players[0].library = im::vector![hit];
+
+        let ability = ResolvedAbility::new(Effect::Cascade, vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::Cascade {
+                        hit_card,
+                        source_mv,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(
+                    *source_mv, 8,
+                    "cascade source MV is the combined value (8), not the front half (2)"
+                );
+                assert_eq!(
+                    *hit_card, hit,
+                    "the MV-5 card is a cascade hit under the combined threshold (8)"
+                );
+            }
+            other => panic!(
+                "expected a Cascade offer with the MV-5 hit, got {:?}",
+                other
+            ),
         }
     }
 

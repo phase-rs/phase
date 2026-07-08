@@ -231,6 +231,12 @@ pub enum KeywordKind {
     Escape,
     Morph,
     Megamorph,
+    /// CR 702.35a: Madness — see `Keyword::Madness`.
+    Madness,
+    /// CR 702.168: Disguise — see `Keyword::Disguise`. A discriminant-level kind
+    /// (like Morph/Mutate) so `FilterProp::HasKeywordKind { Disguise }` can name
+    /// the class regardless of the `Disguise(ManaCost)` parameter payload.
+    Disguise,
     /// CR 702.187: Mayhem — see `Keyword::Mayhem`.
     Mayhem,
     Suspend,
@@ -322,6 +328,73 @@ impl DynamicKeywordKind {
         match name {
             "annihilator" => Some(Self::Annihilator),
             "modular" => Some(Self::Modular),
+            _ => None,
+        }
+    }
+}
+
+/// CR 702 cast-from-off-zone-for-alternative-cost keyword family whose cost is a
+/// plain `ManaCost`. Used by `ContinuousModification::AddKeywordWithDerivedCost`
+/// to construct the runtime keyword from a per-recipient DERIVED cost — the
+/// derived-cost mirror of `DynamicKeywordKind` (numeric-parameter grants).
+///
+/// The compound-cost members Flashback/Escape/Evoke/Bestow carry their own cost
+/// types (`FlashbackCost`/`EscapeCost`/`EvokeCost`/`BestowCost`), so they are out
+/// of this constructor's domain; they would belong to a future richer-cost kind
+/// if a card ever grants them a derived cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CostBearingKeywordKind {
+    Foretell,
+    Madness,
+    Disturb,
+    Mayhem,
+    Dash,
+    Unearth,
+}
+
+impl CostBearingKeywordKind {
+    /// Parallel to `DynamicKeywordKind::with_value(u32)`: construct the concrete
+    /// `Keyword` from a per-recipient DERIVED `ManaCost`. Infallible — every
+    /// variant maps to a `Keyword::X(ManaCost)`.
+    pub fn with_cost(&self, cost: ManaCost) -> Keyword {
+        match self {
+            Self::Foretell => Keyword::Foretell(cost),
+            Self::Madness => Keyword::Madness(cost),
+            Self::Disturb => Keyword::Disturb(cost),
+            Self::Mayhem => Keyword::Mayhem(cost),
+            Self::Dash => Keyword::Dash(cost),
+            Self::Unearth => Keyword::Unearth(cost),
+        }
+    }
+
+    /// True when `kw` is a keyword of this family (regardless of its cost). Used
+    /// by the off-zone applier's per-recipient "without <kw>" dedup check.
+    /// Compares by concrete `Keyword` shape rather than `KeywordKind` because
+    /// several of these families (e.g. Madness) share `KeywordKind::Unknown`,
+    /// which would over-match under a `kind()` comparison.
+    pub fn matches_keyword(&self, kw: &Keyword) -> bool {
+        matches!(
+            (self, kw),
+            (Self::Foretell, Keyword::Foretell(_))
+                | (Self::Madness, Keyword::Madness(_))
+                | (Self::Disturb, Keyword::Disturb(_))
+                | (Self::Mayhem, Keyword::Mayhem(_))
+                | (Self::Dash, Keyword::Dash(_))
+                | (Self::Unearth, Keyword::Unearth(_))
+        )
+    }
+
+    /// Parse a keyword name into a `CostBearingKeywordKind`, if it is one of the
+    /// plain-`ManaCost` cast-from-off-zone family. Lets a single parser branch
+    /// select the family from the granted keyword's name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "foretell" => Some(Self::Foretell),
+            "madness" => Some(Self::Madness),
+            "disturb" => Some(Self::Disturb),
+            "mayhem" => Some(Self::Mayhem),
+            "dash" => Some(Self::Dash),
+            "unearth" => Some(Self::Unearth),
             _ => None,
         }
     }
@@ -1159,6 +1232,11 @@ impl Keyword {
             Keyword::Escape(_) => KeywordKind::Escape,
             Keyword::Morph(_) => KeywordKind::Morph,
             Keyword::Megamorph(_) => KeywordKind::Megamorph,
+            Keyword::Madness(_) => KeywordKind::Madness,
+            // CR 702.168: Disguise — its own discriminant kind (mirrors Morph)
+            // so `HasKeywordKind { Disguise }` selects face-up disguise creatures
+            // rather than being folded into the shared `Unknown` catch-all.
+            Keyword::Disguise(_) => KeywordKind::Disguise,
             Keyword::Mayhem(_) => KeywordKind::Mayhem,
             Keyword::Suspend { .. } => KeywordKind::Suspend,
             Keyword::Blitz(_) => KeywordKind::Blitz,
@@ -1226,7 +1304,6 @@ impl Keyword {
             | Keyword::Demonstrate
             | Keyword::Dethrone
             | Keyword::Discover(_)
-            | Keyword::Disguise(_)
             | Keyword::DoubleTeam
             | Keyword::Echo(_)
             | Keyword::Emerge(_)
@@ -1244,7 +1321,6 @@ impl Keyword {
             | Keyword::Ingest
             | Keyword::LevelUp(_)
             | Keyword::LivingMetal
-            | Keyword::Madness(_)
             | Keyword::Melee
             | Keyword::Mentor
             | Keyword::Mobilize(_)
@@ -2400,7 +2476,7 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
         "black" => HexproofFilter::Color(ManaColor::Black),
         "red" => HexproofFilter::Color(ManaColor::Red),
         "green" => HexproofFilter::Color(ManaColor::Green),
-        "monocolored" | "multicolored" => HexproofFilter::Quality(lower),
+        "colorless" | "monocolored" | "multicolored" => HexproofFilter::Quality(lower),
         // CR 702.11d + CR 105.4 + CR 609.6: "that color" / "the chosen color"
         // anaphors after a preceding `Choose a color` instruction. Resolved at
         // runtime via `ChosenAttribute::Color` on the granting source. Mirrors
@@ -2431,7 +2507,7 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // `source.color.len() == 1`. Multicolored keeps its dedicated variant;
         // monocolored reuses the existing Quality variant (no new variant / no game
         // change). Mirrors parse_hexproof_filter's monocolored→Quality handling.
-        "monocolored" => ProtectionTarget::Quality("monocolored".into()),
+        "colorless" | "monocolored" => ProtectionTarget::Quality(lower),
         // CR 702.16 + CR 105.4: "the chosen color" / "the color of your choice"
         // resolve at runtime from the granting source's `ChosenAttribute::Color`.
         // "color of your choice" is the as-resolved phrasing (Mother of Runes,
@@ -3135,6 +3211,34 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 mod tests {
     use super::*;
 
+    /// CR 702.143d + CR 702 (alt-cost family): `with_cost` maps each variant to
+    /// its `Keyword::X(ManaCost)`, and `matches_keyword`/`from_name` round-trip.
+    #[test]
+    fn cost_bearing_keyword_kind_maps_family() {
+        use crate::types::mana::ManaCost;
+        let cost = ManaCost::generic(2);
+        let cases = [
+            (CostBearingKeywordKind::Foretell, "foretell"),
+            (CostBearingKeywordKind::Madness, "madness"),
+            (CostBearingKeywordKind::Disturb, "disturb"),
+            (CostBearingKeywordKind::Mayhem, "mayhem"),
+            (CostBearingKeywordKind::Dash, "dash"),
+            (CostBearingKeywordKind::Unearth, "unearth"),
+        ];
+        for (kind, name) in cases {
+            assert_eq!(CostBearingKeywordKind::from_name(name), Some(kind));
+            let kw = kind.with_cost(cost.clone());
+            // The constructed keyword is recognized by matches_keyword...
+            assert!(kind.matches_keyword(&kw));
+            // ...and NOT confused with a different family member.
+            assert!(!CostBearingKeywordKind::Dash.matches_keyword(&Keyword::Foretell(cost.clone())));
+        }
+        assert_eq!(
+            CostBearingKeywordKind::Foretell.with_cost(cost.clone()),
+            Keyword::Foretell(cost)
+        );
+    }
+
     #[test]
     fn parse_simple_keywords() {
         assert_eq!(Keyword::from_str("Flying").unwrap(), Keyword::Flying);
@@ -3419,6 +3523,10 @@ mod tests {
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Red))
         );
         assert_eq!(
+            Keyword::from_str("Protection:colorless").unwrap(),
+            Keyword::Protection(ProtectionTarget::Quality("colorless".to_string()))
+        );
+        assert_eq!(
             Keyword::from_str("Protection:from everything").unwrap(),
             Keyword::Protection(ProtectionTarget::Quality("from everything".to_string()))
         );
@@ -3485,6 +3593,33 @@ mod tests {
         assert_eq!(
             parse_protection_target("artifacts"),
             ProtectionTarget::CardType("artifacts".to_string())
+        );
+    }
+
+    /// CR 702.16a + CR 105.2c: "protection from colorless" is a color-quality
+    /// predicate (zero colors), NOT a card type. The runtime reads it through
+    /// `source_matches_quality` the same way as monocolored/multicolored.
+    #[test]
+    fn parse_protection_target_colorless_is_quality_not_card_type() {
+        assert_eq!(
+            parse_protection_target("colorless"),
+            ProtectionTarget::Quality("colorless".to_string())
+        );
+        assert_ne!(
+            parse_protection_target("colorless"),
+            ProtectionTarget::CardType("colorless".to_string())
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:colorless").unwrap(),
+            Keyword::Protection(ProtectionTarget::Quality("colorless".to_string()))
+        );
+        assert_eq!(
+            parse_hexproof_filter("colorless"),
+            HexproofFilter::Quality("colorless".to_string())
+        );
+        assert_eq!(
+            Keyword::from_str("hexproof from colorless").unwrap(),
+            Keyword::HexproofFrom(HexproofFilter::Quality("colorless".to_string()))
         );
     }
 

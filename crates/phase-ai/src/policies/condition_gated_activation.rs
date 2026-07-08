@@ -210,6 +210,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         ConditionGatedActivationPolicy.verdict(&ctx)
     }
@@ -289,6 +290,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_score(
             ConditionGatedActivationPolicy.verdict(&ctx),

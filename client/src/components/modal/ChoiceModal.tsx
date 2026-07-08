@@ -9,6 +9,8 @@ export interface ChoiceOption {
   id: string;
   label: string;
   description?: string;
+  /** Optional glyph rendered before the label (e.g. a loyalty badge). */
+  icon?: ReactNode;
 }
 
 interface ChoiceModalProps {
@@ -63,6 +65,7 @@ export function ChoiceModal({
               className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/40"
             >
               <span className="font-semibold text-white">
+                {opt.icon && <span className="mr-1.5 align-middle">{opt.icon}</span>}
                 <RichLabel text={opt.label} size="sm" />
               </span>
               {opt.description && (

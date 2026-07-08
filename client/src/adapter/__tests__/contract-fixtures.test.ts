@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject, GameState, WaitingFor } from "../types";
-import { WebSocketAdapter } from "../ws-adapter";
+import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -39,7 +39,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 11,
+    protocol_version: PROTOCOL_VERSION,
     mode: "Full",
   },
 });

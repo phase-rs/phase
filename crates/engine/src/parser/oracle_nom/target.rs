@@ -6,13 +6,13 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
-use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::combinator::{map, not, opt, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
-use crate::parser::oracle_util::{parse_subtype, OUTLAW_SUBTYPES};
+use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
 use crate::types::ability::{
     Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -92,16 +92,21 @@ fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
-/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow")
-/// without consuming any trailing boundary. Shared building block for both the
-/// adjective-prefix form (`parse_supertype_prefix`, word + space) and trailing
-/// relative-clause forms ("that aren't legendary", where the word is at
-/// end-of-string). Callers that need a boundary apply their own check.
+/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow",
+/// "world", "ongoing") without consuming any trailing boundary. Shared building
+/// block for both the adjective-prefix form (`parse_supertype_prefix`, word +
+/// space) and trailing relative-clause forms ("that aren't legendary", where
+/// the word is at end-of-string). Callers that need a boundary apply their own
+/// check. Covers the full CR 205.4a set the engine `Supertype` enum models
+/// (Host is set-supplemental / not CR 205.4a and is excluded here). None of the
+/// five words is a prefix of another, so `alt` ordering is boundary-safe.
 pub fn parse_supertype_word(input: &str) -> OracleResult<'_, Supertype> {
     alt((
         value(Supertype::Legendary, tag("legendary")),
         value(Supertype::Basic, tag("basic")),
         value(Supertype::Snow, tag("snow")),
+        value(Supertype::World, tag("world")),
+        value(Supertype::Ongoing, tag("ongoing")),
     ))
     .parse(input)
 }
@@ -162,6 +167,11 @@ pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
         value(ControllerRef::Opponent, tag("an opponent controls")),
         value(ControllerRef::Opponent, tag("your opponents control")),
         value(ControllerRef::TargetPlayer, tag("target player controls")),
+        // CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained target-player scope.
+        value(
+            ControllerRef::TargetOpponent,
+            tag("target opponent controls"),
+        ),
     ))
     .parse(input)
 }
@@ -283,8 +293,15 @@ fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
 /// "this artifact".
 ///
 /// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
+///
+/// CR 201.5a: a granted body's by-name reference to its GRANTING object is
+/// masked to [`GRANTING_SELF_PLACEHOLDER`] by `normalize_card_name_refs` and
+/// recognized here (first alt) as `TargetFilter::GrantingObject` — distinct
+/// from the host `SelfRef`. This single edit covers the effect-target channel
+/// (`parse_target` → here) for "Return/Destroy/gains control of <self>".
 pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
+        parse_granting_object_ref,
         value(TargetFilter::SelfRef, tag("~")),
         parse_it_self_reference,
         // CR 201.5: "itself" is a self-reference to the object the ability is on.
@@ -298,6 +315,29 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
         value(TargetFilter::SelfRef, tag("this attraction")),
+    ))
+    .parse(input)
+}
+
+/// CR 201.5a: Single recognition authority for the granting-object by-name
+/// self-reference placeholder emitted by the quote masker in
+/// `normalize_card_name_refs`. Used as the first alt in both
+/// [`parse_self_reference`] (effect-target channel) and
+/// [`parse_cost_self_reference`] (cost channel).
+pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::GrantingObject, tag(GRANTING_SELF_PLACEHOLDER)).parse(input)
+}
+
+/// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
+/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand").
+/// Recognizes the granter placeholder → `GrantingObject` and the host tokens
+/// (`~`, "cardname") → `SelfRef`, in one authority so every cost site routes
+/// through the same logic instead of an ad-hoc per-site `tag("~")` copy.
+pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        parse_granting_object_ref,
+        value(TargetFilter::SelfRef, tag("~")),
+        value(TargetFilter::SelfRef, tag("cardname")),
     ))
     .parse(input)
 }
@@ -363,7 +403,16 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         ),
         value(TargetFilter::TriggeringSource, tag("that spell")),
         value(TargetFilter::TriggeringSource, tag("that creature")),
-        value(TargetFilter::TriggeringSource, tag("that permanent")),
+        value(
+            TargetFilter::TriggeringSource,
+            terminated(
+                tag("that permanent"),
+                not(preceded(
+                    tag(" "),
+                    alt((tag("or player"), tag("or a player"))),
+                )),
+            ),
+        ),
         value(TargetFilter::TriggeringSource, tag("that card")),
         parse_attacking_player_event_ref,
         // CR 506.3d: "that opponent" before the shorter "that player" arm.
@@ -854,6 +903,30 @@ mod tests {
         }
     }
 
+    /// CR 205.4a: the shared supertype-word recognizer is the building block for
+    /// every CR 205.4a supertype the engine `Supertype` enum models. World and
+    /// Ongoing were previously missing, so the "general" supertype-grant path
+    /// silently dropped them; this pins that the recognizer now maps all five
+    /// (Host is set-supplemental and intentionally excluded). None of the five
+    /// words is a prefix of another, so the `alt` order is boundary-safe.
+    #[test]
+    fn test_parse_supertype_word_covers_world_and_ongoing() {
+        assert_eq!(parse_supertype_word("world").unwrap().1, Supertype::World);
+        assert_eq!(
+            parse_supertype_word("ongoing").unwrap().1,
+            Supertype::Ongoing
+        );
+        // pre-existing arms remain recognized (no regression).
+        assert_eq!(
+            parse_supertype_word("legendary").unwrap().1,
+            Supertype::Legendary
+        );
+        assert_eq!(parse_supertype_word("basic").unwrap().1, Supertype::Basic);
+        assert_eq!(parse_supertype_word("snow").unwrap().1, Supertype::Snow);
+        // Host is NOT a CR 205.4a word here, so the recognizer must reject it.
+        assert!(parse_supertype_word("host").is_err());
+    }
+
     #[test]
     fn test_parse_type_phrase_nonland() {
         // "nonland" → Non(Land) with trailing text unconsumed
@@ -963,6 +1036,13 @@ mod tests {
         let (rest8, f8) = parse_event_context_ref("that opponent.").unwrap();
         assert_eq!(rest8, ".");
         assert_eq!(f8, TargetFilter::DefendingPlayer);
+
+        let (rest9, f9) = parse_event_context_ref("that permanent").unwrap();
+        assert_eq!(rest9, "");
+        assert_eq!(f9, TargetFilter::TriggeringSource);
+
+        assert!(parse_event_context_ref("that permanent or player").is_err());
+        assert!(parse_event_context_ref("that permanent or a player").is_err());
     }
 
     #[test]

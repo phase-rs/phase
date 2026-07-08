@@ -12,9 +12,10 @@ use crate::types::counter::parse_counter_type;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CounterAddedRecord, CounterMoveChoice, DelayedTrigger, GameState, PendingCounterAddition,
-    PendingCounterAdditionQueue, PendingCounterMove, PendingCounterMoveQueue,
-    PendingCounterPostAction, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
+    CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice, DelayedTrigger, GameState,
+    PendingCounterAddition, PendingCounterAdditionQueue, PendingCounterMove,
+    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemovalQueue,
+    PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -383,6 +384,22 @@ fn apply_pending_counter_post_action(
             }
             true
         }
+        PendingCounterPostAction::ContinueAmassAfterTokenCreation {
+            controller,
+            subtype,
+            count,
+            ability,
+        } => super::amass::continue_amass_after_token_creation(
+            state, controller, &subtype, count, &ability, events,
+        ),
+        PendingCounterPostAction::FinalizeAmass {
+            object_id,
+            subtype,
+            ability,
+        } => {
+            super::amass::finalize_amass(state, object_id, &subtype, &ability, events);
+            true
+        }
         PendingCounterPostAction::InjectPredefinedTokenAbilities { object_id } => {
             // CR 111.10 + CR 400.7: Incubator tokens get predefined
             // subtype abilities and battlefield-entry bookkeeping after their
@@ -712,8 +729,10 @@ pub(crate) fn apply_counter_addition(
         keywords: obj.keywords.clone(),
         power: obj.power,
         toughness: obj.toughness,
-        colors: obj.color.clone(),
-        mana_value: obj.mana_cost.mana_value(),
+        // CR 709.4b + CR 202.3d: combined colors / mana value for a split card off
+        // the stack (no-op for single-face and battlefield Rooms, which gate out).
+        colors: obj.effective_colors(),
+        mana_value: obj.effective_mana_value(),
         controller: obj.controller,
         owner: obj.owner,
         counters: obj
@@ -1438,6 +1457,22 @@ fn resolve_defined_or_targets(
         return vec![ability.source_id];
     }
 
+    // CR 608.2c + CR 122.1: `ParentTargetSlot { index }` — a later counter
+    // instruction that refers to a specific earlier declared target slot ("put a
+    // +1/+1 counter on the creature you control", index 0). The counter node's
+    // local `ability.targets` may have been replaced with the most-recent parent
+    // slot by chain propagation, so resolve against the flattened chain root
+    // (single authority in `targeting`), then keep only the object at `index`.
+    if let Some(TargetFilter::ParentTargetSlot { index }) = target_spec {
+        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
+
     // CR 608.2k: "the exiled card" — an untargeted reference to the object
     // referred to by this ability's cost (Jhoira of the Ghitu: "Put four time
     // counters on the exiled card"). Resolved from the recursively-stamped
@@ -1945,6 +1980,25 @@ pub fn resolve_remove(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 107.1c + CR 608.2d: "remove any number of counters" is a resolution-time
+    // interactive choice; the parser encodes it as `UpTo { Fixed{-1} }`.
+    // Discriminate on the peel FLAG (never on the scalar): if the count wrapper is
+    // present, route to the interactive per-type selection. We MUST NOT numerically
+    // resolve the inner `Fixed{-1}` — the board-derived per-type `available` counts
+    // ARE the legal domain (each type 0..=available; total 0..=Σ, incl. zero,
+    // CR 107.1c). Resolving the scalar would collapse into the non-interactive
+    // "remove all" branch below and skip the player's choice.
+    if let Effect::RemoveCounter {
+        count,
+        counter_type,
+        ..
+    } = &ability.effect
+    {
+        if count.is_up_to() {
+            return resolve_remove_interactive(state, ability, counter_type.clone(), events);
+        }
+    }
+
     let (counter_type, raw_count) = match &ability.effect {
         Effect::RemoveCounter {
             counter_type,
@@ -2035,6 +2089,178 @@ pub fn resolve_remove(
     Ok(())
 }
 
+/// CR 107.1c + CR 608.2d: Resolve "remove any number of counters from [source]"
+/// as a resolution-time interactive choice. Derives the public per-type counter
+/// budget from the single removal source (the ability's target for Rhys, the
+/// Evermore; `SelfRef` for Tetravus) and raises `WaitingFor::RemoveCountersChoice`
+/// so the controller picks any per-type subset (0..=available, incl. the empty
+/// set). When no counters are available the only legal selection is empty, so we
+/// resolve immediately with `last_effect_count = Some(0)` (CR 608.2h) and no
+/// prompt.
+///
+/// ponytail: single-source only — multi-source "from among" removals (Galloping
+/// Lizrog, Eventide's Shadow) are out of scope and keep hitting the parser's
+/// existing paths.
+fn resolve_remove_interactive(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    counter_type: Option<CounterType>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Some(source_id) = resolve_defined_or_targets(state, ability)
+        .into_iter()
+        .next()
+    else {
+        // No legal source (target left the battlefield, etc.) — finish cleanly.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+
+    // CR 122.1: derive the public per-type counts on the source, honoring the
+    // effect's counter-type filter (`Some` → that single type; `None` → every
+    // type present, e.g. Rhys "any number of counters").
+    let available: Vec<(CounterType, u32)> = state
+        .objects
+        .get(&source_id)
+        .map(|obj| {
+            obj.counters
+                .iter()
+                .filter(|(ct, &v)| {
+                    v > 0 && counter_type.as_ref().is_none_or(|filter| filter == *ct)
+                })
+                .map(|(ct, &v)| (ct.clone(), v))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // CR 107.1c: "any number" includes zero — an empty board means the only legal
+    // choice is the empty set. Resolve without a prompt and stamp 0 so a
+    // downstream "create that many" rider (Tetravus) reads 0, not a stale count.
+    if available.is_empty() {
+        state.last_effect_count = Some(0);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    state.waiting_for = WaitingFor::RemoveCountersChoice {
+        player: ability.controller,
+        source_id,
+        counter_type,
+        available,
+        pending_effect: Box::new(ability.clone()),
+    };
+    Ok(())
+}
+
+/// CR 107.1c: Validate a submitted "remove any number of counters" selection
+/// against the per-type `available` budget and return the total requested.
+///
+/// Shared single authority for the per-type constraints of both the effect-path
+/// handler (`RemoveCountersChoice`) and the cost-path handler
+/// (`handle_remove_counter_distribution_for_cost`, which projects its per-object
+/// distribution to per-type first). Enforces: every selected type exists in
+/// `available`, per entry `count <= available[type]`, positive counts, and no
+/// duplicate type. The empty selection (remove zero) is legal, and omitting an
+/// available type is legal.
+pub(crate) fn validate_counter_selection(
+    available: &[(CounterType, u32)],
+    selections: &[CounterRemoveChoice],
+) -> Result<u32, EffectError> {
+    let mut seen = HashSet::new();
+    let mut total = 0u32;
+    for selection in selections {
+        if selection.count == 0 {
+            return Err(EffectError::InvalidParam(
+                "counter removal selections must have positive counts".to_string(),
+            ));
+        }
+        if !seen.insert(selection.counter_type.clone()) {
+            return Err(EffectError::InvalidParam(
+                "counter removal selections must have distinct counter types".to_string(),
+            ));
+        }
+        let available_count = available
+            .iter()
+            .find(|(ct, _)| *ct == selection.counter_type)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        if selection.count > available_count {
+            return Err(EffectError::InvalidParam(
+                "counter removal request exceeds available counters".to_string(),
+            ));
+        }
+        total = total.saturating_add(selection.count);
+    }
+    Ok(total)
+}
+
+/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and stash the
+/// per-type removals into `pending_counter_removals` for
+/// `drain_pending_counter_removals` to apply. Mirrors
+/// `validate_and_queue_counter_move_distribution` so the `apply()` handler stays
+/// a thin dispatcher.
+pub(crate) fn validate_and_queue_counter_removal(
+    state: &mut GameState,
+    selections: &[CounterRemoveChoice],
+    source_id: ObjectId,
+    available: &[(CounterType, u32)],
+    pending_effect: &ResolvedAbility,
+) -> Result<(), EffectError> {
+    let total = validate_counter_selection(available, selections)?;
+    let remaining: Vec<(CounterType, u32)> = selections
+        .iter()
+        .map(|s| (s.counter_type.clone(), s.count))
+        .collect();
+    state.pending_counter_removals = Some(PendingCounterRemovalQueue {
+        remaining,
+        source_id,
+        effect_kind: EffectKind::from(&pending_effect.effect),
+        source_ability_id: pending_effect.source_id,
+        total,
+    });
+    Ok(())
+}
+
+/// CR 107.1c + CR 608.2h: Drain the pending "remove any number of counters"
+/// selection one `(counter_type, count)` entry at a time through the
+/// single-authority remove pipeline so prevention/modification replacements
+/// apply. Mirrors `drain_pending_counter_moves`: re-parks the queue (returning
+/// early) when a per-removal replacement surfaces a `ReplacementChoice`, and when
+/// the queue empties stamps `last_effect_count = total` BEFORE emitting
+/// `EffectResolved` so a downstream "create that many" / "add that much" rider
+/// reading `QuantityRef::EventContextAmount` picks up the removed count.
+pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    while let Some(mut queue) = state.pending_counter_removals.take() {
+        let Some((counter_type, count)) = queue.remaining.first().cloned() else {
+            // CR 608.2h: ordering invariant — stamp the total removed before the
+            // terminating EffectResolved (and thus before the continuation drains).
+            state.last_effect_count = Some(queue.total as i32);
+            events.push(GameEvent::EffectResolved {
+                kind: queue.effect_kind,
+                source_id: queue.source_ability_id,
+            });
+            continue;
+        };
+        queue.remaining.remove(0);
+        let source_id = queue.source_id;
+        state.pending_counter_removals = Some(queue);
+        // CR 614.1: single-authority remove pipeline (applies prevention /
+        // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
+        remove_counter_with_replacement(state, source_id, counter_type, count, events);
+        // If a replacement needs a player choice, suspend — the ReplacementChoice
+        // resume path re-invokes this drain to finish the remaining removals.
+        if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2056,6 +2282,73 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// T4 (counter resolver arm) — CR 608.2c + CR 122.1: a `PutCounter` whose
+    /// target is `ParentTargetSlot { index }` resolves against the FLATTENED
+    /// CHAIN ROOT (from `resolving_stack_entry`), not the node's local targets.
+    /// The node's own `targets` here carry only the most-recent parent slot
+    /// `[obj1]` (the model-B propagation the arm corrects); slot 0 must still
+    /// resolve to `obj0`. Reverting the arm falls through to the local `[obj1]`
+    /// for BOTH indices, so the `index: 0 → [obj0]` assertion flips.
+    #[test]
+    fn resolve_defined_or_targets_parent_target_slot_indexes_chain_root() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let obj0 = ObjectId(1);
+        let obj1 = ObjectId(2);
+
+        // Root two-slot chain: TargetOnly(obj0) → TargetOnly(obj1).
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj0)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj1)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: root,
+            },
+        });
+
+        let put_counter = |index: usize| {
+            ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTargetSlot { index },
+                },
+                // Local targets = most-recent slot only (model-B inheritance).
+                vec![TargetRef::Object(obj1)],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        assert_eq!(
+            resolve_defined_or_targets(&state, &put_counter(0)),
+            vec![obj0]
+        );
+        assert_eq!(
+            resolve_defined_or_targets(&state, &put_counter(1)),
+            vec![obj1]
+        );
     }
 
     fn mark_creature(state: &mut GameState, object_id: ObjectId) {
@@ -3117,6 +3410,102 @@ mod tests {
         );
     }
 
+    /// CR 122.1 + CR 603.4 + CR 603.10a: Drizzt Do'Urden — "Whenever a creature
+    /// dies, if it had power greater than Drizzt's power, put a number of +1/+1
+    /// counters on Drizzt equal to the difference." End-to-end through the real
+    /// parser: a larger-power creature dying gates the trigger on and puts
+    /// `dyingPower - drizztPower` counters (read from LKI, CR 603.10a); an
+    /// equal/smaller creature fails the gate and adds none. Fails on revert
+    /// (parser leaves the effect Unimplemented / drops the gate → 0 counters).
+    #[test]
+    fn drizzt_difference_counters_from_dying_creature_lki_power() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::triggers::TriggerMode;
+
+        // Parse Drizzt's dies trigger from Oracle text (real pipeline).
+        let parsed = crate::parser::parse_oracle_text(
+            "Double strike\n\
+             Whenever a creature dies, if it had power greater than Drizzt's power, \
+             put a number of +1/+1 counters on Drizzt equal to the difference.",
+            "Drizzt Do'Urden",
+            &[],
+            &["Creature".to_string()],
+            &["Elf".to_string(), "Ranger".to_string()],
+        );
+        let dies_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.execute
+                        .as_ref()
+                        .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| panic!("Drizzt dies PutCounter trigger not parsed: {parsed:#?}"))
+            .clone();
+
+        // Run the dies scenario with a creature of the given power; return the
+        // number of +1/+1 counters Drizzt ends up with.
+        let run = |dying_power: i32| -> u32 {
+            let mut state = GameState::new_two_player(42);
+
+            let drizzt_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Drizzt Do'Urden".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let d = state.objects.get_mut(&drizzt_id).unwrap();
+                d.power = Some(2);
+                d.toughness = Some(3);
+                d.card_types.core_types.push(CoreType::Creature);
+                d.trigger_definitions.push(dies_trigger.clone());
+            }
+
+            let dying_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Hill Giant".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let g = state.objects.get_mut(&dying_id).unwrap();
+                g.power = Some(dying_power);
+                g.toughness = Some(3);
+                g.card_types.core_types.push(CoreType::Creature);
+            }
+
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, dying_id, Zone::Graveyard, &mut events);
+            process_triggers(&mut state, &events);
+            while !state.stack.is_empty() {
+                let mut resolve_events = Vec::new();
+                resolve_top(&mut state, &mut resolve_events);
+            }
+
+            state.objects[&drizzt_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        };
+
+        // Larger power (5) than Drizzt (2): gate passes, +1/+1 counters = 5 - 2 = 3.
+        assert_eq!(
+            run(5),
+            3,
+            "5-power creature dying should give Drizzt 3 (=5-2) +1/+1 counters"
+        );
+        // Equal power (2): strict GT gate fails, no counters.
+        assert_eq!(run(2), 0, "equal-power creature must not add counters");
+        // Smaller power (1): gate fails, no counters.
+        assert_eq!(run(1), 0, "smaller-power creature must not add counters");
+    }
+
     /// Regression test: MoveCounters must use LKI when the source has changed zones.
     /// Simulates Essence Channeler's "When this creature dies, put its counters on
     /// target creature you control" — the source is in the graveyard with no counters,
@@ -3152,6 +3541,7 @@ mod tests {
             source_id,
             LKISnapshot {
                 name: "Essence Channeler".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(4),
                 base_power: Some(5),
@@ -3167,6 +3557,7 @@ mod tests {
                 chosen_attributes: Vec::new(),
                 counters: lki_counters,
                 tapped: false,
+                is_suspected: false,
             },
         );
 

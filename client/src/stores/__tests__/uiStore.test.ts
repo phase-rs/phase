@@ -117,4 +117,12 @@ describe("uiStore", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
+
+  it("toggleDebugClickModeButtonVisible flips the pinned click-mode control", () => {
+    expect(useUiStore.getState().debugClickModeButtonVisible).toBe(false);
+    act(() => useUiStore.getState().toggleDebugClickModeButtonVisible());
+    expect(useUiStore.getState().debugClickModeButtonVisible).toBe(true);
+    act(() => useUiStore.getState().toggleDebugClickModeButtonVisible());
+    expect(useUiStore.getState().debugClickModeButtonVisible).toBe(false);
+  });
 });

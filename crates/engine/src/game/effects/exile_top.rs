@@ -18,7 +18,11 @@ pub fn resolve(
         } => (
             // Use resolve_quantity_with_targets so that TargetZoneCardCount (and
             // DivideRounded wrapping it) can resolve against the targeted player.
-            resolve_quantity_with_targets(state, count, ability) as usize,
+            // CR 107.1b: clamp a negative result to zero before the `as usize`
+            // cast — a subtractive count would otherwise wrap huge, and the
+            // downstream library-size `min` would exile the entire library
+            // instead of nothing. Mirrors the guard in `draw.rs` / `discard.rs`.
+            resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             player.clone(),
             *face_down,
         ),
@@ -565,6 +569,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(recall_inner),
                 uses_tracked_set: true,
@@ -686,10 +691,12 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: crate::types::ability::TrackedAnaphorSource::ChainSet,
                     },
                 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),
@@ -764,6 +771,87 @@ mod tests {
         assert!(
             !obj.face_down,
             "face-up ExileTop must not flip the object's `face_down` flag",
+        );
+    }
+
+    /// CR 107.1b: an exile-top count that resolves negative must clamp to 0, not
+    /// wrap through the `as usize` cast and exile the whole library. Revert-probe:
+    /// without the `.max(0)` the downstream library-size `min` exiles the target's
+    /// entire library instead of nothing.
+    #[test]
+    fn exile_top_negative_count_clamps_to_zero() {
+        use crate::types::ability::PlayerScope;
+
+        let mut state = GameState::new_two_player(7);
+        // Controller (P0): 1 card in hand, 2 in library. Opponent (P1): 3 in hand.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand".into(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "LibA".into(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "LibB".into(),
+            Zone::Library,
+        );
+        for i in 0..3u64 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                "Theirs".into(),
+                Zone::Hand,
+            );
+        }
+
+        // count = HandSize{You} − HandSize{Opponent} = 1 − 3 = −2.
+        let count = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                        },
+                    }),
+                },
+            ],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count,
+                face_down: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].library.len(),
+            2,
+            "CR 107.1b: a negative exile-top count must exile 0, not the whole library"
         );
     }
 }

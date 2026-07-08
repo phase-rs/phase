@@ -2,7 +2,6 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
-import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -10,18 +9,20 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
+import { ManualManaToggle } from "../board/ManualManaToggle.tsx";
+import { UndoButton } from "../board/UndoButton.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
 import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { NextUpBadge } from "./NextUpBadge.tsx";
 
 export function PlayerHud() {
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
-  const { waitingSeatId } = useTurnStatus();
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
   const poisonCounters = useGameStore((s) => s.gameState?.players[playerId]?.poison_counters ?? 0);
   const radCounters = useGameStore((s) => s.gameState?.players[playerId]?.player_counters?.Rad ?? 0);
@@ -95,9 +96,9 @@ export function PlayerHud() {
         underAttack={isUnderAttack}
         avatarUrl={avatarUrl}
         playerId={playerId}
-        hasPendingDecision={waitingSeatId === playerId}
         density={compact ? "compact" : "default"}
         onClick={isValidTarget ? handleTargetClick : undefined}
+        cornerBadge={<NextUpBadge playerId={playerId} compact={compact} />}
         trailing={
           <>
             <EnchantmentsBadge playerId={playerId} />
@@ -147,6 +148,16 @@ export function PlayerHud() {
         </div>
       </HudPlate>
       <PhaseIndicatorRight />
+      {/* Manual mana + undo ride the HUD (drag offsets and the mobile portrait
+          shift included) instead of overlaying the land column, where they
+          collided with land stacks and the zone piles. Absolutely positioned
+          off the right edge so the plate keeps its centered anchor. The
+          pointer-events split keeps the column's empty bounding-box regions
+          (chip gap, short-chip gutter) tappable through to fanned hand cards. */}
+      <div className="pointer-events-none absolute left-full top-1/2 z-20 ml-1 flex -translate-y-1/2 flex-col items-start gap-1 [&>*]:pointer-events-auto">
+        <ManualManaToggle />
+        <UndoButton />
+      </div>
     </div>
   );
 }

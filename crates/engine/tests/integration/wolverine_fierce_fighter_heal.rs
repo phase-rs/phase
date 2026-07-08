@@ -29,6 +29,7 @@ fn damage_ability(source_id: ObjectId, target: ObjectId, amount: i32) -> Resolve
             amount: QuantityExpr::Fixed { value: amount },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         },
         vec![TargetRef::Object(target)],
         source_id,

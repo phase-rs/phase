@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameState, LegalActionsResult, WaitingFor } from "../../../adapter/types";
+import { buildGameState, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory";
 
 /**
  * Regression test for issue #484 (P0 AI softlock).
@@ -54,6 +55,7 @@ vi.mock("../../../stores/gameStore", () => ({
 }));
 
 import { createAIController } from "../aiController";
+import { debugLog } from "../../debugLog";
 
 // --- Fixtures --------------------------------------------------------------
 
@@ -72,19 +74,20 @@ const ILLEGAL_DECLARE: GameAction = {
 } as unknown as GameAction;
 
 function declareAttackersState(): GameState {
-  const waitingFor = {
+  const waitingFor: WaitingFor = {
     type: "DeclareAttackers",
     data: { player: 1, valid_attacker_ids: [GOADED_ID] },
-  } as unknown as WaitingFor;
-  return {
+  };
+  return buildGameState({
     waiting_for: waitingFor,
     stack: [],
     has_pending_cast: false,
-  } as unknown as GameState;
+    priority_player: 1,
+  });
 }
 
 function castOfferState(): GameState {
-  const waitingFor = {
+  const waitingFor: WaitingFor = {
     type: "CastOffer",
     data: {
       player: 1,
@@ -95,13 +98,13 @@ function castOfferState(): GameState {
         source_mv: 4,
       },
     },
-  } as unknown as WaitingFor;
-  return {
+  };
+  return buildGameState({
     waiting_for: waitingFor,
     stack: [],
     has_pending_cast: false,
     priority_player: 1,
-  } as unknown as GameState;
+  });
 }
 
 /** Flush pending microtasks (promise `.then` chains). */
@@ -116,6 +119,7 @@ describe("aiController stuck-fallback (issue #484)", () => {
     vi.useFakeTimers();
     dispatchAction.mockReset();
     notifyEngineLost.mockReset();
+    vi.mocked(debugLog).mockReset();
   });
 
   afterEach(() => {
@@ -280,6 +284,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     vi.useFakeTimers();
     dispatchAction.mockReset();
     notifyEngineLost.mockReset();
+    vi.mocked(debugLog).mockReset();
   });
 
   afterEach(() => {
@@ -290,11 +295,8 @@ describe("aiController turn-control authorization (issue #2012)", () => {
    *  authorized submitter slot (priority_player) — i.e. the human controls
    *  the AI's turn. */
   function humanControlsAiTurnState(): GameState {
-    const waitingFor = {
-      type: "Priority",
-      data: { player: 1 },
-    } as unknown as WaitingFor;
-    return {
+    const waitingFor = buildPriorityWaitingFor({ data: { player: 1 } });
+    return buildGameState({
       waiting_for: waitingFor,
       stack: [],
       has_pending_cast: false,
@@ -302,7 +304,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
       priority_player: 0,
       active_player: 1,
       turn_decision_controller: 0,
-    } as unknown as GameState;
+    });
   }
 
   it("stays silent when a human controls the AI's turn (does not crash)", async () => {
@@ -338,14 +340,14 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     const getAiAction = vi.fn(async () => PASS);
     // Normal turn: AI seat 1 is both the acting player and the authorized
     // submitter (no turn-control effect).
-    const state = {
-      waiting_for: { type: "Priority", data: { player: 1 } } as unknown as WaitingFor,
+    const state = buildGameState({
+      waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
       stack: [],
       has_pending_cast: false,
       priority_player: 1,
       active_player: 1,
       turn_decision_controller: null,
-    } as unknown as GameState;
+    });
     storeState = {
       gameState: state,
       waitingFor: state.waiting_for,
@@ -369,6 +371,117 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     controller.dispose();
   });
 
+  it("logs the actual random card-predicate guess returned by the AI", async () => {
+    const gollumId = 300;
+    const guess: GameAction = {
+      type: "ChooseOption",
+      data: { choice: "Nonland" },
+    };
+    const waitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
+        options: ["Land", "Nonland"],
+        source_id: gollumId,
+      },
+    };
+    const state = buildGameState({
+      waiting_for: waitingFor,
+      priority_player: 1,
+      active_player: 1,
+      objects: {
+        [gollumId]: {
+          name: "Gollum, Scheming Guide",
+        } as GameState["objects"][number],
+      },
+    });
+    const getAiAction = vi.fn(async () => guess);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushMicrotasks();
+    }
+
+    expect(debugLog).toHaveBeenCalledWith(
+      "AI player 2 randomly guesses Nonland for Gollum, Scheming Guide",
+      "info",
+    );
+
+    controller.dispose();
+  });
+
+  it("ignores a delayed card-predicate guess after the prompt changes", async () => {
+    const gollumId = 300;
+    const guess: GameAction = {
+      type: "ChooseOption",
+      data: { choice: "Nonland" },
+    };
+    const scheduledWaitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
+        options: ["Land", "Nonland"],
+        source_id: gollumId,
+      },
+    };
+    const currentWaitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: "Opponent",
+        options: ["1"],
+        source_id: gollumId,
+      },
+    };
+    const scheduledState = buildGameState({
+      waiting_for: scheduledWaitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
+    const currentState = buildGameState({
+      waiting_for: currentWaitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
+    const getAiAction = vi.fn(async () => guess);
+    storeState = {
+      gameState: scheduledState,
+      waitingFor: scheduledState.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    storeState = {
+      ...storeState,
+      gameState: currentState,
+      waitingFor: currentState.waiting_for,
+    };
+
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(debugLog).toHaveBeenCalledWith(
+      expect.stringContaining("AI ignored stale ChooseOption"),
+      "info",
+    );
+
+    controller.dispose();
+  });
+
   it("acts as the controller when an AI controls the human's turn", async () => {
     const PASS: GameAction = { type: "PassPriority" } as GameAction;
     const getAiAction = vi.fn(async () => PASS);
@@ -377,14 +490,14 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     // authorized submitter to the controller (priority_player = 1). The AI must
     // act for, and dispatch as, the controller seat — not bail because
     // data.player is the local human (which previously soft-stalled the turn).
-    const state = {
-      waiting_for: { type: "Priority", data: { player: 0 } } as unknown as WaitingFor,
+    const state = buildGameState({
+      waiting_for: buildPriorityWaitingFor({ data: { player: 0 } }),
       stack: [],
       has_pending_cast: false,
       priority_player: 1,
       active_player: 0,
       turn_decision_controller: 1,
-    } as unknown as GameState;
+    });
     storeState = {
       gameState: state,
       waitingFor: state.waiting_for,

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::card_db::CardDatabase;
 use super::legality::LegalityFormat;
-use crate::types::card::CardFace;
+use crate::types::card::{CardFace, LayoutKind};
 use crate::types::card_type::CardType;
 use crate::types::mana::{ManaColor, ManaCost};
 
@@ -109,7 +109,9 @@ impl CardDatabase {
                 continue;
             }
             if !requested_colors.is_empty() {
-                let colors = face_colors(face);
+                // CR 105.2 + CR 202.3d + CR 709.4b: off-stack a split card's colors
+                // are the combined colors of both halves.
+                let colors = self.off_stack_colors_for_face(face);
                 if !requested_colors.iter().all(|c| colors.contains(c)) {
                     continue;
                 }
@@ -118,7 +120,9 @@ impl CardDatabase {
                 continue;
             }
             if let Some(max) = query.cmc_max {
-                if face.mana_cost.mana_value() > max {
+                // CR 202.3d + CR 709.4b: off-stack a split card's mana value is the
+                // combined value of both halves.
+                if self.off_stack_mana_value_for_face(face) > max {
                     continue;
                 }
             }
@@ -191,11 +195,12 @@ impl CardDatabase {
         CardSearchResult {
             name: face.name.clone(),
             oracle_id: face.scryfall_oracle_id.clone(),
-            mana_value: face.mana_cost.mana_value(),
-            color_identity: face
-                .color_identity
-                .iter()
-                .copied()
+            // CR 202.3d + CR 709.4b + CR 903.4: off the stack a split card reports
+            // the COMBINED mana value and color identity of both halves.
+            mana_value: self.off_stack_mana_value_for_face(face),
+            color_identity: self
+                .off_stack_color_identity_for_face(face)
+                .into_iter()
                 .map(color_letter)
                 .collect(),
             legalities,
@@ -228,6 +233,76 @@ impl CardDatabase {
             haystack.push_str(&text.to_lowercase());
         }
         words.iter().all(|w| haystack.contains(w))
+    }
+}
+
+impl CardDatabase {
+    /// CR 202.3d + CR 709.4b: The faces to combine for an OFF-STACK characteristic
+    /// of the whole card `face` belongs to. In every zone except the stack a SPLIT
+    /// card's mana value and colors are the COMBINED value of both halves, so this
+    /// returns BOTH halves for a split card; every other layout (single-face, DFC,
+    /// MDFC, Adventure, Flip, …) keeps its per-face value, so it returns just
+    /// `face`. Siblings are enumerated via `scryfall_oracle_id` (`oracle_id_index`
+    /// → `face_index`); Split-ness is read from `layout_index`. This is the single
+    /// authority routed through by deck-builder search, `CardSearchResult`, and
+    /// off-stack deck-legality checks.
+    fn off_stack_faces<'a>(&'a self, face: &'a CardFace) -> Vec<&'a CardFace> {
+        let is_split = face
+            .scryfall_oracle_id
+            .as_deref()
+            .and_then(|oid| self.layout_index.get(oid))
+            .is_some_and(|kind| *kind == LayoutKind::Split);
+        if !is_split {
+            return vec![face];
+        }
+        let siblings: Vec<&CardFace> = face
+            .scryfall_oracle_id
+            .as_deref()
+            .and_then(|oid| self.oracle_id_index.get(oid))
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|key| self.face_index.get(key))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Defensive: if the sibling index is somehow empty, fall back to the single
+        // face rather than reporting a zero mana value / no colors.
+        if siblings.is_empty() {
+            vec![face]
+        } else {
+            siblings
+        }
+    }
+
+    /// CR 202.3d + CR 709.4b: off-stack mana value of the whole card — the combined
+    /// mana value of both halves for a split card, else the face's own mana value.
+    pub(crate) fn off_stack_mana_value_for_face(&self, face: &CardFace) -> u32 {
+        self.off_stack_faces(face)
+            .iter()
+            .map(|f| f.mana_cost.mana_value())
+            .sum()
+    }
+
+    /// CR 105.2 + CR 202.3d + CR 709.4b: off-stack colors (mana-symbol + color
+    /// indicator colors) — the union across both halves for a split card, else the
+    /// face's colors. Returned in canonical WUBRG order.
+    pub(crate) fn off_stack_colors_for_face(&self, face: &CardFace) -> Vec<ManaColor> {
+        let faces = self.off_stack_faces(face);
+        ManaColor::ALL
+            .into_iter()
+            .filter(|color| faces.iter().any(|f| face_colors(f).contains(color)))
+            .collect()
+    }
+
+    /// CR 903.4 + CR 202.3d + CR 709.4b: off-stack color identity — the union
+    /// across both halves for a split card, else the face's color identity.
+    /// Returned in canonical WUBRG order.
+    pub(crate) fn off_stack_color_identity_for_face(&self, face: &CardFace) -> Vec<ManaColor> {
+        let faces = self.off_stack_faces(face);
+        ManaColor::ALL
+            .into_iter()
+            .filter(|color| faces.iter().any(|f| f.color_identity.contains(color)))
+            .collect()
     }
 }
 

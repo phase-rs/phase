@@ -35,11 +35,25 @@
     "off": "Disattivato"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Vista",
+      "tools": "Strumenti",
+      "game": "Partita"
+    },
+    "reportCard": "Segnala una carta",
     "menu": "Menu di gioco",
     "sandboxTools": "Strumenti Sandbox",
     "sandboxToolsTitle": "Strumenti Sandbox — imposta qualsiasi stato del campo (`)",
+    "openSandboxTools": "Apri strumenti Sandbox",
+    "clickModeButton": "Pulsante modalità clic",
+    "shown": "Visibile",
+    "hidden": "Nascosto",
     "resume": "Riprendi",
     "settings": "Impostazioni",
+    "boardLayoutSplit": "Diviso",
+    "boardLayoutLegacy": "Legacy",
+    "switchToSplitView": "Passa alla vista tavolo diviso",
+    "switchToLegacyView": "Passa alla vista legacy focalizzata",
     "helpShortcuts": "Aiuto e scorciatoie",
     "showAiHand": "Mostra mano IA",
     "hideAiHand": "Nascondi mano IA",
@@ -202,6 +216,12 @@
       "message": "Imposta qualsiasi stato del campo con <tools>Strumenti Sandbox</tools> — aggiungi carte e pedine, cambia punti vita e segnalini, copia permanenti o salta le fasi. Aprilo in qualsiasi momento con il tasto <key>`</key>.",
       "dismiss": "Ignora",
       "open": "Apri Strumenti Sandbox"
+    },
+    "reportCardNudge": {
+      "message": "Una carta viene mostrata o giocata in modo errato? Tocca la <flag>bandierina di segnalazione</flag> in alto a sinistra per segnalarla così possiamo correggerla.",
+      "dismiss": "Ignora",
+      "open": "Segnala una carta",
+      "debugPrompt": "Una carta viene mostrata o giocata in modo errato? Segnalala così possiamo correggerla."
     }
   },
   "splash": {
@@ -228,5 +248,16 @@
     "settings": "Impostazioni",
     "languageSettings": "Lingua ({{lang}}) — apri impostazioni",
     "languageTitle": "Lingua: {{lang}}"
+  },
+  "errorBoundary": {
+    "heading": "Qualcosa è andato storto",
+    "body": "L'app ha riscontrato un errore imprevisto e non può continuare in questa schermata. Ricaricare di solito risolve il problema.",
+    "reload": "Ricarica"
+  },
+  "actionError": {
+    "title": "{{action}} non riuscita",
+    "skipTarget": "Salta bersaglio",
+    "genericAction": "Azione",
+    "unknownEngineError": "Errore motore sconosciuto"
   }
 }
