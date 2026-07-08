@@ -1,8 +1,6 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, CountScope, CounterAdjustment, DoorLockOp, TypeFilter,
-};
+use crate::types::ability::{CountScope, CounterAdjustment, DoorLockOp};
 use crate::types::counter::{CounterMatch, CounterType};
 
 /// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
@@ -1038,13 +1036,13 @@ fn compound_target_player_continuations_share_one_target() {
 }
 
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
-    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition,
-    PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement,
-    SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
-    TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AggregateFunction, Comparator, ContinuousModification,
+    ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition,
+    TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
