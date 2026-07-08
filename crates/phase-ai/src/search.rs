@@ -1033,6 +1033,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Choose-one-of branch: pick the first branch.
         WaitingFor::ChooseOneOfBranch { .. } => Some(GameAction::ChooseBranch { index: 0 }),
+        // CR 119.7 + CR 119.8: option 0 is always the identity ("keep current totals")
+        // assignment and always legal — a safe deterministic fallback.
+        WaitingFor::RedistributeLifeTotals { .. } => {
+            Some(GameAction::SubmitLifeRedistribution { option_index: 0 })
+        }
 
         // Discover/Cascade: decline.
         WaitingFor::CastOffer {

@@ -22,7 +22,10 @@ use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::apply_draw_after_replacement;
-use super::effects::life::{apply_life_gain_after_replacement, apply_life_loss_after_replacement};
+use super::effects::life::{
+    apply_life_gain_after_replacement, apply_life_loss_after_replacement,
+    drain_pending_life_total_assignment,
+};
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
@@ -695,6 +698,15 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_life_total_assignment.is_some()
+            {
+                drain_pending_life_total_assignment(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             // CR 603.10a + CR 616.1: A simultaneous zone-move batch (mill or
             // mass bounce) paused mid-delivery because an object's Moved
             // replacements needed an ordering choice (Rest in Peace + Leyline of
@@ -885,6 +897,13 @@ pub(super) fn handle_replacement_choice(
                 if let Some(wf) = drain_pending_connive_reentry(state, events) {
                     return Ok(wf);
                 }
+                return Ok(state.waiting_for.clone());
+            }
+            if state.pending_life_total_assignment.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                drain_pending_life_total_assignment(state, events);
                 return Ok(state.waiting_for.clone());
             }
             if state.pending_counter_additions.is_some() {

@@ -497,6 +497,9 @@ fn redundancy_delta(
         // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
         // triggered ability — it has no target and no static redundancy signal.
         | Effect::ChaosEnsues
+        // CR 119.7 + CR 119.8: RedistributeLifeTotals is a one-time interactive life
+        // permutation — no target and no static redundancy signal.
+        | Effect::RedistributeLifeTotals
         // CR 103.1: ReverseTurnOrder has no target and no static redundancy signal.
         | Effect::ReverseTurnOrder
         | Effect::GrantCastingPermission { .. }

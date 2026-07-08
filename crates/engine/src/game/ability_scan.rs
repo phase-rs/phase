@@ -1543,6 +1543,8 @@ fn scan_effect(x: &Effect) -> Axes {
             scan_effect(replacement_effect)
         }
         Effect::ChaosEnsues => Axes::NONE,
+        // Field-less self-gathering effect: no target/quantity axes to scan.
+        Effect::RedistributeLifeTotals => Axes::NONE,
         Effect::ReverseTurnOrder => Axes::NONE,
         Effect::ChooseOneOf { .. } => Axes::CONSERVATIVE,
         Effect::Unimplemented {
@@ -3665,6 +3667,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::ChooseCounterAdjustment { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
         | Effect::Unimplemented { .. } => ResolutionChoiceFreedom::MayPrompt,
