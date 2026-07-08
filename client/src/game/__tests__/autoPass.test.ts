@@ -50,7 +50,7 @@ describe("shouldAutoPass", () => {
     const mulligan: WaitingFor = {
       type: "MulliganDecision",
       data: {
-        pending: [{ player: 0, mulligan_count: 0 }],
+        pending: [{ player: 0, mulligan_count: 0, phase: { type: "Declare" } }],
         free_first_mulligan: false,
       },
     };

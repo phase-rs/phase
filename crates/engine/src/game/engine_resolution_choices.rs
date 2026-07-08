@@ -77,6 +77,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::CastOffer {
@@ -552,6 +553,39 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
+            WaitingFor::RedistributeLifeTotals { player, options },
+            GameAction::SubmitLifeRedistribution { option_index },
+        ) => {
+            // CR 119.7 + CR 119.8: apply the chosen assignment. Every enumerated
+            // option is already legal because the resolver filtered each receiver.
+            let option = options.get(option_index).ok_or_else(|| {
+                EngineError::InvalidAction(format!(
+                    "Life redistribution option {option_index} out of range"
+                ))
+            })?;
+            let assignment = option.assignment.clone();
+            match effects::life::apply_life_totals_assignment(
+                state,
+                &assignment,
+                player,
+                None,
+                events,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+            {
+                // CR 616.1: a competing replacement installed a choice WaitingFor;
+                // the resume path completes the assignment and continuation.
+                effects::life::LifeAssignmentOutcome::Deferred => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                effects::life::LifeAssignmentOutcome::Applied => {
+                    ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                        state, player, events,
+                    ))
+                }
+            }
+        }
+        (
             WaitingFor::CoinFlipKeepChoice {
                 player,
                 results,
@@ -965,6 +999,20 @@ pub(super) fn handle_resolution_choice(
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
+                // CR 608.2c + CR 107.1c (issue #1032): reset to `Priority`
+                // BEFORE re-entering the chain, mirroring the `decline`
+                // branch's `finish_with_continuation` reset below and
+                // `handle_optional_effect_choice`'s `set_active_priority`
+                // reset (engine_payment_choices.rs). Without this,
+                // `state.waiting_for` is still the just-answered
+                // `RepeatDecision`, which `waits_for_resolution_choice`
+                // (effects/mod.rs) matches — the ChangeZone/LoseLife
+                // sub-chain following this iteration's RevealTop is then
+                // wrongly deferred into `pending_continuation` (accumulating
+                // there via `append_to_sub_chain`) instead of resolving
+                // immediately, and only drains in one batch when the
+                // controller eventually declines.
+                set_priority(state, player);
                 // Re-resolve one more process pass. `ability` retains
                 // `repeat_until: Some(ControllerChoice)`, so this hits the
                 // `repeat_until` dispatch, runs `resolve_chain_body` once, and

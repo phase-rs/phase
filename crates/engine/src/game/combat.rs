@@ -1878,13 +1878,23 @@ pub fn compute_combat_tax(
         .collect();
     let mut any_tax = false;
 
-    // CR 114.4: Emblems in the command zone contribute their statics too.
+    // CR 113.6b + CR 114.3/114.4: command-zone sources contribute their
+    // statics when they're an emblem (function unconditionally) or when a
+    // non-emblem object (a plane, scheme, or conspiracy) has at least one
+    // static that opts into the command zone via `active_zones` — the same
+    // admission rule `functioning_abilities::object_sources_static_from_command_zone`
+    // already applies for every other command-zone-consuming gather. An
+    // emblem-only gate here would silently drop legitimate Eminence-style
+    // command-zone opt-in sources before their `CantAttack`/`CantBlock`
+    // definitions ever reach the per-def zone check below.
     let zones = state.battlefield.iter().chain(state.command_zone.iter());
     for &source_id in zones {
         let Some(source_obj) = state.objects.get(&source_id) else {
             continue;
         };
-        if source_obj.zone == Zone::Command && !source_obj.is_emblem {
+        if source_obj.zone == Zone::Command
+            && !super::functioning_abilities::object_sources_static_from_command_zone(source_obj)
+        {
             continue;
         }
         // CR 702.26b: Phased-out permanents' statics don't function.
@@ -1898,6 +1908,19 @@ pub fn compute_combat_tax(
         // gates are enforced by the outer `if obj.is_phased_out()` / command-
         // zone check above this loop.
         for def in source_obj.static_definitions.iter_all() {
+            // CR 113.6 + CR 113.6b: single-authority zone-of-function gate,
+            // shared with every other statics gather (see
+            // `functioning_abilities::static_functions_in_zone`) so they cannot
+            // disagree. A zone-restricted `CantAttack`/`CantBlock`/
+            // `CantAttackOrBlock` static must not tax from a zone its
+            // `active_zones` excludes — e.g. a battlefield permanent whose
+            // static only functions from the graveyard must not tax attacks or
+            // blocks. Command-zone emblems are already admitted by the outer
+            // gate and function from command regardless of `active_zones`;
+            // every other zone follows the default/listed-zone rule.
+            if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
+                continue;
+            }
             let mode_matches = match context {
                 CombatTaxContext::Attacking => matches!(
                     def.mode,
@@ -10271,6 +10294,196 @@ mod tests {
         assert_eq!(total.mana_value(), 4);
         assert_eq!(per_creature.len(), 1);
         assert_eq!(per_creature[0].1.mana_value(), 4);
+    }
+
+    /// CR 113.6 + CR 113.6b: a `CantAttack` tax static whose `active_zones`
+    /// restricts it to a non-battlefield zone must NOT tax attacks while its
+    /// source sits on the battlefield. This mirrors the zone-of-function gate
+    /// already enforced by every other statics gather via
+    /// `functioning_abilities::static_functions_in_zone`. No shipping card
+    /// currently builds a zone-restricted `CantAttack`, but the tax loop must
+    /// agree with the single-authority predicate the moment one does.
+    ///
+    /// The positive reach-guard (an identically-shaped static with EMPTY
+    /// `active_zones`, i.e. battlefield-only, on the same kind of battlefield
+    /// object) proves the negative assertion is not vacuous: the only
+    /// difference between the two branches is `active_zones`, and the empty
+    /// case still taxes.
+    #[test]
+    fn compute_attack_tax_respects_zone_of_function_active_zones() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        // Builds a Ghostly-Prison-shaped `CantAttack` tax static on a
+        // battlefield enchantment controlled by `controller`, restricted to the
+        // given `active_zones` (empty = battlefield-only default).
+        let build_prison =
+            |state: &mut GameState, controller: PlayerId, active_zones: Vec<Zone>| -> ObjectId {
+                let id = create_object(
+                    state,
+                    CardId(state.next_object_id),
+                    controller,
+                    "Zone-Gated Prison".to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let mut def = StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::Opponent),
+                        properties: vec![],
+                    }))
+                    .active_zones(active_zones)
+                    .description("Zone-Gated Prison".to_string());
+                def.condition = Some(StaticCondition::UnlessPay {
+                    cost: ManaCost::generic(2),
+                    scaling: UnlessPayScaling::PerAffectedCreature,
+                    defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+                });
+                obj.static_definitions.push(def);
+                id
+            };
+
+        // Negative: source is on the battlefield but the static only functions
+        // from the graveyard — no tax may be produced.
+        {
+            let mut state = setup();
+            let _prison = build_prison(&mut state, PlayerId(1), vec![Zone::Graveyard]);
+            let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+            assert!(
+                compute_attack_tax(&state, &attacks).is_none(),
+                "a CantAttack static restricted to the graveyard must not tax \
+                 attacks from the battlefield"
+            );
+        }
+
+        // Positive reach-guard: identical static with empty `active_zones`
+        // (battlefield-only default) on a battlefield source still taxes.
+        {
+            let mut state = setup();
+            let _prison = build_prison(&mut state, PlayerId(1), vec![]);
+            let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+            let (total, per_creature) = compute_attack_tax(&state, &attacks)
+                .expect("battlefield-only CantAttack tax must apply from the battlefield");
+            assert_eq!(total.mana_value(), 2);
+            assert_eq!(per_creature.len(), 1);
+            assert_eq!(per_creature[0].1.mana_value(), 2);
+        }
+    }
+
+    /// CR 113.6b + CR 311.2/312.2: a non-emblem command-zone source (an active
+    /// plane or scheme) that opts into the command zone via
+    /// `active_zones.contains(Command)` must still contribute its `CantAttack`
+    /// tax — mirroring the admission rule
+    /// `functioning_abilities::object_sources_static_from_command_zone`
+    /// already applies for every other command-zone-consuming gather. An
+    /// emblem-only outer gate would silently drop this source before its
+    /// static ever reaches the per-def zone check, even though the static
+    /// itself explicitly opts in.
+    #[test]
+    fn compute_attack_tax_admits_non_emblem_command_zone_opt_in_source() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let card_id = CardId(state.next_object_id);
+        let plane = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Command-Opted Prison".to_string(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&plane).unwrap();
+        // Explicitly NOT an emblem — the opt-in comes from `active_zones`
+        // alone, per CR 113.6b Eminence-style command-zone functioning.
+        obj.is_emblem = false;
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .active_zones(vec![Zone::Command])
+            .description("Command-Opted Prison".to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost: ManaCost::generic(2),
+            scaling: UnlessPayScaling::PerAffectedCreature,
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+        });
+        obj.static_definitions.push(def);
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+        let (total, per_creature) = compute_attack_tax(&state, &attacks).expect(
+            "a non-emblem command-zone source with an explicit Command opt-in \
+             must still tax attacks",
+        );
+        assert_eq!(total.mana_value(), 2);
+        assert_eq!(per_creature.len(), 1);
+        assert_eq!(per_creature[0].1.mana_value(), 2);
+    }
+
+    /// Negative sibling: the same non-emblem command-zone source, but WITHOUT
+    /// the `active_zones` opt-in (battlefield-default empty list) — must NOT
+    /// tax, since CR 114.4 excludes non-emblem command-zone objects by
+    /// default. Proves the positive test above isn't vacuously admitting
+    /// every command-zone object regardless of opt-in.
+    #[test]
+    fn compute_attack_tax_excludes_non_emblem_command_zone_source_without_opt_in() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let card_id = CardId(state.next_object_id);
+        let plane = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Unopted Command Prison".to_string(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&plane).unwrap();
+        obj.is_emblem = false;
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .description("Unopted Command Prison".to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost: ManaCost::generic(2),
+            scaling: UnlessPayScaling::PerAffectedCreature,
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+        });
+        obj.static_definitions.push(def);
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+        assert!(
+            compute_attack_tax(&state, &attacks).is_none(),
+            "a non-emblem command-zone source without an explicit Command \
+             opt-in must not tax attacks"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    CastingPermission, Effect, EffectError, EffectKind, PermissionGrantee, ResolvedAbility,
-    TargetFilter, TargetRef,
+    CastingPermission, Effect, EffectError, EffectKind, PermissionGrantee,
+    PlayPermissionInvalidation, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -154,24 +154,25 @@ pub fn resolve(
         // and would conflict with the live `&mut obj`. Used only by the Foretold
         // branch; harmless to precompute for other permissions.
         let derived_foretell = crate::game::casting::foretell_cost(state, obj_id);
-        if let Some(obj) = state.objects.get_mut(&obj_id) {
-            let mut granted = permission.clone();
-            if let CastingPermission::PlayFromExile {
-                granted_to,
-                source_id,
-                exiled_by_ability_controller,
-                single_use,
-                single_use_group,
-                ..
-            } = &mut granted
-            {
-                *granted_to = granted_to_pid;
-                *source_id = Some(ability.source_id);
-                *exiled_by_ability_controller = Some(ability.controller);
-                if *single_use {
-                    *single_use_group = tracked_set_group;
-                }
+        let mut granted = permission.clone();
+        if let CastingPermission::PlayFromExile {
+            granted_to,
+            source_id,
+            exiled_by_ability_controller,
+            single_use,
+            single_use_group,
+            ..
+        } = &mut granted
+        {
+            *granted_to = granted_to_pid;
+            *source_id = Some(ability.source_id);
+            *exiled_by_ability_controller = Some(ability.controller);
+            if *single_use {
+                *single_use_group = tracked_set_group;
             }
+        }
+        prune_replaced_play_from_exile_permissions(state, obj_id, &granted);
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
             // CR 611.2a + CR 118.9: Bind `granted_to` for `ExileWithAltCost` and
             // `ExileWithAltAbilityCost` to the resolved grantee. Without this
             // step, an Airbender owned by the controller of the airbended card
@@ -259,6 +260,41 @@ pub fn resolve(
     Ok(())
 }
 
+fn prune_replaced_play_from_exile_permissions(
+    state: &mut GameState,
+    target_id: crate::types::identifiers::ObjectId,
+    granted: &CastingPermission,
+) {
+    let CastingPermission::PlayFromExile {
+        granted_to,
+        source_id: Some(source_id),
+        invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
+        ..
+    } = granted
+    else {
+        return;
+    };
+
+    for obj_id in state.exile.clone() {
+        if obj_id == target_id {
+            continue;
+        }
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            obj.casting_permissions.retain(|permission| {
+                !matches!(
+                    permission,
+                    CastingPermission::PlayFromExile {
+                        granted_to: prior_grantee,
+                        source_id: Some(prior_source),
+                        invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
+                        ..
+                    } if prior_grantee == granted_to && prior_source == source_id
+                )
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +332,7 @@ mod tests {
                     single_use: false,
                     cast_cost_raise: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::AbilityController,
@@ -315,6 +352,95 @@ mod tests {
             }
             _ => panic!("expected PlayFromExile"),
         }
+    }
+
+    /// CR 611.2a: Furious Rise-class permissions last until a source-specific
+    /// invalidation event. Granting a new card from the same source replaces the
+    /// prior same-source permission for that player without touching unrelated
+    /// impulse grants.
+    #[test]
+    fn same_source_exile_invalidation_replaces_prior_permission() {
+        let mut state = GameState::new_two_player(1);
+        let source = crate::types::identifiers::ObjectId(100);
+        let prior = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Prior Card".to_string(),
+            Zone::Exile,
+        );
+        let current = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Current Card".to_string(),
+            Zone::Exile,
+        );
+        let unrelated = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Unrelated Card".to_string(),
+            Zone::Exile,
+        );
+        let permission = CastingPermission::PlayFromExile {
+            duration: Duration::Permanent,
+            granted_to: PlayerId(0),
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            source_id: Some(source),
+            exiled_by_ability_controller: Some(PlayerId(0)),
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
+        };
+        state
+            .objects
+            .get_mut(&prior)
+            .unwrap()
+            .casting_permissions
+            .push(permission.clone());
+        let mut unrelated_permission = permission.clone();
+        if let CastingPermission::PlayFromExile { source_id, .. } = &mut unrelated_permission {
+            *source_id = Some(crate::types::identifiers::ObjectId(101));
+        }
+        state
+            .objects
+            .get_mut(&unrelated)
+            .unwrap()
+            .casting_permissions
+            .push(unrelated_permission);
+
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission,
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::AbilityController,
+            },
+            vec![TargetRef::Object(current)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.objects[&prior].casting_permissions.is_empty(),
+            "prior same-source permission should be removed"
+        );
+        assert_eq!(
+            state.objects[&current].casting_permissions.len(),
+            1,
+            "current card should receive the replacement permission"
+        );
+        assert_eq!(
+            state.objects[&unrelated].casting_permissions.len(),
+            1,
+            "different-source permissions must survive"
+        );
     }
 
     /// CR 603.7 + CR 611.2a: A tracked-set `single_use` `PlayFromExile` grant
@@ -349,6 +475,7 @@ mod tests {
                     single_use: true,
                     cast_cost_raise: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::TrackedSet { id: tracked_set },
                 grantee: PermissionGrantee::AbilityController,
@@ -571,6 +698,7 @@ mod tests {
                     single_use: false,
                     cast_cost_raise: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -627,6 +755,7 @@ mod tests {
                     single_use: false,
                     cast_cost_raise: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ParentTargetController,
@@ -696,6 +825,7 @@ mod tests {
                     single_use: false,
                     cast_cost_raise: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -777,6 +907,7 @@ mod tests {
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         };
 
         state.objects.get_mut(&card_a).unwrap().casting_permissions = vec![mk_perm(
@@ -854,6 +985,7 @@ mod tests {
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         };
         state
             .objects
@@ -917,6 +1049,7 @@ mod tests {
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         }];
 
         // Simulate the ordering in `turns.rs`:
@@ -953,6 +1086,7 @@ mod tests {
                     single_use: false,
                     cast_cost_raise: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -1022,6 +1156,7 @@ mod tests {
                 single_use: false,
                 cast_cost_raise: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
             }];
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -1064,6 +1199,7 @@ mod tests {
                 single_use: false,
                 cast_cost_raise: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
             }];
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
@@ -1121,6 +1257,7 @@ mod tests {
                     single_use: false,
                     cast_cost_raise: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

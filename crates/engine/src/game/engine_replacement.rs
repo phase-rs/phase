@@ -21,8 +21,11 @@ use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
-use super::effects::draw::apply_draw_after_replacement;
-use super::effects::life::{apply_life_gain_after_replacement, apply_life_loss_after_replacement};
+use super::effects::draw::{apply_draw_after_replacement, resume_multi_draw};
+use super::effects::life::{
+    apply_life_gain_after_replacement, apply_life_loss_after_replacement,
+    drain_pending_life_total_assignment,
+};
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
@@ -355,7 +358,22 @@ pub(super) fn handle_replacement_choice(
                 // the count and the central `post_replacement_continuation`
                 // drain below runs the chain (Choose → RevealUntil).
                 draw @ ProposedEvent::Draw { player_id, .. } => {
-                    apply_draw_after_replacement(state, draw, events);
+                    let drawn_count = apply_draw_after_replacement(state, draw, events);
+                    // CR 121.6b + CR 609.3: this Draw arm resolves the ONE unit
+                    // that was paused (the choice just answered) — it does NOT
+                    // go through `resume_multi_draw`'s own closure, so its
+                    // actually-drawn count is never folded into the running
+                    // total unless done here explicitly. Fold it into the
+                    // stashed `PendingMultiDraw.accumulated` (if this player has
+                    // one in flight) BEFORE the drain below reads it, so the
+                    // eventual `state.last_effect_count` commit includes every
+                    // unit of the original instruction — not just the units
+                    // `resume_multi_draw` itself executed without pausing.
+                    if let Some(pending) = state.pending_multi_draw.as_mut() {
+                        if pending.player == player_id {
+                            pending.accumulated += drawn_count;
+                        }
+                    }
                     // CR 805.4b: if this resumed draw IS the front of the
                     // team draw-step queue (the active player's mandatory
                     // draw, parked here by a CR 616.1 competing-replacement
@@ -648,6 +666,33 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 121.6b: a multi-card draw (`Effect::Draw{count: N}`, N > 1)
+            // paused mid-sequence because a per-unit replacement (Dredge,
+            // Notion Thief, Hullbreacher, a count-doubling static, etc.) needed
+            // this choice. The just-resolved unit was applied above (Draw arm);
+            // drain the remaining units via `resume_multi_draw`, which
+            // internally re-parks `pending_multi_draw` and sets
+            // `state.waiting_for` (via `draw_through_replacement`) if the next
+            // unit surfaces its own choice — an arbitrary number of sequential
+            // re-pauses compose correctly since each drain call re-reads
+            // whatever the previous one stashed.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_multi_draw.is_some()
+            {
+                if let Some(pending) = state.pending_multi_draw.take() {
+                    let _ = resume_multi_draw(
+                        state,
+                        pending.player,
+                        pending.remaining,
+                        pending.accumulated,
+                        events,
+                    );
+                }
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             // CR 701.50a + CR 614.5 + CR 616.1f: resume a deferred connive whose
             // leading Draw link parked this just-resolved ReplacementChoice. The
             // draw fully delivered above (Draw arm), so "draw a card, THEN that
@@ -690,6 +735,15 @@ pub(super) fn handle_replacement_choice(
                 && state.pending_counter_additions.is_some()
             {
                 effects::counters::drain_pending_counter_additions(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_life_total_assignment.is_some()
+            {
+                drain_pending_life_total_assignment(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
                 }
@@ -885,6 +939,13 @@ pub(super) fn handle_replacement_choice(
                 if let Some(wf) = drain_pending_connive_reentry(state, events) {
                     return Ok(wf);
                 }
+                return Ok(state.waiting_for.clone());
+            }
+            if state.pending_life_total_assignment.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                drain_pending_life_total_assignment(state, events);
                 return Ok(state.waiting_for.clone());
             }
             if state.pending_counter_additions.is_some() {

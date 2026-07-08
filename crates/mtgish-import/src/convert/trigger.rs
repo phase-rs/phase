@@ -8,7 +8,7 @@
 
 use engine::types::ability::{CounterTriggerFilter, DamageKindFilter, TriggerConstraint};
 use engine::types::triggers::{AttackTargetFilter, TriggerMode};
-use engine::types::{Phase, TargetFilter, TriggerDefinition, TypedFilter, Zone};
+use engine::types::{Phase, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter, Zone};
 
 use crate::convert::filter::{
     cards_in_graveyard_to_filter, cards_to_filter, convert as convert_permanents,
@@ -567,12 +567,18 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             TriggerDefinition::new(TriggerMode::YouAttack)
         }
 
-        // CR 508.3a: "Whenever [a creature] attacks alone" — same firing axis
-        // as a regular attack trigger; the "alone" qualifier (single-attacker
-        // batch) has no engine field today. Mirrors native parser at
-        // oracle_trigger.rs:8273 (collapses to `TriggerMode::Attacks`).
+        // CR 506.5: "Whenever [a creature] attacks alone" — same firing axis
+        // as a regular attack trigger; zero same-controller co-attackers via
+        // `Not(MinCoAttackers { minimum: 1 })`.
         Trigger::WhenACreatureAttacksAlone(filter) => {
-            TriggerDefinition::new(TriggerMode::Attacks).valid_card(convert_permanents(filter)?)
+            TriggerDefinition::new(TriggerMode::Attacks)
+                .valid_card(convert_permanents(filter)?)
+                .condition(TriggerCondition::Not {
+                    condition: Box::new(TriggerCondition::MinCoAttackers {
+                        minimum: 1,
+                        filter: None,
+                    }),
+                })
         }
 
         // CR 509.1h: "Whenever [a creature] blocks [a creature]" — fires for

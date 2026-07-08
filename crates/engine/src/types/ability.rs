@@ -2189,6 +2189,10 @@ pub enum Duration {
     ForAsLongAs {
         condition: StaticCondition,
     },
+    /// CR 611.2a + CR 607.2a: Permission/effect lasts until the same linked
+    /// source exiles another card. Used by "you may play that card until you
+    /// exile another card with [this object]" source-linked exile grants.
+    UntilSourceExilesAnotherCard,
     Permanent,
 }
 
@@ -2481,7 +2485,9 @@ pub enum CastingPermission {
         #[serde(default, skip_serializing_if = "CastFrequency::is_unlimited")]
         frequency: CastFrequency,
         /// Source object whose once-per-turn slot is consumed when
-        /// `frequency` is bounded. Filled by `grant_permission::resolve`.
+        /// `frequency` is bounded, and whose later source-linked exile expires
+        /// `Duration::UntilSourceExilesAnotherCard` grants. Filled by
+        /// `grant_permission::resolve`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
         /// Controller of the ability that exiled this card and attached this
@@ -2535,6 +2541,12 @@ pub enum CastingPermission {
         /// "enters tapped" is a CR 614.1c "[permanent] enters ..." replacement.
         #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
         land_enter_tapped: EtbTapState,
+        /// CR 611.2a: Additional non-time invalidation printed on the same
+        /// play-from-exile permission. `None` preserves ordinary impulse grants;
+        /// source-bound forms are pruned by the grant resolver when their
+        /// printed invalidation event occurs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invalidation: Option<PlayPermissionInvalidation>,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -2582,6 +2594,16 @@ pub enum CastingPermission {
     /// when the special action resolves; the permission is scoped to the exile
     /// zone and cleared when the object leaves exile.
     Foretold { cost: ManaCost, turn_foretold: u32 },
+}
+
+/// CR 611.2a: Non-time condition that invalidates a per-card play permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PlayPermissionInvalidation {
+    /// "Until you exile another card with [this source]" — the next grant from
+    /// the same source to the same player replaces earlier grants from that
+    /// source without touching unrelated impulse permissions.
+    UntilNextGrantFromSameSource,
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
@@ -7211,6 +7233,12 @@ pub fn is_loyalty_ability_cost(cost: &AbilityCost) -> bool {
                 && target.is_none()
                 && matches!(selection, CounterCostSelection::SingleObject)
         }
+        // CR 606.1 + CR 118.7: A loyalty ability whose activation cost has been
+        // raised by a static (Eidolon of Obstruction) carries its loyalty cost
+        // inside a `Composite` alongside the added mana. It is still a loyalty
+        // ability, so the CR 606.3 once-per-turn gate and loyalty-activation
+        // tracking must keep recognizing it after the tax.
+        AbilityCost::Composite { costs } => costs.iter().any(is_loyalty_ability_cost),
         _ => false,
     }
 }
@@ -11105,6 +11133,14 @@ pub enum Effect {
     /// physical seating is unchanged. Payload-less resolving keyword action
     /// (mirrors `Effect::ChaosEnsues`). RUNTIME: reverse_turn_order::resolve.
     ReverseTurnOrder,
+    /// CR 119.7 + CR 119.8: The controller redistributes any number of players' life
+    /// totals — a controller-chosen permutation of the chosen players' life
+    /// totals (Reverse the Sands, The Doctor's Tomb). Field-less: "any number of
+    /// players" is self-gathered at resolution (no target slot). The resolver
+    /// enumerates the legal assignments (CR 119.7 can't-gain / CR 119.8 can't-lose
+    /// filter each receiver) and installs `WaitingFor::RedistributeLifeTotals`.
+    /// RUNTIME: redistribute_life_totals::resolve.
+    RedistributeLifeTotals,
     /// CR 701.51b: Open N Attractions by putting cards from the top of your
     /// Attraction deck onto the battlefield.
     OpenAttractions {
@@ -13390,6 +13426,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
@@ -13761,6 +13798,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
@@ -14012,6 +14050,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
             | Effect::Unimplemented { .. }
             | Effect::VentureInto { .. }
@@ -14175,6 +14214,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::Planeswalk => "Planeswalk",
         Effect::ChaosEnsues => "ChaosEnsues",
+        Effect::RedistributeLifeTotals => "RedistributeLifeTotals",
         Effect::ReverseTurnOrder => "ReverseTurnOrder",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
@@ -14417,6 +14457,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     Planeswalk,
     ChaosEnsues,
+    RedistributeLifeTotals,
     ReverseTurnOrder,
     OpenAttractions,
     RollToVisitAttractions,
@@ -14676,6 +14717,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
+            Effect::RedistributeLifeTotals => EffectKind::RedistributeLifeTotals,
             Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
@@ -17910,6 +17952,26 @@ pub struct StaticDefinition {
     /// Piper, Marble Priest; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 702.11e + CR 609.4 + CR 109.5: For an object-scoped `IgnoreHexproof`
+    /// static (one carrying an `affected` filter), which players' spells and
+    /// abilities receive the "as though it didn't have hexproof" targeting
+    /// permission — the beneficiary of the bypass, resolved relative to the
+    /// static's source controller.
+    ///
+    /// - `None` — every player's spells and abilities (Nowhere to Run:
+    ///   "... can be the targets of spells and abilities as though they didn't
+    ///   have hexproof", no controller qualifier). Since hexproof (CR 702.11b)
+    ///   only ever blocks the affected creature's opponents, removing it for the
+    ///   matched permanents opens them to every player.
+    /// - `Some(ControllerRef::You)` — only the static controller's spells and
+    ///   abilities (Glaring Spotlight: "... spells and abilities YOU CONTROL as
+    ///   though they didn't have hexproof"). A third player in a multiplayer game
+    ///   still can't target the affected creatures.
+    ///
+    /// `None` for every other `StaticMode` (unused). Serde-defaulted so existing
+    /// serialized statics (all unrestricted) round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass_beneficiary: Option<ControllerRef>,
 }
 
 impl StaticDefinition {
@@ -17927,6 +17989,7 @@ impl StaticDefinition {
             description: None,
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         }
     }
 
@@ -17970,6 +18033,15 @@ impl StaticDefinition {
     /// field doc). Set at graft time by the `AddStaticMode` layer arm.
     pub fn source_controller(mut self, controller: crate::types::player::PlayerId) -> Self {
         self.source_controller = Some(controller);
+        self
+    }
+
+    /// CR 702.11e + CR 609.4: Restrict an object-scoped `IgnoreHexproof` bypass
+    /// to a single beneficiary scope (see the `bypass_beneficiary` field doc).
+    /// `Some(ControllerRef::You)` = the static controller's spells and abilities
+    /// only (Glaring Spotlight); `None` = every player (Nowhere to Run).
+    pub fn bypass_beneficiary(mut self, beneficiary: Option<ControllerRef>) -> Self {
+        self.bypass_beneficiary = beneficiary;
         self
     }
 
@@ -19307,6 +19379,13 @@ pub struct ResolvedAbility {
     /// it just found empty.
     #[serde(skip)]
     pub dig_found_nothing_for_parent_target: bool,
+    /// CR 609.3 + CR 608.2c: Stamped only by
+    /// `effects::apply_parent_chain_context` when this ability is the immediate
+    /// child of a `ChooseFromZone` that had no cards to choose. Consumers that
+    /// name the missing choice through `ParentTarget` must no-op instead of
+    /// using the shared source fallback.
+    #[serde(skip)]
+    pub choose_from_zone_found_nothing_for_parent_target: bool,
 }
 
 impl ResolvedAbility {
@@ -19363,6 +19442,7 @@ impl ResolvedAbility {
             modal: None,
             mode_abilities: Vec::new(),
             dig_found_nothing_for_parent_target: false,
+            choose_from_zone_found_nothing_for_parent_target: false,
         }
     }
 
@@ -20837,6 +20917,7 @@ mod tests {
             description: Some("Other creatures you control get +1/+1.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -21128,6 +21209,7 @@ mod tests {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                bypass_beneficiary: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
@@ -21189,6 +21271,7 @@ mod tests {
                 player: PlayerScope::Controller,
             },
             Duration::UntilHostLeavesPlay,
+            Duration::UntilSourceExilesAnotherCard,
             Duration::Permanent,
         ];
         let json = serde_json::to_string(&durations).unwrap();

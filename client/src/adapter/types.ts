@@ -214,6 +214,41 @@ export interface MatchScore {
   draws: number;
 }
 
+/** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
+export interface ReplayPlayerDeckList {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+  planar_deck: string[];
+  scheme_deck: string[];
+  contraption_deck: string[];
+  sticker_sheets: string[];
+  signature_spell: string[];
+  bracket_tier: string;
+}
+
+/** Mirrors the engine's `DeckList` — the name-only deck payload `initializeGame` accepts. */
+export interface ReplayDeckList {
+  player: ReplayPlayerDeckList;
+  opponent: ReplayPlayerDeckList;
+  ai_decks: ReplayPlayerDeckList[];
+  ai_difficulties: string[];
+}
+
+/**
+ * Everything needed to reconstruct a recorded game's starting state — the
+ * non-action-sequence half of a replay recording. Mirrors the engine's
+ * `ReplayHeader` (`crates/engine/src/types/replay.rs`).
+ */
+export interface ReplayHeader {
+  format_config: FormatConfig;
+  match_config: MatchConfig;
+  player_count: number;
+  first_player: number | null;
+  seed: number;
+  deck_data: ReplayDeckList | null;
+}
+
 export interface DeckCardCount {
   name: string;
   count: number;
@@ -1220,19 +1255,28 @@ export type CastOfferKind =
       exile_instead_of_graveyard?: boolean;
     };
 
+// CR 103.5b: Which declare-point action a pending BottomCards obligation
+// completes once resolved. Field-flattened under `type` (no `data:` wrapper) to
+// mirror the Rust `#[serde(tag = "type")]` no-content shape — intentionally
+// different from MulliganChoice's TS shape (which nests under `data:`).
+export type PendingMulliganAction =
+  | { type: "Keep" }
+  | { type: "UseSerumPowder"; object_id: ObjectId };
+
+// CR 103.5 + 103.5b: Per-entry sub-state for the declare-point mulligan flow.
+export type MulliganDecisionPhase =
+  | { type: "Declare" }
+  | { type: "BottomCards"; count: number; then: PendingMulliganAction };
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
       data: {
-        pending: { player: PlayerId; mulligan_count: number }[];
+        pending: { player: PlayerId; mulligan_count: number; phase: MulliganDecisionPhase }[];
         free_first_mulligan: boolean;
       };
-    }
-  | {
-      type: "MulliganBottomCards";
-      data: { pending: { player: PlayerId; count: number }[] };
     }
   | {
       type: "OpeningHandBottomCards";
@@ -1267,6 +1311,7 @@ export type WaitingFor =
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
   | { type: "SaddleMount"; data: { player: PlayerId; mount_id: ObjectId; saddle_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
+  | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
@@ -1689,8 +1734,17 @@ export type DebugAction =
 export type YieldScope = "ThisObject" | "AllCopies";
 
 export type YieldTarget =
-  | { ThisObject: { source_id: ObjectId; incarnation: number } }
-  | { AllCopies: { card_id: CardId } };
+  | {
+      ThisObject: {
+        source_id: ObjectId;
+        // `null` for synthetic/delayed triggers that never latched an incarnation.
+        incarnation: number | null;
+        // Absent/`null` = source-level wildcard (legacy/coarse yields); a value
+        // scopes the yield to one of a source's distinct triggers.
+        trigger_description?: string | null;
+      };
+    }
+  | { AllCopies: { card_id: CardId; trigger_description?: string | null } };
 
 export type PriorityYieldOp =
   | { type: "Add"; data: { source_id: ObjectId; scope: YieldScope } }
@@ -1746,6 +1800,7 @@ export type GameAction =
   | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
   | { type: "ChoosePile"; data: { pile: PileSide } }
   | { type: "ChooseBranch"; data: { index: number } }
+  | { type: "SubmitLifeRedistribution"; data: { option_index: number } }
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
@@ -2093,6 +2148,13 @@ export interface UnboundedResourceView {
   axis: ResourceAxis;
 }
 
+/** Mirrors `engine::game::derived_views::TurnOrderSlotView`. */
+export interface TurnOrderSlotView {
+  player: PlayerId;
+  slot_index: number;
+  turns_from_now: number;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -2152,6 +2214,11 @@ export interface DerivedViews {
   planechase?: PlanechaseView | null;
   /** Engine-authored Archenemy state. */
   archenemy?: ArchenemyView | null;
+  /**
+   * Engine-authored multiplayer turn-order rows. Duplicate players are
+   * intentional when extra turns put the same player in multiple slots.
+   */
+  turn_order?: TurnOrderSlotView[];
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The

@@ -29,8 +29,7 @@ use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
-use super::oracle_nom::primitives::parse_number as nom_parse_number;
-use super::oracle_nom::primitives::scan_contains;
+use super::oracle_nom::primitives::{parse_number as nom_parse_number, scan_contains};
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{

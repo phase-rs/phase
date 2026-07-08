@@ -264,7 +264,7 @@ export function ActionButton() {
   const idle = mode === "hidden" && !isEndingTurn;
   const blocked = idle || actionBlocked;
   const panelClassName =
-    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:flex-col max-lg:portrait:flex-nowrap max-lg:portrait:gap-1 max-lg:portrait:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
+    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[10px] border border-white/10 bg-slate-950/92 p-2 shadow-[0_12px_32px_rgba(15,23,42,0.45)] max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:flex-col max-lg:portrait:flex-nowrap max-lg:portrait:gap-1 max-lg:portrait:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[8px]";
   const primaryButtonClass = "min-w-[10.5rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
   const secondaryButtonClass = "min-w-[8rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
 
@@ -339,12 +339,12 @@ export function ActionButton() {
               </button>
             )}
             {pendingBlocker !== null && (
-              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-cyan-300/25 bg-cyan-950/80 px-4 py-2 text-sm font-medium text-cyan-100 shadow-lg backdrop-blur-xl">
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-cyan-300/25 bg-cyan-950/95 px-4 py-2 text-sm font-medium text-cyan-100 shadow-lg">
                 {t("actionButton.selectAttackerForBlocker")}
               </div>
             )}
             {pendingBlocker === null && incompleteBlockCount > 0 && (
-              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-amber-300/30 bg-amber-950/85 px-4 py-2 text-sm font-medium text-amber-100 shadow-lg backdrop-blur-xl">
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-amber-300/30 bg-amber-950/95 px-4 py-2 text-sm font-medium text-amber-100 shadow-lg">
                 {t("combat.blockIncomplete", { count: incompleteBlockCount })}
               </div>
             )}

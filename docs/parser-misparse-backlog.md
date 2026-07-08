@@ -36,11 +36,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 22 | Attacks-alone / while-saddled combat constraint dropped | 51 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers + TriggerCondition::SourceIsSaddled |
 | 23 | Effect modeled with structurally wrong variant / ability class | 51 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
-| 25 | Wrong / dropped effect duration | 32 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
+| 25 | Wrong / dropped effect duration | 29 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 17 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
-| 30 | Token/named-card name corrupted by normalization or overrun | 12 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
+| 30 | Token/named-card name corrupted by normalization or overrun | 10 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 5 | manual triage |
 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
@@ -821,7 +821,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - A-Paragon of Modernity
 - A-Sigil of Myrkul
-- Abzan Beastmaster
 - Adaptive Training Post
 - Adrestia
 - Aether Revolt
@@ -5003,7 +5002,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 25. Wrong / dropped effect duration  (32 cards)
+### 25. Wrong / dropped effect duration  (29 cards)
 
 **Signature.** Effect duration is wrong (UntilEndOfTurn where permanent/until-event/two-turn needed, or a spurious expiry added), or a 'until <state change>' delayed-return is dropped.
 
@@ -5021,7 +5020,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ferris Wheel
 - Firja's Retribution
 - Fraying Sanity
-- Furious Rise
 - Glorious End
 - Golden Guardian
 - Jinx
@@ -5039,9 +5037,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Palace Jailer
 - Peace Talks
 - Plant a Sapling
-- Superior Foes of Spider-Man
 - Trickery Charm
-- Unstable Amulet
 - War of the Last Alliance
 
 </details>
@@ -5104,7 +5100,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (17 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (15 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -5117,14 +5113,12 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Goremand
 - Grizzled Wolverine
 - Hermit of the Natterknolls
-- Hidden Lair
 - Highspire Bell-Ringer
 - Hurkyl's Final Meditation
 - Ichneumon Druid
 - MACH-1, Swooping Scoundrel
 - Shadowheart, Sharran Cleric
 - Skarrgan Hellkite
-- Skyblade's Boon
 - Tomb Tyrant
 - Trade Caravan
 - Uthros Research Craft
@@ -5132,7 +5126,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 30. Token/named-card name corrupted by normalization or overrun  (11 cards)
+### 30. Token/named-card name corrupted by normalization or overrun  (8 cards)
 
 **Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
 
@@ -5142,9 +5136,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - Dragonstorm Forecaster
 - Hecatomb
-- High Marshal Arguel
-- Liu Bei, Lord of Shu
-- Sift Through Sands
 - Thran Golem
 - Thrasta, Tempest's Roar
 - Wrathful Raptors
@@ -5154,7 +5145,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 31. Other / uncategorized misparse  (5 cards)
+### 31. Other / uncategorized misparse  (4 cards)
 
 **Signature.** Cluster did not match a canonical signature class.
 
@@ -5164,7 +5155,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - Cabal Stronghold
 - Flaccify
-- On Thin Ice
 - Rainbow Vale
 - The Great Mound
 

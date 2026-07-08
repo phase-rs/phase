@@ -90,7 +90,7 @@ pub fn acting_players(state: &GameState) -> Vec<PlayerId> {
 /// CR 103.5: True iff `player` is one of the actors permitted to submit an
 /// action for the current WaitingFor. Replaces the
 /// `acting_player(state) == Some(player)` idiom at multiplayer routing sites
-/// so the simultaneous-decision states (MulliganDecision, MulliganBottomCards,
+/// so the simultaneous-decision states (MulliganDecision,
 /// OpeningHandBottomCards)
 /// route legal actions to every pending player, not just the first.
 pub fn is_acting(state: &GameState, player: PlayerId) -> bool {
@@ -2300,6 +2300,7 @@ mod tests {
             pending: vec![engine::types::game_state::MulliganDecisionEntry {
                 player: ai_pid,
                 mulligan_count: 0,
+                phase: engine::types::game_state::MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: true,
         };

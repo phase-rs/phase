@@ -1478,7 +1478,6 @@ impl GameRunner {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
-            WaitingFor::MulliganBottomCards { .. } => "MulliganBottomCards",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
             WaitingFor::TargetSelection { .. } => "TargetSelection",
@@ -1496,6 +1495,7 @@ impl GameRunner {
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
@@ -2414,6 +2414,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::PayCost { .. } => "PayCost",
         WaitingFor::DistributeAmong { .. } => "DistributeAmong",
         WaitingFor::SurveilChoice { .. } => "SurveilChoice",
+        WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
         WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
         WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
         WaitingFor::NamedChoice { .. } => "NamedChoice",

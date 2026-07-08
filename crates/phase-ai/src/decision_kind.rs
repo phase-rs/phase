@@ -17,9 +17,9 @@ use engine::types::game_state::CastPaymentMode;
 /// Classify a decision into the bucket the policy registry uses for routing.
 pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
     match waiting_for {
-        WaitingFor::MulliganDecision { .. }
-        | WaitingFor::MulliganBottomCards { .. }
-        | WaitingFor::OpeningHandBottomCards { .. } => DecisionKind::Mulligan,
+        WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. } => {
+            DecisionKind::Mulligan
+        }
         WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. } => {
             DecisionKind::ManaPayment
         }
@@ -79,6 +79,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::StationTarget { .. }
         | WaitingFor::SaddleMount { .. }
         | WaitingFor::ScryChoice { .. }
+        // CR 119.7 + CR 119.8: redistribute life totals is a forced mid-resolution
+        // selection; route to the ability catch-all bucket.
+        | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
@@ -212,6 +215,7 @@ mod tests {
                     pending: vec![engine::types::game_state::MulliganDecisionEntry {
                         player: PlayerId(0),
                         mulligan_count: 0,
+                        phase: engine::types::game_state::MulliganDecisionPhase::Declare,
                     }],
                     free_first_mulligan: false,
                 },

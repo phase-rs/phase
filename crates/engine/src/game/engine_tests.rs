@@ -2108,7 +2108,8 @@ fn set_priority_yield_add_binds_from_stack_after_token_ceased() {
             player: PlayerId(0),
             target: crate::types::game_state::YieldTarget::ThisObject {
                 source_id: source,
-                incarnation: 4,
+                incarnation: Some(4),
+                trigger_description: None,
             },
         }],
         "Add must bind the incarnation latched on the on-stack trigger",
@@ -2146,13 +2147,21 @@ fn set_priority_yield_add_no_op_without_matching_stack_entry() {
     );
 }
 
-/// CR 400.7 None-boundary: a `ThisObject` add on a trigger with no latched
-/// incarnation no-ops, while an `AllCopies` add on the same trigger still stores.
+/// G6 (CR 400.7): a `ThisObject` add on a trigger with no latched incarnation
+/// (a synthetic/delayed game-rule trigger) now STORES a `None`-incarnation yield
+/// through the real `SetPriorityYield` pipeline and that yield matches its own
+/// trigger — previously this add was a silent no-op. An `AllCopies` add on the
+/// same trigger also stores.
 #[test]
-fn set_priority_yield_this_object_none_incarnation_no_ops_but_all_copies_works() {
+fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(0); // synthetic game-rule trigger source
     push_token_trigger(&mut state, source, PlayerId(0), None, Some(CardId(77)));
+    let entry = state
+        .stack
+        .back()
+        .cloned()
+        .expect("reach-guard: the synthetic trigger is on the stack");
 
     apply(
         &mut state,
@@ -2165,11 +2174,24 @@ fn set_priority_yield_this_object_none_incarnation_no_ops_but_all_copies_works()
         },
     )
     .expect("legal");
+    assert_eq!(
+        state.priority_yields,
+        vec![crate::types::game_state::PriorityYield {
+            player: PlayerId(0),
+            target: crate::types::game_state::YieldTarget::ThisObject {
+                source_id: source,
+                incarnation: None,
+                trigger_description: None,
+            },
+        }],
+        "G6: ThisObject add must latch a None-incarnation yield, not no-op"
+    );
     assert!(
-        state.priority_yields.is_empty(),
-        "ThisObject add must no-op when the trigger latched no incarnation"
+        state.is_priority_yielded(PlayerId(0), &entry),
+        "G6: the None-incarnation latch must match its own synthetic trigger"
     );
 
+    state.clear_priority_yields(PlayerId(0));
     apply(
         &mut state,
         PlayerId(0),
@@ -2256,7 +2278,8 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
         PlayerId(0),
         crate::types::game_state::YieldTarget::ThisObject {
             source_id: source,
-            incarnation: 4,
+            incarnation: Some(4),
+            trigger_description: None,
         },
     );
     assert!(

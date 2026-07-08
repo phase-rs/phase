@@ -12,6 +12,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition::{
     inject_controller_you, parse_cast_using_teamwork_phrase, parse_spell_target_superlative_suffix,
+    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -3208,6 +3209,11 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         return Some(condition);
     }
 
+    let lower = text.to_ascii_lowercase();
+    if let Some(condition) = parse_cost_paid_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     let (lhs_text, comparator_rhs) = text.split_once(" is ")?;
     let lhs = parse_cda_quantity(lhs_text)?;
     let (comparator, rhs) = parse_quantity_comparison(comparator_rhs)?;
@@ -5602,6 +5608,9 @@ fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<Abilit
     if let Some(condition) = parse_cost_paid_object_subject_verb_form(lower) {
         return Some(condition);
     }
+    if let Some(condition) = parse_cost_paid_object_possessive_pt_comparison(lower) {
+        return Some(condition);
+    }
     parse_cost_paid_object_definite_noun_form(lower)
 }
 
@@ -5707,6 +5716,38 @@ fn parse_cost_paid_object_definite_noun_form(lower: &str) -> Option<AbilityCondi
     })
 }
 
+fn parse_cost_paid_object_possessive_pt_comparison(lower: &str) -> Option<AbilityCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the ").parse(lower).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("discarded "),
+        tag("sacrificed "),
+        tag("exiled "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, noun_filter) = parse_cost_paid_object_possessive_noun_prefix(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("'s ").parse(rest).ok()?;
+    let (rest, stat) = parse_reflexive_pt_stat(rest).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("was "), tag("is ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, (comparator, value)) = parse_threshold_with_exactly(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(noun_filter).properties(vec![
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            },
+        ])),
+    })
+}
+
 /// Predicate result for a definite-noun form's property clause. Property
 /// predicates (color-set, status such as suspected) land on
 /// `TypedFilter::properties`; type-or-subtype predicates land on
@@ -5740,6 +5781,38 @@ fn parse_cost_paid_object_noun_prefix(input: &str) -> Option<(&str, TypeFilter)>
         value(TypeFilter::Planeswalker, tag("planeswalker ")),
         value(TypeFilter::Permanent, tag("permanent ")),
         value(TypeFilter::Card, tag("card ")),
+    ))
+    .parse(input)
+    .ok()
+}
+
+/// Possessive sibling of [`parse_cost_paid_object_noun_prefix`]: matches the
+/// noun immediately before `"'s "` in forms like "the sacrificed creature's
+/// toughness was 4 or greater".
+fn parse_cost_paid_object_possessive_noun_prefix(input: &str) -> Option<(&str, TypeFilter)> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            terminated(tag::<_, _, OracleError<'_>>("creature"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Artifact,
+            terminated(tag("artifact"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Enchantment,
+            terminated(tag("enchantment"), peek(tag("'s "))),
+        ),
+        value(TypeFilter::Land, terminated(tag("land"), peek(tag("'s ")))),
+        value(
+            TypeFilter::Planeswalker,
+            terminated(tag("planeswalker"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Permanent,
+            terminated(tag("permanent"), peek(tag("'s "))),
+        ),
+        value(TypeFilter::Card, terminated(tag("card"), peek(tag("'s ")))),
     ))
     .parse(input)
     .ok()
@@ -6120,12 +6193,13 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
     ))
 }
 
-/// CR 608.2c: "[effect] if at least one <filter> was <verb> this way" — the
-/// trailing (suffix) form of the prior-effect outcome gate. CR 608.2c states
-/// later text on a card may reference an earlier instruction in the same
-/// effect; here "this way" refers to the set of objects affected by the
-/// immediately-preceding instruction, and the condition fires when that set
-/// contains at least one object matching `<filter>`. Kaya, Orzhov Usurper's
+/// CR 608.2c + CR 400.7j: "[effect] if at least one <filter> was <verb> this
+/// way" — the trailing (suffix) form of the prior-effect outcome gate. Later
+/// text may reference an earlier instruction in the same effect, and objects
+/// moved to public zones remain findable. Here "this way" refers to the set of
+/// objects affected by the immediately-preceding instruction, and the condition
+/// fires when that set contains at least one object matching `<filter>`. Kaya,
+/// Orzhov Usurper's
 /// +1 ("Exile up to two target
 /// cards from a single graveyard. You gain 2 life if at least one creature
 /// card was exiled this way.") is the motivating case.
@@ -6135,9 +6209,21 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
 /// article), the type/subtype filter, both tenses, the verb set, and the
 /// negation flag (`wasn't`/`isn't`). Requiring an empty remainder keeps this
 /// matcher from firing on partial overlaps with longer condition phrases.
+///
+/// Both grammatical voices of the same event are recognized here so the leading
+/// (`if …, [effect]`) and suffix (`[effect] if …`) forms produce identical
+/// `ZoneChangedThisWay` conditions:
+///   - passive: `a Cave (is|was) put onto the battlefield this way` —
+///     `parse_zone_changed_this_way_clause`
+///   - active: `you put a Cave onto the battlefield this way` —
+///     `parse_you_put_onto_battlefield_this_way_clause` (Spelunking's ETB
+///     rider "If you put a Cave onto the battlefield this way, you gain 4 life";
+///     unlocks the whole "if you put a [type] onto the battlefield this way,
+///     [bonus]" fetch/ramp payoff class).
 fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
-    let (rest, (filter, negated)) =
-        crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(lower).ok()?;
+    let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(lower)
+        .or_else(|_| parse_you_put_onto_battlefield_this_way_clause(lower))
+        .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -7344,6 +7430,63 @@ mod tests {
                 ));
             }
             other => panic!("expected Typed Equipment filter, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c + CR 400.7j: Spelunking's ETB rider — "If you put a Cave onto
+    /// the battlefield this way, you gain 4 life." CR 400.7j lets the rider find
+    /// the Cave the preceding put-land instruction moved to the battlefield (a
+    /// public zone). The leading `if`
+    /// form of the active-voice put-onto-battlefield gate must lower through
+    /// `strip_leading_general_conditional` to `ZoneChangedThisWay { Cave }` —
+    /// not drop to `condition: null` (which fires the `Condition_If` swallow
+    /// detector and marks the whole ETB chain unsupported). Unlocks the
+    /// "if you put a [type] onto the battlefield this way, [bonus]" rider class.
+    #[test]
+    fn leading_you_put_a_cave_onto_battlefield_spelunking() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If you put a Cave onto the battlefield this way, you gain 4 life.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "you gain 4 life.");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Cave"))
+                    ),
+                    "expected Subtype Cave, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Cave filter, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: The suffix form of the same active-voice gate — "[effect] if
+    /// you put a [type] onto the battlefield this way" — routes through
+    /// `parse_outcome_this_way_condition` to the identical `ZoneChangedThisWay`
+    /// condition, so leading and trailing phrasings stay in lockstep.
+    #[test]
+    fn outcome_you_put_a_creature_onto_battlefield_active_voice() {
+        let condition =
+            parse_outcome_this_way_condition("you put a creature onto the battlefield this way")
+                .expect("active-voice put gate must lower to ZoneChangedThisWay");
+        let AbilityCondition::ZoneChangedThisWay { filter } = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Creature)),
+                    "expected Creature type filter, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Creature filter, got {other:?}"),
         }
     }
 

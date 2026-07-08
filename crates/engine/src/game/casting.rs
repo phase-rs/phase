@@ -75,6 +75,68 @@ fn runtime_granted_cycling_abilities(
         .collect()
 }
 
+/// CR 702.6: An `Equip` keyword granted at runtime by a static ability (Bram,
+/// Bludgeon Brawl's "… is an Equipment with equip {N} …") does not pass through
+/// card-load synthesis, so its equip activated ability must be synthesized live
+/// from the object's post-layer keyword set. `obj.keywords` is battlefield-
+/// authoritative (AddKeyword grants land there); printed equip keywords are
+/// excluded because card-load synthesis already turned them into an
+/// `obj.abilities` entry, so re-synthesizing them would double-offer equip.
+fn runtime_granted_equip_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    // CR 702.6: Equip functions only while its source is on the battlefield.
+    if obj.zone != Zone::Battlefield {
+        return Vec::new();
+    }
+    // CR 702.6a: a permanent may have more than one equip ability, and each is
+    // independently activatable. Card-load synthesis already turned every PRINTED
+    // Equip keyword into an `obj.abilities` entry, so subtract printed equips by
+    // OCCURRENCE (not value-wide membership): consume one printed instance per
+    // matching live keyword, and synthesize the rest. This keeps a granted
+    // Equip {1} offered even when the object also prints an identical Equip {1}.
+    let mut unconsumed_printed: Vec<&Keyword> = obj
+        .base_keywords
+        .iter()
+        .filter(|keyword| matches!(keyword, Keyword::Equip(_)))
+        .collect();
+    obj.keywords
+        .iter()
+        .filter_map(|keyword| {
+            if !matches!(keyword, Keyword::Equip(_)) {
+                return None;
+            }
+            if let Some(index) = unconsumed_printed
+                .iter()
+                .position(|printed| *printed == keyword)
+            {
+                // A printed equip already lives in `obj.abilities`; consume it so
+                // any additionally granted copies are still synthesized below.
+                unconsumed_printed.remove(index);
+                return None;
+            }
+            crate::database::synthesis::equip_ability_for_keyword(keyword).map(|mut ability| {
+                // CR 202.3 + CR 118.9: Bludgeon Brawl grants `equip {X}` where X
+                // is the artifact's mana value, so the keyword carries the
+                // `ManaCost::SelfManaValue` placeholder. Concretize it to the
+                // source's actual mana value HERE — otherwise the payment path
+                // treats `SelfManaValue` as `{0}` and the equip is effectively
+                // free.
+                if let Some(cost) = ability.cost.take() {
+                    ability.cost = Some(super::keywords::resolve_self_mana_in_ability_cost(
+                        state, source_id, &cost,
+                    ));
+                }
+                ability
+            })
+        })
+        .collect()
+}
+
 /// CR 604.1 (seam 4: activated-ability-on-grant): synthesize graveyard activated
 /// abilities (Encore, Scavenge) for keywords granted to a graveyard card by a
 /// static. The `AddKeyword` layer seam installs only the keyword + triggers, so a
@@ -191,6 +253,10 @@ pub fn activated_ability_definitions(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            // CR 702.6: statically granted equip (Bram, Bludgeon Brawl) chained
+            // LAST — the identical append order is REQUIRED in
+            // `activation_ability_definition` so `ability_index` stays consistent.
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .enumerate()
             .map(|(offset, ability)| (printed_len + offset, ability)),
     );
@@ -220,6 +286,7 @@ fn activation_ability_definition(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .nth(offset)?
     };
     if let Some(ref cost) = ability.cost {
@@ -2945,38 +3012,34 @@ fn graveyard_permission_sources(
             if !source_belongs_to_player {
                 return None;
             }
-            active_static_definitions(state, obj)
-                .filter(|definition| graveyard_permission_functions_in_zone(definition, obj.zone))
-                .find_map(|definition| match definition.mode {
-                    StaticMode::GraveyardCastPermission {
-                        frequency,
-                        play_mode,
-                        graveyard_destination_replacement,
-                        ref extra_cost,
-                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
-                        definition
-                            .affected
-                            .as_ref()
-                            .map(|filter| GraveyardPermissionSource {
-                                source_id,
-                                filter,
-                                frequency,
-                                graveyard_destination_replacement,
-                                extra_cost,
-                            })
-                    }
-                    _ => None,
-                })
+            // The zone-of-function gate is now fully owned by
+            // `active_static_definitions` (CR 113.6 / CR 113.6b), which also
+            // correctly admits emblem-sourced graveyard-cast permissions —
+            // the previously-inlined gate never exempted `is_emblem` unlike
+            // every other command-zone consumer, an independent latent bug
+            // now fixed as a side effect.
+            active_static_definitions(state, obj).find_map(|definition| match definition.mode {
+                StaticMode::GraveyardCastPermission {
+                    frequency,
+                    play_mode,
+                    graveyard_destination_replacement,
+                    ref extra_cost,
+                } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
+                    definition
+                        .affected
+                        .as_ref()
+                        .map(|filter| GraveyardPermissionSource {
+                            source_id,
+                            filter,
+                            frequency,
+                            graveyard_destination_replacement,
+                            extra_cost,
+                        })
+                }
+                _ => None,
+            })
         })
         .collect()
-}
-
-fn graveyard_permission_functions_in_zone(definition: &StaticDefinition, zone: Zone) -> bool {
-    if zone == Zone::Battlefield {
-        definition.active_zones.is_empty() || definition.active_zones.contains(&Zone::Battlefield)
-    } else {
-        definition.active_zones.contains(&zone)
-    }
 }
 
 fn graveyard_permission_play_mode_matches(
@@ -14299,6 +14362,53 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
     }
 }
 
+/// CR 107.4f + GH #600: Pause for K'rrik/Phyrexian per-shard consent when an
+/// activated ability's mana leg would otherwise be paid inline (e.g. `{B},{T}: …`)
+/// without routing through `enter_payment_step`. Removal-first and `{X}` detours
+/// already hoist mana through `finalize_mana_payment`, which shares this pause
+/// helper — this path covers bare mana + non-removal residual tails only.
+pub(super) fn try_pause_activation_phyrexian_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    resolved: &ResolvedAbility,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    if find_non_self_battlefield_removal_cost(cost).is_some() {
+        return None;
+    }
+    let (mana_cost, remaining) = casting_costs::extract_mana_leg(cost)?;
+    let excluded_sources = remaining
+        .as_ref()
+        .map(|tail| ability_mana_payment_excluded_sources(tail, source_id))
+        .unwrap_or_default();
+    let (source_types, source_subtypes) = activation_source_types(state, source_id);
+    let activation_ctx = PaymentContext::Activation {
+        source_types: &source_types,
+        source_subtypes: &source_subtypes,
+        ability_tag: activation_ability_tag(state, source_id, ability_index),
+    };
+    let waiting = casting_costs::maybe_pause_for_phyrexian_choice(
+        state,
+        player,
+        source_id,
+        &mana_cost,
+        events,
+        Some(&activation_ctx),
+        &excluded_sources,
+    )?;
+    let mut pending = PendingCast::new(source_id, CardId(0), resolved.clone(), mana_cost);
+    pending.activation_cost = remaining;
+    pending.activation_ability_index = Some(ability_index);
+    if pending.activation_cost.is_some() {
+        pending.activation_residual = ActivationResidual::ManaLeg;
+    }
+    state.pending_cast = Some(Box::new(pending));
+    Some(waiting)
+}
+
 /// CR 602.2: To activate an ability is to put it onto the stack and pay its costs.
 /// CR 602.2a: Only an object's controller can activate its activated ability unless
 /// the object specifically says otherwise.
@@ -14582,7 +14692,20 @@ pub fn handle_activate_ability(
         // both fall through to the unchanged paths. SelfRef removal is excluded by
         // the walkers. `{X}`-mana removals were already caught by the X detour
         // above, so any mana leg seen here is non-X (mutually exclusive residuals).
-        if find_non_self_battlefield_removal_cost(cost).is_some() {
+        //
+        // CR 118.7 + CR 606.4: A loyalty ability taxed by a cost-raise static
+        // (Eidolon of Obstruction) reaches here as `Composite { Mana, Loyalty }`
+        // via `handle_activate_loyalty`'s delegation. A NON-TARGETED taxed loyalty
+        // ability hoists the mana leg to `enter_payment_step` and defers the
+        // loyalty counter cost as the `ManaLeg` residual, so mana is paid before
+        // the loyalty counters (no free loyalty on an unaffordable/cancelled mana
+        // payment). A TARGETED taxed loyalty ability is deliberately NOT hoisted
+        // here — it must fall through to the general target-first path below
+        // (CR 601.2c: targets are chosen before costs are paid), where the
+        // mana-first `Composite` ordering keeps the post-target payment atomic.
+        let loyalty_no_targets = crate::types::ability::is_loyalty_ability_cost(cost)
+            && build_target_slots(state, &resolved)?.is_empty();
+        if find_non_self_battlefield_removal_cost(cost).is_some() || loyalty_no_targets {
             if let Some((mana_cost, remaining)) = casting_costs::extract_mana_leg(cost) {
                 let mut pending_leg = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
                 pending_leg.activation_cost = remaining;
@@ -14991,6 +15114,17 @@ pub fn handle_activate_ability(
                     ));
                 }
                 stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
+                if let Some(waiting) = try_pause_activation_phyrexian_payment(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    &resolved,
+                    cost,
+                    events,
+                ) {
+                    return Ok(waiting);
+                }
                 if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
                     state,
                     player,
@@ -15097,6 +15231,17 @@ pub fn handle_activate_ability(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
+        if let Some(waiting) = try_pause_activation_phyrexian_payment(
+            state,
+            player,
+            source_id,
+            ability_index,
+            &resolved,
+            cost,
+            events,
+        ) {
+            return Ok(waiting);
+        }
         if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
             state,
             player,
@@ -15439,16 +15584,80 @@ fn increase_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
         } => {
             *generic = generic.saturating_add(amount);
         }
+        // A pre-resolution placeholder mana cost (`NoCost`, `SelfManaCost`, …) or a
+        // `ManaDynamic` cost carries no concrete generic component to grow here; it
+        // is concretized on its own path, so leave it untouched.
+        AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. } => {}
         AbilityCost::Composite { costs } => {
-            if let Some(sub) = costs
-                .iter_mut()
-                .find(|c| matches!(c, AbilityCost::Mana { .. }))
-            {
+            if let Some(sub) = costs.iter_mut().find(|c| {
+                matches!(
+                    c,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { .. }
+                    }
+                )
+            }) {
                 increase_generic_in_cost(sub, amount);
+            } else {
+                // CR 118.7 + CR 601.2h: no concrete mana component to grow — add
+                // one so the increase still applies (e.g. a Composite of only
+                // `{T}`/sacrifice). Inserted at the FRONT so it is paid before the
+                // non-mana components (see the `_` arm rationale).
+                costs.insert(0, added_generic_mana_cost(amount));
             }
         }
-        _ => {} // Non-mana costs unaffected
+        // CR 118.7 + CR 606.1: A non-mana cost (a loyalty ability's `Loyalty` cost,
+        // a bare `{T}` / sacrifice / pay-life cost) has no generic mana to grow, so
+        // a raise must ADD a generic-mana component. Wrap the existing cost in a
+        // `Composite` with the added `{amount}` — this is what makes Eidolon of
+        // Obstruction actually tax an opponent's loyalty ability by {1}.
+        //
+        // CR 601.2h: the added mana leg is placed FIRST so any payment path that
+        // pays a `Composite` in order settles the mana before the non-mana cost.
+        // This keeps payment atomic: an unaffordable mana leg fails/pauses before
+        // the loyalty counters (or other non-mana cost) are ever committed, so a
+        // cancelled payment never leaves a free loyalty change behind.
+        _ => {
+            let existing = std::mem::replace(cost, AbilityCost::Composite { costs: Vec::new() });
+            *cost = AbilityCost::Composite {
+                costs: vec![added_generic_mana_cost(amount), existing],
+            };
+        }
     }
+}
+
+/// CR 118.7: A `{amount}` generic-mana `AbilityCost`, used to add a mana component
+/// to an ability whose printed cost has none when a cost-raise static applies.
+fn added_generic_mana_cost(amount: u32) -> AbilityCost {
+    AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: Vec::new(),
+            generic: amount,
+        },
+    }
+}
+
+/// CR 118.7 + CR 601.2f + CR 606.1: True when an active cost-modifier static
+/// (Eidolon of Obstruction) adds a mana component to an otherwise mana-free
+/// loyalty ability. Such an ability can no longer use the loyalty fast path
+/// (`handle_activate_loyalty`, which pays only loyalty counters and never mana);
+/// the caller routes it through the general activated-ability flow instead,
+/// which prompts for the added mana, pays the loyalty counters, records the
+/// CR 606.3 activation, and enforces the once-per-turn gate. A bare `Loyalty`
+/// cost that stays bare after applying every modifier is untaxed and keeps the
+/// fast path (zero behavior change for the common case).
+pub(crate) fn loyalty_ability_gains_mana_tax(
+    state: &GameState,
+    ability_def: &AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if !matches!(ability_def.cost, Some(AbilityCost::Loyalty { .. })) {
+        return false;
+    }
+    let mut probe = ability_def.clone();
+    apply_cost_reduction(state, &mut probe, player, source_id);
+    !matches!(probe.cost, Some(AbilityCost::Loyalty { .. }))
 }
 
 /// CR 601.2f: Apply self-referential cost reduction to an ability definition's cost.
@@ -15532,6 +15741,12 @@ fn apply_static_activated_ability_cost_reduction(
     let Some(cost) = ability_def.cost.as_mut() else {
         return;
     };
+    // CR 606.1: Loyalty abilities are activated abilities identified by their
+    // `AbilityCost::Loyalty` cost, not by an `AbilityTag`. A `ReduceAbilityCost`
+    // static keyed on `keyword == "loyalty"` (Eidolon of Obstruction) matches
+    // exactly this class. Classified on the unwrapped cost (a `&mut` reborrows to
+    // `&`) before the loop mutates it.
+    let ability_is_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
 
     for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::ReduceAbilityCost {
@@ -15546,7 +15761,13 @@ fn apply_static_activated_ability_cost_reduction(
         else {
             continue;
         };
-        if (keyword != "activated" && Some(keyword.as_str()) != active_keyword) || *amount == 0 {
+        // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed
+        // keyword (power-up, exhaust, …), or the "loyalty" arm against a loyalty
+        // ability's cost.
+        let keyword_matches = keyword == "activated"
+            || Some(keyword.as_str()) == active_keyword
+            || (keyword == "loyalty" && ability_is_loyalty);
+        if !keyword_matches || *amount == 0 {
             continue;
         }
         // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"

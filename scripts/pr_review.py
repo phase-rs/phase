@@ -2294,28 +2294,32 @@ SCAN_PR_QUERY = (
     "pullRequests(states:[OPEN], first:$first, after:$after,"
     " orderBy:{field:CREATED_AT, direction:DESC}){"
     "pageInfo{hasNextPage endCursor}"
-    f"nodes{{{pr_node_fields(
+    "nodes{"
+    + pr_node_fields(
         comments_last=15,
-        include_full_reviews=False,
+        include_full_reviews=True,
         include_pr_body=True,
         include_review_body=False,
         include_comment_body=True,
         status_contexts_first=None,
-    )}}}"
+    )
+    + "}"
     "}}}"
 )
 
 SINGLE_PR_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){"
     "repository(owner:$owner,name:$name){"
-    f"pullRequest(number:$number){{{pr_node_fields(
+    "pullRequest(number:$number){"
+    + pr_node_fields(
         comments_last=30,
         include_full_reviews=True,
         include_pr_body=True,
         include_review_body=True,
         include_comment_body=True,
         status_contexts_first=80,
-    )}}}"
+    )
+    + "}"
     "}}"
 )
 

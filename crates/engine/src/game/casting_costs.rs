@@ -7858,7 +7858,7 @@ fn auto_tap_mana_sources_inner(
     }
 }
 
-fn production_override_for_option(
+pub(crate) fn production_override_for_option(
     ability_def: &crate::types::ability::AbilityDefinition,
     option: &ManaSourceOption,
 ) -> Option<crate::types::game_state::ProductionOverride> {

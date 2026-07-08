@@ -1161,6 +1161,7 @@ fn fmt_duration(d: &Duration) -> String {
             format!("until end of next turn ({})", fmt_player_scope(player))
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
+        Duration::UntilSourceExilesAnotherCard => "until source exiles another card".to_string(),
         Duration::UntilNextStepOf { step, player } => {
             format!(
                 "until next {} ({})",
@@ -3357,6 +3358,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -11221,6 +11223,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -11266,6 +11269,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -12252,6 +12256,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -12284,6 +12289,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -12314,6 +12320,7 @@ mod tests {
             description: None,
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -12462,6 +12469,7 @@ mod tests {
             description: Some("Skip your draw step.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(
@@ -12492,6 +12500,7 @@ mod tests {
             description: Some("Players skip their upkeep steps.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(
@@ -12532,6 +12541,7 @@ mod tests {
             description: Some("Players can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -12563,6 +12573,7 @@ mod tests {
             description: Some("You can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -12596,6 +12607,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -12635,6 +12647,7 @@ mod tests {
                 description: Some(description.to_string()),
                 attack_defended: None,
                 source_controller: None,
+                bypass_beneficiary: None,
             });
         }
 
@@ -12776,6 +12789,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(

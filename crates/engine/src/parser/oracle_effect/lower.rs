@@ -6,7 +6,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
-use super::super::oracle_nom::duration::{parse_duration, parse_for_as_long_as_condition};
+use super::super::oracle_nom::duration::{
+    parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
+};
 use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -28,10 +30,10 @@ use crate::types::ability::{
     CastFromZoneDriver, CastingPermission, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
     FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetFilter, TypeFilter, TypedFilter,
+    ObjectScope, PlayPermissionInvalidation, PlayerFilter, PreventionAmount, PreventionScope,
+    PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -931,6 +933,28 @@ fn is_land_enters_tapped_rider(clause: &ClauseIr) -> bool {
     parses_land_enters_tapped_rider(trimmed)
 }
 
+pub(super) fn scan_until_next_same_source_exile_invalidation(lower: &str) -> bool {
+    nom_primitives::scan_preceded(lower, |i| {
+        terminated(parse_until_next_same_source_exile_invalidation, eof).parse(i)
+    })
+    .is_some()
+}
+
+fn parse_until_next_same_source_exile_invalidation(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("until ").parse(input)?;
+    let (input, _) = parse_until_source_exiles_another_card_body(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
+fn is_until_next_same_source_exile_rider(clause: &ClauseIr) -> bool {
+    let lower = clause.source_text.to_ascii_lowercase();
+    nom_on_lower(clause.source_text.trim(), lower.trim(), |i| {
+        all_consuming(parse_until_next_same_source_exile_invalidation).parse(i)
+    })
+    .is_some()
+}
+
 /// Walk the previous def and its `sub_ability` chain for a `PlayFromExile`
 /// permission. The grant produced by the compound "exile … and may play that
 /// card" chain (Lightstall Inquisitor) lands as a sibling def during the lower
@@ -983,6 +1007,22 @@ fn attach_land_enters_tapped_to_previous_play_from_exile(defs: &mut [AbilityDefi
         return false;
     };
     *land_enter_tapped = EtbTapState::Tapped;
+    true
+}
+
+fn attach_until_next_same_source_exile_to_previous_play_from_exile(
+    defs: &mut [AbilityDefinition],
+) -> bool {
+    let Some(CastingPermission::PlayFromExile {
+        duration,
+        invalidation,
+        ..
+    }) = find_prev_play_from_exile_permission_mut(defs)
+    else {
+        return false;
+    };
+    *duration = Duration::Permanent;
+    *invalidation = Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource);
     true
 }
 
@@ -1547,6 +1587,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         }
         if is_land_enters_tapped_rider(clause_ir)
             && attach_land_enters_tapped_to_previous_play_from_exile(&mut defs)
+        {
+            prev_boundary = clause_ir.boundary;
+            continue;
+        }
+        if is_until_next_same_source_exile_rider(clause_ir)
+            && attach_until_next_same_source_exile_to_previous_play_from_exile(&mut defs)
         {
             prev_boundary = clause_ir.boundary;
             continue;
@@ -3169,8 +3215,9 @@ fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
 
 /// CR 608.2c + CR 301.5b: Token creation followed by a sibling `Attach`
 /// ("create a Kor Soldier token. You may attach an Equipment you control to
-/// it") — the bare-"it" host anaphor must target `LastCreated`, not
-/// `ParentTarget` (the token-creating effect has no parent target slot).
+/// it") — the bare-"it" host anaphor must target `LastCreated`, not the
+/// source object or parent trigger subject (the token-creating effect has no
+/// parent target slot).
 fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
     // Walk the whole sub-ability chain: the token + bare-Attach pair is not
     // always at the root. Field-Tested Frying Pan ("create a Food token, then
@@ -3188,7 +3235,9 @@ fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
                     if let Effect::Attach { target, .. } = sub.effect.as_mut() {
                         if matches!(
                             target,
-                            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                            TargetFilter::SelfRef
+                                | TargetFilter::ParentTarget
+                                | TargetFilter::TriggeringSource
                         ) {
                             *target = TargetFilter::LastCreated;
                         }
@@ -3541,6 +3590,17 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
                 *duration = Some(Duration::Permanent);
             }
         }
+        Effect::Attach { target, .. } => {
+            // CR 608.2c + CR 301.5b: after a token creator, "attach this
+            // Equipment to it" may have resolved the host pronoun through the
+            // source-default `SelfRef` path before this gated post-token pass.
+            if matches!(
+                target,
+                TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+            ) {
+                *target = TargetFilter::LastCreated;
+            }
+        }
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
@@ -3551,7 +3611,6 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ..
         }
         | Effect::Pump { target, .. }
-        | Effect::Attach { target, .. }
         // CR 603.7c + CR 608.2c (issue #4601 review): a delayed cleanup that
         // puts the temporary token on top/bottom of a library ("… put it on the
         // bottom of its owner's library at the beginning of the next end step")

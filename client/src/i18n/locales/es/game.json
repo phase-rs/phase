@@ -11,6 +11,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "nextUp": {
+    "label": "Sigue",
+    "tooltip": "El turno de este jugador es el siguiente."
+  },
   "card": {
     "faceDownName": "Carta boca abajo",
     "loading": "Cargando {{name}}",
@@ -1681,6 +1685,13 @@
     "subtitle": "Selecciona la opción a resolver.",
     "subtitleBinary": "Elige una de las dos opciones siguientes.",
     "optionFallback": "Opción {{number}}"
+  },
+  "redistributeLifeTotals": {
+    "eyebrow": "Totales de vida",
+    "title": "Redistribuir los totales de vida",
+    "subtitle": "Elige cómo reasignar los totales de vida de los jugadores.",
+    "keepCurrent": "Mantener los totales actuales",
+    "playerLife": "{{player}}: {{life}} vidas"
   },
   "combatTax": {
     "eyebrow": "Impuesto de combate",

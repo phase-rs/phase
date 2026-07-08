@@ -2400,6 +2400,18 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     .or(value((), tag("cast ")))
     .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
+    // CR 701.34a + CR 608.2c: "draw a card and proliferate" is two
+    // independent instructions. `proliferate` is intransitive, so it has no
+    // trailing space; keep it in the bare-and splitter instead of letting the
+    // Draw parser swallow it as an ignored tail.
+    .or(value((), tag("proliferate")))
+    // CR 701.47a + CR 608.2c: "you lose 1 life and amass Zombies 1"
+    // (Dreadhorde Invasion — issue #5341) is two independent instructions.
+    // Without this arm the LoseLife half greedily swallows the whole chunk and
+    // the Amass conjunct is dropped, so the upkeep trigger only loses life.
+    // Trailing space mirrors other transitive keyword actions (`create `,
+    // `sacrifice `): amass always takes a subtype + count.
+    .or(value((), tag("amass ")))
     // CR 701.20a (issue #516): "reveal " as an imperative clause starter so
     // chains like "choose land or nonland and reveal cards from the top of
     // your library ..." split at the bare " and " and each half reaches its
@@ -2625,7 +2637,8 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
                     tag("that permanent's "),
                     tag("that permanent\u{2019}s "),
                 )),
-                tag("activated abilities can't be activated"),
+                // CR 605.1a: dual-apostrophe predicate via the shared authority.
+                crate::parser::oracle_static::parse_activated_abilities_cant_be_activated,
             ),
         ),
     )))
@@ -5453,6 +5466,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -7394,6 +7408,15 @@ mod tests {
         // Lotho: "you lose 1 life and create a Treasure token"
         let chunks = clause_texts("you lose 1 life and create a Treasure token");
         assert_eq!(chunks, vec!["you lose 1 life", "create a Treasure token"]);
+    }
+
+    #[test]
+    fn bare_and_splits_lose_life_and_amass() {
+        // CR 701.47a + CR 608.2c (issue #5341): Dreadhorde Invasion —
+        // "you lose 1 life and amass Zombies 1". Without splitting the Amass
+        // conjunct, LoseLife swallows the remainder and the Army never arrives.
+        let chunks = clause_texts("you lose 1 life and amass Zombies 1");
+        assert_eq!(chunks, vec!["you lose 1 life", "amass Zombies 1"]);
     }
 
     #[test]

@@ -11,6 +11,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "nextUp": {
+    "label": "Next Up",
+    "tooltip": "This player's turn is next."
+  },
   "card": {
     "faceDownName": "Face-down card",
     "loading": "Loading {{name}}",
@@ -1718,6 +1722,13 @@
     "subtitle": "Select the option to resolve.",
     "subtitleBinary": "Pick one of the two options below.",
     "optionFallback": "Option {{number}}"
+  },
+  "redistributeLifeTotals": {
+    "eyebrow": "Life Totals",
+    "title": "Redistribute life totals",
+    "subtitle": "Choose how to reassign the players' life totals.",
+    "keepCurrent": "Keep current totals",
+    "playerLife": "{{player}}: {{life}} life"
   },
   "combatTax": {
     "eyebrow": "Combat Tax",

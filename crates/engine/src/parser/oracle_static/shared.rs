@@ -5,13 +5,16 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
-/// CR 702.11b + CR 702.21a: Parse the "[subject] can be the targets of spells
-/// and abilities as though they didn't have hexproof[. Ward abilities of those
-/// creatures don't trigger]" static pair (Nowhere to Run).
+/// CR 702.11e + CR 609.4 + CR 702.21a: Parse the "[subject] can be the targets
+/// of spells and abilities[ you control] as though they didn't have hexproof[.
+/// Ward abilities of those creatures don't trigger]" static pair (Nowhere to
+/// Run, Glaring Spotlight).
 ///
 /// Sentence 1 → `StaticMode::IgnoreHexproof` scoped to `<subject>` via the
-/// definition's `affected` filter (CR 702.11b — the bypass lets the matched
-/// permanents be targeted as though they had no hexproof). Optional sentence 2
+/// definition's `affected` filter (CR 702.11e — the bypass lets the matched
+/// permanents be targeted as though they had no hexproof). The optional "you
+/// control" qualifier restricts the beneficiary (`bypass_beneficiary`). Optional
+/// sentence 2
 /// → `StaticMode::SuppressTriggers { source_filter: <same subject>, events:
 /// [BecomesTargeted] }` (CR 702.21a — "those creatures" anaphors sentence 1's
 /// subject, so the parsed filter is reused rather than re-derived).
@@ -28,21 +31,32 @@ pub(crate) fn parse_ignore_hexproof_static(
     let (after_subject, subject) = take_until::<_, _, OracleError<'_>>(" can be the target")
         .parse(tp.lower)
         .ok()?;
-    let bypass: OracleResult<'_, ()> = (|| {
+    let bypass: OracleResult<'_, bool> = (|| {
         let (i, _) = tag::<_, _, OracleError<'_>>(" can be the target").parse(after_subject)?;
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(i)?;
-        let (i, _) =
-            tag::<_, _, OracleError<'_>>(" of spells and abilities as though ").parse(i)?;
-        // CR 702.11b: plural ("they") or singular ("it") subject pronoun.
+        let (i, _) = tag::<_, _, OracleError<'_>>(" of spells and abilities").parse(i)?;
+        // CR 702.11e + CR 609.4: an optional "you control" qualifier restricts
+        // which spells and abilities bypass hexproof to the static controller's
+        // (Glaring Spotlight — "spells and abilities you control"). Its presence
+        // is semantically load-bearing in multiplayer: without it (Nowhere to
+        // Run) every player's spells and abilities gain the bypass; with it, only
+        // the controller's do. The flag drives `bypass_beneficiary` below.
+        let (i, you_control) = opt(tag::<_, _, OracleError<'_>>(" you control")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" as though ").parse(i)?;
+        // CR 702.11e: plural ("they") or singular ("it") subject pronoun.
         let (i, _) = alt((
             tag::<_, _, OracleError<'_>>("they didn't"),
             tag::<_, _, OracleError<'_>>("it didn't"),
         ))
         .parse(i)?;
         let (i, _) = tag::<_, _, OracleError<'_>>(" have hexproof").parse(i)?;
-        Ok((i, ()))
+        Ok((i, you_control.is_some()))
     })();
-    let (rest, ()) = bypass.ok()?;
+    let (rest, you_control) = bypass.ok()?;
+    // CR 109.5: "you control" resolves relative to the static's source
+    // controller, so the beneficiary is `ControllerRef::You`; absent, the bypass
+    // benefits every player (`None`).
+    let beneficiary = you_control.then_some(ControllerRef::You);
 
     // Map the subject phrase to a typed filter; require it to fully consume so a
     // partial parse never silently scopes the bypass wider than written.
@@ -53,6 +67,7 @@ pub(crate) fn parse_ignore_hexproof_static(
 
     let mut defs = vec![StaticDefinition::new(StaticMode::IgnoreHexproof)
         .affected(filter.clone())
+        .bypass_beneficiary(beneficiary)
         .description(text.to_string())];
 
     // Optional sentence 2: ward suppression for the same subject.
@@ -735,6 +750,63 @@ pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFi
     None
 }
 
+/// CR 605.1a: Match the mana-ability exemption suffix " unless they're mana
+/// abilities" with either the ASCII (`'`) or typographic (U+2019) apostrophe.
+///
+/// MTGJSON oracle text carries the U+2019 form, and there is no global apostrophe
+/// normalization in the parser pipeline — which is exactly why the `can't be
+/// activated` predicate combinators already dual-branch (see
+/// `parse_activation_compound_tail` and `evasion::try_split_and_cant_activate_abilities`).
+/// The exemption suffix must accept both glyphs too, or a U+2019 printing silently
+/// loses the carve-out and the runtime wrongly blocks mana abilities that CR 605.1a
+/// requires to stay activatable. Single authority shared by every "can't be
+/// activated" / "cost {N} more to activate" exemption site.
+pub(crate) fn parse_mana_ability_exemption_suffix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag(" unless they're "), tag(" unless they\u{2019}re "))),
+            tag("mana abilities"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 602.5: The bare `can't be activated` predicate, tolerant of both the ASCII
+/// (`'`) and typographic (U+2019) apostrophe. Companion of
+/// `parse_mana_ability_exemption_suffix` — the single authority every activation
+/// prohibition predicate routes through, since there is no global apostrophe
+/// normalization in the parser pipeline.
+pub(crate) fn parse_cant_be_activated_predicate(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("can't be activated"), tag("can\u{2019}t be activated"))),
+    )
+    .parse(input)
+}
+
+/// CR 602.5: The `activated abilities can't be activated` predicate phrase,
+/// dual-apostrophe. Composes the fixed `"activated abilities "` lead with the
+/// shared `parse_cant_be_activated_predicate`.
+pub(crate) fn parse_activated_abilities_cant_be_activated(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("activated abilities "),
+            parse_cant_be_activated_predicate,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 602.5: True if `text` contains the `activated abilities can't be activated`
+/// predicate with either apostrophe glyph — the scan form used by the
+/// self-reference and compound-Aura activation-prohibition gates.
+pub(crate) fn contains_activated_abilities_cant_be_activated(text: &str) -> bool {
+    nom_primitives::scan_contains(text, "activated abilities can't be activated")
+        || nom_primitives::scan_contains(text, "activated abilities can\u{2019}t be activated")
+}
+
 /// CR 602.5: Parses the activation-prohibition tail of compound static text.
 fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
     value(
@@ -742,11 +814,8 @@ fn parse_activation_compound_tail(input: &str) -> OracleResult<'_, ()> {
         (
             tag(", and "),
             opt(alt((tag("its "), tag("their ")))),
-            alt((
-                tag("activated abilities can't be activated"),
-                tag("activated abilities can\u{2019}t be activated"),
-            )),
-            opt((tag(" unless they're "), tag("mana abilities"))),
+            parse_activated_abilities_cant_be_activated,
+            opt(parse_mana_ability_exemption_suffix),
             opt(tag(".")),
         ),
     )
@@ -1168,6 +1237,29 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         if !defs.is_empty() {
             return defs;
         }
+        // CR 702.11 + CR 702.18 + CR 611.3a: Inverted player+object compound
+        // keyword grants ("As long as <cond>, you and <objects> have hexproof")
+        // must decompose into TWO defs (object Continuous + player Hexproof/
+        // Shroud/PlayerProtection). The single-return inverted rewrite can only
+        // keep one def, so rewrite to the canonical trailing-gate form and
+        // re-enter through the multi compound-keyword splitter here.
+        let canon_lower = split.canonical.to_lowercase();
+        if let Some(mut defs) =
+            parse_compound_subject_keyword_static(&split.canonical, &canon_lower)
+        {
+            let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
+                    text: split.condition_text.clone(),
+                },
+            );
+            for def in &mut defs {
+                if def.condition.is_none() {
+                    def.condition = Some(condition.clone());
+                }
+                def.description = Some(stripped.to_string());
+            }
+            return defs;
+        }
     }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
@@ -1187,6 +1279,13 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: "You and <objects> have
+    // <player-applicable keyword>" (Sigarda / Serra's Emissary / Gruul
+    // Spellbreaker), or the Oxford-comma N-item form "You, <objects>, …, and
+    // <objects> have <keyword>" (Shalai, Voice of Plenty). Must claim before
+    // the single-return fallback, which otherwise emits one bogus Continuous
+    // Or{empty-typed You, objects} that grants the keyword to every permanent
+    // you control.
     if let Some(defs) = parse_compound_subject_keyword_static(&stripped, &lower) {
         return defs;
     }
@@ -1280,7 +1379,7 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
 
     // CR 508.1c / CR 509.1b / CR 702.122c + CR 602.5: compound attack,
     // block, crew, and activation prohibitions produce parallel static definitions.
-    if nom_primitives::scan_contains(&lower, "activated abilities can't be activated")
+    if contains_activated_abilities_cant_be_activated(&lower)
         && (attached_activation_compound_modes.is_some()
             || nom_primitives::scan_contains(&lower, "can't attack")
             || nom_primitives::scan_contains(&lower, "can't block"))

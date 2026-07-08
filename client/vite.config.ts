@@ -30,6 +30,32 @@ function wasmEnvShim(): Plugin {
   };
 }
 
+// mana-font ships a legacy @font-face (eot/woff/ttf/svg) for BOTH the "Mana"
+// glyph family AND an unused "MPlantin" text family. Imported verbatim, Vite
+// emits every referenced url() — ~3.4 MB of fonts (a 1.8 MB SVG among them,
+// plus the whole unused MPlantin family) into the web dist AND the Tauri
+// bundle, when the only asset any `.ms-*` class needs is the 187 KB woff2 the
+// vendored CSS never references. Rewrite that one stylesheet at build time to a
+// single woff2-only @font-face for "Mana" and drop the rest, so exactly one
+// font file is emitted. Keeps the npm package as the source of truth for the
+// glyph classes (no vendored copy, updates on version bump). enforce:"pre" so
+// this runs before Vite's CSS plugin resolves url()s into emitted assets.
+function trimManaFont(): Plugin {
+  return {
+    name: "trim-mana-font",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.replace(/\\/g, "/").endsWith("mana-font/css/mana.css")) return;
+      const classes = code.replace(/@font-face\s*\{[^}]*\}/g, "");
+      const woff2Face =
+        '@font-face{font-family:"Mana";' +
+        'src:url("../fonts/mana.woff2") format("woff2");' +
+        "font-weight:normal;font-style:normal;}\n";
+      return { code: woff2Face + classes, map: null };
+    },
+  };
+}
+
 function gitHash(): string {
   try {
     return execSync("git rev-parse --short HEAD").toString().trim();
@@ -136,6 +162,7 @@ export default defineConfig(({ mode }) => ({
   },
   plugins: [
     wasmEnvShim(),
+    trimManaFont(),
     react(),
     tailwindcss(),
     wasm(),
@@ -146,6 +173,14 @@ export default defineConfig(({ mode }) => ({
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
+        // Workbox's default globPatterns (`**/*.{js,wasm,css,html}`) omit fonts,
+        // so the hashed self-hosted webfonts (@fontsource-variable/* and
+        // mana-font, all emitted as .woff2) are bundled but never precached —
+        // they'd 404 offline. Extend the default generically to cover every
+        // font family's woff2 (no per-font special case). The .wasm engine/draft
+        // bundles are still handled by their dedicated runtimeCaching rules
+        // below via globIgnores.
+        globPatterns: ["**/*.{js,wasm,css,html,woff2}"],
         // changelog{,-meta}.json are committed to public/ but stripped from the
         // Pages bundle on deploy (manifest-driven rm in deploy.yml/release.yml)
         // and served from R2. The precache manifest is generated BEFORE that

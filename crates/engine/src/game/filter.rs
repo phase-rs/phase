@@ -5018,12 +5018,26 @@ fn object_shares_quality_with_reference_filter(
         return event_context_references
             .into_iter()
             .filter_map(|target| match target {
-                TargetRef::Object(reference_id) => state.objects.get(&reference_id),
+                TargetRef::Object(reference_id) => Some(reference_id),
                 TargetRef::Player(_) => None,
             })
-            .any(|reference_obj| {
-                let values =
-                    object_shared_quality_values(reference_obj, quality, &state.all_creature_types);
+            .any(|reference_id| {
+                let values = state
+                    .objects
+                    .get(&reference_id)
+                    .map(|reference_obj| {
+                        object_shared_quality_values(
+                            reference_obj,
+                            quality,
+                            &state.all_creature_types,
+                        )
+                    })
+                    .or_else(|| {
+                        state.lki_cache.get(&reference_id).map(|lki| {
+                            lki_shared_quality_values(lki, quality, &state.all_creature_types)
+                        })
+                    })
+                    .unwrap_or_default();
                 object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
             });
     }
@@ -5768,6 +5782,69 @@ mod tests {
         assert!(matches_target_filter(&state, id, &creature_filter, id));
         assert!(!matches_target_filter(&state, id, &land_filter, id));
         assert!(matches_target_filter(&state, id, &card_filter, id));
+    }
+
+    /// GitHub #4710 (Scourglass) / CR 205.2b: "except for artifacts" must
+    /// exclude an ARTIFACT CREATURE too, not just noncreature artifacts — an
+    /// object with more than one card type satisfies criteria for any of
+    /// them. `Permanent AND NOT Artifact AND NOT Land` (Scourglass's actual
+    /// filter shape) must reject the artifact creature, accept the plain
+    /// creature, and reject the land.
+    #[test]
+    fn non_artifact_type_filter_excludes_artifact_creatures() {
+        let mut state = setup();
+        let artifact_creature = add_creature(&mut state, PlayerId(0), "Ornithopter");
+        state
+            .objects
+            .get_mut(&artifact_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let plain_creature = add_creature(&mut state, PlayerId(0), "Bear");
+        let land_card_id = CardId(state.next_object_id);
+        let land = create_object(
+            &mut state,
+            land_card_id,
+            PlayerId(0),
+            "Forest".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let scourglass_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![
+                TypeFilter::Permanent,
+                TypeFilter::Non(Box::new(TypeFilter::Artifact)),
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
+            controller: None,
+            properties: vec![],
+        });
+
+        assert!(
+            !matches_target_filter(
+                &state,
+                artifact_creature,
+                &scourglass_filter,
+                artifact_creature
+            ),
+            "an artifact creature must be excluded by 'except for artifacts' (CR 205.2b)"
+        );
+        assert!(
+            matches_target_filter(&state, plain_creature, &scourglass_filter, plain_creature),
+            "a plain (non-artifact, non-land) creature must survive"
+        );
+        assert!(
+            !matches_target_filter(&state, land, &scourglass_filter, land),
+            "a land must be excluded by 'except for lands'"
+        );
     }
 
     #[test]

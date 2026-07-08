@@ -179,16 +179,16 @@ function PhaseDot({ phase }: { phase: Phase }) {
       aria-label={tooltip}
       aria-describedby={tooltipId}
       aria-pressed={hasStop}
-      className={`group relative flex h-6 w-6 items-center justify-center rounded-full border transition-all duration-200 lg:h-8 lg:w-8 lg:p-1 ${
+      className={`group relative flex h-6 w-6 items-center justify-center rounded-[7px] border transition-colors duration-150 lg:h-8 lg:w-8 lg:p-1 ${
         isActive
-          ? "border-cyan-300/45 bg-cyan-400/18 text-white shadow-[0_10px_22px_rgba(34,211,238,0.22)]"
+          ? "border-cyan-300/45 bg-cyan-950/82 text-white"
           : hasStop
             ? "border-white/12 bg-white/8 text-slate-200 hover:border-white/20 hover:text-white"
             : "border-transparent bg-transparent text-slate-500 hover:border-white/10 hover:bg-white/5 hover:text-slate-200"
       }`}
     >
       {isActive && (
-        <span className="absolute -top-1 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.9)]" />
+        <span className="absolute -top-1 left-1/2 h-1 w-3 -translate-x-1/2 rounded-[2px] bg-amber-300" />
       )}
       {PHASE_ICONS[phase]}
       {hasStop && (
@@ -205,7 +205,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorLeft() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
       {LEFT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -217,7 +217,7 @@ export function PhaseIndicatorLeft() {
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorRight() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
       {RIGHT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -234,7 +234,7 @@ export function CombatPhaseIndicator() {
   return (
     <div
       data-combat-phase-indicator
-      className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/64 px-1 py-1 backdrop-blur-xl lg:px-1.5"
+      className="flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:px-1.5"
     >
       {COMBAT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />

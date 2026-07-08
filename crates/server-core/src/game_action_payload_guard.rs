@@ -391,6 +391,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChoosePile { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
         | GameAction::ChooseDamageSource { .. }
         | GameAction::DecideOptionalCost { .. }
         | GameAction::RespondToSpliceOffer { .. }
