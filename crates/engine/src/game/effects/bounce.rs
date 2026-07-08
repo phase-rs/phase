@@ -232,7 +232,12 @@ pub fn resolve(
                     track_exiled_by_source: false,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
+                    library_position: None,
+                    is_cost_payment: false,
+                    enters_modified_if: None,
                 };
                 return Ok(());
             }
@@ -320,7 +325,12 @@ pub fn resolve(
                     track_exiled_by_source: false,
                     // CR 708.2a: bounce returns cards face up; no face-down entry.
                     face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     count_param: 0,
+                    library_position: None,
+                    is_cost_payment: false,
+                    enters_modified_if: None,
                 };
                 return Ok(());
             }
@@ -491,7 +501,12 @@ pub fn resolve_all(
                 track_exiled_by_source: false,
                 // CR 708.2a: bounce returns cards face up; no face-down entry.
                 face_down_profile: None,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 count_param: 0,
+                library_position: None,
+                is_cost_payment: false,
+                enters_modified_if: None,
             };
             return Ok(());
         }
@@ -543,6 +558,7 @@ pub fn resolve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::change_zone;
     use crate::game::zones::create_object;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{CastingVariant, StackEntry};
@@ -790,6 +806,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: None,
                     tag: None,
+                    kind: None,
                 },
                 destination: None,
                 selection: BounceSelection::Targeted,
@@ -1500,6 +1517,77 @@ mod tests {
             "no card returned when zero targets were chosen"
         );
         assert!(!state.players[0].hand.contains(&land));
+    }
+
+    /// Issue #3257: Macabre Waltz — chosen graveyard creature must return to hand.
+    #[test]
+    fn targeted_up_to_two_graveyard_bounce_moves_chosen_creature() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{
+            AbilityKind, FilterProp, MultiTargetSpec, QuantityExpr, TypeFilter,
+        };
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Graveyard Bear".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let def = parse_effect_chain(
+            "Return up to two target creature cards from your graveyard to your hand, then discard a card.",
+            AbilityKind::Spell,
+        );
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("expected ChangeZone head");
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Hand);
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+        );
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed ChangeZone filter");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+
+        let mut ability = ResolvedAbility::new(
+            def.effect.as_ref().clone(),
+            vec![TargetRef::Object(bear)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = def.multi_target.clone();
+        let mut events = Vec::new();
+        change_zone::resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&bear).map(|o| o.zone),
+            Some(Zone::Hand),
+            "chosen graveyard creature must return to hand"
+        );
     }
 
     /// CR 115.1 + CR 608.2c: the zero-target short-circuit is only for

@@ -4,11 +4,11 @@ use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
-    CounterMoveChoice, ShardChoice,
+    CounterMoveChoice, CounterRemoveChoice, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
-use super::mana::ManaType;
+use super::mana::{ManaPipId, ManaType};
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -205,6 +205,17 @@ pub enum GameAction {
     UntapLandForMana {
         object_id: ObjectId,
     },
+    /// CR 118.3a: Pin a specific pool `ManaUnit` (by id) so the finalize spend
+    /// prefers it. The unit stays in the pool — this records a priority hint on
+    /// `PendingCast.pinned_pool_units`, it does not remove mana.
+    SpendPoolMana {
+        pip_id: ManaPipId,
+    },
+    /// CR 118.3a: Remove a previously-recorded pin. Always legal (no-op if the
+    /// pin is absent).
+    UnspendPoolMana {
+        pip_id: ManaPipId,
+    },
     SelectCards {
         cards: Vec<ObjectId>,
     },
@@ -289,6 +300,16 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 701.38b: Cast a vote for one object candidate in an object-pool vote
+    /// (`VoteSubject::Objects` — Council's Judgment, Prime Minister's Cabinet
+    /// Room). `candidate_index` indexes `WaitingFor::VoteChoice.candidate_objects`
+    /// (and the parallel `option_labels`). Index-based — not name-based — so
+    /// two candidates with the same printed name are disambiguated. Named votes
+    /// continue to use `ChooseOption { choice }`; object votes reject the string
+    /// path because their candidates are not canonical option words.
+    SubmitVoteCandidate {
+        candidate_index: u32,
+    },
     /// Alchemy spellbook draft: the player's chosen card name in response to
     /// `WaitingFor::SpellbookDraft`. The named card is conjured into the
     /// pending destination.
@@ -314,6 +335,11 @@ pub enum GameAction {
     /// CR 701.55a: Choose one branch of a resolution-time "A or B" instruction.
     ChooseBranch {
         index: usize,
+    },
+    /// CR 119.7 + CR 119.8: Submit one of the engine-enumerated life-total redistribution
+    /// options. `option_index` indexes `WaitingFor::RedistributeLifeTotals.options`.
+    SubmitLifeRedistribution {
+        option_index: usize,
     },
     /// CR 609.7a: Choose a source of damage for a prevention or replacement effect.
     ChooseDamageSource {
@@ -489,6 +515,17 @@ pub enum GameAction {
         object_id: ObjectId,
         door: crate::game::game_object::RoomDoor,
     },
+    /// CR 901.9 / CR 116.2i: Active-player special action to roll the planar
+    /// die during a main phase while the stack is empty.
+    RollPlanarDie,
+    /// CR 709.5f-g: Response to `WaitingFor::ChooseRoomDoor` — the player picked
+    /// which door (half) of the targeted Room to act on, and the operation to
+    /// apply to it. The `(op, door)` pair must be one of the prompt's `options`.
+    ChooseRoomDoor {
+        object_id: ObjectId,
+        op: crate::types::ability::DoorLockOp,
+        door: crate::game::game_object::RoomDoor,
+    },
     /// CR 702.51a: Tap creature/artifact for convoke or waterbend mana.
     /// CR 302.6: Summoning sickness does not apply (convoke doesn't use the tap ability mechanism).
     TapForConvoke {
@@ -509,6 +546,13 @@ pub enum GameAction {
     CompanionToHand,
     /// CR 701.57a: Choose to cast discovered card or put it to hand.
     DiscoverChoice {
+        choice: CastChoice,
+    },
+    /// CR 608.2g + CR 609.4b: Accept/decline a during-resolution PAID cast of a
+    /// graveyard card (Quistis Trepe, Tinybones the Pickpocket). On accept the
+    /// caster pays the card's real printed cost with any-type mana; on decline
+    /// the card stays in the graveyard.
+    GraveyardPaidCastChoice {
         choice: CastChoice,
     },
     /// CR 702.85a: Choose to cast the cascaded card without paying its mana cost.
@@ -563,11 +607,19 @@ pub enum GameAction {
     /// Cancel any active auto-pass for the acting player.
     CancelAutoPass,
     /// Replace the acting player's phase-stop preference list. Phase stops
-    /// interrupt an `UntilEndOfTurn` auto-pass session and prevent the engine
+    /// interrupt an `UntilTurnBoundary` auto-pass session and prevent the engine
     /// from auto-submitting empty blocker declarations during the named phases.
     /// Legal in any WaitingFor state — pure preference propagation.
     SetPhaseStops {
-        stops: Vec<super::phase::Phase>,
+        stops: Vec<super::phase::PhaseStop>,
+    },
+    /// CR 117.3d: Update the acting player's standing priority-yield preferences —
+    /// a pre-committed decision to pass priority while a class of triggered
+    /// ability is on the stack. Legal in any WaitingFor state and routed to the
+    /// acting player (not necessarily the priority-holder), mirroring
+    /// `SetPhaseStops`. Pure preference propagation.
+    SetPriorityYield {
+        op: PriorityYieldOp,
     },
     /// CR 510.1c/d: Assign damage from an attacker to its blockers (and optionally
     /// the defending player/PW with trample, plus PW controller with trample-over-PW).
@@ -598,6 +650,13 @@ pub enum GameAction {
     ChooseCounterMoveDistribution {
         selections: Vec<CounterMoveChoice>,
     },
+    /// CR 107.1c + CR 608.2d: Submit the resolution-time "remove any number of
+    /// counters" selection (Rhys, the Evermore; Tetravus). Answers a
+    /// `WaitingFor::RemoveCountersChoice`. An empty `selections` vector removes
+    /// nothing (CR 107.1c: choosing zero is always legal).
+    ChooseCountersToRemove {
+        selections: Vec<CounterRemoveChoice>,
+    },
     /// CR 107.1c + CR 107.14: Submit the chosen amount for a
     /// `WaitingFor::PayAmountChoice` prompt ("pay any amount of {E}" and
     /// similar resource-choice patterns).
@@ -617,6 +676,13 @@ pub enum GameAction {
     /// `WaitingFor::CategoryChoice::categories`. `None` = no permanent of that type.
     SelectCategoryPermanents {
         choices: Vec<Option<ObjectId>>,
+    },
+    /// CR 107.1c + CR 701.21a: Answer to `WaitingFor::KeepWithinTotalPowerChoice`
+    /// (Slaughter the Strong) — the subset of eligible creatures to keep. Every id
+    /// must be in the prompt's `eligible` set and their combined power must not
+    /// exceed `cap`; the rest are sacrificed.
+    ChooseKeptCreatures {
+        kept: Vec<ObjectId>,
     },
     /// CR 107.1b + CR 601.2f: Choose the value of X for a spell or activated
     /// ability whose cost contains X. Chosen as part of determining total cost,
@@ -708,6 +774,25 @@ pub enum GameAction {
     Concede {
         player_id: PlayerId,
     },
+}
+
+/// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
+/// acting player's standing priority-yield preferences. `Add` names a stack
+/// source and scope; the engine resolves it into a concrete `YieldTarget` by
+/// reading the identity latched on that source's trigger (CR 400.7), so the
+/// frontend never constructs an incarnation or card id. `Remove` echoes a
+/// stored `YieldTarget` verbatim; `ClearAll` drops every yield for the actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PriorityYieldOp {
+    Add {
+        source_id: ObjectId,
+        scope: YieldScope,
+    },
+    Remove {
+        target: YieldTarget,
+    },
+    ClearAll,
 }
 
 /// CR 701.48a: Learn choice — rummage a specific card, or skip entirely.
@@ -912,6 +997,10 @@ pub enum DebugTokenRequest {
     Preset {
         preset_id: String,
         owner: PlayerId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power_override: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness_override: Option<i32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
     },
@@ -1150,13 +1239,25 @@ impl DebugAction {
                         .collect();
                     format!(" with {}", parts.join(", "))
                 };
+                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let token_label = match request {
-                    DebugTokenRequest::Preset { preset_id, .. } => preset_id.as_str(),
+                    DebugTokenRequest::Preset {
+                        preset_id,
+                        power_override,
+                        toughness_override,
+                        ..
+                    } => {
+                        if let (Some(power), Some(toughness)) = (power_override, toughness_override)
+                        {
+                            format!("{preset_id} {power}/{toughness}")
+                        } else {
+                            preset_id.clone()
+                        }
+                    }
                     DebugTokenRequest::Custom {
                         characteristics, ..
-                    } => characteristics.display_name.as_str(),
+                    } => characteristics.display_name.clone(),
                 };
-                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 format!(
                     "CreateToken ({} for {}{}{})",
                     token_label,
@@ -1196,7 +1297,13 @@ impl GameAction {
     pub fn is_mana_ability(&self) -> bool {
         matches!(
             self,
-            GameAction::TapLandForMana { .. } | GameAction::UntapLandForMana { .. }
+            GameAction::TapLandForMana { .. }
+                | GameAction::UntapLandForMana { .. }
+                // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
+                // action; classifying it here grants MP skip_legality acceptance and
+                // AI-exclusion via the single !is_mana_ability authority.
+                | GameAction::SpendPoolMana { .. }
+                | GameAction::UnspendPoolMana { .. }
         )
     }
 
@@ -1230,12 +1337,15 @@ impl GameAction {
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { object_id } => Some(*object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
+            // CR 118.3a: act on a pool pip, not a battlefield object.
+            GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
             GameAction::Equip { equipment_id, .. } => Some(*equipment_id),
             GameAction::CrewVehicle { vehicle_id, .. } => Some(*vehicle_id),
             GameAction::ActivateStation { spacecraft_id, .. } => Some(*spacecraft_id),
             GameAction::SaddleMount { mount_id, .. } => Some(*mount_id),
             GameAction::Transform { object_id } => Some(*object_id),
             GameAction::UnlockRoomDoor { object_id, .. } => Some(*object_id),
+            GameAction::ChooseRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
@@ -1266,10 +1376,12 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
             | GameAction::ChooseBranch { .. }
+            | GameAction::SubmitLifeRedistribution { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
             | GameAction::RespondToSpliceOffer { .. }
@@ -1286,11 +1398,13 @@ impl GameAction {
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }
+            | GameAction::RollPlanarDie
             | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
+            | GameAction::GraveyardPaidCastChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::RippleChoice { .. }
             | GameAction::FreeCastWindowChoice { .. }
@@ -1304,14 +1418,17 @@ impl GameAction {
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityYield { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }
             | GameAction::ChooseCounterMoveDistribution { .. }
+            | GameAction::ChooseCountersToRemove { .. }
             | GameAction::SubmitPayAmount { .. }
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
+            | GameAction::ChooseKeptCreatures { .. }
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }

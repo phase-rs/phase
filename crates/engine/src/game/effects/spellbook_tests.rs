@@ -231,3 +231,141 @@ fn parser_rejects_unmodeled_riders_as_unimplemented() {
         );
     }
 }
+
+/// Runtime DRIVER + RESOLVER guard for the interactive Alchemy draft. Builds a
+/// battlefield permanent with a `{T}: DraftFromSpellbook` activated ability,
+/// seeds its spellbook, and drives it through the real activation pipeline via
+/// the new `.spellbook_pick(..)` driver hook. Reverting the driver's
+/// `SpellbookDraft` arm (or the `spellbook_pick` threading) leaves the pick
+/// unanswered: the draft never completes, the card never reaches hand, and the
+/// pipeline halts at `SpellbookDraft` instead of `Priority` — flipping both
+/// assertions. This guards the driver/resolver, NOT the data pipeline (that
+/// revert guard is the oracle_gen `build_token_source_metadata` merge test).
+#[test]
+fn spellbook_pick_drives_the_draft_and_conjures_the_chosen_card() {
+    use crate::game::scenario::GameScenario;
+    use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind};
+    use crate::types::phase::Phase;
+
+    let p0 = PlayerId(0);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(p0, "Alchemist", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DraftFromSpellbook {
+                    destination: Zone::Hand,
+                    tapped: false,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    // Seed the drafting source's spellbook — the runtime data the pipeline fix
+    // populates at export from AtomicCards' relatedCards.spellbook.
+    let list = ["Fireshrieker", "Lion Sash", "Fishing Pole"];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .spellbook = list.iter().map(|s| s.to_string()).collect();
+
+    let outcome = runner
+        .activate(source, 0)
+        .spellbook_pick("Lion Sash")
+        .resolve();
+
+    let drafted = outcome.state().players[0]
+        .hand
+        .iter()
+        .filter_map(|id| outcome.state().objects.get(id))
+        .any(|o| o.name == "Lion Sash");
+    assert!(
+        drafted,
+        "the driver must conjure the declared spellbook pick into P0's hand"
+    );
+    // Positive reach-guard (non-vacuous): the driver actually reached the
+    // SpellbookDraft halt, answered it, and drove resolution back to Priority.
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "resolution must return to Priority after the draft, got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// Multi-authority provenance: with two permanents carrying DIFFERENT
+/// spellbooks, activating one must offer ONLY that source's list — proving the
+/// offered options come from the drafting source, not any other permanent.
+/// Activating without a `.spellbook_pick(..)` halts cleanly at `SpellbookDraft`
+/// (the driver's no-pick break), which we inspect for the offered options.
+#[test]
+fn spellbook_draft_offers_only_the_activated_sources_list() {
+    use crate::game::scenario::GameScenario;
+    use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind};
+    use crate::types::phase::Phase;
+
+    let p0 = PlayerId(0);
+    let draft = || {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DraftFromSpellbook {
+                destination: Zone::Hand,
+                tapped: false,
+            },
+        )
+        .cost(AbilityCost::Tap)
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source_a = scenario
+        .add_creature(p0, "Archivist A", 1, 1)
+        .with_ability_definition(draft())
+        .id();
+    let source_b = scenario
+        .add_creature(p0, "Archivist B", 1, 1)
+        .with_ability_definition(draft())
+        .id();
+    let mut runner = scenario.build();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source_a)
+        .unwrap()
+        .spellbook = vec!["Alpha One".to_string(), "Alpha Two".to_string()];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source_b)
+        .unwrap()
+        .spellbook = vec![
+        "Beta One".to_string(),
+        "Beta Two".to_string(),
+        "Beta Three".to_string(),
+    ];
+
+    // Activate A with NO pick → the driver halts at the draft boundary.
+    let outcome = runner.activate(source_a, 0).resolve();
+    match outcome.final_waiting_for() {
+        WaitingFor::SpellbookDraft {
+            source_id, options, ..
+        } => {
+            assert_eq!(
+                *source_id, source_a,
+                "the draft must be sourced from the activated permanent"
+            );
+            assert_eq!(
+                options,
+                &vec!["Alpha One".to_string(), "Alpha Two".to_string()],
+                "only the activated source's spellbook may be offered, not the other permanent's"
+            );
+        }
+        other => panic!("expected halt at SpellbookDraft, got {other:?}"),
+    }
+}

@@ -14,9 +14,20 @@ fn parse_two_layer(
     types: &[&str],
     subtypes: &[&str],
 ) -> (OracleDocIr, ParsedAbilities) {
+    parse_two_layer_with_keywords(oracle_text, card_name, &[], types, subtypes)
+}
+
+fn parse_two_layer_with_keywords(
+    oracle_text: &str,
+    card_name: &str,
+    keywords: &[&str],
+    types: &[&str],
+    subtypes: &[&str],
+) -> (OracleDocIr, ParsedAbilities) {
+    let keywords: Vec<String> = keywords.iter().map(|s| s.to_string()).collect();
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
-    let ir = parse_oracle_ir(oracle_text, card_name, &[], &types, &subtypes);
+    let ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&ir);
     (ir, lowered)
 }
@@ -182,6 +193,18 @@ fn mother_of_runes() {
 }
 
 #[test]
+fn sylvan_safekeeper() {
+    let (ir, lowered) = parse_two_layer(
+        "Sacrifice a land: Target creature you control gains shroud until end of turn.",
+        "Sylvan Safekeeper",
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    insta::assert_json_snapshot!("sylvan_safekeeper_ir", &ir);
+    insta::assert_json_snapshot!("sylvan_safekeeper_lowered", &lowered);
+}
+
+#[test]
 fn jade_mage() {
     let (ir, lowered) = parse_two_layer(
         "{2}{G}: Create a 1/1 green Saproling creature token.",
@@ -259,6 +282,19 @@ fn smugglers_copter() {
     );
     insta::assert_json_snapshot!("smugglers_copter_ir", &ir);
     insta::assert_json_snapshot!("smugglers_copter_lowered", &lowered);
+}
+
+#[test]
+fn thunderous_velocipede() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Trample\nEach other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.\nCrew 3",
+        "Thunderous Velocipede",
+        &["trample", "crew"],
+        &["Artifact"],
+        &["Vehicle"],
+    );
+    insta::assert_json_snapshot!("thunderous_velocipede_ir", &ir);
+    insta::assert_json_snapshot!("thunderous_velocipede_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +865,18 @@ mod diagnostic_snapshots {
     }
 
     #[test]
-    fn diagnostic_swallowed_clause() {
+    fn diagnostic_swallowed_clause_cleared_for_a_killer() {
+        // Regression guard for S07 N2: A Killer Among Us' ETB "Then secretly
+        // choose Human, Merfolk, or Goblin" used to be a swallowed clause (the
+        // enumerated creature-type choice was unrecognized). The new
+        // `parse_creature_type_enumeration` arm in `try_parse_named_choice` now
+        // parses it as `ChoiceType::CreatureType { options }`, so no
+        // swallowed-clause diagnostic is emitted.
+        //
+        // The ETB now creates all THREE tokens: the comma-listed same-verb token
+        // chain ("create A, a B, and a C token") N-way split fix (commit
+        // f2648a0cb) no longer drops the MIDDLE element (Merfolk). Full cast-path
+        // coverage lives in `crates/engine/tests/a_killer_among_us.rs`.
         let diagnostics = parse_diagnostics(
             "When this enchantment enters, create a 1/1 white Human creature token, a 1/1 blue Merfolk creature token, and a 1/1 red Goblin creature token. Then secretly choose Human, Merfolk, or Goblin.\nSacrifice this enchantment, Reveal the creature type you chose: If target attacking creature token is the chosen type, put three +1/+1 counters on it and it gains deathtouch until end of turn.",
             "A Killer Among Us",
@@ -837,13 +884,12 @@ mod diagnostic_snapshots {
             &[],
         );
         assert!(
-            diagnostics
+            !diagnostics
                 .iter()
                 .any(|d| d.category_name() == "swallowed-clause"),
-            "Expected swallowed-clause diagnostic for A Killer Among Us, got: {:?}",
+            "Expected NO swallowed-clause diagnostic for A Killer Among Us after N2, got: {:?}",
             diagnostics
         );
-        insta::assert_json_snapshot!("diagnostic_swallowed_clause", &diagnostics);
     }
 
     // NOTE: CascadeLoss diagnostic is not triggered by any card in the current

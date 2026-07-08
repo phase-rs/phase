@@ -25,7 +25,7 @@ A worktree based on `origin/main` gives a clean branch we cherry-pick into, isol
 
 ## When NOT to use
 
-- Work is uncommitted. Run `/commit` first (commit by pathspec — your memory's `feedback_shared_index_commit_pathspec`).
+- Work is uncommitted. Run `/commit` first (commit by pathspec — your memory's `feedback_shared_index_commit_pathspec`). **Uncommitted work being shipped must not be left dirty on local `main`.**
 - A PR for these commits already exists. Use `gh pr merge <N> --auto` directly to enqueue.
 - The commits are already on `origin/main`. Nothing to do.
 - Repo isn't `phase-rs/phase`. This skill encodes phase.rs-specific conventions.
@@ -106,6 +106,26 @@ This only ever touches `ship/*` worktrees this skill created; `forge.rs-pr` and 
 ### 1. Identify the commits to ship
 
 If the user named commits explicitly (SHAs, "the last commit", "HEAD~3..HEAD"), use them. Otherwise, ask once: which commits?
+
+**Hard gate: do not ship uncommitted source changes by recreating them in the ship worktree.** If the work to ship currently exists as tracked modifications in local `main`, first commit that exact work in the source worktree by pathspec, then verify the shipped pathspecs are clean there before continuing. The source worktree may contain unrelated dirty files from other agents, but the files you are shipping must not remain dirty.
+
+Use this checklist before creating the ship worktree:
+
+```bash
+# 1) Identify the paths that belong to the work being shipped.
+SHIPPED_PATHS="path/one path/two ..."
+
+# 2) If any shipped path is dirty, commit it in the source worktree first.
+git status --short -- $SHIPPED_PATHS
+# If output is non-empty: run /commit or create a normal local commit scoped to $SHIPPED_PATHS.
+
+# 3) Re-check. This must print nothing before shipping.
+git status --short -- $SHIPPED_PATHS
+```
+
+If the re-check still shows shipped paths dirty, stop and fix that before shipping. Do not proceed with a PR while the same work remains as uncommitted local `main` changes. This prevents the user from seeing the work both "shipped" and still dirty locally.
+
+Generated planning/review artifacts are not part of the shipped code unless the user explicitly requested them. If you created untracked artifacts while preparing the shipment (`.claude/wf/*`, `.agents/pr-review/*`, compiler crash dumps, logs), either remove your own artifacts or explicitly report them and get approval before leaving them behind.
 
 Resolve to a concrete list of SHAs in chronological order (oldest first):
 
@@ -201,6 +221,14 @@ Do **not** reintroduce a SHA-equality reset here. A squash-merge changes the SHA
 
 If the commits were shipped from a feature branch (not `main`), leave that branch alone.
 
+Then verify source-worktree hygiene for the shipped paths recorded in Step 1:
+
+```bash
+git status --short -- $SHIPPED_PATHS
+```
+
+This must print nothing for work that was originally uncommitted on local `main`. If it prints shipped paths, the shipment is incomplete operationally: either the work was not committed before shipping, or the source worktree still contains duplicate local modifications. Do not silently leave that state. Clean only files you own and only after confirming they are represented by the shipped commits; otherwise stop and report the exact dirty paths.
+
 ### 8. Worktree disposition
 
 Default: leave the worktree at `$WORKTREE` so the user can inspect it if the queue rejects the PR. It's gitignored at the repo level (worktrees live above the repo root). It will be **auto-pruned by Step 0 on the next ship-commits run** once its PR squash-merges (along with its build artifacts) — so you don't have to remember to clean it up. To remove it sooner: `git worktree remove "$WORKTREE"` once the PR lands.
@@ -231,6 +259,7 @@ For each shipped PR, report:
 - Commits included (SHA + subject, in cherry-pick order)
 - Enqueue status: `enqueued: yes` with timestamp, or `enqueued: no` with the exact `gh pr merge` error
 - Whether local `main` was reset (and why, or why not)
+- Source-worktree hygiene: whether the shipped pathspecs are clean on local `main`; list any remaining dirty shipped paths explicitly
 - Worktree disposition (left in place vs. removed)
 
 Do not claim "merged" — the queue is async. The correct status at end-of-skill is `enqueued`.

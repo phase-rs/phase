@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
-import { ACTIVE_DECK_KEY } from "../../../constants/storage";
+import { ACTIVE_DECK_KEY, isRandomDeckSelection } from "../../../constants/storage";
 import { MenuShell } from "../MenuShell";
 import { MenuActionTile, type MenuTileTone } from "../MenuActionTile";
 import type { TileMotif } from "../TileMotif";
@@ -116,12 +116,12 @@ function ResumeHero() {
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(130%_120%_at_92%_0%,rgba(180,83,30,0.28),transparent_46%)]" />
       <img src="/logo_only.webp" alt="" aria-hidden="true" className="pointer-events-none absolute -right-10 top-1/2 w-44 -translate-y-1/2 -rotate-6 opacity-[0.06] grayscale" />
       <div className="relative flex flex-col gap-3">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-col gap-3 min-[480px]:flex-row min-[480px]:items-center min-[480px]:gap-4">
           <div className="min-w-0 flex-1">
             <div className="text-[0.7rem] font-semibold uppercase tracking-[0.18em] text-ember-soft">
               {t("home.dashboard.continue")}
             </div>
-            <div className="mt-1 truncate font-display text-[clamp(1.35rem,2.4vw,1.7rem)] font-semibold tracking-[-0.02em] text-fg">
+            <div className="mt-1 font-display text-[clamp(1.35rem,2.4vw,1.7rem)] font-semibold leading-tight tracking-[-0.02em] text-fg min-[480px]:truncate">
               {primary.title}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-fg-muted">
@@ -135,7 +135,7 @@ function ResumeHero() {
               )}
             </div>
           </div>
-          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-ember-soft/30 bg-ember/[0.12] px-4 py-2 text-sm font-medium text-ember-text transition-colors group-hover:border-ember-soft/50">
+          <span className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-full border border-ember-soft/30 bg-ember/[0.12] px-4 py-2.5 text-sm font-medium text-ember-text transition-colors group-hover:border-ember-soft/50 min-[480px]:w-auto">
             <img src="/icons/sections/resume.png" alt="" aria-hidden="true" className="h-4 w-4 opacity-80" />
             {primary.cta}
           </span>
@@ -172,7 +172,9 @@ function ActiveDeckCard() {
   // Resolve the deck's representative card so the card can show real art, the
   // same way the deck tiles do. Hook runs unconditionally (Rules of Hooks);
   // an empty name yields no src and falls back to the loading shimmer.
-  const repCard = name ? getRepresentativeCard(name) : null;
+  const randomDeckSelected = isRandomDeckSelection(name);
+  const displayName = randomDeckSelected ? t("myDecks.randomDeckTile") : name;
+  const repCard = name && !randomDeckSelected ? getRepresentativeCard(name) : null;
   const { src: artSrc } = useCardImage(repCard ?? "", { size: "art_crop" });
 
   if (!name) {
@@ -183,8 +185,8 @@ function ActiveDeckCard() {
       </button>
     );
   }
-  const count = getDeckCardCount(name);
-  const colors = getDeckColorIdentity(name);
+  const count = randomDeckSelected ? 0 : getDeckCardCount(name);
+  const colors = randomDeckSelected ? [] : getDeckColorIdentity(name);
   return (
     <button
       type="button"
@@ -212,8 +214,10 @@ function ActiveDeckCard() {
       </div>
       {/* Body: deck name + card count. */}
       <div className="flex flex-1 flex-col justify-center gap-1 px-4 py-3">
-        <div className="truncate font-display text-[1.12rem] font-semibold tracking-[-0.02em] text-fg">{name}</div>
-        <span className="text-xs text-fg-muted tabular-nums">{t("home.dashboard.cards", { count })}</span>
+        <div className="truncate font-display text-[1.12rem] font-semibold tracking-[-0.02em] text-fg">{displayName}</div>
+        {!randomDeckSelected && (
+          <span className="text-xs text-fg-muted tabular-nums">{t("home.dashboard.cards", { count })}</span>
+        )}
       </div>
     </button>
   );

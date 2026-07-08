@@ -11,6 +11,7 @@ pub mod damage_reflection;
 pub mod decision_kind;
 pub mod deck_knowledge;
 pub mod deck_profile;
+pub mod determinize;
 pub mod draft_eval;
 pub mod duel_suite;
 pub mod eval;
@@ -46,4 +47,8 @@ pub use eval::{
     threat_level_projected, EvalWeightSet, EvalWeights, EvaluationBreakdown, KeywordBonuses,
     StrategicIntent,
 };
-pub use search::{choose_action, score_candidates, softmax_select_pairs};
+pub use search::{
+    choose_action, choose_action_with_session, score_candidates, score_candidates_with_session,
+    softmax_select_pairs,
+};
+pub use session::{deck_pools_fingerprint, AiSession, SessionCache};

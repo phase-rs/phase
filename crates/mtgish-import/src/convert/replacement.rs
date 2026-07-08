@@ -27,7 +27,7 @@ use crate::convert::quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::convert::static_effect;
 use crate::schema::types::{
-    Condition, CopyEffect, CopyEffects, CounterType, DamageRecipientsList, Expiration,
+    CardInExile, Condition, CopyEffect, CopyEffects, CounterType, DamageRecipientsList, Expiration,
     FutureReplacableEventWouldDealDamage, GameNumber, Permanent, Permanents, Player, Players,
     ReplacableEventWouldDealDamage, ReplacableEventWouldDraw, ReplacableEventWouldEnter,
     ReplacableEventWouldGainLife, ReplacableEventWouldPutCounters,
@@ -89,6 +89,7 @@ pub fn convert_as_enters(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -170,6 +171,7 @@ pub fn convert_replace_would_enter(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -234,6 +236,7 @@ pub fn convert_replace_would_deal_damage(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -607,6 +610,7 @@ pub fn convert_replace_would_draw(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: valid_player.clone(),
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -707,7 +711,9 @@ pub fn convert_replace_would_put_into_graveyard(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         out.push(ReplacementDefinition {
@@ -729,6 +735,7 @@ pub fn convert_replace_would_put_into_graveyard(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -954,7 +961,9 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         out.push(ReplacementDefinition {
@@ -976,6 +985,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -1027,11 +1037,11 @@ fn graveyard_action_to_destination(
 /// - `Plus(WouldPutCounters_NumberOfCounters, Integer(n))` →
 ///   `QuantityModification::Plus { value: n }`
 /// - `Twice(WouldPutCounters_NumberOfCounters)` →
-///   `QuantityModification::Double`
+///   `QuantityModification::DOUBLE` (`Times { factor: 2 }`)
 ///
-/// Other quantity expressions (multipliers other than 2, references to
-/// other game state) strict-fail until `QuantityModification` grows
-/// additional axes.
+/// Other quantity expressions (multipliers other than 2 — the engine's
+/// `Times { factor }` axis exists but no mtgish counter idiom emits a
+/// non-2 multiplier — or references to other game state) strict-fail.
 pub fn convert_replace_would_put_counters(
     event: &ReplacableEventWouldPutCounters,
     actions: &[ReplacementActionWouldPutCounters],
@@ -1065,6 +1075,7 @@ pub fn convert_replace_would_put_counters(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: None,
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -1172,7 +1183,7 @@ fn game_number_to_modification(
     idiom: &'static str,
 ) -> ConvResult<QuantityModification> {
     match g {
-        GameNumber::Twice(inner) if is_self_ref(inner) => Ok(QuantityModification::Double),
+        GameNumber::Twice(inner) if is_self_ref(inner) => Ok(QuantityModification::DOUBLE),
         GameNumber::Plus(a, b) if is_self_ref(a) || is_self_ref(b) => {
             let n_node = if is_self_ref(a) { &**b } else { &**a };
             match n_node {
@@ -1216,8 +1227,8 @@ fn game_number_to_modification(
 ///
 /// - `GainLife(Plus(LifeAmount, Integer(N)))` →
 ///   `QuantityModification::Plus { value: N }` (Hardened-Heart pattern).
-/// - `GainLife(Twice(LifeAmount))` → `QuantityModification::Double`
-///   (Boon Reflection / Rhox Faithmender).
+/// - `GainLife(Twice(LifeAmount))` → `QuantityModification::DOUBLE`
+///   (`Times { factor: 2 }`; Boon Reflection / Rhox Faithmender).
 ///
 /// Other actions (DrawNumberCards, GainNoLifeInstead, LoseLife,
 /// PlayerAction wrappers) strict-fail.
@@ -1248,6 +1259,7 @@ pub fn convert_replace_would_gain_life(
             token_owner_scope: None,
             token_owner_redirect: None,
             valid_player: valid_player.clone(),
+            consume_on_apply: false,
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
@@ -1368,6 +1380,7 @@ fn try_build_may_cost_pair(
         token_owner_scope: None,
         token_owner_redirect: None,
         valid_player: None,
+        consume_on_apply: false,
         is_consumed: false,
         redirect_target: None,
         mana_modification: None,
@@ -1405,6 +1418,85 @@ fn convert_enter_cost(cost: &ReplacementActionWouldEnterCost) -> ConvResult<Abil
         ReplacementActionWouldEnterCost::PayLife(amount) => AbilityCost::PayLife {
             amount: quantity::convert(amount)?,
         },
+        ReplacementActionWouldEnterCost::ExileTwoCardsFromAmongPlayersGraveyards(
+            cards,
+            players,
+        ) => {
+            let controller = players_to_controller(players)?;
+            // Convert CardsInGraveyard to a basic filter - for now, just use creature cards
+            let card_filter = match cards {
+                crate::schema::types::CardsInGraveyard::IsCardtype(
+                    crate::schema::types::CardType::Creature,
+                ) => TargetFilter::Typed(TypedFilter::creature()),
+                _ => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "AbilityCost",
+                        needed_variant: format!("CardsInGraveyard variant: {cards:?}"),
+                    });
+                }
+            };
+            // Combine the card filter with the controller constraint from Players
+            let filter = match controller {
+                ControllerRef::You => {
+                    // "from among players' graveyards" when Players = You means "your graveyard"
+                    Some(TargetFilter::And {
+                        filters: vec![
+                            card_filter,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .controller(ControllerRef::You)
+                                    .properties(vec![FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    }]),
+                            ),
+                        ],
+                    })
+                }
+                ControllerRef::Opponent => {
+                    // "from among players' graveyards" when Players = Opponent means "opponents' graveyards"
+                    Some(TargetFilter::And {
+                        filters: vec![
+                            card_filter,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .controller(ControllerRef::Opponent)
+                                    .properties(vec![FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    }]),
+                            ),
+                        ],
+                    })
+                }
+                ControllerRef::TargetPlayer => {
+                    // Targeted player scope - defer to interactive selection
+                    Some(TargetFilter::And {
+                        filters: vec![
+                            card_filter,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .controller(ControllerRef::TargetPlayer)
+                                    .properties(vec![FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    }]),
+                            ),
+                        ],
+                    })
+                }
+                _ => {
+                    // Other scopes (ScopedPlayer, ParentTargetController, etc.) not expected for this cost
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "ExileTwoCardsFromAmongPlayersGraveyards",
+                        path: String::new(),
+                        detail: format!("Unsupported Players axis: {controller:?}"),
+                    });
+                }
+            };
+            AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter,
+            }
+        }
         other => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "AbilityCost",
@@ -1691,24 +1783,29 @@ fn build_replacement_exec(
         // the native parser shape in `oracle_replacement.rs`
         // (`parse_as_enters_choose`).
         A::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseAColor(choice) => Effect::Choose {
             choice_type: choice_type_for_choosable_color(choice),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardName(_) => Effect::Choose {
             choice_type: ChoiceType::CardName,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACardtype => Effect::Choose {
-            choice_type: ChoiceType::CardType,
+            choice_type: ChoiceType::card_type(),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseABasicLandType => Effect::Choose {
             choice_type: ChoiceType::BasicLandType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 305.7: "land type" includes basic + nonbasic. Both
         // unparameterized (ChooseALandType) and parameterized
@@ -1718,6 +1815,7 @@ fn build_replacement_exec(
         A::ChooseALandType | A::ChooseLandType(_) => Effect::Choose {
             choice_type: ChoiceType::LandType,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 800.4a: opponent-scoped player choice when the schema
         // filter narrows to opponents; broader player choice
@@ -1732,6 +1830,7 @@ fn build_replacement_exec(
             Effect::Choose {
                 choice_type,
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 614.12a: "Choose a number between X and Y" — engine's
@@ -1755,17 +1854,21 @@ fn build_replacement_exec(
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
                     max: max_u8,
+                    distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         A::ChooseEvenOrOdd => Effect::Choose {
             choice_type: ChoiceType::OddOrEven,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseTwoColors => Effect::Choose {
             choice_type: ChoiceType::TwoColors,
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 614.12a + CR 701.x voting: enumerated option lists become
         // `ChoiceType::Labeled`. Each variant supplies its own option
@@ -1775,6 +1878,7 @@ fn build_replacement_exec(
                 options: vec!["Left".to_string(), "Right".to_string()],
             },
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         A::ChooseACreatureTypeFromList(opts) => {
             if opts.is_empty() {
@@ -1788,22 +1892,19 @@ fn build_replacement_exec(
                     options: opts.iter().map(|c| format!("{c:?}")).collect(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
-        A::ChooseACardtypeFromList(opts) => {
-            if opts.is_empty() {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "ChoiceType::Labeled",
-                    needed_variant: "ChooseACardtypeFromList with empty option list".into(),
-                });
-            }
-            Effect::Choose {
-                choice_type: ChoiceType::Labeled {
-                    options: opts.iter().map(|c| format!("{c:?}")).collect(),
-                },
-                persist: true,
-            }
-        }
+        // CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+        // artifact, enchantment, instant, sorcery, or planeswalker", Archon
+        // of Valor's Reach) is a narrowed `ChoiceType::CardType`, not a
+        // free-form `Labeled` choice — see `filter::restricted_card_type_choice`
+        // (shared with the spell-action sibling in `action.rs`) for why.
+        A::ChooseACardtypeFromList(opts) => Effect::Choose {
+            choice_type: crate::convert::filter::restricted_card_type_choice(opts)?,
+            persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
+        },
         A::ChooseWord(opts) => {
             if opts.is_empty() {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -1816,6 +1917,7 @@ fn build_replacement_exec(
                     options: opts.clone(),
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 614.12a strict-fails — each gets its own refined tag so
@@ -1946,12 +2048,23 @@ fn build_replacement_exec(
         // `Unless` and `MayActions` are handled by the early-return guards above.
         A::Unless(_, _) => unreachable!("Unless handled by early-return guard"),
         A::MayActions(_) => unreachable!("MayActions handled by early-return guard"),
+        // CR 707.2: Enter as a copy of a specific card exiled by the source.
+        // Used by The Mimeoplasm to copy the first exiled card.
+        A::EnterAsCopyOfExiled(card_in_exile, copy_effects) => {
+            let target = convert_card_in_exile_to_target_filter(card_in_exile)?;
+            let additional_modifications = convert_copy_effects(copy_effects)?;
+            Effect::BecomeCopy {
+                target,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications,
+            }
+        }
         // CR 707.x / CR 614.12: Remaining copy-source zones plus face-down /
         // transformed / attached / attacking / blocking modifier shapes need
         // dedicated engine primitives or converter-side source filters.
         A::EnterAsACopyOfACardInAPlayersGraveyard(_, _, _)
         | A::EnterAsACopyOfACardInExile(_, _)
-        | A::EnterAsCopyOfExiled(_, _)
         | A::EntersAsFaceDownArtifactCreature(_, _)
         | A::EntersAsFaceDownCreatureWithAbilitiesAndNotedName(_, _, _)
         | A::EntersAsFaceDownLand(_)
@@ -2009,6 +2122,17 @@ fn build_replacement_exec(
 /// `Effect::BecomeCopy.additional_modifications` channel. Unsupported
 /// "keep original characteristic" shapes strict-fail because they need a
 /// source-relative override primitive, not a no-op.
+fn convert_card_in_exile_to_target_filter(card: &CardInExile) -> ConvResult<TargetFilter> {
+    match card {
+        CardInExile::TheFirstCardExiledThisWay => Ok(TargetFilter::ExiledCardByIndex { index: 0 }),
+        CardInExile::TheSecondCardExiledThisWay => Ok(TargetFilter::ExiledCardByIndex { index: 1 }),
+        _ => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "TargetFilter",
+            needed_variant: format!("CardInExile variant: {card:?}"),
+        }),
+    }
+}
+
 fn convert_copy_effects(effects: &CopyEffects) -> ConvResult<Vec<ContinuousModification>> {
     let list = match effects {
         CopyEffects::NoCopyEffects => return Ok(Vec::new()),
@@ -2615,7 +2739,7 @@ fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => rewrite_variable_x_to_cost_x_paid(inner),
-        QuantityExpr::Sum { exprs } => {
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
                 rewrite_variable_x_to_cost_x_paid(inner);
             }
@@ -3123,9 +3247,10 @@ mod tests {
 
     use super::*;
     use crate::schema::types::{
-        CardType, Condition, CopyEffect, CopyEffects, FutureReplacableEventWouldDealDamage,
-        GameNumber, Permanent, Permanents, ReplacementActionWouldDealDamage,
-        ReplacementActionWouldEnter, Rule, SingleDamageSource, SuperType,
+        CardInExile, CardType, Condition, CopyEffect, CopyEffects,
+        FutureReplacableEventWouldDealDamage, GameNumber, Permanent, Permanents, Player, Players,
+        ReplacementActionWouldDealDamage, ReplacementActionWouldEnter, Rule, SingleDamageSource,
+        SuperType,
     };
 
     #[test]
@@ -3163,6 +3288,40 @@ mod tests {
                 } if *target == TargetFilter::SelfRef
             )
         ));
+    }
+
+    // Issue #4201 — Archon of Valor's Reach's "choose artifact, enchantment,
+    // instant, sorcery, or planeswalker" ETB action must lower to a
+    // restricted `ChoiceType::CardType` (excluding Creature and Land), not a
+    // free-form `Labeled` choice, so the companion "can't cast spells of the
+    // chosen type" prohibition (`FilterProp::IsChosenCardType`) can bind.
+    #[test]
+    fn choose_a_cardtype_from_list_lowers_to_restricted_card_type_choice() {
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::ChooseACardtypeFromList(vec![
+                CardType::Artifact,
+                CardType::Enchantment,
+                CardType::Instant,
+                CardType::Sorcery,
+                CardType::Planeswalker,
+            ])],
+        )
+        .unwrap();
+
+        assert_eq!(defs.len(), 1);
+        let exec = defs[0].execute.as_ref().expect("execute must be set");
+        match exec.effect.as_ref() {
+            Effect::Choose {
+                choice_type: engine::types::ability::ChoiceType::CardType { excluded },
+                persist,
+                ..
+            } => {
+                assert!(*persist);
+                assert_eq!(excluded, &vec![CoreType::Creature, CoreType::Land]);
+            }
+            other => panic!("expected a restricted CardType choice, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3564,5 +3723,58 @@ mod tests {
                     controller: ControllerRef::Opponent,
                 })
         )));
+    }
+
+    #[test]
+    fn exile_two_cards_from_graveyards_cost_converts_to_exile_cost() {
+        use crate::schema::types::{CardType, CardsInGraveyard, Player, Players};
+
+        let cost = ReplacementActionWouldEnterCost::ExileTwoCardsFromAmongPlayersGraveyards(
+            CardsInGraveyard::IsCardtype(CardType::Creature),
+            Box::new(Players::SinglePlayer(Box::new(Player::You))),
+        );
+        let result = convert_enter_cost(&cost);
+        assert!(result.is_ok());
+        let ability_cost = result.unwrap();
+        assert!(matches!(
+            ability_cost,
+            AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter: Some(_),
+            }
+        ));
+    }
+
+    #[test]
+    fn enter_as_copy_of_exiled_converts_to_become_copy_with_indexed_filter() {
+        use crate::schema::types::CopyEffects;
+
+        let action = ReplacementActionWouldEnter::EnterAsCopyOfExiled(
+            CardInExile::TheFirstCardExiledThisWay,
+            CopyEffects::NoCopyEffects,
+        );
+        let def = build_replacement_exec(&action, &TargetFilter::SelfRef)
+            .unwrap()
+            .2;
+        assert!(matches!(
+            &*def.effect,
+            Effect::BecomeCopy {
+                target: TargetFilter::ExiledCardByIndex { index: 0 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn card_in_exile_to_target_filter_maps_indices_correctly() {
+        assert!(matches!(
+            convert_card_in_exile_to_target_filter(&CardInExile::TheFirstCardExiledThisWay),
+            Ok(TargetFilter::ExiledCardByIndex { index: 0 })
+        ));
+        assert!(matches!(
+            convert_card_in_exile_to_target_filter(&CardInExile::TheSecondCardExiledThisWay),
+            Ok(TargetFilter::ExiledCardByIndex { index: 1 })
+        ));
     }
 }

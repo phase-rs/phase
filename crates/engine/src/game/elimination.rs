@@ -12,7 +12,7 @@ use super::players;
 ///
 /// - Marks the player as eliminated
 /// - Removes their spells from the stack
-/// - Exiles all permanents they own on the battlefield
+/// - Exiles all objects they own (all zones)
 /// - Emits PlayerEliminated event
 /// - For team-based formats (2HG): also eliminates all teammates
 /// - Checks if the game is over (1 or fewer living players/teams remain)
@@ -35,6 +35,21 @@ pub fn eliminate_players_simultaneously(
     events: &mut Vec<GameEvent>,
 ) {
     let mut eliminated_any = false;
+    let mut leaving_set = HashSet::new();
+
+    for &player in players_to_eliminate {
+        if !players::is_alive(state, player) {
+            continue;
+        }
+        leaving_set.insert(player);
+        if super::topology::has_two_headed_giant_shared_resources(state) {
+            for teammate in players::teammates(state, player) {
+                if players::is_alive(state, teammate) {
+                    leaving_set.insert(teammate);
+                }
+            }
+        }
+    }
 
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
@@ -43,14 +58,14 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
 
-        do_eliminate(state, player, events);
+        do_eliminate(state, player, &leaving_set, events);
         eliminated_any = true;
 
-        // For team-based formats, eliminate teammates too.
-        if state.format_config.team_based {
-            let team = players::teammates(state, player);
-            for teammate in team {
-                do_eliminate(state, teammate, events);
+        if super::topology::has_two_headed_giant_shared_resources(state) {
+            for teammate in players::teammates(state, player) {
+                if players::is_alive(state, teammate) {
+                    do_eliminate(state, teammate, &leaving_set, events);
+                }
             }
         }
     }
@@ -59,27 +74,50 @@ pub fn eliminate_players_simultaneously(
         return;
     }
 
+    // CR 800.4a: after ALL owned-exiles, end control effects the leaving players
+    // control and exile anything still under a leaver's control. Runs ONCE over
+    // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's
+    // steal of a survivor's object revert instead of being over-exiled.
+    end_control_effects_for_leaving_players(state, &leaving_set, events);
+
     // CR 704.3 + CR 104.4a: a SINGLE game-over check after all simultaneous
     // eliminations — so a finish where every remaining player lost at once
     // resolves to a draw (`winner: None`) rather than a spurious winner.
     check_game_over(state, events);
 
-    // CR 800.4a: If the active `WaitingFor` was waiting on any newly-eliminated
-    // player (the conceder, or — for team formats — a teammate eliminated alongside
-    // them), advance to `Priority` for the next living player so the game does not
-    // deadlock waiting on a player who has left. Skip when the game just ended
-    // (`GameOver` is terminal) or the waiting player is still alive.
-    if !matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+    let game_over_winner = match &state.waiting_for {
+        WaitingFor::GameOver { winner } => Some(*winner),
+        _ => None,
+    };
+
+    // CR 603.3b + CR 800.4a: Always resolve in-flight trigger-ordering work
+    // when players leave — including lethal combat damage that ends the game
+    // (issue #1350). Previously this ran only when the game continued, leaving
+    // `pending_trigger_order` / `deferred_triggers` orphaned on `GameOver`.
+    prune_pending_trigger_order(state);
+    prune_deferred_triggers_for_eliminated_players(state);
+
+    if let Some(winner) = game_over_winner {
+        // Terminal: drop trigger scaffolding the client would otherwise show as
+        // a stuck stack / ordering prompt.
+        state.pending_trigger_order = None;
+        state.deferred_triggers.clear();
+        state.pending_trigger = None;
+        state.pending_trigger_entry = None;
+        state.waiting_for = WaitingFor::GameOver { winner };
+    } else {
+        // CR 603.3b: If prune collapsed an ordering pass into
+        // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
+        // combat auto-advance does not skip them (issue #1350).
+        drain_or_clear_deferred_triggers_after_elimination(state, events);
+
+        // CR 800.4a: If the active `WaitingFor` was waiting on any
+        // newly-eliminated player, advance to `Priority` for the next living
+        // player so the game does not deadlock waiting on a player who has left.
         // CR 103.5: For simultaneous mulligan states, prune eliminated players
         // from the pending list. If the list becomes empty, advance the flow
         // by emitting MulliganStarted-equivalent transition state.
         prune_mulligan_pending(state, events);
-
-        // CR 603.3b + CR 800.4a: Resolve any in-flight trigger-ordering pass
-        // around the elimination — drop triggers controlled by eliminated
-        // players, auto-resolve their ordering groups with identity order,
-        // and re-emit / advance the prompt as needed.
-        prune_pending_trigger_order(state);
 
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
@@ -90,24 +128,17 @@ pub fn eliminate_players_simultaneously(
     }
 }
 
-/// CR 103.5 + CR 800.4a: Prune eliminated players from in-flight mulligan
-/// pending lists. If pruning empties the decision phase, transition to the
-/// bottoms phase (or finish mulligans). If it empties the bottoms phase,
-/// finish mulligans directly.
+/// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
+/// mulligan pending list. If pruning empties it, finish the mulligan flow
+/// directly — bottoming is now resolved per-entry at the declare point, so
+/// there is no separate batch bottoms phase left to advance to.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // CR 800.4a: Drop any final-mulligan-count entries for players who have
-    // been eliminated. Symmetric with the pending-list pruning below so
-    // enter_bottom_phase never sees stale entries for dead players.
     let alive: HashSet<PlayerId> = state
-        .final_mulligan_counts
+        .prepaid_mulligan_bottoms
         .keys()
-        .chain(state.prepaid_mulligan_bottoms.keys())
         .copied()
         .filter(|pid| players::is_alive(state, *pid))
         .collect();
-    state
-        .final_mulligan_counts
-        .retain(|pid, _| alive.contains(pid));
     state
         .prepaid_mulligan_bottoms
         .retain(|pid, _| alive.contains(pid));
@@ -117,30 +148,26 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             pending,
             free_first_mulligan,
         } => {
+            // CR 800.4a: A pruned player whose entry was mid-`BottomCards
+            // { then: UseSerumPowder { object_id } }` needs no special
+            // cleanup of `object_id` — that reference lives only inside this
+            // `MulliganDecisionEntry`. By the time this function runs,
+            // `eliminate_players_simultaneously` has already exiled every
+            // object the leaving player owned, including the Serum Powder
+            // itself. A plain is_alive-filtered removal of the whole entry
+            // is sufficient.
             let alive: Vec<_> = pending
                 .into_iter()
                 .filter(|e| players::is_alive(state, e.player))
                 .collect();
             if alive.is_empty() {
-                state.waiting_for = super::mulligan::enter_bottom_phase_public(state, events);
+                state.prepaid_mulligan_bottoms.clear();
+                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
             } else {
                 state.waiting_for = WaitingFor::MulliganDecision {
                     pending: alive,
                     free_first_mulligan,
                 };
-            }
-        }
-        WaitingFor::MulliganBottomCards { pending } => {
-            let alive: Vec<_> = pending
-                .into_iter()
-                .filter(|e| players::is_alive(state, e.player))
-                .collect();
-            if alive.is_empty() {
-                state.final_mulligan_counts.clear();
-                state.prepaid_mulligan_bottoms.clear();
-                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
-            } else {
-                state.waiting_for = WaitingFor::MulliganBottomCards { pending: alive };
             }
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
@@ -224,8 +251,144 @@ fn prune_pending_trigger_order(state: &mut GameState) {
     }
 }
 
+/// CR 800.4a: Remove deferred triggers controlled by eliminated players.
+fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
+    state.deferred_triggers.retain(|ctx| {
+        state
+            .players
+            .iter()
+            .find(|player| player.id == ctx.pending.controller)
+            .is_some_and(|player| !player.is_eliminated)
+    });
+}
+
+/// CR 603.3b: If prune collapsed an ordering pass into `deferred_triggers`
+/// while `waiting_for` is Priority, dispatch now so phase auto-advance does
+/// not skip them (issue #1350).
+fn drain_or_clear_deferred_triggers_after_elimination(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if state.deferred_triggers.is_empty()
+        || state.pending_trigger.is_some()
+        || state.pending_trigger_order.is_some()
+    {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+            state.waiting_for = wf;
+        }
+    }
+}
+
+/// CR 800.4a: Exile every object `player` owns, regardless of zone.
+fn exile_owned_objects_on_player_left_game(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 702.26k: phased-out permanents owned by a leaving player also leave the
+    // game; zone_object_ids(Battlefield) filters is_phased_in (targeting.rs:2009),
+    // so the battlefield leg iterates state.battlefield UNFILTERED.
+    let non_battlefield_zones = [
+        Zone::Graveyard,
+        Zone::Hand,
+        Zone::Library,
+        Zone::Exile,
+        Zone::Command,
+        Zone::Stack,
+    ];
+    let mut to_exile: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .chain(
+            non_battlefield_zones
+                .into_iter()
+                .flat_map(|zone| super::targeting::zone_object_ids(state, zone)),
+        )
+        .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
+        .collect();
+    to_exile.sort_by_key(|id| id.0);
+    to_exile.dedup();
+
+    for id in to_exile {
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::player_left_game(id, Zone::Exile);
+        crate::game::zone_pipeline::move_object(state, req, events);
+    }
+}
+
+/// CR 800.4a: End every control effect that gives a LEAVING player control of an
+/// object, then exile anything still controlled by a leaver. Runs ONCE after all
+/// per-player owned-exiles, over the full `leaving_set`, so a co-leaver's steal of
+/// a survivor's object reverts symmetrically rather than being over-exiled by the
+/// per-player pass.
+fn end_control_effects_for_leaving_players(
+    state: &mut GameState,
+    leaving_set: &HashSet<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::identifiers::ObjectId;
+
+    // CR 800.4a: any effect giving a LEAVING player control of an object ends.
+    // Prune every single-mod ChangeController TCE controlled by any leaver, over
+    // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
+    // steal of a survivor's object reverts rather than being over-exiled.
+    state.transient_continuous_effects.retain(|e| {
+        !(leaving_set.contains(&e.controller)
+            && e.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::ChangeController)))
+    });
+
+    // CR 613.1b: recompute layers so control reverts to base_controller/owner for
+    // every object whose control TCE was pruned. evaluate_layers is pure (no events).
+    super::layers::mark_layers_full(state);
+    super::layers::evaluate_layers(state);
+
+    // CR 800.4a: "if there are any objects still controlled by that player, those
+    // objects are exiled" — e.g. an object whose base_controller reverted to a
+    // leaver ("enters under [leaver]'s control", zones.rs:1172) with no surviving
+    // control effect. Sweep only PHASED-IN battlefield objects: evaluate_layers
+    // above skips phased-OUT permanents (CR 702.26b — layers.rs:1602/1613-1615
+    // only reset controller for phased-in ids), so a survivor-OWNED permanent
+    // phased-out while stolen by a leaver still reads obj.controller == leaver
+    // after the re-derive. Such a permanent must stay frozen (CR 702.26b) and
+    // revert to its owner when it phases back in — it must NOT be exiled here. A
+    // leaver-OWNED phased-out permanent is already exiled by step 1 (the CR
+    // 702.26k unfiltered owned-exile leg), so restricting to phased-in objects
+    // loses no required exile. (step-1-exiled objects are already gone, so no
+    // already-exiled id reaches move_object.)
+    let mut to_exile: Vec<ObjectId> = state
+        .battlefield_phased_in_ids()
+        .into_iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| leaving_set.contains(&obj.controller))
+        })
+        .collect();
+    to_exile.sort_by_key(|id| id.0);
+    to_exile.dedup();
+    for id in to_exile {
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::player_left_game(id, Zone::Exile);
+        crate::game::zone_pipeline::move_object(state, req, events);
+    }
+}
+
 /// Perform the actual elimination of a single player (CR 800.4).
-fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+fn do_eliminate(
+    state: &mut GameState,
+    player: PlayerId,
+    leaving_set: &HashSet<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) {
+    let planar_handoff =
+        crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
+
     // Mark as eliminated
     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
         p.is_eliminated = true;
@@ -234,8 +397,35 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         state.eliminated_players.push(player);
     }
 
+    crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
+
     // CR 800.4a: Remove spells they control from the stack
     state.stack.retain(|entry| entry.controller != player);
+
+    // CR 800.4a + CR 800.4b: A control-another-player effect (CR 723, e.g.
+    // Mindslaver / Secret of Bloodbending) ends when EITHER party leaves the
+    // game — the leaving player's control effects end (CR 800.4a) and a player
+    // can't be controlled by someone who has left (CR 800.4b). Drop every
+    // scheduled control where the leaving player is the controller or the target,
+    // routing each removal through the single release authority. Covers both
+    // windows and closes a latent gap that also affected Mindslaver's full-turn
+    // control.
+    let leaving = super::topology::normalize_shared_turn_recipient(state, player);
+    while let Some(idx) = state
+        .scheduled_turn_controls
+        .iter()
+        .position(|scheduled| scheduled.controller == player || scheduled.target_player == leaving)
+    {
+        super::turn_control::release_control_at(state, idx);
+    }
+    // CR 800.4b: If the controlled active player just left, `turn_decision_controller`
+    // still points at the (living) controller of a now-departed player — stale;
+    // clear it so the departed seat isn't piloted by anyone.
+    if state.turn_decision_controller.is_some()
+        && super::topology::normalize_shared_turn_recipient(state, state.active_player) == leaving
+    {
+        state.turn_decision_controller = None;
+    }
 
     // CR 800.4a: A paused triggered ability on the stack is "an object on the
     // stack not represented by a card" and ceases to exist when its controller
@@ -275,31 +465,69 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         state.pending_cast = None;
     }
 
-    // CR 800.4a: Exile permanents they own from the battlefield
-    let to_exile: Vec<_> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.owner == player)
-                .unwrap_or(false)
-        })
-        .collect();
-
-    // CR 800.4a: route the owner's objects to exile through the zone pipeline
-    // under the `PlayerLeftGame` exempt cause — "This is not a state-based
-    // action", and no replacement effect applies to a player leaving the game,
-    // so the consult is skipped while the unconditional primitive guards still
-    // run (PLAN §3).
-    for id in to_exile {
-        let req = crate::game::zone_pipeline::ZoneMoveRequest::player_left_game(id, Zone::Exile);
-        crate::game::zone_pipeline::move_object(state, req, events);
+    // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
+    // leaving player was answering. A CR 616.1 replacement-order (or optional
+    // MayCost / MayCost sub-choice re-park) is held in `state.pending_replacement`
+    // and resumed ONLY via `(WaitingFor::ReplacementChoice, ChooseReplacement)`
+    // (engine.rs) or that sub-choice's own resolution — both re-enter
+    // `continue_replacement`. If the player who must answer leaves the game, the
+    // choice is unanswerable: the post-loop reconcile rewrite advances
+    // `waiting_for` to `Priority{next}`, and every later `check_state_based_actions`
+    // then bails at its `pending_replacement` guard (sba.rs) — freezing all
+    // object-destroying SBAs for the rest of the game.
+    //
+    // Key off the LATCHED chooser identity, not the mutating object graph:
+    // `waiting_for.acting_player()` is the affected player for both
+    // `ReplacementChoice{player}` (game_state.rs) and a MayCost sub-choice re-park
+    // (payer == affected, replacement.rs), and `do_eliminate` never mutates
+    // `waiting_for` (the rewrite runs after the loop), so this key is CONSTANT
+    // across a simultaneous multi-elimination batch and object-graph-independent.
+    // (`ProposedEvent::affected_player` would mis-resolve here: once a co-eliminated
+    // lower-id loser has exiled the affected object, its effective controller is
+    // reverted to its owner — CR 616.1's owner-fallback is pre-existing and NOT
+    // relied upon.) Mirror the `pending_cast` teardown: clear `pending_replacement`
+    // (the SBA-gating slot) plus the parked replacement's own tightly-coupled
+    // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
+    // `pending_connive_reentry`). The resume drain also touches OTHER resolution
+    // slots on a normal answer (e.g. `pending_phase_transition_progress`,
+    // `pending_team_draw_step`, `pending_continuation`); those are intentionally
+    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
+    // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
+    // drain) that predates this PR and is NOT the reported regression; repairing
+    // them correctly requires resuming the interrupted APNAP queue for the
+    // remaining players (not field-nulling), tracked as a separate follow-up. This
+    // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
+    // `pending_replacement` guard.
+    if state.pending_replacement.is_some() && state.waiting_for.acting_player() == Some(player) {
+        state.pending_replacement = None;
+        state.replacement_may_cost_paused = false;
+        super::replacement::abandon_post_replacement_continuation(state);
     }
 
+    // CR 800.4a: A coupled ETB spell-resolution context can outlive its
+    // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
+    // engine_replacement.rs), so it is torn down under its OWN controller-keyed
+    // guard — cleared only for the LEAVING player's own resolution (mirroring the
+    // `pending_cast` controller key above) so a living player's paused resolution
+    // survives an opponent's departure.
+    if state
+        .pending_spell_resolution
+        .as_ref()
+        .is_some_and(|psr| psr.controller == player)
+    {
+        state.pending_spell_resolution = None;
+    }
+
+    // CR 800.4a: All objects the player owns leave the game (exiled). Route each
+    // through the zone pipeline under the `PlayerLeftGame` exempt cause — "This
+    // is not a state-based action", and no replacement effect applies to a
+    // player leaving the game, so the consult is skipped while the
+    // unconditional primitive guards still run (PLAN §3).
+    exile_owned_objects_on_player_left_game(state, player, events);
+    crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
+
     state.auto_pass.remove(&player);
+    state.planar_die_actions_this_turn.remove(&player);
 
     // CR 725.4: If the monarch leaves the game, the active player becomes the monarch.
     // If the active player is also leaving, the next living player in turn order gets it.
@@ -317,7 +545,7 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
                 if players::is_alive(state, state.active_player) && state.active_player != player {
                     state.active_player
                 } else {
-                    players::next_player(state, player)
+                    players::next_player_in_turn_order(state, player)
                 };
             state.monarch = Some(new_monarch);
             events.push(GameEvent::MonarchChanged {
@@ -326,7 +554,7 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         }
     }
 
-    // CR 725.4: If the player who has the initiative leaves the game,
+    // CR 726.4: If the player who has the initiative leaves the game,
     // the active player takes the initiative. If the active player is
     // also leaving, the next living player in turn order gets it.
     if state.initiative == Some(player) {
@@ -342,7 +570,7 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
                 if players::is_alive(state, state.active_player) && state.active_player != player {
                     state.active_player
                 } else {
-                    players::next_player(state, player)
+                    players::next_player_in_turn_order(state, player)
                 };
             state.initiative = Some(new_holder);
             events.push(GameEvent::InitiativeTaken {
@@ -384,29 +612,6 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         }
     }
 
-    // CR 901.10 / CR 311.5 / CR 312.4: If the planar controller leaves the game,
-    // the next player in turn order that isn't leaving becomes the planar
-    // controller (the active player normally, unless they're the one leaving).
-    // This is NOT a state-based action — it happens immediately on leave.
-    if state.planar_controller == Some(player) {
-        let any_alive = state
-            .players
-            .iter()
-            .any(|p| !p.is_eliminated && p.id != player);
-
-        if !any_alive {
-            state.planar_controller = None;
-        } else {
-            let new_controller =
-                if players::is_alive(state, state.active_player) && state.active_player != player {
-                    state.active_player
-                } else {
-                    players::next_player(state, player)
-                };
-            crate::game::planechase::set_planar_controller(state, new_controller, events);
-        }
-    }
-
     // CR 800.4a: If the archenemy leaves the game, the Archenemy subsystem ends.
     // The archenemy is unique (CR 904.2a), so there is no reassignment — unlike the
     // planar controller. Scheme cards are owned by the archenemy and are locked to
@@ -444,12 +649,28 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|p| p.id)
         .collect();
 
-    if state.format_config.team_based {
-        // Count living teams (team = pair of players with same team index)
-        let mut living_teams = std::collections::HashSet::new();
+    if let Some(archenemy) = super::topology::archenemy(state) {
+        let archenemy_alive = living.contains(&archenemy);
+        let living_heroes: Vec<PlayerId> = living
+            .iter()
+            .copied()
+            .filter(|&pid| pid != archenemy)
+            .collect();
+        let winner = if archenemy_alive && living_heroes.is_empty() {
+            Some(archenemy)
+        } else if !archenemy_alive && !living_heroes.is_empty() {
+            living_heroes.first().copied()
+        } else if !archenemy_alive && living_heroes.is_empty() {
+            None
+        } else {
+            return;
+        };
+        events.push(GameEvent::GameOver { winner });
+        state.waiting_for = WaitingFor::GameOver { winner };
+    } else if super::topology::has_two_headed_giant_shared_resources(state) {
+        let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
-            let team_idx = pid.0 / 2;
-            living_teams.insert(team_idx);
+            living_teams.insert(super::topology::team_dedup_key(state, pid));
         }
 
         if living_teams.len() <= 1 {
@@ -484,11 +705,16 @@ pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut V
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::ability::{Effect, PostReplacementContinuation, ResolvedAbility, TargetRef};
+    use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{CastingVariant, PendingCast, StackEntry, StackEntryKind};
+    use crate::types::game_state::{
+        CastingVariant, PendingCast, PendingConniveReentry, PendingReplacement,
+        PendingSpellResolution, StackEntry, StackEntryKind,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
+    use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -504,6 +730,12 @@ mod tests {
 
     fn setup_2hg() -> GameState {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 1;
+        state
+    }
+
+    fn setup_archenemy() -> GameState {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
         state.turn_number = 1;
         state
     }
@@ -701,6 +933,39 @@ mod tests {
         assert!(state.exile.contains(&id));
     }
 
+    #[test]
+    fn elimination_exiles_owned_graveyard_and_library_cards() {
+        let mut state = setup_three_player();
+        let graveyard_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Graveyard Bear".to_string(),
+            Zone::Graveyard,
+        );
+        let library_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Library Bear".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            !state.players[1].graveyard.contains(&graveyard_id),
+            "eliminated player's graveyard cards must leave the game (CR 800.4a)"
+        );
+        assert!(
+            !state.players[1].library.contains(&library_id),
+            "eliminated player's library cards must leave the game (CR 800.4a)"
+        );
+        assert!(state.exile.contains(&graveyard_id));
+        assert!(state.exile.contains(&library_id));
+    }
+
     /// Build a mid-cast spell (on the stack, awaiting payment) controlled by
     /// `caster` and stash it in `state.pending_cast`, mirroring the engine state
     /// during `WaitingFor::ManaPayment` (e.g. a convoke spell awaiting taps).
@@ -770,6 +1035,200 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_elimination_clears_object_referential_replacement_for_eliminated_chooser() {
+        // CR 800.4a + CR 616.1: 4-player FFA so two simultaneous losses leave the
+        // game running (exercises the reconcile rewrite that strands the choice).
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        state.turn_number = 1;
+
+        // O: OWNED by X = P1, CONTROLLED by chooser C = P2. X.0 (1) < C.0 (2), so
+        // do_eliminate(X) runs first and reverts O's effective controller to its
+        // OWNER (P1) on exile (zones.rs revert_layered_characteristics_to_base) --
+        // by the time do_eliminate(C) runs, `affected_player(O) == P1 != C`, so the
+        // OLD live key would SKIP the clear. This is the revert-failing wedge.
+        let o = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Contested".into(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&o) {
+            obj.controller = PlayerId(2);
+            obj.base_controller = Some(PlayerId(2));
+        }
+
+        // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::AddCounter {
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(2),
+                    object_id: o,
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                applied: HashSet::new(),
+            },
+            candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        // Latched chooser identity — the fix's key. C = P2.
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(2),
+            candidate_count: 1,
+            candidates: vec![],
+        };
+        // Coupled continuation slots the resume drain would clear on a normal answer.
+        state.replacement_may_cost_paused = true;
+        state.post_replacement_continuation = Some(PostReplacementContinuation::Resolved(
+            Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "psrc".into(),
+                    description: None,
+                },
+                vec![],
+                o,
+                PlayerId(2),
+            )),
+        ));
+        state.post_replacement_source = Some(o);
+        state.post_replacement_event_source = Some(o);
+        state.post_replacement_event_target = Some(TargetRef::Object(o));
+        // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
+        // seed, owned by this same abandoned continuation, must be abandoned
+        // alongside its siblings — this field was added after the teardown
+        // block below was written and was missed until this regression.
+        state.post_replacement_token_choice_applied = Some(HashSet::from([ReplacementId {
+            source: o,
+            index: 0,
+        }]));
+        state.pending_connive_reentry = Some(PendingConniveReentry {
+            conniver: o,
+            count: 1,
+            applied: HashSet::new(),
+        });
+        // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
+        state.pending_spell_resolution = Some(PendingSpellResolution {
+            object_id: o,
+            controller: PlayerId(2),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        let mut events = Vec::new();
+        // Real path: X (P1) and C (P2) leave in the SAME simultaneous SBA event
+        // (losers sorted by id -> [P1, P2] -> do_eliminate(P1) then do_eliminate(P2)).
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1), PlayerId(2)], &mut events);
+
+        assert!(state.players[1].is_eliminated && state.players[2].is_eliminated);
+        // Gap 1 core (revert-failing vs the affected_player key): the parked choice
+        // of the eliminated chooser is cleared even though a lower-id co-loser
+        // already exiled the affected object.
+        assert!(
+            state.pending_replacement.is_none(),
+            "eliminating the parked chooser must clear pending_replacement (latched acting_player key, not affected_player)"
+        );
+        // Every coupled continuation slot the resume drain owns is torn down.
+        assert!(!state.replacement_may_cost_paused);
+        assert!(state.post_replacement_continuation.is_none());
+        assert!(state.post_replacement_source.is_none());
+        assert!(state.post_replacement_event_source.is_none());
+        assert!(state.post_replacement_event_target.is_none());
+        assert!(
+            state.post_replacement_token_choice_applied.is_none(),
+            "abandoning the parked chooser's continuation must also clear the token-choice \
+             applied seed, not just its established siblings (issue #4886, review #6)"
+        );
+        assert!(state.pending_connive_reentry.is_none());
+        assert!(
+            state.pending_spell_resolution.is_none(),
+            "the leaving chooser's coupled spell-resolution ctx must be torn down"
+        );
+    }
+
+    #[test]
+    fn opponent_leaving_preserves_living_choosers_replacement() {
+        // CR 800.4a affects only the leaving player: a DIFFERENT player's departure
+        // must NOT clear the living chooser's parked replacement (no over-clear).
+        let mut state = setup_three_player();
+
+        // Chooser C = P0 (survivor). Player-keyed parked Draw.
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: vec![],
+        };
+        // A coupled spell-resolution ctx owned by the LIVING chooser (P0).
+        state.pending_spell_resolution = Some(PendingSpellResolution {
+            object_id: create_object(&mut state, CardId(7), PlayerId(0), "S".into(), Zone::Stack),
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        let mut events = Vec::new();
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
+
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[0].is_eliminated);
+        assert!(
+            state.pending_replacement.is_some(),
+            "an opponent leaving must not clear the living chooser's parked replacement"
+        );
+        assert!(
+            state.pending_spell_resolution.is_some(),
+            "an opponent leaving must not tear down the living player's spell-resolution ctx"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "the living chooser's ReplacementChoice park must be preserved"
+        );
+    }
+
+    #[test]
     fn elimination_skips_already_eliminated_player() {
         let mut state = setup_three_player();
         let mut events = Vec::new();
@@ -803,6 +1262,52 @@ mod tests {
             state.waiting_for,
             WaitingFor::GameOver {
                 winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn archenemy_hero_loss_eliminates_only_that_hero() {
+        let mut state = setup_archenemy();
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn archenemy_wins_after_all_heroes_are_eliminated() {
+        let mut state = setup_archenemy();
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(2), &mut events);
+        eliminate_player(&mut state, PlayerId(3), &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn archenemy_loss_uses_persistent_topology_after_runtime_state_cleared() {
+        let mut state = setup_archenemy();
+        state.archenemy = None;
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
             }
         ));
     }
@@ -859,7 +1364,30 @@ mod tests {
         assert!(state.eliminated_players.contains(&PlayerId(1)));
     }
 
-    // --- Initiative transfer on elimination (CR 725.4) ---
+    // --- Monarch transfer on elimination (CR 725.4) ---
+
+    #[test]
+    fn monarch_transfers_to_next_turn_order_player_when_active_leaving_and_reversed() {
+        let mut state = setup_three_player();
+        state.active_player = PlayerId(0);
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        state.monarch = Some(PlayerId(0));
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        // CR 725.4 + CR 103.1: active player is leaving, so reversed turn
+        // order gives the monarch designation to P2, not physical-next P1.
+        assert_eq!(state.monarch, Some(PlayerId(2)));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::MonarchChanged {
+                player_id: PlayerId(2)
+            }
+        )));
+    }
+
+    // --- Initiative transfer on elimination (CR 726.4) ---
 
     #[test]
     fn initiative_transfers_on_elimination() {
@@ -870,7 +1398,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
-        // CR 725.4: Active player (P0) takes the initiative.
+        // CR 726.4: Active player (P0) takes the initiative.
         assert_eq!(state.initiative, Some(PlayerId(0)));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -894,7 +1422,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut events);
 
-        // CR 725.4: Active player is leaving, so next living player in turn order gets it.
+        // CR 726.4: Active player is leaving, so next living player in turn order gets it.
         // P1 is next after P0 in a 3-player game.
         assert_eq!(state.initiative, Some(PlayerId(1)));
         assert!(events.iter().any(|e| matches!(
@@ -914,7 +1442,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut events);
 
-        // CR 725.4: P1 is still alive, so they get initiative (game ends immediately after).
+        // CR 726.4: P1 is still alive, so they get initiative (game ends immediately after).
         assert_eq!(state.initiative, Some(PlayerId(1)));
         assert!(matches!(
             state.waiting_for,
@@ -922,5 +1450,434 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
+    }
+
+    #[test]
+    fn initiative_transfers_to_next_turn_order_player_when_active_leaving_and_reversed() {
+        let mut state = setup_three_player();
+        state.active_player = PlayerId(0);
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        state.initiative = Some(PlayerId(0));
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        // CR 726.4 + CR 103.1: active player is leaving, so reversed turn
+        // order gives the initiative to P2, not physical-next P1.
+        assert_eq!(state.initiative, Some(PlayerId(2)));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::InitiativeTaken {
+                player_id: PlayerId(2)
+            }
+        )));
+    }
+
+    // --- CR 800.4a: control effects end when a player leaves the game ---
+
+    use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+
+    fn setup_four_player() -> GameState {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        state.turn_number = 1;
+        state
+    }
+
+    /// Create a battlefield object owned by `owner` and give `controller` control
+    /// of it via a real ChangeController TCE (mirrors gain_control.rs). Evaluates
+    /// layers so `obj.controller` reflects the effect. Returns the object id.
+    fn create_controlled_object(
+        state: &mut GameState,
+        owner: PlayerId,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            owner,
+            "Stolen Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            id,
+            controller,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        super::super::layers::mark_layers_full(state);
+        super::super::layers::evaluate_layers(state);
+        id
+    }
+
+    fn controller_of(state: &GameState, id: ObjectId) -> PlayerId {
+        state.objects.get(&id).unwrap().controller
+    }
+
+    /// (a) Dynamic control reverts on a single leave: survivor P0 owns O, a TCE
+    /// gives leaver P1 control. Eliminating P1 must prune the TCE and revert O to
+    /// P0 — O stays on the battlefield, not exiled. Reverting the fix (never
+    /// pruning the TCE) leaves O.controller == P1 stuck under an absent player and
+    /// then step-4 exiles it, so `battlefield.contains(&o) && controller == P0`
+    /// both flip.
+    #[test]
+    fn control_effect_reverts_when_controller_leaves() {
+        let mut state = setup_three_player();
+        let o = create_controlled_object(&mut state, PlayerId(0), PlayerId(1));
+        assert_eq!(controller_of(&state, o), PlayerId(1));
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            state.battlefield.contains(&o),
+            "survivor's object must remain on the battlefield after its thief leaves"
+        );
+        assert!(!state.exile.contains(&o));
+        assert_eq!(
+            controller_of(&state, o),
+            PlayerId(0),
+            "control reverts to the surviving owner (CR 800.4a + CR 613.1b)"
+        );
+    }
+
+    /// (a2) Aura/Mind-Control-style control reverts via owned-exile: P1 owns a
+    /// control-granting permanent (Aura) that gives P1 control of survivor P0's
+    /// creature C. Eliminating P1 exiles the Aura (step 1, owner=P1) which removes
+    /// its TCE source; the retain sweep drops the TCE and C reverts to P0.
+    #[test]
+    fn control_aura_reverts_when_owner_leaves() {
+        let mut state = setup_three_player();
+        // Survivor P0's creature.
+        let c = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Survivor Creature".to_string(),
+            Zone::Battlefield,
+        );
+        // P1's control Aura on the battlefield.
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Control Magic".to_string(),
+            Zone::Battlefield,
+        );
+        // Aura gives P1 control of C.
+        state.add_transient_continuous_effect(
+            aura,
+            PlayerId(1),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: c },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        super::super::layers::mark_layers_full(&mut state);
+        super::super::layers::evaluate_layers(&mut state);
+        assert_eq!(controller_of(&state, c), PlayerId(1));
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.exile.contains(&aura), "P1's Aura is owned-exiled");
+        assert!(
+            state.battlefield.contains(&c),
+            "survivor's creature stays in play"
+        );
+        assert_eq!(controller_of(&state, c), PlayerId(0));
+    }
+
+    /// (b) Step-1 owned-exile + hostile negative. O is owned by the LEAVER P1 but
+    /// controlled by survivor P0 via a TCE → O is exiled by step-1 owned-exile.
+    /// Hostile: O2 owned by a LIVING third player P2, controlled by survivor P0 →
+    /// eliminating P1 must NOT exile O2 and must NOT disturb its controller.
+    #[test]
+    fn leaver_owned_but_survivor_controlled_is_exiled_living_owned_is_not() {
+        let mut state = setup_three_player();
+        // O: owned by leaver P1, controlled by survivor P0.
+        let o = create_controlled_object(&mut state, PlayerId(1), PlayerId(0));
+        assert_eq!(controller_of(&state, o), PlayerId(0));
+        // O2: owned by living P2, controlled by survivor P0.
+        let o2 = create_controlled_object(&mut state, PlayerId(2), PlayerId(0));
+        assert_eq!(controller_of(&state, o2), PlayerId(0));
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            state.exile.contains(&o),
+            "object owned by the leaver leaves the game (step 1)"
+        );
+        assert!(!state.battlefield.contains(&o));
+        assert!(
+            state.battlefield.contains(&o2),
+            "object owned by a LIVING player must not leave the game"
+        );
+        assert_eq!(
+            controller_of(&state, o2),
+            PlayerId(0),
+            "a living player's control effect is untouched by an unrelated departure"
+        );
+    }
+
+    /// (g) Step-4 controller-leg — the reachable CR-800.4a step-3 exile. A
+    /// survivor-owned object whose `base_controller` is the leaver P1 (entered
+    /// under P1's control, zones.rs:1172) with NO surviving control TCE. After the
+    /// leaver leaves, layer re-derivation resets controller to base_controller ==
+    /// P1, and the step-4 sweep exiles it. Reverting the sweep leaves O on the
+    /// battlefield under an absent controller, so `exile.contains(&o)` flips.
+    #[test]
+    fn base_controller_reverts_to_leaver_then_step4_exiles() {
+        let mut state = setup_three_player();
+        let o = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Entered Under P1".to_string(),
+            Zone::Battlefield,
+        );
+        // Enters under P1's control: sets base_controller = controller = P1.
+        let mut events = Vec::new();
+        crate::game::zones::apply_battlefield_entry_controller_override(
+            &mut state,
+            &mut events,
+            o,
+            PlayerId(1),
+        );
+        super::super::layers::mark_layers_full(&mut state);
+        super::super::layers::evaluate_layers(&mut state);
+        assert_eq!(controller_of(&state, o), PlayerId(1));
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            state.exile.contains(&o),
+            "an object still controlled by the leaver (via base_controller) is exiled (CR 800.4a)"
+        );
+        assert!(!state.battlefield.contains(&o));
+    }
+
+    /// (c) CR 702.26k: a phased-OUT permanent owned by the leaver leaves the game.
+    /// Pre-fix the battlefield leg used zone_object_ids which filters is_phased_in,
+    /// so this object was skipped; the unfiltered iteration exiles it.
+    #[test]
+    fn phased_out_owned_permanent_leaves_the_game() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = setup_three_player();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Phased Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert!(!state.objects.get(&id).unwrap().is_phased_in());
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            !state.battlefield.contains(&id),
+            "phased-out permanent owned by the leaver must leave the battlefield (CR 702.26k)"
+        );
+        assert!(state.exile.contains(&id));
+    }
+
+    /// (d) An unrelated survivor's own creature and control effects are untouched
+    /// when a different, uninvolved player leaves.
+    #[test]
+    fn uninvolved_survivor_creature_untouched() {
+        let mut state = setup_three_player();
+        // P0 owns a plain creature it controls itself.
+        let own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let tce_count_before = state.transient_continuous_effects.len();
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(2), &mut events);
+
+        assert!(state.battlefield.contains(&own));
+        assert_eq!(controller_of(&state, own), PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            tce_count_before,
+            "no control effect is pruned when an uninvolved player leaves"
+        );
+    }
+
+    /// (e) 2HG idempotency: an entire team leaves; each teammate's owned object is
+    /// exiled exactly once (no double move_object / panic) and the other team wins.
+    #[test]
+    fn two_headed_giant_team_leaves_idempotent() {
+        let mut state = setup_2hg();
+        // Team A = {P0, P1}; Team B = {P2, P3} (free-for-all pairing in 2HG setup).
+        let o0 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A0 Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let o1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "A1 Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut events = Vec::new();
+        eliminate_players_simultaneously(&mut state, &[PlayerId(0), PlayerId(1)], &mut events);
+
+        assert!(state.exile.contains(&o0));
+        assert!(state.exile.contains(&o1));
+        // Exiled exactly once each (no duplicate ids in exile).
+        assert_eq!(state.exile.iter().filter(|&&x| x == o0).count(), 1);
+        assert_eq!(state.exile.iter().filter(|&&x| x == o1).count(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    /// (f) The hoist test (round-2 blocker). Co-leavers P1 < P2. Survivor P0 owns
+    /// S, controlled by the HIGHER-id co-leaver P2 via a TCE. Eliminating [P1, P2]
+    /// simultaneously must revert S to P0 and keep it on the battlefield. Under a
+    /// per-player structure the retain/sweep would run inside each do_eliminate:
+    /// when P1 is processed, P2's TCE is still live (S controlled by P2, a leaver)
+    /// and the per-P1 sweep would over-exile S. Hoisting the retain+sweep to run
+    /// ONCE over the full leaving_set is what lets S survive.
+    #[test]
+    fn hoisted_sweep_survivor_object_controlled_by_higher_id_coleaver_survives() {
+        let mut state = setup_four_player();
+        // Survivor P0 owns S; higher-id co-leaver P2 controls it.
+        let s = create_controlled_object(&mut state, PlayerId(0), PlayerId(2));
+        assert_eq!(controller_of(&state, s), PlayerId(2));
+
+        let mut events = Vec::new();
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1), PlayerId(2)], &mut events);
+
+        assert!(
+            state.battlefield.contains(&s),
+            "survivor's object must survive when a co-leaver controlled it (hoist)"
+        );
+        assert!(!state.exile.contains(&s));
+        assert_eq!(
+            controller_of(&state, s),
+            PlayerId(0),
+            "control reverts to the surviving owner P0"
+        );
+    }
+
+    /// (h) Step-4 phased-out survivor guard. Survivor P0 OWNS a permanent that a
+    /// leaver P1 stole via a ChangeController TCE, and it is then phased OUT.
+    /// evaluate_layers skips phased-out permanents (CR 702.26b), so after the TCE
+    /// is pruned and layers re-derive, obj.controller is NOT reset and still reads
+    /// P1. A raw-battlefield step-4 sweep (pre-fix) would then over-EXILE this
+    /// survivor-owned permanent. Restricting the sweep to battlefield_phased_in_ids
+    /// leaves it frozen on the battlefield (it will revert to P0 on phase-in).
+    /// Revert the fix (raw state.battlefield sweep) and this object gets exiled,
+    /// flipping `battlefield.contains(&o)` and `!exile.contains(&o)`.
+    #[test]
+    fn phased_out_survivor_owned_stolen_permanent_not_over_exiled() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = setup_three_player();
+        // Survivor P0 OWNS the permanent; leaver P1 controls it via a TCE.
+        let o = create_controlled_object(&mut state, PlayerId(0), PlayerId(1));
+        assert_eq!(controller_of(&state, o), PlayerId(1));
+
+        // Phase it OUT while stolen. Layers freeze it (CR 702.26b): the controller
+        // field is not reset by evaluate_layers, so it stays == P1 (the leaver).
+        state.objects.get_mut(&o).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert!(!state.objects.get(&o).unwrap().is_phased_in());
+        assert_eq!(
+            controller_of(&state, o),
+            PlayerId(1),
+            "phased-out permanent keeps its stale (leaver) controller — evaluate_layers skips it"
+        );
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        // The survivor-owned, phased-out permanent must NOT be over-exiled by the
+        // step-4 sweep: it stays frozen on the battlefield (CR 702.26b) and will
+        // revert to its owner P0 when it phases back in.
+        assert!(
+            state.battlefield.contains(&o),
+            "survivor-owned phased-out permanent must stay on the battlefield, not be over-exiled"
+        );
+        assert!(
+            !state.exile.contains(&o),
+            "survivor-owned phased-out permanent must not be exiled by the step-4 sweep"
+        );
+    }
+
+    // CR 800.4a + CR 800.4b (test 7.4 — 4c controller leaves): a live control
+    // (CR 723) ends when the controlling player leaves the game. Eliminating the
+    // controller clears `turn_decision_controller` and drops their scheduled
+    // control, while an UNRELATED control by a different controller survives (the
+    // non-vacuous reach-guard). Revert-to-red: without the `do_eliminate` control
+    // cleanup, `turn_decision_controller` stays `Some(controller)` and the entry
+    // persists.
+    #[test]
+    fn controller_leaving_ends_scheduled_control() {
+        let mut state = setup_three_player();
+        let controller = PlayerId(0);
+        let owner = PlayerId(1);
+        let other_controller = PlayerId(1);
+        let other_owner = PlayerId(2);
+        state.active_player = owner;
+        // C actively pilots O's turn (CR 723).
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: owner,
+                controller,
+                grant_extra_turn_after: false,
+                window: crate::types::ability::ControlWindow::NextTurn,
+            });
+        state.turn_decision_controller = Some(controller);
+        // An unrelated control by a different controller (reach-guard: proves the
+        // cleanup is scoped to the leaving player, not a blanket wipe).
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: other_owner,
+                controller: other_controller,
+                grant_extra_turn_after: false,
+                window: crate::types::ability::ControlWindow::NextTurn,
+            });
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, controller, &mut events);
+
+        assert_eq!(
+            state.turn_decision_controller, None,
+            "the departed controller's live control ends"
+        );
+        assert!(
+            !state
+                .scheduled_turn_controls
+                .iter()
+                .any(|s| s.controller == controller),
+            "the departed controller's scheduled control is dropped"
+        );
+        assert!(
+            state
+                .scheduled_turn_controls
+                .iter()
+                .any(|s| s.controller == other_controller && s.target_player == other_owner),
+            "an unrelated control by a living controller survives (non-vacuous)"
+        );
     }
 }

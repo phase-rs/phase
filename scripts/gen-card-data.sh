@@ -6,6 +6,10 @@ if [ -f ".env" ]; then
   set -a; source .env; set +a
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/mtgjson-fetch.sh
+source "$SCRIPT_DIR/lib/mtgjson-fetch.sh"
+
 DATA_DIR="data"
 OUTPUT_DIR="client/public"
 OUTPUT="${OUTPUT_DIR}/card-data.json"
@@ -19,12 +23,19 @@ DECKS_OUTPUT="${OUTPUT_DIR}/decks.json"
 
 echo "=== Card Data Generation ==="
 
-# Download MTGJSON AtomicCards if not present
+# Pin the release-gate "as of" date to UTC today so `GATED_SETS` auto-unlocks
+# sets whose MTGJSON releaseDate has passed (issue #4365). Override in tests
+# with GATED_SETS_AS_OF=YYYY-MM-DD.
+export GATED_SETS_AS_OF="${GATED_SETS_AS_OF:-$(date -u +%Y-%m-%d)}"
+
+# Download MTGJSON AtomicCards if not present. mtgjson_download prefers the
+# gzipped artifact (~50 MB vs ~156 MB uncompressed) and retries the
+# mid-transfer connection resets mtgjson hands out on large anonymous reads.
 MTGJSON_FILE="$DATA_DIR/mtgjson/AtomicCards.json"
 if [ ! -f "$MTGJSON_FILE" ]; then
   echo "Downloading MTGJSON AtomicCards..."
   mkdir -p "$DATA_DIR/mtgjson"
-  curl -L -o "$MTGJSON_FILE" "https://mtgjson.com/api/v5/AtomicCards.json"
+  mtgjson_download "AtomicCards.json" "$MTGJSON_FILE"
   echo "Downloaded MTGJSON data."
 fi
 
@@ -33,14 +44,21 @@ MTGJSON_META_FILE="$DATA_DIR/mtgjson/Meta.json"
 if [ ! -f "$MTGJSON_META_FILE" ]; then
   echo "Downloading MTGJSON Meta..."
   mkdir -p "$DATA_DIR/mtgjson"
-  curl -L -o "$MTGJSON_META_FILE" "https://mtgjson.com/api/v5/Meta.json"
+  mtgjson_download "Meta.json" "$MTGJSON_META_FILE"
+fi
+
+MTGJSON_CARD_TYPES_FILE="$DATA_DIR/mtgjson/CardTypes.json"
+if [ ! -f "$MTGJSON_CARD_TYPES_FILE" ]; then
+  echo "Downloading MTGJSON CardTypes..."
+  mkdir -p "$DATA_DIR/mtgjson"
+  mtgjson_download "CardTypes.json" "$MTGJSON_CARD_TYPES_FILE"
 fi
 
 MTGJSON_SET_LIST_FILE="$DATA_DIR/mtgjson/SetList.json"
 if [ ! -f "$MTGJSON_SET_LIST_FILE" ]; then
   echo "Downloading MTGJSON SetList..."
   mkdir -p "$DATA_DIR/mtgjson"
-  curl -L -o "$MTGJSON_SET_LIST_FILE" "https://mtgjson.com/api/v5/SetList.json"
+  mtgjson_download "SetList.json" "$MTGJSON_SET_LIST_FILE"
 fi
 
 echo "Ensuring MTGJSON token set files..."
@@ -53,7 +71,7 @@ if [ ! -d "$MTGJSON_DECKS_DIR" ]; then
   echo "Downloading MTGJSON AllDeckFiles..."
   mkdir -p "$MTGJSON_DECKS_DIR"
   MTGJSON_DECKS_ARCHIVE="$DATA_DIR/mtgjson/AllDeckFiles.tar.gz"
-  curl -L -o "$MTGJSON_DECKS_ARCHIVE" "https://mtgjson.com/api/v5/AllDeckFiles.tar.gz"
+  "${MTGJSON_CURL[@]}" -o "$MTGJSON_DECKS_ARCHIVE" "$MTGJSON_BASE/AllDeckFiles.tar.gz"
   tar -xzf "$MTGJSON_DECKS_ARCHIVE" -C "$MTGJSON_DECKS_DIR" --strip-components=1
   rm -f "$MTGJSON_DECKS_ARCHIVE"
 fi
@@ -134,7 +152,7 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 #      set of requested --bin targets; alternating shapes (e.g. tokens-gen
 #      alone vs the others) recompiles the engine on each switch. One shape for
 #      every build keeps the warm case a true no-op.
-TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate)
+TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate --bin coverage-parse-diff)
 TOOL_BIN="target/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
@@ -246,7 +264,7 @@ elif [ ! -s "$WARNING_PATTERNS_OUTPUT_TMP" ] || ! jq -e '.' "$WARNING_PATTERNS_O
   coverage_ok=0
 fi
 if [ "$coverage_ok" = 1 ]; then
-  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set}' \
+  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set, token_coverage}' \
         "$COVERAGE_OUTPUT_TMP" > "$COVERAGE_SUMMARY_TMP"; then
     echo "WARNING: coverage-summary derivation failed; leaving existing $COVERAGE_SUMMARY in place." >&2
   else

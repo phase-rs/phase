@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import type { TFunction } from "i18next";
 import { Trans, useTranslation } from "react-i18next";
 
-import { onEngineLost } from "../../game/engineRecovery";
+import { onEngineLost, onEngineSlow } from "../../game/engineRecovery";
+import { exportGameStateDebugZip } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
+import type { GameState } from "../../adapter/types";
 
 /**
  * Layer 3 fallback for engine state loss — the user-facing prompt.
@@ -20,6 +22,10 @@ import { useGameStore } from "../../stores/gameStore";
  * - **Connection lost (no panic):** the legacy transient-loss path —
  *   worker restart, PWA update activation race. Reload restores from IDB.
  *
+ * - **Engine request slow:** the worker has not replied within the watchdog
+ *   window, but the request is still in flight. The player may keep waiting
+ *   without reloading; a late worker response completes the original action.
+ *
  * The listener is de-duped (`shown` latch) so repeated failures within
  * the same tab session don't stack multiple modals.
  */
@@ -30,10 +36,12 @@ import { useGameStore } from "../../stores/gameStore";
  * "Copy diagnostic" or "Report on GitHub".
  */
 interface EngineLostSnapshot {
+  kind: "lost" | "slow";
   reason: string;
   panic: string | null;
   gameId: string | null;
   gameMode: string | null;
+  gameState: GameState | null;
 }
 
 export function EngineLostModal() {
@@ -41,6 +49,8 @@ export function EngineLostModal() {
   const [snapshot, setSnapshot] = useState<EngineLostSnapshot | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [exported, setExported] = useState(false);
+  const [exportFailed, setExportFailed] = useState(false);
 
   useEffect(() => {
     // External latch instead of a setState updater with a side effect.
@@ -48,20 +58,33 @@ export function EngineLostModal() {
     // which would double-set state and could double-show the modal
     // after a state reset in dev (StrictMode).
     let fired = false;
-    return onEngineLost((event) => {
-      if (fired) return;
-      fired = true;
+    const snapshotStore = (kind: EngineLostSnapshot["kind"], event: { reason: string; panic?: string }) => {
       // Snapshot store fields right now — recovery / cleanup paths may
       // null these before the user interacts with the modal, which would
       // leave the diagnostic blank exactly when it matters most.
-      const { gameId, gameMode } = useGameStore.getState();
+      const { gameId, gameMode, gameState } = useGameStore.getState();
       setSnapshot({
+        kind,
         reason: event.reason,
         panic: event.panic ?? null,
         gameId,
         gameMode,
+        gameState,
       });
+    };
+    const unsubscribeLost = onEngineLost((event) => {
+      if (fired) return;
+      fired = true;
+      snapshotStore("lost", event);
     });
+    const unsubscribeSlow = onEngineSlow((event) => {
+      if (fired) return;
+      snapshotStore("slow", event);
+    });
+    return () => {
+      unsubscribeLost();
+      unsubscribeSlow();
+    };
   }, []);
 
   if (!snapshot) return null;
@@ -70,8 +93,16 @@ export function EngineLostModal() {
   const handleReload = () => {
     window.location.reload();
   };
+  const handleContinueWaiting = () => {
+    setSnapshot(null);
+  };
 
   const isPanic = panic !== null;
+  const isSlowRequest = snapshot.kind === "slow";
+  // Legacy timeout events may still arrive through the terminal path (for
+  // example, from an older adapter implementation). Show timeout-specific copy
+  // instead of the connection text when there is no panic payload.
+  const isTimeout = isSlowRequest || (!isPanic && reason.endsWith("-timeout"));
   const diagnostic = buildDiagnostic(snapshot);
 
   const handleCopy = async () => {
@@ -84,6 +115,21 @@ export function EngineLostModal() {
       // a prompt so the user can copy manually rather than leaving them
       // stuck — the whole point of this modal is making the report easy.
       window.prompt(t("engineLost.copyPrompt"), diagnostic);
+    }
+  };
+
+  const handleExport = async () => {
+    if (!snapshot.gameState) return;
+    setExported(false);
+    setExportFailed(false);
+    try {
+      await exportGameStateDebugZip(snapshot.gameState);
+      setExported(true);
+      window.setTimeout(() => setExported(false), 2000);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setExportFailed(true);
+      window.setTimeout(() => setExportFailed(false), 2000);
     }
   };
 
@@ -112,6 +158,15 @@ export function EngineLostModal() {
               {panic}
             </pre>
           </>
+        ) : isTimeout ? (
+          <>
+            <h2 className="mb-3 text-xl font-bold text-white">
+              {t("engineLost.timeoutTitle")}
+            </h2>
+            <p className="mb-4 text-sm text-gray-300">
+              {t("engineLost.timeoutBody")}
+            </p>
+          </>
         ) : (
           <>
             <h2 className="mb-3 text-xl font-bold text-white">
@@ -136,6 +191,18 @@ export function EngineLostModal() {
           </button>
         )}
         <div className="flex flex-wrap justify-end gap-3">
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={!snapshot.gameState}
+            className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {exportFailed
+              ? t("engineLost.exportFailed")
+              : exported
+                ? t("engineLost.exported")
+                : t("engineLost.exportGameState")}
+          </button>
           {isPanic && (
             <>
               <button
@@ -155,10 +222,20 @@ export function EngineLostModal() {
               </a>
             </>
           )}
+          {isSlowRequest && (
+            <button
+              type="button"
+              onClick={handleContinueWaiting}
+              className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-cyan-600"
+              autoFocus
+            >
+              {t("engineLost.continueWaiting")}
+            </button>
+          )}
           <button
             onClick={handleReload}
             className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-rose-500"
-            autoFocus
+            autoFocus={!isSlowRequest}
           >
             {t("engineLost.reload")}
           </button>
@@ -187,7 +264,7 @@ function buildDiagnostic({ reason, panic, gameId, gameMode }: EngineLostSnapshot
     `User agent: ${navigator.userAgent}`,
     "",
     "Panic:",
-    panic ?? "<no panic captured — transient state-loss>",
+    panic ?? "<no panic captured>",
   ];
   return lines.join("\n");
 }

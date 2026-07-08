@@ -12,6 +12,13 @@
     "data": "Données"
   },
   "gameplay": {
+    "collapseLands": "Réduire Lands",
+    "collapseSupport": "Réduire Support",
+    "collapseZoneOptions": {
+      "auto": "Auto",
+      "on": "Toujours activé",
+      "off": "Toujours désactivé"
+    },
     "title": "Jouabilité",
     "language": "Langue",
     "cardSize": "Taille des cartes",
@@ -54,6 +61,11 @@
     "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
     "opponentHoverPreview": "Aperçu au survol de l'adversaire",
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
+    "multiplayerBoardLayout": "Disposition du plateau multijoueur",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Adversaire ciblé",
+      "split": "Table divisée"
+    },
     "cardPreviewDelay": "Délai de survol",
     "cardPreviewDelayInstant": "Instantané",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -74,6 +86,7 @@
     "clearArtOverrides_other": "Effacer tous les remplacements d'illustration ({{count}})",
     "clearArtOverridesConfirm_one": "Effacer les {{count}} remplacement d'illustration ?",
     "clearArtOverridesConfirm_other": "Effacer les {{count}} remplacements d'illustration ?",
+    "clearArtOverridesAction": "Effacer",
     "vfxQualityOptions": {
       "full": "Complète",
       "reduced": "Réduite",
@@ -160,6 +173,10 @@
     "description": "L'export regroupe vos préférences, decks importés et abonnements à des flux dans un seul fichier JSON. L'import les restaure sur une autre machine. Les caches IndexedDB (cache de flux, cache audio, parties enregistrées) ne sont pas inclus — ils se reconstruisent automatiquement.",
     "exportBackup": "Exporter une sauvegarde…",
     "importBackup": "Importer une sauvegarde…",
+    "importModeTitle": "Importer une sauvegarde",
+    "importModeMessage": "Tout remplacer par la sauvegarde (destructif), ou fusionner — conserver les decks existants et ajouter ceux de la sauvegarde.",
+    "importOverwrite": "Tout remplacer",
+    "importMerge": "Fusionner",
     "importConfirm": "Écraser les préférences et decks existants ?\n\nOK : tout remplacer par la sauvegarde (destructif).\nAnnuler : fusionner — conserver les decks existants, ajouter les nouveaux de la sauvegarde.",
     "backupDownloaded": "Sauvegarde téléchargée.",
     "imported_one": "{{count}} deck importé.",
@@ -167,11 +184,14 @@
     "importedWithPreferences_one": "{{count}} deck et les préférences importés.",
     "importedWithPreferences_other": "{{count}} decks et les préférences importés.",
     "skippedMalformed_one": "{{count}} entrée malformée ignorée.",
-    "skippedMalformed_other": "{{count}} entrées malformées ignorées."
+    "skippedMalformed_other": "{{count}} entrées malformées ignorées.",
+    "telemetry": "Envoyer des rapports anonymes de plantage et d'utilisation",
+    "telemetryDescription": "Aide à corriger les plantages et à prioriser la prise en charge des cartes. Aucun compte, aucune donnée personnelle — uniquement des comptages d'erreurs et de résumés de partie."
   },
   "resetAll": {
     "confirm": "Réinitialiser toutes les préférences aux valeurs par défaut ? Cela efface tous les paramètres de cette boîte de dialogue.",
-    "button": "Réinitialiser toutes les préférences"
+    "button": "Réinitialiser toutes les préférences",
+    "confirmAction": "Réinitialiser"
   },
   "pacing": {
     "title": "Rythme",

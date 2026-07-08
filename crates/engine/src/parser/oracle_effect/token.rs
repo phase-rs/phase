@@ -6,11 +6,11 @@ use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, rest, value};
 use nom::Parser;
 
-use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter,
+    ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
+    QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -19,9 +19,10 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
-    normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_count_expr, parse_rounding_suffix_only,
+    rewrite_quantity_expr_rounding, strip_reminder_text, TextPair,
 };
 use crate::parser::oracle_ir::ast::*;
 
@@ -36,7 +37,7 @@ where
     Some((result, &text[consumed..]))
 }
 
-pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
+pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
 
@@ -74,7 +75,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
             (TargetFilter::CostPaidObject, "")
         } else {
-            parse_target(target_text)
+            parse_target_with_ctx(target_text, ctx)
         };
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {
@@ -231,30 +232,89 @@ fn split_token_except_clause<'a>(
     ctx: &ParseContext,
 ) -> (&'a str, Vec<Keyword>, Vec<ContinuousModification>) {
     let lower = text.to_lowercase();
-    let Ok((except_input, head_lower)) = parse_token_except_boundary(&lower) else {
+    let Ok((_, head_lower)) = parse_token_except_boundary(&lower) else {
         return (text, Vec::new(), Vec::new());
     };
     let head = &text[..head_lower.len()];
+    // CR 707.9b + CR 707.2: a token-copy exception can rename the copy with a
+    // literal name ("…named Mishra's Warform…", Mishra, Eminent One). Unlike the
+    // self-name "its name is ~" arm — which keys off the copying card's own name
+    // and so cannot apply to a token copy (`card_name` empty below) — a literal
+    // override carries the name in the text itself, so peel it off here (original
+    // case preserved) and strip the "named <X>" span before the body reaches the
+    // shared except parser. Without this the name words leak into the copied
+    // creature's subtype list AND the override is dropped, so a token copying a
+    // legendary permanent keeps the source's name and wrongly collides with it
+    // under the legend rule (CR 704.5j). The original-case except body is
+    // byte-aligned to its lowercase form (mirrors the `head` slice above).
+    let except_original = &text[head_lower.len()..];
+    let (name_override, except_body) = strip_copy_except_named_override(except_original);
+    let except_lower = except_body.to_lowercase();
+
     // Pass the lowercase suffix starting at `[, ]except ` to the shared
     // building block. The except parser is the single authority for the
     // grammar (CR 707.9 + CR 707.2): keyword lists, supertype additions /
     // removals, conditional counter placement, etc.
     let card_name = ""; // SetName cannot apply to token-copy (source unknown at parse time).
-    let (_, modifications) =
-        match super::become_copy_except::parse_except_clause(except_input, card_name, ctx) {
-            Some(parts) => parts,
-            None => return (head, Vec::new(), Vec::new()),
-        };
-
     let mut extra_keywords = Vec::new();
     let mut additional_modifications = Vec::new();
-    for modification in modifications {
-        match modification {
-            ContinuousModification::AddKeyword { keyword } => extra_keywords.push(keyword),
-            other => additional_modifications.push(other),
+    match super::become_copy_except::parse_except_clause(&except_lower, card_name, ctx) {
+        Some((_, modifications)) => {
+            for modification in modifications {
+                match modification {
+                    ContinuousModification::AddKeyword { keyword } => extra_keywords.push(keyword),
+                    other => additional_modifications.push(other),
+                }
+            }
         }
+        // A clause that is *only* a literal name override (no other recognised
+        // body) still yields the rename — don't discard it.
+        None if name_override.is_none() => return (head, Vec::new(), Vec::new()),
+        None => {}
+    }
+
+    if let Some(name) = name_override {
+        additional_modifications.push(ContinuousModification::SetName { name });
     }
     (head, extra_keywords, additional_modifications)
+}
+
+/// CR 707.9b + CR 707.2: peel a literal `"named <X>"` rename off a token-copy
+/// `, except <body>` clause, returning the original-case name and the body with
+/// the `"named <X>"` span removed. Mishra, Eminent One: "…except it's a 4/4
+/// Construct artifact creature named Mishra's Warform in addition to its other
+/// types." — the name must not be ingested as creature subtypes, and must
+/// override the copied name so the legend rule (CR 704.5j) sees the distinct
+/// token name.
+///
+/// Quoted-ability exceptions ("…except it has \"…\"") are left untouched: any
+/// `named` inside a granted ability is part of that ability's own text, not a
+/// rename of the copy, so the strip is skipped when the body carries a `"`.
+fn strip_copy_except_named_override(body: &str) -> (Option<String>, String) {
+    if body.contains('"') {
+        return (None, body.to_string());
+    }
+    let lower = body.to_lowercase();
+    let tp = TextPair::new(body, &lower);
+    let Some((before, after)) = tp.split_around(" named ") else {
+        return (None, body.to_string());
+    };
+    // The literal name runs to the next copy-exception boundary: the additive
+    // type carve-out, a further `and`-joined body, or sentence punctuation.
+    let mut end = after.original.len();
+    for needle in [" in addition to", " and ", " with ", " that ", ",", "."] {
+        if let Some(pos) = after.find(needle) {
+            end = end.min(pos);
+        }
+    }
+    let name = after.original[..end].trim().trim_matches('"');
+    if name.is_empty() {
+        return (None, body.to_string());
+    }
+    // Reassemble the body without the " named <X>" span so the type list parses
+    // cleanly ("…artifact creature in addition to its other types").
+    let stripped = format!("{}{}", before.original, &after.original[end..]);
+    (Some(name.to_string()), stripped)
 }
 
 fn parse_token_except_boundary(input: &str) -> OracleResult<'_, &str> {
@@ -267,6 +327,23 @@ fn parse_token_except_boundary(input: &str) -> OracleResult<'_, &str> {
 
 pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     parse_token_description_with_context(text, &ParseContext::default())
+}
+
+/// True iff a `for each … this way` count restricts to a specific card type
+/// (Dread Summons' "creature card"), so it should override the unfiltered
+/// `TrackedSetSize`. A bare/generic "card" filter (e.g. "card discarded this
+/// way") is not restrictive and keeps `TrackedSetSize`.
+fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
+    let QuantityRef::FilteredTrackedSetSize { filter, .. } = qty else {
+        return false;
+    };
+    let TargetFilter::Typed(typed) = filter.as_ref() else {
+        return false;
+    };
+    typed
+        .type_filters
+        .iter()
+        .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
 }
 
 fn parse_token_description_with_context(
@@ -358,6 +435,29 @@ fn parse_token_description_with_context(
         } else {
             return None;
         };
+    // CR 603.2 + CR 603.4 + CR 107.4: "create that many tokens" on a colored-pip
+    // cast trigger (Namor the Sub-Mariner) back-references the cast spell's
+    // colored-symbol count (EventSource), not the generic EventContextAmount —
+    // a SpellCast event carries no amount, so EventContextAmount resolves to 0.
+    // The qualifier color was staged onto the context from the trigger's
+    // "with one or more <color> mana symbols in its mana cost" valid_card phrase.
+    // Gated on `pending_mana_symbol_count_color`, so Chatterfang-style "that many"
+    // counters (color None) are untouched.
+    if matches!(
+        &count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        }
+    ) {
+        if let Some(color) = ctx.pending_mana_symbol_count_color {
+            count = QuantityExpr::Ref {
+                qty: QuantityRef::ManaSymbolsInManaCost {
+                    scope: ObjectScope::EventSource,
+                    color: Some(color),
+                },
+            };
+        }
+    }
     // CR 508.4: Seed `tapped` from the inline "tapped and attacking" suffix
     // detected earlier so the "tapped " / "untapped " leading-word loop below
     // can still flip it if the token text also carries a leading "tapped".
@@ -403,6 +503,10 @@ fn parse_token_description_with_context(
     let (suffix, is_all_colors) = strip_token_all_colors_suffix(suffix);
     if is_all_colors {
         colors = ManaColor::ALL.to_vec();
+    }
+    // CR 107.1a: Parse and apply standalone trailing rounding suffix.
+    if let Some(rounding) = parse_rounding_suffix_only(suffix) {
+        rewrite_quantity_expr_rounding(&mut count, rounding);
     }
     let mut keywords = parse_token_keyword_clause(suffix);
     let (mut name, types) = parse_token_identity(descriptor, ctx.card_name.as_deref())?;
@@ -481,6 +585,8 @@ fn parse_token_description_with_context(
             );
         }
     }
+    bind_bare_token_x_pt_to_cost_x(&mut power);
+    bind_bare_token_x_pt_to_cost_x(&mut toughness);
 
     if let Some(count_expression) = extract_token_count_expression(suffix) {
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
@@ -527,6 +633,18 @@ fn parse_token_description_with_context(
                     .ok()
                     .filter(|(rest, _)| rest.is_empty())
                     .map(|(_, qty)| QuantityExpr::Ref { qty })
+                    // CR 609.3 + CR 205.2a: a TYPE-restricted "for each <type> card
+                    // <verb> this way" (Dread Summons: "for each creature card put
+                    // into a graveyard this way") counts only the matching cards
+                    // moved this way — `FilteredTrackedSetSize` — not every card
+                    // moved (`TrackedSetSize`, which would create X tokens). Only a
+                    // restrictive type overrides; a bare/"card" filter keeps
+                    // `TrackedSetSize`.
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                            .filter(tracked_set_count_is_type_restricted)
+                            .map(|qty| QuantityExpr::Ref { qty })
+                    })
                 })
                 .unwrap_or(QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
@@ -553,7 +671,16 @@ fn parse_token_description_with_context(
 
     let is_creature = types.iter().any(|token_type| token_type == "Creature");
     if is_creature && (power.is_none() || toughness.is_none()) {
-        return None;
+        if let Some(TokenPtFollowup::PowerToughness {
+            power: followup_power,
+            toughness: followup_toughness,
+        }) = &ctx.token_pt_followup
+        {
+            power = Some(followup_power.clone());
+            toughness = Some(followup_toughness.clone());
+        } else {
+            return None;
+        }
     }
 
     // Extract quoted static abilities: `and "This token can't block."` / `"~ can't block."`
@@ -573,6 +700,19 @@ fn parse_token_description_with_context(
         static_abilities,
         enters_attacking,
     })
+}
+
+fn bind_bare_token_x_pt_to_cost_x(value: &mut Option<PtValue>) {
+    // CR 107.3a + CR 107.3i + CR 111.3: a bare X in token P/T shares the
+    // spell or ability's chosen X unless an explicit "where X is" clause
+    // already rebound it above.
+    if matches!(value, Some(PtValue::Variable(alias)) if alias == "X") {
+        *value = Some(PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }));
+    }
 }
 
 fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
@@ -610,16 +750,29 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
 }
 
 fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
-    let comma = text.find(',')?;
-    let name = text[..comma].trim().trim_matches('"');
-    if name.is_empty() {
-        return None;
+    // CR 111.4: A named-token preamble is "<Name>, a/an <characteristics> token".
+    // The token name may itself contain a comma ("Primo, the Indivisible";
+    // "Tibalt, the Fiend-Blooded"), so the FIRST comma is not necessarily the
+    // name/body boundary. The boundary is the comma immediately followed by the
+    // article that introduces the token's characteristics (", a "/", an "). Scan
+    // every comma and pick the one whose remainder begins with an article, so
+    // the full epithet stays in the name. Mirrors the article guard already used
+    // for the single-comma case.
+    for (idx, _) in text.match_indices(',') {
+        let after_comma = text[idx + 1..].trim_start();
+        let after_lower = after_comma.to_lowercase();
+        let Some((_, rest)) =
+            nom_on_lower(after_comma, &after_lower, nom_primitives::parse_article)
+        else {
+            continue;
+        };
+        let name = text[..idx].trim().trim_matches('"');
+        if name.is_empty() {
+            continue;
+        }
+        return Some((name.to_string(), rest));
     }
-
-    let after_comma = text[comma + 1..].trim_start();
-    let after_lower = after_comma.to_lowercase();
-    let (_, rest) = nom_on_lower(after_comma, &after_lower, nom_primitives::parse_article)?;
-    Some((name.to_string(), rest))
+    None
 }
 
 /// CR 205.4a: Strip leading supertype words from the token description and
@@ -963,6 +1116,12 @@ pub(super) fn scope_token_for_each_to_iterating_player(expr: QuantityExpr) -> Qu
                 .map(scope_token_for_each_to_iterating_player)
                 .collect(),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(scope_token_for_each_to_iterating_player)
+                .collect(),
+        },
         other => other,
     }
 }
@@ -981,23 +1140,27 @@ fn extract_token_count_expression(text: &str) -> Option<String> {
 
 fn extract_token_pt_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-    for needle in [
-        "power and toughness are each equal to ",
-        "power and toughness is each equal to ",
-    ] {
-        if let Some(after) = tp.strip_after(needle) {
-            return Some(
-                after
-                    .original
-                    .trim()
-                    .trim_matches('"')
-                    .trim_end_matches('.')
-                    .to_string(),
-            );
-        }
-    }
-    None
+    // SCAN (not anchor) to the "power and toughness" P/T marker anywhere in the
+    // token suffix, then accept an optional "are "/"is " copula and the shared
+    // "each equal to " tail. `take_until` discards any leading "base " for free,
+    // so the combinator subsumes the two prior literals ("… are/is each equal
+    // to") AND Skullspore's copula-less "base power and toughness each equal to"
+    // — without an anchored `opt(tag("base "))` that would only match at position
+    // 0 and silently regress every existing mid-suffix P/T token to 0/0.
+    let (_, after) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = take_until::<_, _, OracleError<'_>>("power and toughness").parse(i)?;
+        let (i, _) = tag("power and toughness ").parse(i)?;
+        let (i, _) = opt(alt((tag("are "), tag("is ")))).parse(i)?;
+        let (i, _) = tag("each equal to ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    Some(
+        after
+            .trim()
+            .trim_matches('"')
+            .trim_end_matches('.')
+            .to_string(),
+    )
 }
 
 fn parse_token_identity(
@@ -1131,7 +1294,7 @@ fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
     if let Ok((_, head)) = take_until::<_, _, nom::error::Error<&str>>("\"").parse(clause) {
         clause = head;
     }
-    for marker in [" where ", " equal to ", " attached "] {
+    for marker in [" where ", " equal to ", " attached ", " named "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
     clause
@@ -1213,6 +1376,274 @@ mod tests {
     use crate::types::card_type::CoreType;
 
     #[test]
+    fn extract_token_pt_expression_covers_base_and_are_is_copula_classes() {
+        // Gap A regression guard (scan-not-anchor). `extract_token_pt_expression`
+        // receives the FULL token suffix, so the "power and toughness … each equal
+        // to" marker is MID-suffix. The combinator must SCAN to it, not anchor at
+        // position 0. Each input is a full suffix; each asserts the trailing
+        // expression string (non-vacuous — a bare `is_some` would pass while the
+        // anchored mis-implementation regressed the existing tokens to 0/0).
+        let cases = [
+            // NEW: "base " prefix, no copula (The Skullspore Nexus). Reverting the
+            // scan to the original two literals makes this return None.
+            (
+                "green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures",
+                "the total power of those creatures",
+            ),
+            // EXISTING "are" copula, mid-suffix. Reverting the scan to an anchored
+            // `tag("power and toughness ")` at pos 0 makes this return None.
+            (
+                "0/0 green Ooze creature token with power and toughness are each equal to the number of creatures you control",
+                "the number of creatures you control",
+            ),
+            // EXISTING "is" copula, mid-suffix.
+            (
+                "green Plant creature token with power and toughness is each equal to your life total",
+                "your life total",
+            ),
+        ];
+        for (suffix, expected) in cases {
+            assert_eq!(
+                extract_token_pt_expression(suffix).as_deref(),
+                Some(expected),
+                "full-suffix P/T marker must be scanned, not anchored: {suffix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skullspore_token_lowers_to_triggering_batch_dynamic_pt() {
+        // Gap A + Gap B composed. The Skullspore Nexus create clause (verbatim)
+        // must lower to a dynamic-P/T token whose base P/T reads the triggering
+        // batch's total power. Baseline: `Effect::Unimplemented` (measured).
+        use crate::types::ability::{AggregateFunction, ObjectProperty, TrackedAnaphorSource};
+        let txt = "Create a green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("Skullspore token must parse (was Unimplemented)");
+        let Effect::Token {
+            power,
+            toughness,
+            types,
+            colors,
+            count,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: TrackedAnaphorSource::TriggeringBatch,
+            },
+        });
+        assert_eq!(power, expected_pt.clone(), "base power must be batch sum");
+        assert_eq!(toughness, expected_pt, "base toughness must be batch sum");
+        assert!(types.iter().any(|t| t == "Creature"));
+        assert!(
+            types.iter().any(|t| t == "Fungus") && types.iter().any(|t| t == "Dinosaur"),
+            "subtypes must include Fungus and Dinosaur, got {types:?}"
+        );
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+    }
+
+    #[test]
+    fn bare_x_x_token_pt_lowers_to_cost_x_quantity_shape() {
+        let txt = "Create an X/X green Ooze creature token.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            types,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "bare X power must bind to cost X"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "bare X toughness must bind to cost X"
+        );
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Ooze"),
+            "types must include Creature and Ooze, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn variable_count_and_bare_x_x_token_pt_share_cost_x_shape() {
+        let txt = "Create X X/X green Ooze creature tokens.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            types,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(count, expected_x.clone(), "token count must bind to cost X");
+        let expected_pt = PtValue::Quantity(expected_x);
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "bare X power must bind to cost X"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "bare X toughness must bind to cost X"
+        );
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Ooze"),
+            "types must include Creature and Ooze, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn where_x_token_pt_keeps_explicit_greatest_power_quantity_shape() {
+        let txt = "Create an X/X green Ooze creature token, where X is the greatest power among creatures you control.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            power, toughness, ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected = crate::parser::oracle_quantity::parse_cda_quantity(
+            "the greatest power among creatures you control",
+        )
+        .expect("greatest-power quantity must parse");
+        let expected_pt = PtValue::Quantity(expected);
+        assert_eq!(
+            power,
+            expected_pt.clone(),
+            "where-X power must keep the explicit greatest-power quantity"
+        );
+        assert_eq!(
+            toughness, expected_pt,
+            "where-X toughness must keep the explicit greatest-power quantity"
+        );
+    }
+
+    #[test]
+    fn where_x_token_pt_covers_known_ooze_source_expressions() {
+        let cases = [
+            (
+                "Create an X/X green Ooze creature token, where X is that spell's mana value.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is the number of +1/+1 counters removed this way.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is the sacrificed creature's power.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            ),
+            (
+                "Create an X/X green Ooze creature token, where X is this card's power.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            ),
+        ];
+
+        for (txt, expected) in cases {
+            let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("expected Token effect for {txt:?}"));
+            let Effect::Token {
+                power, toughness, ..
+            } = effect
+            else {
+                panic!("expected Effect::Token, got {effect:?}");
+            };
+            let expected_pt = PtValue::Quantity(expected);
+            assert_eq!(
+                power,
+                expected_pt.clone(),
+                "where-X power must bind for {txt:?}"
+            );
+            assert_eq!(
+                toughness, expected_pt,
+                "where-X toughness must bind for {txt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_x_token_pt_covers_cards_exiled_this_way_aggregate() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty, TrackedAnaphorSource};
+
+        let txt = "Create an X/X blue Zombie creature token, where X is the total power of the cards exiled this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Stitcher Geralf token effect");
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let expected_pt = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: TrackedAnaphorSource::ChainSet,
+            },
+        });
+        assert_eq!(name, "Zombie");
+        assert!(
+            types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Zombie"),
+            "types must include Creature and Zombie, got {types:?}"
+        );
+        assert_eq!(colors, vec![ManaColor::Blue]);
+        assert_eq!(power, expected_pt.clone());
+        assert_eq!(toughness, expected_pt);
+    }
+
+    #[test]
     fn occult_epiphany_token_counts_distinct_types_of_discarded() {
         // Occult Epiphany #3307: the token count must be DISTINCT CARD TYPES
         // among the DISCARDED chain members (cause-filtered), NOT TrackedSetSize.
@@ -1251,6 +1682,33 @@ mod tests {
                 qty: QuantityRef::TrackedSetSize,
             },
             "bare 'card discarded this way' must keep TrackedSetSize"
+        );
+    }
+
+    #[test]
+    fn for_each_creature_card_this_way_counts_only_creatures() {
+        // #4746 Dread Summons: "For each creature card put into a graveyard this
+        // way, you create a … token." The token count must restrict to CREATURE
+        // cards moved this way (`FilteredTrackedSetSize`), not every card
+        // (`TrackedSetSize`, which would create X tokens for X cards milled).
+        let txt = "Create a tapped 2/2 black Zombie creature token for each creature card put into a graveyard this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize { filter, .. },
+        } = &count
+        else {
+            panic!("expected FilteredTrackedSetSize (creature-restricted), got {count:?}");
+        };
+        assert!(
+            matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Creature]
+            ),
+            "count must restrict to creature cards milled, got {filter:?}"
         );
     }
 
@@ -1316,6 +1774,55 @@ mod tests {
         };
         assert_eq!(target, TargetFilter::CostPaidObject);
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    #[test]
+    fn copy_token_with_literal_named_override_emits_set_name() {
+        // CR 707.9b + CR 704.5j (issue #4444): Mishra, Eminent One creates a
+        // token copy renamed by a literal "named <X>" exception. The override
+        // must reach `additional_modifications` as a `SetName` (so the copy of a
+        // legendary permanent does not collide with its source under the legend
+        // rule), and the name words must NOT leak into the copied subtype list.
+        let txt = "create a token that's a copy of target artifact you control, except it's a 4/4 Construct artifact creature named Mishra's Warform in addition to its other types";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetName { name } if name == "Mishra's Warform"
+            )),
+            "literal name override must emit SetName with original casing, got {additional_modifications:?}"
+        );
+        // The name words must not be misclassified as creature subtypes.
+        assert!(
+            !additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype }
+                    if matches!(subtype.as_str(), "Named" | "Mishra's" | "Warform")
+            )),
+            "name words must not leak into the subtype list, got {additional_modifications:?}"
+        );
+        // The genuine copy exceptions still flow through.
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Construct"
+        )));
     }
 
     #[test]
@@ -1421,6 +1928,37 @@ mod tests {
             )),
             "AddSubtype(Reflection) must reach CopyTokenOf.additional_modifications; got {additional_modifications:?}"
         );
+    }
+
+    /// Issue #823 — Jace, Mirror Mage: the copy token exception includes both
+    /// "not legendary" and a starting-loyalty override. Both are non-keyword
+    /// copy exceptions and must reach `CopyTokenOf.additional_modifications`.
+    #[test]
+    fn jace_copy_token_routes_starting_loyalty_override() {
+        let effect = try_parse_token(
+            "create a token that's a copy of ~, except it's not legendary and its starting loyalty is 1",
+            "create a token that's a copy of ~, except it's not legendary and its starting loyalty is 1",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::SelfRef);
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary
+            }
+        )));
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetStartingLoyalty { value: 1 })));
     }
 
     /// Issue #1696 — Myrkul, Lord of Bones: "create a token that's a copy of
@@ -1548,6 +2086,34 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn token_count_half_x_rounding_after_token_noun_is_applied() {
+        let txt = "Create half X Food tokens, rounded up.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Food token effect");
+        let Effect::Token { name, count, .. } = effect else {
+            panic!("expected Token, got {effect:?}");
+        };
+        assert_eq!(name, "Food");
+        match count {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor,
+                rounding,
+            } => {
+                assert_eq!(divisor, 2);
+                assert_eq!(rounding, RoundingMode::Up);
+                assert!(matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    } if name == "X"
+                ));
+            }
+            other => panic!("expected DivideRounded token count, got {other:?}"),
+        }
+    }
+
     /// CR 109.4: `try_parse_token` emits the default `owner` of
     /// `TargetFilter::Controller`; a "target [player] creates" subject is
     /// lifted into `owner` later by `inject_subject_target` (issue #403).
@@ -1668,6 +2234,44 @@ mod tests {
         let kws = parse_token_keyword_clause(
             "with flying equal to the number of card types among cards in your graveyard",
         );
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// "with <keyword> named <X>" (Crow Storm, The Hive, etc.): the trailing
+    /// "named …" token-name clause must be truncated before keyword parsing so
+    /// the keyword survives. Without the " named " marker this yields [].
+    #[test]
+    fn keyword_clause_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with flying named storm crow");
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    /// Hornet Cannon: "with flying and haste named hornet" must keep BOTH.
+    #[test]
+    fn keyword_clause_multiple_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with flying and haste named hornet");
+        assert!(kws.contains(&Keyword::Flying), "got {kws:?}");
+        assert!(kws.contains(&Keyword::Haste), "got {kws:?}");
+    }
+
+    /// Jungle Patrol / Wall of Kelp: "with defender named wall".
+    #[test]
+    fn keyword_clause_defender_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with defender named wall");
+        assert_eq!(kws, vec![Keyword::Defender]);
+    }
+
+    /// Then Dreadmaws Ate Everyone: "with trample named dreadmaw".
+    #[test]
+    fn keyword_clause_trample_with_named_suffix() {
+        let kws = parse_token_keyword_clause("with trample named dreadmaw");
+        assert_eq!(kws, vec![Keyword::Trample]);
+    }
+
+    /// No-regression: the " attached " marker must still truncate.
+    #[test]
+    fn keyword_clause_with_attached_suffix() {
+        let kws = parse_token_keyword_clause("with flying attached to it");
         assert_eq!(kws, vec![Keyword::Flying]);
     }
 
@@ -2227,6 +2831,68 @@ mod tests {
         assert_eq!(colors, vec![ManaColor::White]);
     }
 
+    #[test]
+    fn source_defined_named_creature_token_lookup_does_not_invent_fixed_pt() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create a 7/7 Ooze token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Slime Molding".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("source-defined named Ooze token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(name, "Ooze");
+        assert!(types.contains(&"Creature".to_string()));
+        assert!(types.contains(&"Ooze".to_string()));
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(power, PtValue::Fixed(7));
+        assert_eq!(toughness, PtValue::Fixed(7));
+    }
+
+    #[test]
+    fn fixed_source_scoped_named_creature_token_still_fills_omitted_pt() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create an Ooze token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Rot Like the Scum You Are".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("fixed source-scoped Ooze token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(name, "Ooze");
+        assert!(types.contains(&"Creature".to_string()));
+        assert!(types.contains(&"Ooze".to_string()));
+        assert_eq!(colors, vec![ManaColor::Green]);
+        assert_eq!(power, PtValue::Fixed(2));
+        assert_eq!(toughness, PtValue::Fixed(2));
+    }
+
     /// CR 111.1 + CR 111.4 + CR 208.1: ordinary subtype display names are not
     /// token identities when the registry has multiple distinct bodies for the
     /// same name. The Oracle text must supply the missing body characteristics
@@ -2290,4 +2956,137 @@ mod tests {
             assert_eq!(types, expected);
         }
     }
+}
+
+#[cfg(test)]
+mod kazar_token_landfall_tests {
+    use super::*;
+    use crate::types::ability::ContinuousModification;
+
+    /// Ka-Zar of the Savage Land's Zabu token: the granted ability text carries
+    /// an italicized "Landfall —" ability-word prefix (CR 207.2c) before the
+    /// trigger keyword. The token-ability classifier must strip the ability word
+    /// and recognize the inner trigger (CR 603.1 / CR 603.6a) as a `GrantTrigger`
+    /// static modification — not the `GrantAbility(Unimplemented[landfall])`
+    /// catch-all produced before the fix.
+    #[test]
+    fn zabu_token_landfall_trigger_parses_as_grant_trigger() {
+        let txt = "Create Zabu, a legendary 2/2 green Cat creature token with \"Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.\"";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("Zabu token line must parse");
+        let Effect::Token {
+            name,
+            supertypes,
+            static_abilities,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(name, "Zabu");
+        assert!(
+            supertypes.contains(&Supertype::Legendary),
+            "Zabu must be legendary, got {supertypes:?}"
+        );
+        let grant_trigger = static_abilities
+            .iter()
+            .flat_map(|def| def.modifications.iter())
+            .find_map(|m| match m {
+                ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                _ => None,
+            });
+        let trigger = grant_trigger.unwrap_or_else(|| {
+            panic!("landfall trigger must classify as GrantTrigger, got {static_abilities:#?}")
+        });
+        // CR 603.6a: the inner trigger is a zone-change (ETB) trigger.
+        assert_eq!(
+            trigger.mode,
+            crate::types::triggers::TriggerMode::ChangesZone
+        );
+        // No residual Unimplemented landfall effect anywhere in the parsed token.
+        assert!(
+            // allow-noncombinator: test assertion scanning debug output, not parsing dispatch.
+            !format!("{static_abilities:?}").contains("Unimplemented"),
+            "token ability must have no residual Unimplemented effect"
+        );
+    }
+
+    /// The catalog-token path (`inject_catalog_token_abilities`) re-parses the
+    /// preset `rules_text` through `classify_quoted_inner`. The Zabu preset's
+    /// rules_text begins with the "Landfall —" ability word; the same strip must
+    /// apply so the runtime injection yields a `GrantTrigger`, not a
+    /// `GrantAbility(Unimplemented)`.
+    #[test]
+    fn catalog_landfall_rules_text_classifies_as_grant_trigger() {
+        let rules_text =
+            "Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.";
+        let mods = crate::parser::oracle_static::classify_quoted_inner(rules_text);
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+            "catalog rules_text must classify as GrantTrigger, got {mods:?}"
+        );
+        assert!(
+            // allow-noncombinator: test assertion scanning debug output, not parsing dispatch.
+            !format!("{mods:?}").contains("Unimplemented"),
+            "catalog classification must have no residual Unimplemented effect"
+        );
+    }
+
+    /// Full-card parse: Ka-Zar's three lines (look at top, play lands from top,
+    /// ETB token with landfall) must produce zero residual `Unimplemented`
+    /// effects after the ability-word strip fix.
+    #[test]
+    fn kazar_full_card_no_residual_unimplemented() {
+        let oracle = "You may look at the top card of your library any time.\n\
+            You may play lands from the top of your library.\n\
+            When Ka-Zar of the Savage Land enters, create Zabu, a legendary 2/2 green Cat creature token with \"Landfall — Whenever a land you control enters, put a +1/+1 counter on Zabu.\"";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            "Ka-Zar of the Savage Land",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Warrior".to_string()],
+        );
+        let debug = format!("{parsed:?}");
+        assert!(
+            // allow-noncombinator: test assertion scanning debug output, not parsing dispatch.
+            !debug.contains("Unimplemented"),
+            "Ka-Zar must parse to zero residual Unimplemented, got: {debug}"
+        );
+    }
+}
+
+#[test]
+fn copy_token_non_saga_token_you_control_issue_3294() {
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+
+    let effect = try_parse_token(
+        "create a token that's a copy of a non-saga token you control",
+        "Create a token that's a copy of a non-Saga token you control.",
+        &mut ParseContext::default(),
+    )
+    .expect("expected CopyTokenOf");
+    let Effect::CopyTokenOf {
+        target,
+        source_filter,
+        ..
+    } = effect
+    else {
+        panic!("expected CopyTokenOf, got {effect:?}");
+    };
+    assert!(source_filter.is_none());
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected Typed copy source, got {target:?}");
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Saga".to_string()
+            )))),
+        "expected Non(Saga), got {:?}",
+        tf.type_filters
+    );
+    assert!(tf.properties.contains(&FilterProp::Token));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
 }

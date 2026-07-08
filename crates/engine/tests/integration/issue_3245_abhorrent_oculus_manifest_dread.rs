@@ -17,7 +17,10 @@ const ABHORRENT_OCULUS_ORACLE: &str =
 
 const MANIFEST_DREAD_ORACLE: &str = "Manifest dread.";
 
-fn enter_tapped_battlefield_replacement(description: &str) -> ReplacementDefinition {
+fn enter_tap_state_battlefield_replacement(
+    description: &str,
+    state: engine::types::ability::TapStateChange,
+) -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
         .destination_zone(Zone::Battlefield)
         .execute(AbilityDefinition::new(
@@ -25,7 +28,7 @@ fn enter_tapped_battlefield_replacement(description: &str) -> ReplacementDefinit
             Effect::SetTapState {
                 target: TargetFilter::SelfRef,
                 scope: engine::types::ability::EffectScope::Single,
-                state: engine::types::ability::TapStateChange::Tap,
+                state,
             },
         ))
         .description(description.to_string())
@@ -127,17 +130,23 @@ fn manifest_dread_defers_graveyard_until_paused_manifest_entry_resolves() {
     scenario.at_phase(Phase::PreCombatMain);
     let other = scenario.add_card_to_library_top(P0, "Other Card");
     let manifest = scenario.add_card_to_library_top(P0, "Manifest Me");
+    // Two opposite-direction enter tap-state replacements collide materially
+    // (Tap vs Untap write different final values), so per CR 616.1 the affected
+    // player must order them — parking the manifest entry at ReplacementChoice.
+    // A same-direction pair would commute (CR 616.1e/f) and auto-apply silently.
     scenario
         .add_creature(P1, "Kismet", 0, 0)
         .as_enchantment()
-        .with_replacement_definition(enter_tapped_battlefield_replacement(
+        .with_replacement_definition(enter_tap_state_battlefield_replacement(
             "Creatures enter the battlefield tapped.",
+            engine::types::ability::TapStateChange::Tap,
         ));
     scenario
-        .add_creature(P1, "Frozen Aether", 0, 0)
+        .add_creature(P1, "Spelunking", 0, 0)
         .as_enchantment()
-        .with_replacement_definition(enter_tapped_battlefield_replacement(
-            "Permanents enter the battlefield tapped.",
+        .with_replacement_definition(enter_tap_state_battlefield_replacement(
+            "Permanents enter the battlefield untapped.",
+            engine::types::ability::TapStateChange::Untap,
         ));
     let spell = scenario
         .add_spell_to_hand(P0, "Dread Test", false)

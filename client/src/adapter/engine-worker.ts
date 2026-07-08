@@ -20,8 +20,10 @@ import init, {
   restore_game_state,
   resume_multiplayer_host_state,
   load_card_database,
+  build_ai_card_subset,
   evaluate_deck_compatibility_js,
   apply_seat_mutation,
+  project_seat_view,
   export_game_state_json,
   clear_game_state,
   set_multiplayer_mode,
@@ -72,12 +74,14 @@ type EngineRequest =
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
+  | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
+  | { type: "projectSeatView"; id: number; stateJson: string }
   | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number }
   | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest };
 
@@ -136,6 +140,19 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         const count = load_card_database(text);
         cardDbLoaded = true;
         result(msg.id, count);
+        break;
+      }
+
+      case "buildAiCardSubset": {
+        if (!cardDbLoaded) {
+          error(
+            msg.id,
+            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
+          );
+          break;
+        }
+        // Returns the serialized AiCardSubsetResult tagged union as a string.
+        result(msg.id, build_ai_card_subset());
         break;
       }
 
@@ -352,6 +369,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "applySeatMutation": {
         const delta = apply_seat_mutation(msg.stateJson, msg.mutationJson);
         result(msg.id, delta ?? null);
+        break;
+      }
+
+      case "projectSeatView": {
+        const view = project_seat_view(msg.stateJson);
+        result(msg.id, view ?? null);
         break;
       }
 

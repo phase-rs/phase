@@ -20,7 +20,9 @@ This is the orchestrator for the phase.rs implementation pipeline. It runs as a 
 | 5. Review implementation | **Spawned `general-purpose` agent** invoking `/review-impl` | Independent reviewer, not the implementer |
 | 6. Commit | This thread | Owner of the working tree decides what gets staged |
 
-The orchestrator never authors content itself. Its only jobs are: spawn agents, route their output to the next step, loop review steps until clean, and own the commit.
+**Runtimes without subagent spawning (contributor environments — Codex CLI, plain LLM sessions).** The pipeline's value comes from context isolation between author and reviewer, not from the spawning mechanism. If your runtime cannot spawn agents, do NOT silently degrade to reviewing your own work in the same context — that is the failure mode this skill exists to prevent. Instead: run each step against a fresh context (new session/conversation per step when your runtime supports it), and for every review step hand the reviewer ONLY the artifact under review (the full plan, or the unified diff), the original task description, `CLAUDE.md`, and the relevant skill (`/review-engine-plan` or `/review-impl`) — never the conversation that produced it. If even that is impossible, say so explicitly in the final report and in the PR body under a "Validation Failures" heading; do not claim the review loop ran clean.
+
+The orchestrator never authors content itself. Its only jobs are: spawn agents, route their output to the next step, loop review steps until clean, own the commit, and gracefully cull each spawned agent once its output is consumed (send a `shutdown_request` and wait for the `shutdown_response` ack — spawned agents now carry `SendMessage`, so they cull gracefully instead of being pane-killed). The structured report each agent returns stays the authoritative step handoff; SendMessage is an additive progress/acknowledgment channel, not a replacement.
 
 ## Inputs
 
@@ -77,13 +79,13 @@ cargo fmt --all
 
 After a non-zero `tilt-wait.sh`, fetch details with `tilt logs <resource> --tail 50 --since 2m`. Distinguish your diff's errors from concurrent-agent errors per CLAUDE.md's "Defer to other active agents" guidance.
 
-Confirm the executor's two pre-commit gates came back clean (items 4 and 5 of its report): the **discriminating-test gate** (at least one test drives the real pipeline and would fail if the fix were reverted — AST-shape-only coverage does not count) and the **CR-annotation diff gate** (every added/changed `CR <n>` resolves in `docs/MagicCompRules.txt`). If the executor shipped only shape tests, or any CR annotation came back `UNVERIFIED`, loop back to Step 3 with that as a fix constraint — do not commit shape-only coverage or an unverified CR number.
+Confirm the executor's pre-commit artifacts came back complete: the **discriminating-test gate** (a complete production-path coverage map for every behavioral claim — changed seam/function, production entry point, test name, revert-failing assertion, and sibling/negative cases), the **maintainer-simulation matrix** (selected authority, binding time, storage, consuming function, invalidation behavior, hostile fixture rows, and serialized-surface impact for each claim/seam), and the **CR-annotation diff gate** (every added/changed `CR <n>` resolves in `docs/MagicCompRules.txt`). Do not accept generic "gate: pass" summaries. If any changed seam is unmapped, any maintainer-simulation row is missing or superficial, the executor shipped only shape tests for runtime semantics or coverage-support claims, parser work accepts Oracle text while dropping semantics without preserving an honest `Unimplemented`/coverage gap, a rules-bearing "this way" / "that source" / "chosen" / "cast using" / "from among them" / duration-bound "you" path relies on unproven global rescanning, or any CR annotation came back `UNVERIFIED`, loop back to Step 3 with that as a fix constraint — do not commit.
 
 ### Step 5 — Review implementation until clean (unbounded loop)
 
-Spawn a `general-purpose` agent and instruct it to invoke `/review-impl` against the implementation diff. The reviewer MUST also verify the originally reported bug or requirement is actually fixed via a discriminating runtime test — not just that the code looks clean (`feedback_review_impl_verify_bug_fixed`).
+Spawn a `general-purpose` agent and instruct it to invoke `/review-impl` against the implementation diff. The reviewer MUST also verify the originally reported bug or requirement is actually fixed via a discriminating runtime test — not just that the code looks clean (`feedback_review_impl_verify_bug_fixed`). The reviewer MUST audit the executor's production-path coverage map, maintainer-simulation matrix, and parser coverage-honesty statement; a clean review is invalid unless it explicitly confirms those artifacts are complete or returns findings.
 
-**Reviewer spawn inputs:** `git diff` of the in-flight branch against its base; the original task description; the reviewed plan.
+**Reviewer spawn inputs:** `git diff` of the in-flight branch against its base; the original task description; the reviewed plan; the executor's discriminating-test map and maintainer-simulation matrix.
 
 If the reviewer returns findings, spawn a **fresh** `engine-implementation-executor` agent to apply fixes:
 

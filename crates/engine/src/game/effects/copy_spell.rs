@@ -1,10 +1,14 @@
+use crate::game::ability_utils::build_resolved_from_def;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
-    ControllerRef, CopyRetargetPermission, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    CastingVariant, CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor,
+};
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -40,6 +44,19 @@ pub fn resolve(
     // `copier` override routes the copy to a player relative to the controller.
     let copy_controller = resolve_copy_controller(state, ability);
 
+    let (additional_modifications, starting_loyalty_from_casualty_sacrifice) = match &ability.effect
+    {
+        Effect::CopySpell {
+            additional_modifications,
+            starting_loyalty_from_casualty_sacrifice,
+            ..
+        } => (
+            additional_modifications.clone(),
+            *starting_loyalty_from_casualty_sacrifice,
+        ),
+        _ => (Vec::new(), false),
+    };
+
     // Allocate a new stack ID for the copy.
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -61,6 +78,12 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        apply_spell_copy_modifications(
+            &mut copy_obj,
+            &additional_modifications,
+            starting_loyalty_from_casualty_sacrifice,
+            top_entry.ability(),
+        );
         state.objects.insert(copy_id, copy_obj);
     }
 
@@ -69,11 +92,11 @@ pub fn resolve(
     //   - Reset additional_cost_paid + kickers_paid so any "if its [additional]
     //     cost was paid" triggers (Offspring ETB, Casualty) do not fire for the
     //     copy — the copy is placed on the stack, not cast.
-    //   - Update internal source_id references throughout the ability chain to
-    //     copy_id. A copy is a new object — every `SelfRef` in its chain
-    //     (including a nested `CopySpell` sub-ability, as in the Chain cycle)
-    //     must resolve to the copy, not the original spell, or a
-    //     second-generation copy would fail to find its source.
+    //   - Spell copies are new spell objects, so update internal source_id
+    //     references throughout the spell ability chain to copy_id. Ability
+    //     copies keep the original ability source (CR 707.10b), so their
+    //     `SelfRef` effects still refer to the permanent/source that produced
+    //     the copied ability.
     //   - Re-controller the resolved ability chain so opponent-controlled copies
     //     (Twincast, Gogo) resolve under the copying player.
     let copy_kind = {
@@ -90,19 +113,25 @@ pub fn resolve(
                 a.context.additional_cost_payment_count = 0;
                 a.context.kickers_paid.clear();
             }
+            StackEntryKind::Spell { ability: None, .. } => {}
             StackEntryKind::ActivatedAbility { ability, .. } => {
-                set_resolved_source_recursive(ability, copy_id);
+                preserve_ability_copy_source_recursive(ability);
             }
-            _ => {}
+            StackEntryKind::TriggeredAbility { ability, .. } => {
+                preserve_ability_copy_source_recursive(ability);
+            }
+            StackEntryKind::KeywordAction { .. } => {}
         }
         set_copied_kind_controller(&mut kind, copy_controller);
         kind
     };
 
-    // CR 707.10: The copy's source_id is its own id (not the original's).
+    // CR 707.10 / CR 707.10b: spell copies source themselves; ability copies
+    // have the same source as the original ability.
+    let copy_source_id = stack_entry_source_id_for_copy(&copy_kind, copy_id);
     let copy_entry = StackEntry {
         id: copy_id,
-        source_id: copy_id,
+        source_id: copy_source_id,
         controller: copy_controller,
         kind: copy_kind,
     };
@@ -193,6 +222,66 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 707.9 + CR 707.2: Stamp copy exceptions onto a spell copy's GameObject at
+/// creation (Ob Nixilis: "the copy isn't legendary and has starting loyalty X").
+fn apply_spell_copy_modifications(
+    copy_obj: &mut crate::game::game_object::GameObject,
+    modifications: &[ContinuousModification],
+    starting_loyalty_from_casualty_sacrifice: bool,
+    source_ability: Option<&ResolvedAbility>,
+) {
+    for modification in modifications {
+        match modification {
+            ContinuousModification::RemoveSupertype { supertype } => {
+                copy_obj.card_types.supertypes.retain(|s| s != supertype);
+                copy_obj
+                    .base_card_types
+                    .supertypes
+                    .retain(|s| s != supertype);
+            }
+            // CR 702.10a + CR 608.3f / CR 707.10f: "the copy gains haste" — a
+            // keyword granted to a spell copy must ride the copy through the
+            // stack→token transition. Stamp BOTH the live and base keyword store
+            // (mirroring RemoveSupertype), so it survives the layer reset when
+            // the copy resolves into a token permanent.
+            ContinuousModification::AddKeyword { keyword } => {
+                // allow-raw-authority: copy-construction — dedupe the detached stack-copy's OWN keyword store (characteristic snapshot, CR 707.10f), not an effective-keyword query.
+                if !copy_obj.keywords.contains(keyword) {
+                    copy_obj.keywords.push(keyword.clone());
+                }
+                // allow-raw-authority: same copy-construction snapshot — the base-store twin of the live stamp above.
+                if !copy_obj.base_keywords.contains(keyword) {
+                    copy_obj.base_keywords.push(keyword.clone());
+                }
+            }
+            // CR 603.1 + CR 604.1 + CR 608.3f / CR 707.10f: a triggered ability
+            // granted to the copy ("...\"At the beginning of the end step,
+            // sacrifice ~.\"") lands in the separate `trigger_definitions` store.
+            // Stamp base + live (mirroring blitz's dies-trigger seeding) so the
+            // trigger persists once the copy becomes a token permanent.
+            ContinuousModification::GrantTrigger { trigger } => {
+                std::sync::Arc::make_mut(&mut copy_obj.base_trigger_definitions)
+                    .push((**trigger).clone());
+                copy_obj.trigger_definitions.push((**trigger).clone());
+            }
+            _ => {}
+        }
+    }
+    if starting_loyalty_from_casualty_sacrifice {
+        if let Some(power) = source_ability
+            .and_then(|a| a.cost_paid_object.as_ref())
+            .and_then(|snap| snap.lki.power)
+        {
+            let loyalty = power.max(0) as u32;
+            // CR 306.5b: seed the entering face's printed loyalty, not live
+            // counters — stack objects lose counters at the zone-change boundary
+            // (CR 122.2), and ETB reads loyalty from the face values.
+            copy_obj.base_loyalty = Some(loyalty);
+            copy_obj.loyalty = Some(loyalty);
+        }
+    }
+}
+
 /// CR 603.2 + CR 707.10: Drain `SpellCopied` observers collected when the copy
 /// was announced. Deferred until the copy is fully formed — after any CR 707.10c
 /// retarget choice, or immediately when no retarget pause is armed.
@@ -254,6 +343,7 @@ pub(crate) fn open_copy_retarget_choice(
         effect_kind,
         effect_source_id: Some(effect_source_id),
         current_slot: 0,
+        paradigm_remaining_offers: None,
     };
 }
 
@@ -329,12 +419,18 @@ fn resolve_copier_player(
             .next(),
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
-        | ControllerRef::TriggeringPlayer => None,
+        | ControllerRef::TriggeringPlayer
+        // CR 303.4b: Enchanted-player scope cannot resolve a copier. Fail closed.
+        | ControllerRef::EnchantedPlayer
+        // CR 102.1: no card scopes "the active player copies this spell";
+        // fail closed (mirrors DefendingPlayer / EnchantedPlayer).
+        | ControllerRef::ActivePlayer => None,
     }
 }
 
@@ -390,7 +486,7 @@ pub(crate) fn copy_count_with_replacements(
             continue;
         }
         count = match def.quantity_modification {
-            Some(QuantityModification::Double) => count.saturating_mul(2),
+            Some(QuantityModification::Times { factor }) => count.saturating_mul(factor as usize),
             Some(QuantityModification::Half) => count / 2,
             Some(QuantityModification::Plus { value }) => count.saturating_add(value as usize),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value as usize),
@@ -423,6 +519,11 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
                     )
             })
             .cloned();
+    }
+    if let Effect::CopySpell { target, .. } = &ability.effect {
+        if references_tracked_set(target) {
+            return copy_source_from_tracked_set(state, ability, target);
+        }
     }
     if matches!(
         &ability.effect,
@@ -457,6 +558,90 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
         return Some(entry);
     }
     state.stack.last().cloned()
+}
+
+fn references_tracked_set(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(references_tracked_set)
+        }
+        TargetFilter::Not { filter } => references_tracked_set(filter),
+        _ => false,
+    }
+}
+
+fn tracked_set_id_from_filter(filter: &TargetFilter) -> Option<TrackedSetId> {
+    match filter {
+        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => Some(*id),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(tracked_set_id_from_filter)
+        }
+        TargetFilter::Not { filter } => tracked_set_id_from_filter(filter),
+        _ => None,
+    }
+}
+
+/// CR 707.10 + CR 702.153a (Isochron Scepter): `CopySpell { TrackedSet }` copies
+/// an imprinted card from exile, not the top of the stack.
+fn copy_source_from_tracked_set(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<StackEntry> {
+    if !references_tracked_set(target) {
+        return None;
+    }
+    let effective_filter =
+        crate::game::targeting::resolve_tracked_set_sentinel(state, target.clone());
+    let tracked_set_id = tracked_set_id_from_filter(&effective_filter)
+        .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+        .or(state.chain_tracked_set_id)?;
+    let ctx = FilterContext::from_ability(ability);
+    let source_id = state
+        .tracked_object_sets
+        .get(&tracked_set_id)?
+        .iter()
+        .copied()
+        .find(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.zone == Zone::Exile
+                    && matches_target_filter(state, *id, &effective_filter, &ctx)
+            })
+        })?;
+    stack_entry_from_exiled_spell_object(state, source_id, ability.controller)
+}
+
+fn stack_entry_from_exiled_spell_object(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Option<StackEntry> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Exile {
+        return None;
+    }
+    let card_id = obj.card_id;
+    let ability_def = spell_ability_definition(&obj.abilities)?;
+    let resolved = build_resolved_from_def(&ability_def, object_id, controller);
+    Some(StackEntry {
+        id: object_id,
+        source_id: object_id,
+        controller,
+        kind: StackEntryKind::Spell {
+            card_id,
+            ability: Some(resolved),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    })
+}
+
+fn spell_ability_definition(abilities: &[AbilityDefinition]) -> Option<AbilityDefinition> {
+    abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Spell)
+        .cloned()
 }
 
 /// CR 601.2i + CR 603.2 + CR 707.10: "Copy that spell" / `Trigger_ThatSpell`
@@ -552,6 +737,19 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
     }
 }
 
+fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
+    let source_id = ability.source_id;
+    set_resolved_source_recursive(ability, source_id);
+}
+
+fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> ObjectId {
+    match kind {
+        StackEntryKind::Spell { .. } | StackEntryKind::KeywordAction { .. } => copy_id,
+        StackEntryKind::ActivatedAbility { source_id, .. }
+        | StackEntryKind::TriggeredAbility { source_id, .. } => *source_id,
+    }
+}
+
 /// CR 707.10: Spell copies are not cast, so strip cast-origin metadata from
 /// the copied ability chain before the copy resolves.
 fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
@@ -569,11 +767,11 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef,
+        ControllerRef, CopyRetargetPermission, Effect, EffectScope, QuantityExpr, QuantityRef,
+        TapStateChange, TargetFilter, TargetRef,
     };
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
 
     /// Helper: push a spell onto the stack with a matching GameObject.
@@ -610,6 +808,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -631,6 +830,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -675,6 +876,106 @@ mod tests {
         }
     }
 
+    /// GATE #2 — CR 702.10a + CR 603.1 + CR 608.3f / CR 707.10f: a spell copy's
+    /// `additional_modifications` carrying `AddKeyword(Haste)` + `GrantTrigger`
+    /// (Choreographed Sparks / Nalfeshnee's "the copy gains haste and \"...\"")
+    /// must be stamped onto the copy's BOTH live and base keyword/trigger stores.
+    /// The base stores are what survive the layer reset when the copy resolves
+    /// into a token permanent, so this is the copy→token persistence proof.
+    /// Reverting the `apply_spell_copy_modifications` AddKeyword/GrantTrigger arms
+    /// drops the mods and fails every assertion below.
+    #[test]
+    fn spell_copy_applies_granted_haste_and_trigger_to_base_and_live_stores() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+        use crate::types::keywords::Keyword;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // A creature spell on the stack (a permanent spell — CR 608.3f).
+        let creature_spell = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Vanilla Beast",
+            creature_spell,
+            CastingVariant::Normal,
+        );
+
+        // The end-step sacrifice trigger the parser fold produces.
+        let sac_trigger =
+            TriggerDefinition::new(TriggerMode::Phase).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+            ));
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    },
+                    ContinuousModification::GrantTrigger {
+                        trigger: Box::new(sac_trigger.clone()),
+                    },
+                ],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack[1].id;
+        let copy_obj = state.objects.get(&copy_id).expect("copy object exists");
+
+        // Haste stamped into both live and base keyword stores (base survives the
+        // battlefield-entry layer reset).
+        assert!(
+            // allow-raw-authority: test — asserts the copy object's OWN live keyword store.
+            copy_obj.keywords.contains(&Keyword::Haste),
+            "the copy must gain haste (live store)"
+        );
+        assert!(
+            // allow-raw-authority: test — asserts the copy object's OWN base keyword store.
+            copy_obj.base_keywords.contains(&Keyword::Haste),
+            "the copy must gain haste in its BASE store so it survives copy→token"
+        );
+        // The end-step sacrifice trigger stamped into both stores.
+        assert!(
+            copy_obj
+                .trigger_definitions
+                .iter_all()
+                .any(|t| *t == sac_trigger),
+            "the copy must gain the granted end-step-sacrifice trigger (live store)"
+        );
+        assert!(
+            copy_obj.base_trigger_definitions.contains(&sac_trigger),
+            "the granted trigger must be in the BASE store so it survives copy→token"
+        );
+    }
+
     /// CR 702.144a + CR 707.10: a `CopySpell { copier: Some(Opponent) }` puts the
     /// copy onto the stack under an OPPONENT's control (Demonstrate's
     /// opponent-copy). In a two-player game the single opponent is chosen
@@ -689,6 +990,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -711,6 +1013,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: Some(ControllerRef::Opponent),
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -750,6 +1054,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -770,6 +1075,8 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: Some(ControllerRef::Opponent),
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(10),
@@ -780,6 +1087,8 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(10),
@@ -832,6 +1141,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -851,6 +1161,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -875,6 +1187,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -895,6 +1208,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: Some(ControllerRef::You),
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(20),
@@ -919,6 +1234,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -938,6 +1254,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: Some(ControllerRef::You),
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -958,6 +1276,8 @@ mod tests {
             target: TargetFilter::Any,
             retarget: CopyRetargetPermission::KeepOriginalTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         };
         let json_none = serde_json::to_string(&none).unwrap();
         assert!(
@@ -971,6 +1291,8 @@ mod tests {
             target: TargetFilter::Any,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             copier: Some(ControllerRef::Opponent),
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         };
         let json = serde_json::to_string(&with).unwrap();
         assert!(json.contains("copier"));
@@ -1019,6 +1341,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -1048,6 +1372,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -1068,6 +1394,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(50))],
             ObjectId(10),
@@ -1089,6 +1416,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -1116,6 +1445,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(50))],
             ObjectId(10),
@@ -1137,6 +1467,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -1192,6 +1524,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -1276,7 +1610,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(10),
@@ -1329,6 +1665,8 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(10), // source_id = original spell
@@ -1414,6 +1752,8 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -1489,6 +1829,8 @@ mod tests {
                 target: TargetFilter::TriggeringSource,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(20),
@@ -1564,6 +1906,8 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(10),
@@ -1605,6 +1949,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(10),
@@ -1626,6 +1971,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(20),
@@ -1675,6 +2022,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -1682,6 +2030,8 @@ mod tests {
                 target: TargetFilter::TriggeringSource,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             magus,
@@ -1708,6 +2058,86 @@ mod tests {
                 .any(|event| matches!(event, GameEvent::StackPushed { .. })),
             "copying an activated ability must push a stack entry"
         );
+    }
+
+    #[test]
+    fn copied_activated_ability_keeps_original_source_for_self_ref_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let basalt = ObjectId(10);
+        let rings = ObjectId(20);
+        state.objects.insert(
+            basalt,
+            GameObject::new(
+                basalt,
+                CardId(10),
+                PlayerId(0),
+                "Basalt Monolith".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.objects.get_mut(&basalt).unwrap().tapped = true;
+
+        let untap_basalt = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+            vec![],
+            basalt,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: ObjectId(100),
+            source_id: basalt,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: basalt,
+                ability: untap_basalt,
+            },
+        });
+        state.current_trigger_event = Some(GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: basalt,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
+        });
+
+        let copy_effect = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            rings,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_effect, &mut events).unwrap();
+
+        let copy_entry = state.stack.back().expect("copy entry");
+        assert_eq!(
+            copy_entry.source_id, basalt,
+            "CR 707.10b: copied activated abilities keep the original source"
+        );
+        assert_eq!(
+            copy_entry.ability().map(|ability| ability.source_id),
+            Some(basalt),
+            "SelfRef on the copied ability must still refer to Basalt Monolith"
+        );
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert!(
+            !state.objects.get(&basalt).unwrap().tapped,
+            "the copied untap ability must untap Basalt Monolith"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == basalt)
+        ));
     }
 
     #[test]
@@ -1742,6 +2172,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: source_creature,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -1749,6 +2180,8 @@ mod tests {
                 target: TargetFilter::TriggeringSource,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![TargetRef::Object(source_creature)],
             magus,
@@ -1778,9 +2211,12 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: Some(crate::types::ability::ControllerRef::You),
                     tag: None,
+                    kind: None,
                 },
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             gogo_id,
@@ -1803,9 +2239,12 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: Some(crate::types::ability::ControllerRef::You),
                     tag: None,
+                    kind: None,
                 },
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![TargetRef::Object(ObjectId(40))],
             other_id,
@@ -1898,6 +2337,8 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(10),
@@ -1992,6 +2433,8 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(10),
@@ -2099,6 +2542,7 @@ mod tests {
         let gogo_target_filter = TargetFilter::StackAbility {
             controller: Some(crate::types::ability::ControllerRef::You),
             tag: None,
+            kind: None,
         };
         assert_eq!(
             crate::game::targeting::find_legal_targets(
@@ -2115,6 +2559,8 @@ mod tests {
                 target: gogo_target_filter,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![TargetRef::Object(hope_trigger_entry)],
             gogo_id,
@@ -2190,6 +2636,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(800),
@@ -2372,6 +2820,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(60))],
             ObjectId(10),
@@ -2393,6 +2842,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(70),
@@ -2450,6 +2901,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
             vec![TargetRef::Object(ObjectId(60))],
             ObjectId(10),
@@ -2470,6 +2922,8 @@ mod tests {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
             },
             vec![],
             ObjectId(70),
@@ -2488,5 +2942,266 @@ mod tests {
             .filter(|o| o.is_token && o.zone == Zone::Stack)
             .count();
         assert_eq!(copies, 2);
+    }
+
+    /// CR 707.10 + CR 702.153a (issue #1159): Isochron Scepter copies an
+    /// imprinted instant from exile via `TrackedSet`, not the top of stack.
+    #[test]
+    fn copy_spell_tracked_set_copies_exiled_imprint_not_top_of_stack() {
+        let mut state = GameState::new_two_player(42);
+        let scepter_id = ObjectId(5);
+        let imprint_id = ObjectId(10);
+        let decoy_spell_id = ObjectId(20);
+
+        let imprint_spell = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        let mut imprint_obj = GameObject::new(
+            imprint_id,
+            CardId(1),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Exile,
+        );
+        imprint_obj.abilities = std::sync::Arc::new(vec![imprint_spell]);
+        state.objects.insert(imprint_id, imprint_obj);
+
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(0), vec![imprint_id]);
+
+        let decoy_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            decoy_spell_id,
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            decoy_spell_id,
+            CardId(2),
+            PlayerId(0),
+            "Divination",
+            decoy_ability,
+            CastingVariant::Normal,
+        );
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            scepter_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        assert_eq!(state.stack.len(), 2, "decoy plus imprint copy");
+        let copy_entry = state.stack.back().unwrap();
+        assert!(
+            copy_entry
+                .ability()
+                .is_some_and(|a| matches!(a.effect, Effect::DealDamage { .. })),
+            "copy must replicate the exiled imprint, not the decoy draw spell"
+        );
+    }
+
+    /// CR 707.10 + CR 702.153a: tracked-set copying is an exiled-card source
+    /// selector, so an invalid tracked object must not fall through to the top
+    /// stack entry and copy an unrelated spell.
+    #[test]
+    fn copy_spell_tracked_set_without_spell_ability_does_not_fallback_to_stack_top() {
+        let mut state = GameState::new_two_player(42);
+        let scepter_id = ObjectId(5);
+        let imprint_id = ObjectId(10);
+        let decoy_spell_id = ObjectId(20);
+
+        let non_spell_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mut imprint_obj = GameObject::new(
+            imprint_id,
+            CardId(1),
+            PlayerId(0),
+            "Activated Imprint".to_string(),
+            Zone::Exile,
+        );
+        imprint_obj.abilities = std::sync::Arc::new(vec![non_spell_ability]);
+        state.objects.insert(imprint_id, imprint_obj);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(0), vec![imprint_id]);
+
+        let decoy_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            decoy_spell_id,
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            decoy_spell_id,
+            CardId(2),
+            PlayerId(0),
+            "Divination",
+            decoy_ability,
+            CastingVariant::Normal,
+        );
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            scepter_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        assert!(
+            resolve(&mut state, &copy_ability, &mut events).is_err(),
+            "invalid tracked imprint must not copy the unrelated top stack spell"
+        );
+        assert_eq!(state.stack.len(), 1, "only the decoy spell remains");
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackPushed { .. })));
+    }
+
+    /// CR 702.153a + CR 306.5b: Ob Nixilis Casualty copies stamp starting
+    /// loyalty on the entering face (not live counters) so ETB seeding survives
+    /// the stack → battlefield zone change.
+    #[test]
+    fn casualty_planeswalker_copy_enters_with_sacrifice_power_loyalty() {
+        use crate::game::game_object::GameObject;
+        use crate::game::stack::resolve_top;
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::card_type::{CardType, CoreType, Supertype};
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::LKISnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let mut original = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        original.cost_paid_object = Some(CostPaidObjectSnapshot {
+            object_id: ObjectId(99),
+            lki: LKISnapshot {
+                name: "Sacrifice".to_string(),
+                token_image_ref: None,
+                power: Some(4),
+                toughness: Some(4),
+                base_power: Some(4),
+                base_toughness: Some(4),
+                mana_value: 4,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: vec![],
+                counters: Default::default(),
+                tapped: false,
+                is_suspected: false,
+            },
+        });
+
+        let mut obj = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Ob Nixilis, the Adversary".to_string(),
+            Zone::Stack,
+        );
+        obj.card_types = CardType {
+            supertypes: vec![Supertype::Legendary],
+            core_types: vec![CoreType::Planeswalker],
+            subtypes: vec!["Nixilis".to_string()],
+        };
+        obj.base_loyalty = Some(3);
+        obj.loyalty = Some(3);
+        state.objects.insert(ObjectId(10), obj);
+        state.stack.push_back(StackEntry {
+            id: ObjectId(10),
+            source_id: ObjectId(10),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(original),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: vec![ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+                starting_loyalty_from_casualty_sacrifice: true,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack.back().unwrap().id;
+        resolve_top(&mut state, &mut events);
+
+        let copy = state.objects.get(&copy_id).expect("copy permanent");
+        assert_eq!(copy.zone, Zone::Battlefield);
+        assert!(
+            !copy.card_types.supertypes.contains(&Supertype::Legendary),
+            "Casualty copy must not be legendary"
+        );
+        assert_eq!(copy.loyalty, Some(4));
+        assert_eq!(
+            copy.counters.get(&CounterType::Loyalty).copied(),
+            Some(4),
+            "ETB must seed loyalty counters from the stamped entering face"
+        );
     }
 }

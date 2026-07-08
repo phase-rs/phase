@@ -3,13 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BatchResolveResult, GameState } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory";
 import { dispatchResolveAll } from "../dispatch";
 
 // A Priority-on-the-storming-player WaitingFor (active player holds priority).
-const priorityWf = { type: "Priority", data: { player: 0 } } as unknown as BatchResolveResult["waitingFor"];
+const priorityWf: BatchResolveResult["waitingFor"] = buildPriorityWaitingFor();
 
 function stateWithStack(len: number): GameState {
-  return { waiting_for: priorityWf, stack: new Array(len).fill(0), turn: { active_player: 0 } } as unknown as GameState;
+  return buildGameState({
+    waiting_for: priorityWf,
+    stack: Array.from({ length: len }, (_, index) => buildStackEntry({ id: index + 1 })),
+  });
 }
 
 function chunk(itemsResolved: number, total: number): BatchResolveResult {
@@ -27,6 +31,7 @@ describe("dispatchResolveAll progress", () => {
     useGameStore.setState({
       gameState: stateWithStack(200),
       resolutionProgress: null,
+      isResolvingAll: false,
       // Capture every setResolutionProgress call for assertions.
       setResolutionProgress: (p) => {
         progressCalls.push(p);
@@ -70,7 +75,9 @@ describe("dispatchResolveAll progress", () => {
       } as never,
     });
 
-    await dispatchResolveAll(0, []);
+    // Non-empty AI seat list = the "ai"-mode shape; an empty list would route
+    // to the SetAutoPass fallback instead of the batch drain under test.
+    await dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
 
     // Three progress updates: total latched at 200 throughout; resolved
     // accumulates 80 -> 160 -> clamped 200.
@@ -82,10 +89,93 @@ describe("dispatchResolveAll progress", () => {
     // Final call clears progress.
     expect(progressCalls[progressCalls.length - 1]).toBeNull();
     expect(useGameStore.getState().resolutionProgress).toBeNull();
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
 
     // rAF yield fired between the instant chunks (the load-bearing repaint fix):
     // 2 yields between 3 chunks.
     expect(rafSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses responsive instant chunks for giant stacks and marks Resolve All busy", async () => {
+    useGameStore.setState({ gameState: stateWithStack(19192) });
+
+    const resolveAll = vi.fn<EngineResolveAll>(async (_requester, _aiSeats, maxResolutions) => {
+      expect(useGameStore.getState().isResolvingAll).toBe(true);
+      expect(maxResolutions).toBe(5_000);
+      return chunk(0, 19192);
+    });
+
+    useGameStore.setState({
+      adapter: {
+        resolveAll,
+        getState: vi.fn().mockResolvedValue(stateWithStack(0)),
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
+
+    expect(resolveAll).toHaveBeenCalledTimes(1);
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
+  });
+
+  it("falls back to the auto-yield when there are no AI seats to drive the drain, even with a batch-capable adapter (local hotseat, #4978)", async () => {
+    const resolveAll = vi.fn<EngineResolveAll>();
+    const submitAction = vi
+      .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()
+      .mockResolvedValue({ events: [] });
+
+    useGameStore.setState({
+      gameState: stateWithStack(3),
+      adapter: {
+        resolveAll,
+        submitAction,
+        getState: vi.fn().mockResolvedValue(stateWithStack(2)),
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, []);
+
+    // The batch drain needs an AI decider for every non-requester seat; with
+    // none, those seats are humans (local hotseat) and CR 117.4 entitles each
+    // to their own priority window — never engage the worker drain.
+    expect(resolveAll).not.toHaveBeenCalled();
+    expect(submitAction).toHaveBeenCalledWith(
+      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
+      0,
+    );
+  });
+
+  it("falls back to an engine-side UntilStackEmpty auto-pass when the adapter has no batch resolveAll (multiplayer)", async () => {
+    const submitAction = vi
+      .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()
+      .mockResolvedValue({ events: [] });
+
+    useGameStore.setState({
+      gameState: stateWithStack(3),
+      adapter: {
+        submitAction,
+        getState: vi.fn().mockResolvedValue(stateWithStack(2)),
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+      } as never,
+    });
+
+    // A NON-empty seat list pins the `!adapter.resolveAll` half of the
+    // fallback gate on its own: even when a caller claims AI seats exist
+    // (draft-match vs a human would, if its pairing were misread), a
+    // transport with no batch drain must still take the auto-yield path.
+    await dispatchResolveAll(0, [{ playerId: 1, difficulty: "Medium" }]);
+
+    // Arena semantics: yield THIS seat's priority windows via the engine's
+    // auto-pass session — never a host-driven batch drain over human seats.
+    expect(submitAction).toHaveBeenCalledTimes(1);
+    expect(submitAction).toHaveBeenCalledWith(
+      { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
+      0,
+    );
+    // The batch busy-state must stay untouched — there is no local drain loop.
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
   });
 });
 

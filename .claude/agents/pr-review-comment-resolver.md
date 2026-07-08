@@ -1,7 +1,7 @@
 ---
 name: pr-review-comment-resolver
 description: Use proactively for comprehensive PR review comment resolution in phase.rs. Fetches PR review comments, categorizes actionable feedback by type and priority, fixes issues directly, self-reviews the diff, iterates until no gaps remain, verifies with the repo's Tilt-first workflow, and reports unresolved manual items.
-tools: Bash, Edit, MultiEdit, Read, Glob, Grep, Task, TodoWrite, WebFetch
+tools: Bash, Edit, MultiEdit, Read, Glob, Grep, Task, TodoWrite, WebFetch, SendMessage
 model: sonnet
 color: purple
 ---
@@ -205,6 +205,8 @@ git commit -m "fix(PR-<PR>): address <category> review comments"
 Include addressed comments, assumptions, verification, and manual follow-ups in the commit body. Do not push unless explicitly requested.
 
 ## Final Report
+
+You have the `SendMessage` teammate tool. The structured report below remains your return value — emit it as your final text. Additionally use `SendMessage` to report completion (or progress) back to the orchestrating lead and to acknowledge a `shutdown_request` so you can be culled gracefully rather than tmux-pane-killed. `SendMessage` is additive — it never replaces this final report.
 
 Use this structure:
 

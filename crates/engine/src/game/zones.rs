@@ -18,6 +18,70 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
     obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
 }
 
+/// CR 704.5e + CR 707.10a: A copy of a card in any zone other than the stack or
+/// the battlefield ceases to exist as a state-based action. Distinct from the
+/// token rule (CR 704.5d): a copy of a card is legal on the battlefield
+/// (CR 707.10f makes a permanent copy a token there) and may change zones freely
+/// while alive, so this predicate is used ONLY by the cease-to-exist SBA — never
+/// by the CR 111.8 "can't change zones" movement guards, which apply to tokens only.
+pub(super) fn copy_of_card_outside_battlefield_and_stack(obj: &GameObject) -> bool {
+    obj.is_copy && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+}
+
+/// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
+/// into the `to` zone. The default (CR 122.2) is that counters cease to exist on
+/// any zone change. A `StaticMode::CountersPersistAcrossZones` ability overrides
+/// this for destination zones NOT in its `excluded_zones` list (Me, the
+/// Immortal; Skullbriar, the Walking Grave).
+///
+/// CR 113.6b: the ability is read from the object's state in the zone it is
+/// moving FROM. This function must be called while the object's `zone` field
+/// still holds the from-zone (before `move_to_zone` updates it), so the
+/// ability's `condition` gate is evaluated from the correct zone — matching
+/// Me's official ruling.
+///
+/// Two documented limitations, both arising because this helper reads
+/// `obj.static_definitions` directly (via `active_static_definitions`) rather
+/// than the layer-resolved view of the object:
+///
+/// 1. `active_zones`: `active_static_definitions` only enforces the
+///    `active_zones` membership gate for the Command zone
+///    (functioning_abilities.rs); for other zones the full `active_zones` gate
+///    lives in the layers pipeline (layers.rs), which this helper bypasses.
+///    Persistence here is therefore gated by `excluded_zones`, not by
+///    `active_zones`. This is sound for the shipping cards because their
+///    `excluded_zones` (Hand, Library) coincide with the inactive zones where
+///    objects never carry counters. A future `CountersPersistAcrossZones` card
+///    with a different active/excluded split would need an explicit
+///    `active_zones` check added here.
+///
+/// 2. Layer-6 ability removal (Humility / Yixlid Jailer's "Cards in graveyards
+///    lose all abilities"): `evaluate_layers` (layers.rs) only applies layers to
+///    battlefield + hand objects, so a graveyard/exile object's
+///    `static_definitions` never has its abilities stripped. With Yixlid Jailer
+///    in play and Me/Skullbriar in a graveyard bearing counters, this helper
+///    still observes the persistence static and would INCORRECTLY persist the
+///    counters on a graveyard→exile move — CR 113.6b reads the ability from the
+///    from-zone state, where it is rules-meant to be removed. This is not a
+///    regression (graveyard ability-removal is unmodeled engine-wide), but it is
+///    a known-wrong interaction on this new path, called out here explicitly
+///    rather than left implicit.
+///    TODO: once `evaluate_layers` applies Layer-6 ability removal to non-
+///    battlefield zones, re-check persistence against the layer-resolved view
+///    here so Humility/Yixlid correctly suppress it.
+fn counters_persist_on_move(state: &GameState, object_id: ObjectId, to: Zone) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
+        matches!(
+            &def.mode,
+            StaticMode::CountersPersistAcrossZones { excluded_zones }
+                if !excluded_zones.contains(&to)
+        )
+    })
+}
+
 /// CR 603.10a + CR 603.6e: Capture a snapshot of every attachment on `obj` at the
 /// moment of the zone change. The snapshot records each attachment's current
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
@@ -97,13 +161,18 @@ pub(crate) fn apply_zone_exit_cleanup(
         if let Some(obj) = state.objects.get(&object_id) {
             let lki = crate::types::game_state::LKISnapshot {
                 name: obj.name.clone(),
+                token_image_ref: obj.token_image_ref.clone(),
                 power: obj.power,
                 toughness: obj.toughness,
                 // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
                 // base-scope P/T look-back filters read the base, not current.
                 base_power: obj.base_power,
                 base_toughness: obj.base_toughness,
-                mana_value: obj.mana_cost.mana_value(),
+                // CR 202.3d + CR 709.4b: this LKI is captured on leaving the
+                // battlefield or exile (off the stack), so a split card records
+                // its combined mana value and colors (no-op for single-face and
+                // battlefield Rooms, which gate out).
+                mana_value: obj.effective_mana_value(),
                 controller: obj.controller,
                 owner: obj.owner,
                 // CR 400.7: Capture core types for "if it was a creature" patterns.
@@ -111,14 +180,29 @@ pub(crate) fn apply_zone_exit_cleanup(
                 subtypes: obj.card_types.subtypes.clone(),
                 supertypes: obj.card_types.supertypes.clone(),
                 keywords: obj.keywords.clone(),
-                colors: obj.color.clone(),
+                colors: obj.effective_colors(),
                 chosen_attributes: obj.chosen_attributes.clone(),
                 // CR 400.7: Capture counters for "if it had counters on it" patterns.
                 counters: obj.counters.clone(),
+                // CR 110.5 + CR 110.5d: Capture tap status AT zone exit. Once the
+                // object leaves the battlefield it is neither tapped nor untapped,
+                // so a use_lki rider ("if it was tapped", Brackish Blunder) reads
+                // this captured value instead of the live (now-absent) object.
+                tapped: obj.tapped,
+                // CR 701.60b: Capture suspected status at zone exit for
+                // "was suspected" look-back riders.
+                is_suspected: obj.is_suspected,
             };
             state.lki_cache.insert(object_id, lki);
         }
     }
+
+    // CR 122.2 + CR 113.6b: Decide counter persistence using the still-current
+    // from-zone object state, BEFORE taking the mutable borrow below (the helper
+    // needs `&state` to read the object's functioning statics). Me, the
+    // Immortal / Skullbriar keep their counters on a move to any zone outside
+    // their `excluded_zones`; every other object follows the CR 122.2 default.
+    let preserve_counters = counters_persist_on_move(state, object_id, to);
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
         // CR 400.7 + CR 614.1a: Rod of Absorption's stack-exile rider is a
@@ -321,8 +405,18 @@ pub(crate) fn apply_zone_exit_cleanup(
             obj_mut.phyrexian_life_paid = 0;
         }
 
-        // CR 122.2: Counters cease to exist when an object changes zones.
-        obj_mut.counters.clear();
+        // CR 122.2: Counters cease to exist when an object changes zones —
+        // UNLESS a `CountersPersistAcrossZones` ability (read from the from-zone
+        // state above) keeps them for this destination (CR 113.6b). Me, the
+        // Immortal / Skullbriar retain their counters on a move to any zone
+        // other than a player's hand or library.
+        if !preserve_counters {
+            obj_mut.counters.clear();
+        }
+        if !crate::game::stickers::zone_retains_stickers(to) && !obj_mut.stickers.is_empty() {
+            obj_mut.stickers.clear();
+            obj_mut.revert_layered_characteristics_to_base();
+        }
     }
 
     if from == Zone::Battlefield {
@@ -334,6 +428,11 @@ pub(crate) fn apply_zone_exit_cleanup(
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
+        // CR 506.4: A permanent is removed from combat when it leaves the
+        // battlefield. Combat role is snapshotted into the zone-change record
+        // (capture_combat_status) before this cleanup runs so look-back
+        // triggers still read attacking/blocking status (CR 603.10a).
+        super::effects::remove_from_combat::remove_object_from_combat(state, object_id);
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
         // CR 400.7 + CR 702.11b: The "has dealt damage since entering" sticky flag
@@ -344,12 +443,21 @@ pub(crate) fn apply_zone_exit_cleanup(
         state.objects_that_dealt_damage.remove(&object_id);
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
+        // CR 611.2b + CR 400.7: the captured source leaving play, OR the host
+        // leaving and re-entering as a new object (same storage ObjectId), ends
+        // the "can't become untapped for as long as you control [source]"
+        // continuous effect permanently — drop the gated def from base+live so
+        // it cannot revive on a same-ObjectId re-entry.
+        super::layers::prune_controller_controls_source_on_leave(state, object_id);
         // CR 613.1 + CR 400.7: Copy effects are pruned above, but layer-derived
         // characteristics (name, types, abilities) persist on the object until
         // explicitly reset. Revert to printed baseline so graveyard/exile objects
         // do not retain copied identity (Vesuva legend-rule sacrifice).
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.revert_layered_characteristics_to_base();
+            if crate::game::stickers::zone_retains_stickers(to) && !obj.stickers.is_empty() {
+                crate::game::stickers::rebuild_public_zone_stickers(obj);
+            }
         }
         for tapped in state.lands_tapped_for_mana.values_mut() {
             tapped.retain(|&id| id != object_id);
@@ -589,11 +697,26 @@ pub fn move_to_zone(
         state.trigger_index.remove(object_id);
     }
 
+    // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
+    // stamps battlefield entries only, so only draw a timestamp on a battlefield
+    // entry — a graveyard/exile/hand/library move must not burn one. Computed
+    // before the `get_mut` borrow because `next_timestamp` takes `&mut self` over
+    // the whole GameState.
+    let entry_timestamp = (to == Zone::Battlefield).then(|| state.next_timestamp());
+
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
     obj_mut.zone = to;
 
     if to == Zone::Battlefield {
-        obj_mut.reset_for_battlefield_entry(state.turn_number);
+        obj_mut.reset_for_battlefield_entry(
+            state.turn_number,
+            entry_timestamp.expect("battlefield entry draws a timestamp"),
+        );
+        // CR 400.7: capture the entrant's incarnation AFTER the battlefield-entry
+        // bump so a later leave + re-entry (same ObjectId, higher incarnation) is
+        // distinguishable from the original entrant when an ETB intervening-if is
+        // rechecked at resolution (CR 603.4 + CR 608.2h).
+        zone_change_record.entered_incarnation = Some(obj_mut.incarnation);
     }
 
     // CR 700.11: a permanent card was put into its owner's graveyard.
@@ -601,12 +724,25 @@ pub fn move_to_zone(
         record_descend_on_graveyard_arrival(state, object_id, owner);
     }
 
-    // Mark layers dirty when objects enter the battlefield, or the hand (so
-    // Lorehold-style hand-zone grants re-apply to newly-drawn cards).
-    // Exit-side dirty marking is handled by apply_zone_exit_cleanup.
-    // CR 702.94a + CR 400.3: hand-zone continuous effects require re-evaluation
-    // when a hand object appears or departs.
+    // CR 611.3a + CR 400.3: Hand size affects continuous effects gated on the
+    // controller's hand (Carnage Interpreter, issue #3991) and hand-zone
+    // effects (Miracle in hand). Re-evaluate layers on any hand entry/exit.
     if to == Zone::Battlefield || to == Zone::Hand || from == Zone::Hand {
+        crate::game::layers::mark_layers_full(state);
+    }
+
+    // CR 404 + CR 611.3a: A card entering or leaving a graveyard changes
+    // graveyard population, which can flip a static condition gated on graveyard
+    // membership (Tarmogoyf, Cairn Wanderer: "as long as a creature card with
+    // <keyword> is in a graveyard, ~ has <keyword>"). The incremental layer path
+    // is battlefield-entry scoped and the hand/battlefield mark above does not
+    // cover graveyard moves (mill, discard, a death that lands in the graveyard),
+    // so re-evaluate layers on a graveyard membership change — but only when such
+    // a static is actually live, so routine graveyard churn stays cheap when no
+    // graveyard-gated static exists.
+    if (to == Zone::Graveyard || from == Zone::Graveyard)
+        && crate::game::layers::any_active_static_reads_zone_membership(state, Zone::Graveyard)
+    {
         crate::game::layers::mark_layers_full(state);
     }
 
@@ -648,7 +784,9 @@ pub fn move_to_zone(
         super::trigger_index::reindex_object_triggers(state, object_id);
     }
 
-    super::restrictions::record_zone_change(state, zone_change_record.clone());
+    let turn_zone_change_index =
+        super::restrictions::record_zone_change(state, zone_change_record.clone());
+    zone_change_record.turn_zone_change_index = turn_zone_change_index;
 
     if let Some(old_target) = unattached_from {
         events.push(GameEvent::Unattached {
@@ -769,7 +907,9 @@ fn capture_linked_exile_snapshot(
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {
                     exiled_id: link.exiled_id,
                     owner: obj.owner,
-                    mana_value: obj.mana_cost.mana_value(),
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card records its combined mana value.
+                    mana_value: obj.effective_mana_value(),
                 })
             })
         })
@@ -912,7 +1052,9 @@ pub fn move_to_library_at_index(
         obj_mut.zone = Zone::Library;
     }
 
-    super::restrictions::record_zone_change(state, zone_change_record.clone());
+    let turn_zone_change_index =
+        super::restrictions::record_zone_change(state, zone_change_record.clone());
+    zone_change_record.turn_zone_change_index = turn_zone_change_index;
 
     if let Some(old_target) = unattached_from {
         events.push(GameEvent::Unattached {
@@ -964,6 +1106,18 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
                     .expect("owner exists")
                     .attraction_deck
                     .retain(|id| *id != object_id);
+            } else if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_contraption_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .contraption_deck
+                    .retain(|id| *id != object_id);
             } else {
                 state.command_zone.retain(|id| *id != object_id);
             }
@@ -1003,6 +1157,18 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
                     .find(|p| p.id == owner)
                     .expect("owner exists")
                     .attraction_deck
+                    .push_back(object_id);
+            } else if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_contraption_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .contraption_deck
                     .push_back(object_id);
             } else {
                 state.command_zone.push_back(object_id);
@@ -1082,13 +1248,44 @@ fn is_blocked_from_entering_battlefield(state: &GameState, obj: &GameObject) -> 
             }
         }
     }
+
+    // CR 611.2a + CR 614.1d: floating turn-scoped "cards can't enter the
+    // battlefield from <zone>" restrictions (Bad Wolf Bay's chaos ability) block
+    // entry the same way as the permanent CantEnterBattlefieldFrom static. The
+    // object is still in its origin zone here, so the filter's `InAnyZone` prop
+    // matches `obj.zone`.
+    for restriction in &state.restrictions {
+        if let crate::types::ability::GameRestriction::CantEnterBattlefieldFrom {
+            filter,
+            source,
+            ..
+        } = restriction
+        {
+            if super::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &super::filter::FilterContext::from_source(state, *source),
+            ) {
+                return true;
+            }
+        }
+    }
     false
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
+    };
     use crate::types::game_state::GameState;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
@@ -1122,6 +1319,273 @@ mod tests {
             Zone::Hand,
         );
         assert!(state.players[0].hand.contains(&id));
+    }
+
+    #[test]
+    fn hand_to_stack_marks_layers_dirty_for_hand_size_statics() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Hand,
+        );
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Stack, &mut events);
+
+        assert_eq!(state.objects[&id].zone, Zone::Stack);
+        assert!(
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full
+            ),
+            "hand-to-stack movement must mark layers dirty so hand-size-gated statics re-evaluate"
+        );
+    }
+
+    #[test]
+    fn hand_to_stack_with_hand_zone_static_dirties_layers() {
+        let mut state = setup();
+        let grant_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Instant)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Miracle(ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                }),
+            }]);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "HandGrantSource".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let src = state.objects.get_mut(&source).unwrap();
+            src.static_definitions.push(grant_static.clone());
+            src.base_static_definitions = Arc::new(vec![grant_static]);
+        }
+        let id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Hand,
+        );
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Stack, &mut events);
+
+        assert_eq!(state.objects[&id].zone, Zone::Stack);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "hand-zone continuous effects must re-evaluate when a hand card departs"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: PRODUCTION-PATH proof for the graveyard-gated static
+    /// invalidation seam (issue #4774). A flying creature card milled from the
+    /// library into a graveyard via the normal `move_to_zone` path — with NO
+    /// manual `mark_layers_full` — must dirty layers so Cairn Wanderer's "~ has
+    /// flying as long as a creature card with flying is in a graveyard"
+    /// re-evaluates and the grant applies. Library→Graveyard deliberately avoids
+    /// the pre-existing hand/battlefield invalidation, so this exercises the new
+    /// graveyard seam specifically; it fails on revert of that seam.
+    #[test]
+    fn graveyard_arrival_reevaluates_graveyard_gated_static_via_zone_move() {
+        let cairn_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(crate::types::ability::StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+                )),
+            });
+
+        let mut state = setup();
+        let cairn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cairn Wanderer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&cairn).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.static_definitions.push(cairn_static.clone());
+            o.base_static_definitions = Arc::new(vec![cairn_static]);
+        }
+
+        // A flying creature card in the library (to be milled into the graveyard).
+        let flyer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&flyer).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.base_keywords.push(Keyword::Flying);
+            o.keywords.push(Keyword::Flying);
+        }
+
+        // Baseline: empty graveyard → Cairn has no Flying; layers clean after eval.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.objects[&cairn].has_keyword(&Keyword::Flying));
+        assert!(!state.layers_dirty.is_dirty());
+
+        // PRODUCTION PATH: mill the flyer Library → Graveyard (no manual mark_full).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, flyer, Zone::Graveyard, &mut events);
+
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a flying creature card entering a graveyard must dirty layers for Cairn's graveyard-gated static"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&cairn].has_keyword(&Keyword::Flying),
+            "after the flyer reaches the graveyard via move_to_zone, Cairn gains Flying without a manual mark_full"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: the graveyard invalidation is SCOPED — with no active
+    /// graveyard-membership-gated static, a card entering a graveyard must NOT
+    /// dirty layers, so routine graveyard churn (deaths, mill, discard) stays
+    /// cheap and this is not a blanket per-graveyard-move full re-eval.
+    #[test]
+    fn graveyard_arrival_does_not_dirty_layers_without_graveyard_gated_static() {
+        let mut state = setup();
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&bear).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&card).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "graveyard arrival must NOT dirty layers when no graveyard-membership-gated static is active"
+        );
+    }
+
+    /// CR 404 + CR 611.3a: PRODUCTION-PATH proof that the graveyard invalidation
+    /// also covers COUNT/threshold gates, not just `IsPresent`. A static gated on
+    /// `QuantityComparison(GraveyardSize >= 1)` must re-evaluate when a card is
+    /// milled into the graveyard via the normal `move_to_zone` path (no manual
+    /// `mark_full`). Fails on revert of the `QuantityComparison`/`QuantityRef`
+    /// branch of the zone-read detector.
+    #[test]
+    fn graveyard_count_gated_static_reevaluates_via_zone_move() {
+        let count_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }])
+            .condition(crate::types::ability::StaticCondition::QuantityComparison {
+                lhs: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::GraveyardSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            });
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Graveyard-count source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&source).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.static_definitions.push(count_static.clone());
+            o.base_static_definitions = Arc::new(vec![count_static]);
+        }
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Milled card".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&card).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+        }
+
+        // Baseline: empty graveyard → count gate unsatisfied → no Trample.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(!state.objects[&source].has_keyword(&Keyword::Trample));
+        assert!(!state.layers_dirty.is_dirty());
+
+        // Production path: mill a card Library → Graveyard (no manual mark_full).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a card entering a graveyard must dirty layers for a GraveyardSize-count-gated static"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&source].has_keyword(&Keyword::Trample),
+            "with one card in the graveyard the count gate is satisfied and the grant applies"
+        );
     }
 
     #[test]
@@ -1312,6 +1776,105 @@ mod tests {
     /// rules say cease to exist. This test drives `move_to_zone` directly
     /// (not a shape assertion on the HashMap) and would have caught a
     /// regression in `apply_zone_exit_cleanup`'s counter-clear branch.
+    #[test]
+    fn issue_4223_combat_role_cleared_on_battlefield_exit() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Strangleroot Geist".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo {
+                object_id: attacker,
+                defending_player: PlayerId(1),
+                attack_target: AttackTarget::Player(PlayerId(1)),
+                blocked: true,
+                band_id: None,
+            }],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+
+        let mut events = Vec::new();
+        // Blocker dies (e.g. combat damage) — must leave combat before Undying
+        // returns the same ObjectId to the battlefield.
+        move_to_zone(&mut state, blocker, Zone::Graveyard, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            !combat.blocker_to_attacker.contains_key(&blocker),
+            "CR 506.4: blocker must be removed from combat when it leaves the battlefield"
+        );
+        assert!(
+            combat
+                .blocker_assignments
+                .get(&attacker)
+                .is_none_or(|blockers| !blockers.contains(&blocker)),
+            "dead blocker must not remain assigned to the attacker"
+        );
+
+        // Undying-style return: same ObjectId re-enters without combat role.
+        move_to_zone(&mut state, blocker, Zone::Battlefield, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            !combat.blocker_to_attacker.contains_key(&blocker),
+            "returned creature must not inherit stale blocking status (issue #4223)"
+        );
+
+        // Attacker dies and returns — must not remain an attacker either.
+        move_to_zone(&mut state, attacker, Zone::Graveyard, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            combat
+                .attackers
+                .iter()
+                .all(|info| info.object_id != attacker),
+            "CR 506.4: attacker must be removed from combat when it leaves the battlefield"
+        );
+        assert!(
+            !combat.blocker_assignments.contains_key(&attacker),
+            "CR 506.4: attacker-keyed block assignment must be removed on battlefield exit"
+        );
+        assert!(
+            combat
+                .blocker_to_attacker
+                .values()
+                .all(|attackers| !attackers.contains(&attacker)),
+            "CR 506.4: departed attacker must be pruned from every blocker's reverse lookup"
+        );
+        move_to_zone(&mut state, attacker, Zone::Battlefield, &mut events);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            combat
+                .attackers
+                .iter()
+                .all(|info| info.object_id != attacker),
+            "returned attacker must not inherit stale attacking status"
+        );
+        assert!(
+            !combat.blocker_assignments.contains_key(&attacker),
+            "returned attacker must not inherit stale attacker-keyed block assignment"
+        );
+        assert!(
+            !combat.blocker_to_attacker.contains_key(&attacker),
+            "returned attacker must not inherit stale blocking status via reverse lookup"
+        );
+    }
+
     #[test]
     fn counters_cease_to_exist_across_exile_and_return() {
         use crate::types::counter::CounterType;
@@ -1723,6 +2286,96 @@ mod tests {
         assert!(state.objects[&id].counters.is_empty());
     }
 
+    /// CR 122.2 + CR 113.6b building-block test for
+    /// `StaticMode::CountersPersistAcrossZones`: Me, the Immortal / Skullbriar
+    /// retain counters on a move to any zone OTHER than a player's hand or
+    /// library, and follow the normal CR 122.2 clear for hand/library moves.
+    /// Exercises the full destination matrix so the parameter (the
+    /// `excluded_zones` set), not a single card, is verified.
+    fn make_persistent_counter_object(state: &mut GameState, card: u64, zone: Zone) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            "Counter Keeper".to_string(),
+            zone,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 4);
+        // "Counters remain on ~ as it moves to any zone other than a player's
+        // hand or library." Functions in every zone the object can leave with
+        // counters on it (CR 113.6b).
+        obj.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CountersPersistAcrossZones {
+                    excluded_zones: vec![Zone::Hand, Zone::Library],
+                },
+            )
+            .affected(crate::types::ability::TargetFilter::SelfRef)
+            .active_zones(vec![
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Exile,
+                Zone::Command,
+                Zone::Stack,
+            ]),
+        );
+        id
+    }
+
+    #[test]
+    fn persistent_counters_survive_move_to_non_excluded_zones() {
+        for to in [Zone::Graveyard, Zone::Exile, Zone::Command] {
+            let mut state = setup();
+            let id = make_persistent_counter_object(&mut state, 1, Zone::Battlefield);
+            let mut events = Vec::new();
+            move_to_zone(&mut state, id, to, &mut events);
+            assert_eq!(
+                state.objects[&id]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Plus1Plus1)
+                    .copied(),
+                Some(4),
+                "counters should persist on move to {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_counters_cleared_on_move_to_excluded_hand_or_library() {
+        // CR 122.2: hand and library are in `excluded_zones`, so the default
+        // clear still applies (matches Me, the Immortal's ruling).
+        for to in [Zone::Hand, Zone::Library] {
+            let mut state = setup();
+            let id = make_persistent_counter_object(&mut state, 1, Zone::Battlefield);
+            let mut events = Vec::new();
+            move_to_zone(&mut state, id, to, &mut events);
+            assert!(
+                state.objects[&id].counters.is_empty(),
+                "counters should clear on move to excluded zone {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_counters_survive_graveyard_to_battlefield_reanimation() {
+        // CR 113.6b: the ability is read from the graveyard (from-zone) state;
+        // a reanimated Me/Skullbriar keeps its graveyard counters.
+        let mut state = setup();
+        let id = make_persistent_counter_object(&mut state, 1, Zone::Graveyard);
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1)
+                .copied(),
+            Some(4),
+            "graveyard→battlefield should preserve counters per the from-zone ability"
+        );
+    }
+
     #[test]
     fn face_down_instant_can_enter_battlefield() {
         let mut state = setup();
@@ -1875,6 +2528,81 @@ mod tests {
             state.objects[&dead].zone,
             Zone::Battlefield,
             "Phased-out Cage must not block ETB from graveyard"
+        );
+    }
+
+    #[test]
+    fn floating_cant_enter_from_exile_blocks_then_expires_at_cleanup() {
+        // CR 611.2a + CR 614.1d + CR 514.2 runtime proof for Bad Wolf Bay's
+        // chaos ability: a floating `GameRestriction::CantEnterBattlefieldFrom`
+        // (origin = exile) blocks an object from entering the battlefield from
+        // exile via the SAME `move_to_zone` -> `is_blocked_from_entering_
+        // battlefield` gate as the Grafdigger's Cage static, and the "this turn"
+        // restriction is pruned at cleanup so a later move succeeds.
+        use crate::types::ability::{
+            FilterProp, GameRestriction, RestrictionExpiry, TargetFilter, TypedFilter,
+        };
+
+        let mut state = setup();
+
+        // A creature card sitting in exile (Bad Wolf Bay exiled it at combat and
+        // wants it back at the next end step — but chaos ensued this turn).
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exiled Bear".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // "cards can't enter from exile this turn" — empty type_filters = any
+        // card; origin zone = exile.
+        state
+            .restrictions
+            .push(GameRestriction::CantEnterBattlefieldFrom {
+                source: crate::types::identifiers::ObjectId(0),
+                expiry: RestrictionExpiry::EndOfTurn,
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Exile],
+                    },
+                ])),
+            });
+
+        // With the restriction active the return is blocked — the object stays
+        // in exile. CR 614.1d: the "[objects] can't enter the battlefield"
+        // continuous effect is a replacement effect; CR 101.2: the "can't"
+        // effect takes precedence over the attempt to enter, so the creature
+        // remains in exile.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, exiled, Zone::Battlefield, &mut events);
+        assert_eq!(
+            state.objects[&exiled].zone,
+            Zone::Exile,
+            "floating CantEnterBattlefieldFrom must block ETB from exile"
+        );
+
+        // CR 514.2: the "this turn" restriction ends at cleanup.
+        let mut cleanup_events = Vec::new();
+        crate::game::turns::execute_cleanup(&mut state, &mut cleanup_events);
+        assert!(
+            state.restrictions.is_empty(),
+            "EndOfTurn restriction must be pruned at cleanup, got {:?}",
+            state.restrictions
+        );
+
+        // Now the same move succeeds — the gate no longer fires.
+        let mut events2 = Vec::new();
+        move_to_zone(&mut state, exiled, Zone::Battlefield, &mut events2);
+        assert_eq!(
+            state.objects[&exiled].zone,
+            Zone::Battlefield,
+            "after the restriction expires, ETB from exile must succeed"
         );
     }
 
@@ -2054,6 +2782,7 @@ mod tests {
             id,
             id,
             FaceDownProfile::vanilla_2_2(),
+            None,
             &mut events,
         )
         .unwrap();

@@ -276,6 +276,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             ));
         obj.trigger_definitions.push(trigger);
@@ -323,6 +324,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         ChaliceAvoidancePolicy.score(&ctx)
     }
@@ -449,6 +451,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let registry = PolicyRegistry::default();
         let fired = registry.verdicts(&ctx).into_iter().any(|(id, v)| {

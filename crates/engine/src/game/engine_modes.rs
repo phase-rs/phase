@@ -14,7 +14,7 @@ use super::engine::EngineError;
 use super::engine_stack;
 use super::restrictions;
 use super::triggers;
-use super::{casting, casting_costs};
+use super::{casting, casting_costs, priority};
 
 pub(super) fn handle_ability_mode_choice(
     state: &mut GameState,
@@ -329,6 +329,13 @@ fn handle_activated_mode_choice(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id,
+        // CR 606.2: `ability_index` is `Option<usize>` here; classify via the
+        // source ability cost when an index is present, else `Normal`. Using the
+        // index guard avoids the partial-move of `ability_cost` consumed above.
+        kind: ability_index.map_or(
+            crate::types::events::ActivatedAbilityKind::Normal,
+            |index| super::planeswalker::activated_ability_kind(state, source_id, index),
+        ),
     });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     if let Some(index) = ability_index {
@@ -336,8 +343,7 @@ fn handle_activated_mode_choice(
             state, source_id, index, player, events,
         );
     }
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::Priority { player })
 }
 
@@ -350,6 +356,66 @@ struct TriggeredModeChoice {
     /// labels build from the same state as the slots (Finding 4).
     mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
     indices: Vec<usize>,
+}
+
+/// CR 700.2b (override) + CR 701.9b (analogous): Complete a modal *triggered*
+/// ability whose `selection` is `Random` (Cult of Skaro "choose one at random")
+/// without prompting `modal.chooser`. The game draws the mode index/indices via
+/// `random_select_modal_indices` (seeded `state.rng`), then routes through the
+/// SAME finalization path the interactive controller-choice flow uses
+/// (`handle_triggered_mode_choice`) so target legality, per-mode labels, and
+/// stack-entry mutation stay identical.
+///
+/// Preconditions (the "push first, choose second" contract — see
+/// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
+/// stack entry is already pushed and tracked by `state.pending_trigger_entry`.
+///
+/// Returns `Ok(None)` when no mode can be chosen (CR 603.3c) so the caller drops
+/// the trigger exactly as the all-modes-unavailable branch does.
+pub(super) fn resolve_random_modal_trigger(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    modal: crate::types::ability::ModalChoice,
+    mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
+    unavailable_modes: &[usize],
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(indices) =
+        super::ability_utils::random_select_modal_indices(state, &modal, unavailable_modes)
+    else {
+        // CR 603.3c: No legal mode — drop the trigger. The interactive branches
+        // already removed the in-flight stack entry before this point, so just
+        // clear the cursor here.
+        if let Some(entry_id) = state.pending_trigger_entry.take() {
+            if state.stack.back().map(|e| e.id) == Some(entry_id) {
+                state.stack.pop_back();
+                state.stack_paid_facts.remove(&entry_id);
+                state.stack_trigger_event_batches.remove(&entry_id);
+            }
+        }
+        state.pending_trigger = None;
+        return Ok(None);
+    };
+
+    // CR 700.2: Track per-turn/per-game mode usage exactly as the interactive
+    // path does, then build the chained resolved ability for the drawn modes.
+    record_modal_mode_choices(state, source_id, &modal, &indices);
+    let resolved = build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
+
+    handle_triggered_mode_choice(
+        state,
+        TriggeredModeChoice {
+            player,
+            source_id,
+            resolved,
+            modal,
+            mode_abilities,
+            indices,
+        },
+        events,
+    )
+    .map(Some)
 }
 
 fn handle_triggered_mode_choice(
@@ -370,8 +436,26 @@ fn handle_triggered_mode_choice(
         .pending_trigger
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
+    // CR 603.2 + CR 109.4: Re-establish the trigger event context for
+    // the duration of mode-target computation. The modal was paused for mode
+    // choice (`trigger_dispatch`) AFTER restoring the context to its pre-dispatch
+    // value, so `state.current_trigger_event` is now unset. A chosen mode body
+    // whose target filter references the triggering event — e.g. Grenzo, Havoc
+    // Raiser's "Goad target creature that player controls" (`ControllerRef::
+    // TriggeringPlayer`) — must resolve "that player" to the damaged player while
+    // its legal targets are computed here, exactly as the dispatch-time
+    // `filter_modes_by_target_legality` did. Without this, the Goad slot finds no
+    // legal target and `build_target_slots_labelled` errors ("No legal targets
+    // available"). Restored on every return path below.
+    let trigger_event_batch = state.pending_trigger_event_batch.clone();
+    let mode_context_snapshot = triggers::push_trigger_event_context(
+        state,
+        trigger.trigger_event.as_ref(),
+        &trigger_event_batch,
+        trigger.subject_match_count,
+    );
     // CR 700.2 / CR 700.2b: slots + per-mode labels built together (Finding 4).
-    let (target_slots, mode_labels) = build_target_slots_labelled(
+    let (target_slots, mode_labels) = match build_target_slots_labelled(
         state,
         &mode_abilities,
         &indices,
@@ -381,7 +465,13 @@ fn handle_triggered_mode_choice(
         &resolved.context,
         // CR 107.1b: Triggered abilities don't use a chosen X here.
         None,
-    )?;
+    ) {
+        Ok(pair) => pair,
+        Err(err) => {
+            triggers::restore_trigger_event_context(state, mode_context_snapshot);
+            return Err(err);
+        }
+    };
     let target_constraints = target_constraints_from_modal(&modal);
 
     trigger.ability = resolved;
@@ -396,21 +486,33 @@ fn handle_triggered_mode_choice(
             trigger.ability.target_selection_mode,
             crate::types::ability::TargetSelectionMode::Random
         ) {
-            Some(random_select_targets_for_ability(
-                state,
-                &target_slots,
-                &target_constraints,
-            )?)
+            match random_select_targets_for_ability(state, &target_slots, &target_constraints) {
+                Ok(targets) => Some(targets),
+                Err(err) => {
+                    triggers::restore_trigger_event_context(state, mode_context_snapshot);
+                    return Err(err);
+                }
+            }
         } else {
-            auto_select_targets_for_ability(
+            match auto_select_targets_for_ability(
                 state,
                 &trigger.ability,
                 &target_slots,
                 &target_constraints,
-            )?
+            ) {
+                Ok(targets) => targets,
+                Err(err) => {
+                    triggers::restore_trigger_event_context(state, mode_context_snapshot);
+                    return Err(err);
+                }
+            }
         };
 
         if let Some(targets) = resolved_targets {
+            // Targets resolved; the trigger event context is no longer needed
+            // here — the resulting stack entry carries `trigger_event` for the
+            // resolution-time re-establishment in `stack::resolve_top`.
+            triggers::restore_trigger_event_context(state, mode_context_snapshot);
             let mut resolved = trigger.ability.clone();
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`
@@ -426,23 +528,40 @@ fn handle_triggered_mode_choice(
             // pause-time); mutate its ability with the resolved mode so the
             // target prompt operates on the chosen mode. `pending_trigger_entry`
             // stays set — construction continues through target selection.
-            triggers::mutate_pending_trigger_entry(state, &trigger.ability);
+            if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
+                // Unexpected dangling cursor: the entry is gone before the target
+                // prompt could open. Recover per CR 608.2b / CR 800.4a (a stack
+                // object that has left the stack does not resolve) — record the
+                // diagnostic, abandon, return priority (re-normalized next pass;
+                // CR 117.3b would give the active player).
+                triggers::restore_trigger_event_context(state, mode_context_snapshot);
+                triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+                return Ok(WaitingFor::Priority { player });
+            }
             let description = trigger.description.clone();
             state.pending_trigger = Some(trigger);
             let pending_trigger = state
                 .pending_trigger
                 .as_ref()
                 .expect("pending trigger stored before target selection");
-            let selection = begin_target_selection_for_ability(
+            let selection = match begin_target_selection_for_ability(
                 state,
                 &pending_trigger.ability,
                 &target_slots,
                 &target_constraints,
-            )?;
+            ) {
+                Ok(selection) => selection,
+                Err(err) => {
+                    triggers::restore_trigger_event_context(state, mode_context_snapshot);
+                    return Err(err);
+                }
+            };
             // CR 601.2c + CR 603.3d + CR 109.5: a targeted "of their choice" trigger
             // routes target selection to the scoped (upkeep) player, not the source's
             // controller. Magus is non-modal so this is defensive class-consistency
             // with the non-modal path in `begin_pending_trigger_target_selection`.
+            // Snapshot all `pending_trigger` reads into locals here so the trigger
+            // event context can be restored (needs `&mut state`) before returning.
             let player = pending_trigger
                 .ability
                 .target_chooser
@@ -455,8 +574,16 @@ fn handle_triggered_mode_choice(
                     )
                 })
                 .unwrap_or(player);
+            let trigger_controller = pending_trigger.controller;
+            let trigger_event = pending_trigger.trigger_event.clone();
+            // Slot legality computed; the pending `TriggerTargetSelection` carries
+            // `trigger_event` so the per-slot prompt re-establishes the context.
+            triggers::restore_trigger_event_context(state, mode_context_snapshot);
             return Ok(WaitingFor::TriggerTargetSelection {
                 player,
+                trigger_controller: Some(trigger_controller),
+                trigger_event,
+                trigger_events: state.pending_trigger_event_batch.clone(),
                 target_slots,
                 mode_labels,
                 target_constraints,
@@ -466,13 +593,24 @@ fn handle_triggered_mode_choice(
             });
         }
     } else {
+        // No target slots for the chosen mode; the trigger event context is no
+        // longer needed during construction (the resolver re-establishes it).
+        triggers::restore_trigger_event_context(state, mode_context_snapshot);
         // CR 603.3c: Mode chosen and no further input needed. Entry is already
         // on the stack (pushed at modal pause-time); mutate its ability with
         // the resolved mode and clear `pending_trigger_entry` so the resolver
         // may fire this entry.
-        triggers::finalize_pending_trigger_entry(state, &trigger.ability);
-        state.priority_passes.clear();
-        state.priority_pass_count = 0;
+        if !triggers::finalize_pending_trigger_entry(state, &trigger.ability) {
+            // Unexpected dangling cursor: the entry is no longer on the stack.
+            // Recover per CR 608.2b / CR 800.4a (a stack object that has left the
+            // stack does not resolve) — record the diagnostic, abandon, and hand
+            // back priority instead of panicking (re-normalized next pass; CR
+            // 117.3b would give the active player).
+            triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+            priority::clear_priority_passes(state);
+            return Ok(WaitingFor::Priority { player });
+        }
+        priority::clear_priority_passes(state);
         // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind this
         // modal trigger so each independent instance reaches the stack
         // (issue #416).

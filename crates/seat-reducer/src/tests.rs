@@ -97,9 +97,117 @@ fn to_view_strips_tokens() {
     let state = two_player_full();
     let view = state.to_view();
     assert_eq!(view.seats, state.seats);
+    assert!(view.team_info.is_empty());
     assert!(view.is_full);
     assert!(!view.game_started);
     // SeatView has no tokens field — the type itself enforces the invariant
+}
+
+#[test]
+fn non_team_formats_omit_team_metadata() {
+    for format in [FormatConfig::standard(), FormatConfig::commander()] {
+        let state = SeatState {
+            seats: vec![SeatKind::HostHuman, SeatKind::WaitingHuman],
+            tokens: vec!["host".to_string(), String::new()],
+            format,
+            game_started: false,
+        };
+        let view = state.to_view();
+        assert!(view.team_info.is_empty());
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json.get("teamInfo").is_none());
+    }
+}
+
+#[test]
+fn two_headed_giant_team_metadata_maps_seats() {
+    let state = SeatState {
+        seats: vec![
+            SeatKind::HostHuman,
+            SeatKind::WaitingHuman,
+            SeatKind::WaitingHuman,
+            SeatKind::WaitingHuman,
+        ],
+        tokens: vec![
+            "host".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ],
+        format: FormatConfig::two_headed_giant(),
+        game_started: false,
+    };
+    let view = state.to_view();
+    let team_indices: Vec<u8> = view
+        .team_info
+        .iter()
+        .map(|info| info.unwrap().team_index)
+        .collect();
+    let positions: Vec<u8> = view
+        .team_info
+        .iter()
+        .map(|info| info.unwrap().position_in_team)
+        .collect();
+
+    assert_eq!(team_indices, vec![0, 0, 1, 1]);
+    assert_eq!(positions, vec![0, 1, 0, 1]);
+}
+
+#[test]
+fn two_headed_giant_team_metadata_survives_seat_mutations() {
+    let mut state = SeatState {
+        seats: vec![
+            SeatKind::HostHuman,
+            SeatKind::WaitingHuman,
+            SeatKind::JoinedHuman,
+            SeatKind::WaitingHuman,
+        ],
+        tokens: vec![
+            "host".to_string(),
+            String::new(),
+            "guest".to_string(),
+            String::new(),
+        ],
+        format: FormatConfig::two_headed_giant(),
+        game_started: false,
+    };
+
+    crate::apply(
+        &mut state,
+        SeatMutation::SetKind {
+            seat_index: 1,
+            kind: SeatKind::Ai {
+                difficulty: phase_ai::config::AiDifficulty::Medium,
+                deck: DeckChoice::Random,
+            },
+        },
+        &ctx(),
+    )
+    .unwrap();
+
+    let view = state.to_view();
+    assert_eq!(
+        view.team_info,
+        vec![
+            Some(SeatTeamInfo {
+                team_index: 0,
+                position_in_team: 0
+            }),
+            Some(SeatTeamInfo {
+                team_index: 0,
+                position_in_team: 1
+            }),
+            Some(SeatTeamInfo {
+                team_index: 1,
+                position_in_team: 0
+            }),
+            Some(SeatTeamInfo {
+                team_index: 1,
+                position_in_team: 1
+            }),
+        ]
+    );
 }
 
 #[test]

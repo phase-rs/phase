@@ -292,7 +292,7 @@ pub(crate) fn replacement_modifies_p1p1_counters_parts(rep: &ReplacementDefiniti
         && matches!(
             rep.quantity_modification,
             Some(
-                QuantityModification::Double
+                QuantityModification::Times { .. }
                     | QuantityModification::Plus { .. }
                     | QuantityModification::Minus { .. }
             )
@@ -442,7 +442,7 @@ mod tests {
 
     fn doubler_replacement() -> ReplacementDefinition {
         let mut rep = ReplacementDefinition::new(ReplacementEvent::AddCounter);
-        rep.quantity_modification = Some(QuantityModification::Double);
+        rep.quantity_modification = Some(QuantityModification::DOUBLE);
         rep
     }
 

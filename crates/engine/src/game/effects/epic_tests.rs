@@ -29,6 +29,7 @@ fn deal_damage_to_target_player() -> Effect {
         amount: QuantityExpr::Fixed { value: 3 },
         target: TargetFilter::Player,
         damage_source: None,
+        excess: None,
     }
 }
 
@@ -307,6 +308,7 @@ fn targeted_epic_copy_opens_copy_retarget_choice() {
         effect_kind,
         effect_source_id,
         current_slot,
+        ..
     } = &state.waiting_for
     else {
         panic!("expected CopyRetarget, got {:?}", state.waiting_for);
@@ -379,6 +381,7 @@ fn legacy_copy_retarget_completion_uses_copy_as_default_source() {
         effect_kind: EffectKind::CopySpell,
         effect_source_id: None,
         current_slot: 0,
+        paradigm_remaining_offers: None,
     };
 
     let result = apply(&mut state, PlayerId(0), GameAction::KeepAllCopyTargets)

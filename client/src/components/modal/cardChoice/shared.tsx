@@ -68,20 +68,21 @@ export function canAssignDistinctCardTypes(
 
 export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"game">): string {
   const constraint = data.constraint;
+  const allowsPartialFind = searchChoiceAllowsPartialFind(data);
   const opts = { count: data.count };
 
   if (constraint?.type === "MatchEachFilter") {
-    return data.up_to
+    return allowsPartialFind
       ? t("cardChoice.search.subtitleMatchUpTo", opts)
       : t("cardChoice.search.subtitleMatchExact", opts);
   }
   if (constraint?.type === "DistinctQualities") {
-    return data.up_to
+    return allowsPartialFind
       ? t("cardChoice.search.subtitleDistinctUpTo", opts)
       : t("cardChoice.search.subtitleDistinctExact", opts);
   }
   if (constraint?.type === "TotalManaValue") {
-    return data.up_to
+    return allowsPartialFind
       ? t("cardChoice.search.subtitleManaValueUpTo", opts)
       : t("cardChoice.search.subtitleManaValueExact", opts);
   }
@@ -91,7 +92,22 @@ export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"g
     : t("cardChoice.search.subtitleExact", opts);
 }
 
-export type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield" | "Untap" | "Tap";
+export function searchChoiceAllowsPartialFind(data: SearchChoice["data"]): boolean {
+  return (
+    data.up_to === true ||
+    data.allows_partial_find === true ||
+    (data.constraint != null && data.constraint.type !== "None")
+  );
+}
+
+export type EffectZoneMode =
+  | "Sacrifice"
+  | "Topdeck"
+  | "Hand"
+  | "Battlefield"
+  | "Untap"
+  | "Tap"
+  | "Attach";
 
 export const EFFECT_ZONE_VISUAL_CLASSES: Record<
   EffectZoneMode,
@@ -127,6 +143,11 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
     overlay: "bg-amber-500/20",
     badge: "bg-amber-500/90",
   },
+  Attach: {
+    ring: "ring-violet-300/80",
+    overlay: "bg-violet-500/20",
+    badge: "bg-violet-500/90",
+  },
 };
 
 export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
@@ -136,6 +157,7 @@ export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
   Battlefield: "cardChoice.effectZone.labelPut",
   Untap: "cardChoice.effectZone.labelConfirm",
   Tap: "cardChoice.effectZone.labelConfirm",
+  Attach: "cardChoice.effectZone.labelAttach",
 };
 
 export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
@@ -145,4 +167,5 @@ export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
   Battlefield: "cardChoice.badges.put",
   Untap: "cardChoice.badges.untap",
   Tap: "cardChoice.badges.tap",
+  Attach: "cardChoice.badges.attach",
 };

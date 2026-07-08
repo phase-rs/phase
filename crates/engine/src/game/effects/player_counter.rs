@@ -298,6 +298,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             source_incarnation: None,
+            source_card_id: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -317,6 +318,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
+            amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
@@ -329,9 +331,11 @@ mod tests {
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
+            replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         }
     }
 
@@ -482,6 +486,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             source_incarnation: None,
+            source_card_id: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -501,6 +506,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
+            amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
@@ -513,9 +519,11 @@ mod tests {
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
+            replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
+            dig_found_nothing_for_parent_target: false,
         }
     }
 

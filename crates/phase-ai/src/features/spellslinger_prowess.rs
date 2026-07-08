@@ -372,8 +372,8 @@ mod tests {
     use super::*;
     use engine::game::DeckEntry;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, TargetFilter,
-        TriggerDefinition, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, DigSource, Effect, QuantityExpr,
+        TargetFilter, TriggerDefinition, TypedFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -421,6 +421,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -429,6 +430,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -440,6 +442,7 @@ mod tests {
                 ..TypedFilter::default()
             }),
             damage_source: None,
+            excess: None,
         }
     }
 
@@ -448,6 +451,8 @@ mod tests {
             target: TargetFilter::Any,
             retarget: engine::types::ability::CopyRetargetPermission::KeepOriginalTargets,
             copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
         }
     }
 
@@ -632,11 +637,13 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             destination: None,
             keep_count: Some(3),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }));
         let f = detect(&[entry(c, 4)]);
         assert_eq!(f.cantrip_count, 4);
@@ -653,11 +660,13 @@ mod tests {
             count: QuantityExpr::Fixed { value: 2 },
             destination: Some(Zone::Exile),
             keep_count: Some(2),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }));
         let f = detect(&[entry(c, 4)]);
         // impulse-dig should NOT count as cantrip

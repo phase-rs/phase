@@ -234,9 +234,13 @@ When a parser change affects the structure of `ParsedAbilities`:
 
 - [ ] **Update all three loading paths** — `from_mtgjson`, `from_export`, and `from_json_str` all need to understand the serialized `CardFace` shape. If you add/rename fields, verify both raw-MTGJSON loading and flattened export loading.
 
+- [ ] **Audit serialized consumers** — If the parser output shape changes an enum or serialized ability field, verify WASM JSON loading, server `from_export`, coverage-report loading, and any AI/community scenario fixtures that store the changed enum. Add serde defaults, fixture migrations, or compatibility only when deliberately needed.
+
 - [ ] **Regenerate card-data.json** — Always regenerate after parser changes.
 
 - [ ] **Update coverage report** — If the parser now recognizes previously-unimplemented patterns, coverage numbers will change. Run the report to verify improvements, and update any benign-keyword filtering in `coverage_report.rs` if the mismatch profile changed.
+
+- [ ] **Coverage honesty gate** — Accepting full Oracle text while dropping a rules-bearing rider, continuation, restriction, granted ability, replacement, or sentence tail is a hard failure unless an `Effect::unimplemented`, `TriggerMode::Unknown`, equivalent strict-failure marker, or unchanged unsupported coverage keeps the card red. Coverage improvements must list shipped semantics separately from residual unsupported riders.
 
 - [ ] **Update snapshot tests** — `crates/engine/tests/oracle_parser.rs` has `insta` snapshots that must be updated: `cargo insta review`.
 
@@ -270,6 +274,8 @@ Understanding how card data reaches the browser:
 | Adding synthesis but not calling from `build_oracle_face()` | Synthesis exists but never runs — abilities missing from export | Add the call |
 | Not updating TypeScript types | Frontend can't access new fields, or gets wrong types | Update `adapter/types.ts` |
 | Modifying `CardFace` but only testing `from_mtgjson` path | `from_export` and `from_json_str` may fail differently | Test all three paths |
+| Parser accepts a full sentence but drops a semantic rider | Coverage claims support while the engine enforces incomplete rules | Preserve an explicit Unimplemented/Unknown/strict-failure marker or implement the whole rules-bearing clause |
+| Parser enum shape changes but AI/community fixtures are stale | Serialized scenario loading fails even though parser/card-data checks pass | Migrate fixtures or provide an intentional compatibility path |
 | Coverage looks wrong after parser improvement | Manifest filtering or benign-keyword stripping hides real result | Check `coverage_report.rs` filtering logic |
 | Forgetting to regenerate after parser changes | Card-data.json contains stale parsed data | Run `oracle-gen` after any parser modification |
 | Parser produces new support but coverage still looks wrong | Manifest filtering or benign MTGJSON keyword mismatches hide the real result | Check `coverage_report.rs` filtering before assuming the parser regressed |

@@ -99,6 +99,17 @@ pub struct Player {
     /// CR 717.2: Supplementary Attraction deck (command zone), top at front.
     #[serde(default)]
     pub attraction_deck: im::Vector<ObjectId>,
+    /// Unstable Contraptions: supplementary Contraption deck (command zone),
+    /// top at front.
+    #[serde(default)]
+    pub contraption_deck: im::Vector<ObjectId>,
+    /// Unstable Contraptions: the sprocket currently holding the CRANK!
+    /// counter for this player. Starts on sprocket 3.
+    #[serde(default = "default_contraption_crank_sprocket")]
+    pub contraption_crank_sprocket: u8,
+    /// CR 123.2c: Revealed sticker sheets this player has access to this game.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sticker_sheets: Vec<String>,
 
     // Tracking
     pub has_drawn_this_turn: bool,
@@ -171,6 +182,15 @@ pub struct Player {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion: Option<CompanionInfo>,
 
+    /// CR 607.2d / CR 607.2m (by analogy): durable per-player chosen attributes —
+    /// the player-axis mirror of `GameObject.chosen_attributes`. Today this holds
+    /// the "last chose <anchor>" label (`ChosenAttribute::Label`) for planar
+    /// anchor choices (Two Streams Facility). Players never change zones, so a
+    /// per-player choice persists until it is reassigned (unlike an object's
+    /// `chosen_attributes`, which clears on zone change per CR 400.7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_attributes: Vec<crate::types::ability::ChosenAttribute>,
+
     // Derived fields (computed in WASM bridge, not persisted)
     #[serde(skip_deserializing, default)]
     pub can_look_at_top_of_library: bool,
@@ -195,6 +215,9 @@ impl Default for Player {
             hand: im::Vector::new(),
             graveyard: im::Vector::new(),
             attraction_deck: im::Vector::new(),
+            contraption_deck: im::Vector::new(),
+            contraption_crank_sprocket: default_contraption_crank_sprocket(),
+            sticker_sheets: Vec::new(),
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,
@@ -214,11 +237,16 @@ impl Default for Player {
             bending_types_this_turn: HashSet::new(),
             player_counters: HashMap::new(),
             companion: None,
+            chosen_attributes: Vec::new(),
             can_look_at_top_of_library: false,
             commander_color_identity: Vec::new(),
             status: PlayerStatus::Active,
         }
     }
+}
+
+fn default_contraption_crank_sprocket() -> u8 {
+    3
 }
 
 impl Player {

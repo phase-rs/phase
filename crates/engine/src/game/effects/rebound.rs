@@ -45,6 +45,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
             // turn.
             duration: Some(Duration::UntilEndOfTurn),
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
         },
         vec![TargetRef::Object(exiled_id)],
         exiled_id,
@@ -58,6 +59,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
         condition: crate::types::ability::DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: controller,
+            gate: crate::types::ability::TurnGate::None,
         },
         ability: inner,
         // CR 603.7d: controller of the delayed trigger is the player who
@@ -89,7 +91,7 @@ mod tests {
         let trig = &state.delayed_triggers[0];
         // CR 603.7b: keyed on the controller's next upkeep.
         match &trig.condition {
-            DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player } => {
+            DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player, .. } => {
                 assert_eq!(phase, &Phase::Upkeep);
                 assert_eq!(player, &controller);
             }
@@ -176,6 +178,7 @@ mod tests {
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![TargetRef::Object(exiled)],
             exiled,

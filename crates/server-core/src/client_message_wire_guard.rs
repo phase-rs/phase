@@ -54,7 +54,10 @@ pub fn guard_client_message_before_dispatch(
         } => guard_game_reconnect(game_code, player_token),
         ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
-        | ClientMessage::Concede => Ok(()),
+        | ClientMessage::Concede
+        | ClientMessage::RequestTakeback
+        | ClientMessage::RespondTakeback { .. }
+        | ClientMessage::CancelTakeback => Ok(()),
         ClientMessage::CreateGameWithSettings {
             deck,
             display_name,
@@ -62,6 +65,7 @@ pub fn guard_client_message_before_dispatch(
             timer_seconds,
             player_count,
             ai_seats,
+            format_config,
             room_name,
             host_peer_id,
             draft_metadata,
@@ -73,6 +77,7 @@ pub fn guard_client_message_before_dispatch(
                 password: password.as_deref(),
                 timer_seconds: *timer_seconds,
                 player_count: *player_count,
+                format_config: format_config.as_ref(),
                 room_name: room_name.as_deref(),
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
@@ -171,6 +176,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             password,
             timer_seconds,
             player_count,
+            format_config,
             room_name,
             host_peer_id,
             draft_metadata,
@@ -181,6 +187,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             password: password.as_deref(),
             timer_seconds: *timer_seconds,
             player_count: *player_count,
+            format_config: format_config.as_ref(),
             room_name: room_name.as_deref(),
             host_peer_id: host_peer_id.as_deref(),
             draft_metadata: draft_metadata.as_ref(),
@@ -234,7 +241,10 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::JoinDraftWithPassword { .. }
         | ClientMessage::DraftAction { .. }
         | ClientMessage::ReconnectDraft { .. }
-        | ClientMessage::SpectateDraft { .. } => Ok(()),
+        | ClientMessage::SpectateDraft { .. }
+        | ClientMessage::RequestTakeback
+        | ClientMessage::RespondTakeback { .. }
+        | ClientMessage::CancelTakeback => Ok(()),
     }
 }
 

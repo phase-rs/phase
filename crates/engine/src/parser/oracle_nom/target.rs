@@ -6,14 +6,16 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
-use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::combinator::{map, not, opt, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
-use crate::parser::oracle_util::{parse_subtype, OUTLAW_SUBTYPES};
-use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
+use crate::types::ability::{
+    Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+};
 use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -30,8 +32,15 @@ pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     // Optional supertype prefix ("legendary", "basic", "snow")
     let (rest, supertype_opt) = opt(parse_supertype_prefix).parse(rest)?;
 
-    // Optional color prefix
-    let (rest, color_opt) = opt(parse_color_prefix).parse(rest)?;
+    // Optional color-quality prefix ("colorless ", "monocolored ", "multicolored ")
+    let (rest, color_quality_opt) = opt(parse_color_quality_prefix).parse(rest)?;
+
+    // Optional WUBRG color prefix (mutually exclusive with color-quality)
+    let (rest, color_opt) = if color_quality_opt.is_some() {
+        (rest, None)
+    } else {
+        opt(parse_color_prefix).parse(rest)?
+    };
 
     // Core type(s) joined by " or "
     let (rest, types) = parse_type_list(rest)?;
@@ -40,6 +49,12 @@ pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, controller) = opt(preceded(space1, parse_controller_suffix)).parse(rest)?;
 
     let mut filter = build_type_filter(types, color_opt, supertype_opt, controller);
+
+    if let Some(prop) = color_quality_opt {
+        if let TargetFilter::Typed(ref mut tf) = filter {
+            tf.properties.push(prop);
+        }
+    }
 
     // Wrap in Non if "non" prefix was present
     if non_prefix.is_some() {
@@ -77,16 +92,21 @@ fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
-/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow")
-/// without consuming any trailing boundary. Shared building block for both the
-/// adjective-prefix form (`parse_supertype_prefix`, word + space) and trailing
-/// relative-clause forms ("that aren't legendary", where the word is at
-/// end-of-string). Callers that need a boundary apply their own check.
+/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow",
+/// "world", "ongoing") without consuming any trailing boundary. Shared building
+/// block for both the adjective-prefix form (`parse_supertype_prefix`, word +
+/// space) and trailing relative-clause forms ("that aren't legendary", where
+/// the word is at end-of-string). Callers that need a boundary apply their own
+/// check. Covers the full CR 205.4a set the engine `Supertype` enum models
+/// (Host is set-supplemental / not CR 205.4a and is excluded here). None of the
+/// five words is a prefix of another, so `alt` ordering is boundary-safe.
 pub fn parse_supertype_word(input: &str) -> OracleResult<'_, Supertype> {
     alt((
         value(Supertype::Legendary, tag("legendary")),
         value(Supertype::Basic, tag("basic")),
         value(Supertype::Snow, tag("snow")),
+        value(Supertype::World, tag("world")),
+        value(Supertype::Ongoing, tag("ongoing")),
     ))
     .parse(input)
 }
@@ -96,6 +116,35 @@ pub fn parse_supertype_prefix(input: &str) -> OracleResult<'_, Supertype> {
     let (rest, st) = parse_supertype_word(input)?;
     let (rest, _) = space1.parse(rest)?;
     Ok((rest, st))
+}
+
+/// Parse color-quality adjective prefixes: "colorless ", "monocolored ",
+/// "multicolored ".
+fn parse_color_quality_prefix(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+            tag("colorless "),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            },
+            tag("monocolored "),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            },
+            tag("multicolored "),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Parse a color word followed by a space, consuming both.
@@ -118,6 +167,11 @@ pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
         value(ControllerRef::Opponent, tag("an opponent controls")),
         value(ControllerRef::Opponent, tag("your opponents control")),
         value(ControllerRef::TargetPlayer, tag("target player controls")),
+        // CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained target-player scope.
+        value(
+            ControllerRef::TargetOpponent,
+            tag("target opponent controls"),
+        ),
     ))
     .parse(input)
 }
@@ -163,6 +217,10 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         ("planeswalker", TypeFilter::Planeswalker),
         ("lands", TypeFilter::Land),
         ("land", TypeFilter::Land),
+        // Plural before singular (longest-match-first): the word-boundary guard
+        // rejects "battle" + trailing 's', and BATTLE_SUBTYPES has no "Battle"
+        // entry, so the plural must be an explicit head-noun word here.
+        ("battles", TypeFilter::Battle),
         ("battle", TypeFilter::Battle),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
@@ -184,7 +242,15 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
 
     for &(word, ref tf) in TYPE_WORDS {
         if let Some(rest) = input.strip_prefix(word) {
-            return Ok((rest, tf.clone()));
+            // Word-boundary guard (mirrors parse_outlaw_type below and
+            // parse_subtype_entry in oracle_util.rs): a head-noun type word must
+            // be followed by end-of-input or a non-alphanumeric char. Without
+            // this, a TYPE_WORD that prefixes a longer subtype shadows it — e.g.
+            // "land" eating "lander" or "spell" eating "spellshaper" instead of
+            // falling through to the boundary-guarded subtype table.
+            if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric()) {
+                return Ok((rest, tf.clone()));
+            }
         }
     }
 
@@ -227,8 +293,15 @@ fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
 /// "this artifact".
 ///
 /// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
+///
+/// CR 201.5a: a granted body's by-name reference to its GRANTING object is
+/// masked to [`GRANTING_SELF_PLACEHOLDER`] by `normalize_card_name_refs` and
+/// recognized here (first alt) as `TargetFilter::GrantingObject` — distinct
+/// from the host `SelfRef`. This single edit covers the effect-target channel
+/// (`parse_target` → here) for "Return/Destroy/gains control of <self>".
 pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
+        parse_granting_object_ref,
         value(TargetFilter::SelfRef, tag("~")),
         parse_it_self_reference,
         // CR 201.5: "itself" is a self-reference to the object the ability is on.
@@ -238,9 +311,33 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this spell")),
         value(TargetFilter::SelfRef, tag("this card")),
         value(TargetFilter::SelfRef, tag("this enchantment")),
+        value(TargetFilter::SelfRef, tag("this aura")),
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
         value(TargetFilter::SelfRef, tag("this attraction")),
+    ))
+    .parse(input)
+}
+
+/// CR 201.5a: Single recognition authority for the granting-object by-name
+/// self-reference placeholder emitted by the quote masker in
+/// `normalize_card_name_refs`. Used as the first alt in both
+/// [`parse_self_reference`] (effect-target channel) and
+/// [`parse_cost_self_reference`] (cost channel).
+pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::GrantingObject, tag(GRANTING_SELF_PLACEHOLDER)).parse(input)
+}
+
+/// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
+/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand").
+/// Recognizes the granter placeholder → `GrantingObject` and the host tokens
+/// (`~`, "cardname") → `SelfRef`, in one authority so every cost site routes
+/// through the same logic instead of an ad-hoc per-site `tag("~")` copy.
+pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        parse_granting_object_ref,
+        value(TargetFilter::SelfRef, tag("~")),
+        value(TargetFilter::SelfRef, tag("cardname")),
     ))
     .parse(input)
 }
@@ -276,6 +373,20 @@ fn parse_itself_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
 
 /// Parse an event context reference from Oracle text.
 ///
+/// CR 506.2 + CR 603.7c: "that attacking player" — the player who declared
+/// attackers in the triggering `AttackersDeclared` event (Ellie, Brick Master;
+/// Breena, the Demagogue).
+pub fn parse_attacking_player_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::TriggeringPlayer, tag("that attacking player")).parse(input)
+}
+
+/// CR 506.3d + CR 508.1: "that opponent" inside an attack trigger's effect —
+/// the opponent being attacked in the triggering event (token enters attacking
+/// that opponent; Adeline / Ellie class).
+pub fn parse_attacked_opponent_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(TargetFilter::DefendingPlayer, tag("that opponent")).parse(input)
+}
+
 /// Matches "that spell", "that player", "that creature", "defending player",
 /// "the defending player", "that card", "that permanent".
 /// Returns a `TargetFilter` for the referenced entity.
@@ -292,12 +403,34 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         ),
         value(TargetFilter::TriggeringSource, tag("that spell")),
         value(TargetFilter::TriggeringSource, tag("that creature")),
-        value(TargetFilter::TriggeringSource, tag("that permanent")),
+        value(
+            TargetFilter::TriggeringSource,
+            terminated(
+                tag("that permanent"),
+                not(preceded(
+                    tag(" "),
+                    alt((tag("or player"), tag("or a player"))),
+                )),
+            ),
+        ),
         value(TargetFilter::TriggeringSource, tag("that card")),
+        parse_attacking_player_event_ref,
+        // CR 506.3d: "that opponent" before the shorter "that player" arm.
+        parse_attacked_opponent_event_ref,
         value(TargetFilter::TriggeringPlayer, tag("that player")),
         // CR 506.3d: "defending player" / "the defending player"
         value(TargetFilter::DefendingPlayer, tag("the defending player")),
         value(TargetFilter::DefendingPlayer, tag("defending player")),
+        // CR 603.7c + CR 109.4: "the attacking player" on a DamageReceived
+        // trigger — the controller of the creature that dealt combat damage
+        // (Contested Game Ball). Distinct from "that attacking player" (an
+        // attack-declared referent → TriggeringPlayer): the wanted player here
+        // is the controller of the triggering damage *source*, not the
+        // damaged player. Ordered before the bare "the player" arm.
+        value(
+            TargetFilter::TriggeringSourceController,
+            tag("the attacking player"),
+        ),
         // CR 608.2k: "the player" in trigger context is synonymous with
         // "that player" — anaphoric reference to the triggering player.
         // Ordered after "the defending player" so longest-match-first is
@@ -354,6 +487,7 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
                     TargetFilter::StackAbility {
                         controller: None,
                         tag: None,
+                        kind: None,
                     },
                 ],
             },
@@ -373,28 +507,36 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
 
 /// Parse a single ability-kind leg of a stack-object phrase.
 ///
-/// CR 113.3b/113.3c: the only ability kinds that exist on the stack are
-/// activated and triggered abilities; both denote the same legal set (any
-/// ability on the stack), so every spelling maps to one
-/// `StackAbility { controller: None, tag: None }`. Longest-match-first so the
-/// comma/`or`-joined two-word forms are consumed whole before the shorter
-/// single-word alternates.
+/// CR 113.3b/113.3c: activated and triggered abilities are distinct stack
+/// objects; a lone "triggered ability" or "activated ability" leg narrows
+/// `kind`, while combined phrases accept both.
 fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
-    value(
-        TargetFilter::StackAbility {
+    alt((
+        map(tag("triggered ability"), |_| TargetFilter::StackAbility {
             controller: None,
             tag: None,
-        },
-        alt((
-            tag("activated ability, triggered ability"),
-            tag("activated or triggered ability"),
-            tag("triggered or activated ability"),
-            tag("triggered ability or activated ability"),
-            tag("activated ability or triggered ability"),
-            tag("triggered ability"),
-            tag("activated ability"),
-        )),
-    )
+            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
+        }),
+        map(tag("activated ability"), |_| TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(crate::types::ability::StackAbilityKind::Activated),
+        }),
+        map(
+            alt((
+                tag("activated ability, triggered ability"),
+                tag("activated or triggered ability"),
+                tag("triggered or activated ability"),
+                tag("triggered ability or activated ability"),
+                tag("activated ability or triggered ability"),
+            )),
+            |_| TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+        ),
+    ))
     .parse(input)
 }
 
@@ -439,7 +581,7 @@ fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
 fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter> {
     enum StackLeg {
         Spell(TargetFilter),
-        Ability,
+        Ability(TargetFilter),
     }
 
     fn parse_leg(input: &str) -> OracleResult<'_, StackLeg> {
@@ -448,25 +590,50 @@ fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter
         // spell phrase, so the two leg kinds are disjoint and the order is for
         // determinism only.
         alt((
-            map(parse_ability_kind_leg, |_| StackLeg::Ability),
+            map(parse_ability_kind_leg, StackLeg::Ability),
             map(parse_restricted_spell, StackLeg::Spell),
         ))
         .parse(input)
     }
 
+    fn merge_ability_kind(
+        existing: Option<crate::types::ability::StackAbilityKind>,
+        incoming: Option<crate::types::ability::StackAbilityKind>,
+    ) -> Option<crate::types::ability::StackAbilityKind> {
+        match (existing, incoming) {
+            (None, k) | (k, None) => k,
+            (Some(a), Some(b)) if a == b => Some(a),
+            _ => None,
+        }
+    }
+
     // Source-encounter-ordered assembly. Ability legs fold into the first
     // ability slot: push a single `StackAbility` marker at the position it is
-    // first seen, and ignore later ability legs (they denote the same set).
-    fn push_leg(filters: &mut Vec<TargetFilter>, saw_ability: &mut bool, leg: StackLeg) {
+    // first seen, and merge later ability legs (widening `kind` when mixed).
+    fn push_leg(
+        filters: &mut Vec<TargetFilter>,
+        ability_slot: &mut Option<usize>,
+        ability_kind: &mut Option<crate::types::ability::StackAbilityKind>,
+        leg: StackLeg,
+    ) {
         match leg {
             StackLeg::Spell(f) => filters.push(f),
-            StackLeg::Ability => {
-                if !*saw_ability {
-                    *saw_ability = true;
-                    filters.push(TargetFilter::StackAbility {
-                        controller: None,
-                        tag: None,
-                    });
+            StackLeg::Ability(ability_filter) => {
+                let TargetFilter::StackAbility { kind, .. } = ability_filter else {
+                    return;
+                };
+                if let Some(slot) = ability_slot {
+                    *ability_kind = merge_ability_kind(*ability_kind, kind);
+                    if let TargetFilter::StackAbility {
+                        kind: slot_kind, ..
+                    } = &mut filters[*slot]
+                    {
+                        *slot_kind = *ability_kind;
+                    }
+                } else {
+                    *ability_slot = Some(filters.len());
+                    *ability_kind = kind;
+                    filters.push(ability_filter);
                 }
             }
         }
@@ -475,8 +642,9 @@ fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter
     // First leg is mandatory.
     let (mut rest, first) = parse_leg(input)?;
     let mut filters: Vec<TargetFilter> = Vec::new();
-    let mut saw_ability = false;
-    push_leg(&mut filters, &mut saw_ability, first);
+    let mut ability_slot = None;
+    let mut ability_kind = None;
+    push_leg(&mut filters, &mut ability_slot, &mut ability_kind, first);
 
     // Subsequent legs joined by a list connector. Longest-match-first so
     // ", or " / ", and/or " win over the bare ", " separator.
@@ -491,7 +659,7 @@ fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter
         match opt(preceded(connector, parse_leg)).parse(rest)? {
             (next, Some(leg)) => {
                 rest = next;
-                push_leg(&mut filters, &mut saw_ability, leg);
+                push_leg(&mut filters, &mut ability_slot, &mut ability_kind, leg);
             }
             (next, None) => {
                 rest = next;
@@ -502,7 +670,7 @@ fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter
 
     // CONTRACT: an ability disjunct is required — pure-spell phrases go to
     // `parse_target` so the existing single-leg contracts hold.
-    if !saw_ability {
+    if ability_slot.is_none() {
         return Err(oracle_err(input));
     }
 
@@ -735,6 +903,30 @@ mod tests {
         }
     }
 
+    /// CR 205.4a: the shared supertype-word recognizer is the building block for
+    /// every CR 205.4a supertype the engine `Supertype` enum models. World and
+    /// Ongoing were previously missing, so the "general" supertype-grant path
+    /// silently dropped them; this pins that the recognizer now maps all five
+    /// (Host is set-supplemental and intentionally excluded). None of the five
+    /// words is a prefix of another, so the `alt` order is boundary-safe.
+    #[test]
+    fn test_parse_supertype_word_covers_world_and_ongoing() {
+        assert_eq!(parse_supertype_word("world").unwrap().1, Supertype::World);
+        assert_eq!(
+            parse_supertype_word("ongoing").unwrap().1,
+            Supertype::Ongoing
+        );
+        // pre-existing arms remain recognized (no regression).
+        assert_eq!(
+            parse_supertype_word("legendary").unwrap().1,
+            Supertype::Legendary
+        );
+        assert_eq!(parse_supertype_word("basic").unwrap().1, Supertype::Basic);
+        assert_eq!(parse_supertype_word("snow").unwrap().1, Supertype::Snow);
+        // Host is NOT a CR 205.4a word here, so the recognizer must reject it.
+        assert!(parse_supertype_word("host").is_err());
+    }
+
     #[test]
     fn test_parse_type_phrase_nonland() {
         // "nonland" → Non(Land) with trailing text unconsumed
@@ -834,6 +1026,23 @@ mod tests {
         let (rest6, f6) = parse_event_context_ref("the defending player gains").unwrap();
         assert_eq!(rest6, " gains");
         assert_eq!(f6, TargetFilter::DefendingPlayer);
+
+        // CR 506.2 + CR 603.7c: attack-trigger actor anaphor (Ellie, Breena).
+        let (rest7, f7) = parse_event_context_ref("that attacking player creates").unwrap();
+        assert_eq!(rest7, " creates");
+        assert_eq!(f7, TargetFilter::TriggeringPlayer);
+
+        // CR 506.3d: attacked opponent anaphor in token-enter-attacking clauses.
+        let (rest8, f8) = parse_event_context_ref("that opponent.").unwrap();
+        assert_eq!(rest8, ".");
+        assert_eq!(f8, TargetFilter::DefendingPlayer);
+
+        let (rest9, f9) = parse_event_context_ref("that permanent").unwrap();
+        assert_eq!(rest9, "");
+        assert_eq!(f9, TargetFilter::TriggeringSource);
+
+        assert!(parse_event_context_ref("that permanent or player").is_err());
+        assert!(parse_event_context_ref("that permanent or a player").is_err());
     }
 
     #[test]
@@ -891,6 +1100,127 @@ mod tests {
         }
     }
 
+    // --- TYPE_WORDS word-boundary guard (the head-noun-prefix class) ---
+    //
+    // Without the boundary guard on the TYPE_WORDS scan, a head-noun entry like
+    // "land" or "spell" strip_prefix-matches longer subtypes ("lander",
+    // "spellshaper") and returns the wrong card-type filter instead of falling
+    // through to the boundary-guarded subtype table. "Plan" itself is an
+    // enchantment subtype (CR 205.3h), so it resolves via that subtype table.
+
+    #[test]
+    fn test_type_word_plant_is_subtype_not_plan() {
+        // The "plant" head noun resolves to the Plant subtype; no head-noun
+        // TYPE_WORD prefix shadows it.
+        let (rest, tf) = parse_type_filter_word("plant").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plant".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_plants_is_subtype_not_plan() {
+        // Regular plural: "plants" must resolve to the Plant subtype, not Plan.
+        let (rest, tf) = parse_type_filter_word("plants").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plant".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_planet_is_subtype_not_plan() {
+        // "planet" is a land subtype; the "plan" prefix must not shadow it.
+        let (rest, tf) = parse_type_filter_word("planet").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Planet".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_power_plant_never_plan() {
+        // "power-plant" is a land subtype (Power-Plant). The hyphenated form must
+        // resolve as a subtype.
+        let (_, tf) = parse_type_filter_word("power-plant").unwrap();
+        assert!(
+            matches!(tf, TypeFilter::Subtype(_)),
+            "power-plant must be a Subtype, got {tf:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_word_power_space_plant_never_plan() {
+        // The space-separated "power plant" head noun must never classify as the
+        // "Plan" subtype. Either it fails to parse or it resolves to a non-Plan
+        // filter — both are acceptable; "Plan" is the prohibited result.
+        if let Ok((_, tf)) = parse_type_filter_word("power plant") {
+            assert_ne!(
+                tf,
+                TypeFilter::Subtype("Plan".to_string()),
+                "power plant must never be the Plan subtype"
+            );
+        }
+    }
+
+    #[test]
+    fn test_type_word_plan_still_plan() {
+        // "Plan" is an enchantment subtype (CR 205.3h): bare "plan" resolves to
+        // Subtype("Plan") via the subtype table.
+        let (rest, tf) = parse_type_filter_word("plan").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plan".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_plan_trailing_space_still_plan() {
+        // "plan" followed by a space boundary resolves to the Plan subtype and
+        // leaves the trailing context unconsumed.
+        let (rest, tf) = parse_type_filter_word("plan you control").unwrap();
+        assert_eq!(tf, TypeFilter::Subtype("Plan".to_string()));
+        assert_eq!(rest, " you control");
+    }
+
+    #[test]
+    fn test_type_word_spellshaper_is_subtype_not_card() {
+        // Class-lock: pre-fix the "spell" entry (→ Card) eats "spellshaper".
+        // Post-fix the boundary guard lets the subtype table resolve Spellshaper.
+        let (rest, tf) = parse_type_filter_word("spellshaper").unwrap();
+        assert_ne!(tf, TypeFilter::Card, "spellshaper must not be Card");
+        assert_eq!(tf, TypeFilter::Subtype("Spellshaper".to_string()));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_lander_is_subtype_not_land() {
+        // Class-lock: pre-fix the "land" entry (→ Land) eats "lander".
+        // Post-fix the boundary guard lets the subtype table resolve Lander.
+        let (_, tf) = parse_type_filter_word("lander").unwrap();
+        assert_ne!(tf, TypeFilter::Land, "lander must not be Land");
+        assert!(
+            matches!(tf, TypeFilter::Subtype(_)),
+            "lander must be a Subtype, got {tf:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_word_battles_is_battle() {
+        // Regression guard for the word-boundary fix: "battle" is the only
+        // TYPE_WORDS entry that was missing its plural sibling. The boundary
+        // guard rejects "battle" + trailing 's', and BATTLE_SUBTYPES has no
+        // "Battle" entry, so parse_subtype cannot recover it — without the
+        // explicit "battles" TYPE_WORDS entry this returns Err.
+        let (rest, tf) = parse_type_filter_word("battles").unwrap();
+        assert_eq!(tf, TypeFilter::Battle);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_type_word_battles_trailing_context() {
+        // Regression guard for the word-boundary fix: "battles you control" is a
+        // supported head-noun phrase (see oracle_static grammar/type_change/
+        // restriction). The "battles" plural entry must classify as Battle and
+        // leave the trailing context unconsumed.
+        let (rest, tf) = parse_type_filter_word("battles you control").unwrap();
+        assert_eq!(tf, TypeFilter::Battle);
+        assert_eq!(rest, " you control");
+    }
+
     // --- parse_stack_object_target (CR 701.6a + CR 115.1) ---
 
     /// The noncreature-spell disjunct: a stack-pinned `Typed` filter that
@@ -916,7 +1246,8 @@ mod tests {
                 filters: vec![
                     TargetFilter::StackAbility {
                         controller: None,
-                        tag: None
+                        tag: None,
+                        kind: None,
                     },
                     noncreature_spell_leg(),
                 ],
@@ -959,7 +1290,8 @@ mod tests {
             filter,
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: None,
             }
         );
     }
@@ -972,9 +1304,45 @@ mod tests {
             filter,
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: Some(crate::types::ability::StackAbilityKind::Activated),
             }
         );
+    }
+
+    #[test]
+    fn test_stack_object_triggered_ability_only() {
+        let (rest, filter) = parse_stack_object_target("triggered ability").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: Some(crate::types::ability::StackAbilityKind::Triggered),
+            }
+        );
+    }
+
+    #[test]
+    fn test_stack_object_triggered_ability_or_colorless_spell() {
+        let (rest, filter) =
+            parse_stack_object_target("triggered ability or colorless spell").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            filter,
+            TargetFilter::Or {
+                filters: legs
+            } if legs.len() == 2
+                && matches!(
+                    &legs[0],
+                    TargetFilter::StackAbility {
+                        kind: Some(crate::types::ability::StackAbilityKind::Triggered),
+                        ..
+                    }
+                )
+                && matches!(&legs[1], TargetFilter::Typed(_))
+        ));
     }
 
     #[test]
@@ -991,7 +1359,8 @@ mod tests {
                     TargetFilter::StackSpell,
                     TargetFilter::StackAbility {
                         controller: None,
-                        tag: None
+                        tag: None,
+                        kind: None,
                     },
                 ],
             }
@@ -1045,6 +1414,7 @@ mod tests {
                     TargetFilter::StackAbility {
                         controller: None,
                         tag: None,
+                        kind: Some(crate::types::ability::StackAbilityKind::Triggered),
                     },
                 ],
             }

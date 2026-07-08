@@ -82,7 +82,8 @@ fn louisoix_sacrifice_parses_disjunctive_counter_target() {
             f,
             TargetFilter::StackAbility {
                 controller: None,
-                tag: None
+                tag: None,
+                kind: None,
             }
         )),
         "missing the activated/triggered ability disjunct: {target:?}"
@@ -286,6 +287,7 @@ fn louisoix_counter_resolves_each_legal_target() {
             Effect::Counter {
                 target: filter.clone(),
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(activated)],
             ObjectId(1000),
@@ -312,6 +314,7 @@ fn louisoix_counter_resolves_each_legal_target() {
             Effect::Counter {
                 target: filter.clone(),
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(triggered)],
             ObjectId(1000),
@@ -332,6 +335,7 @@ fn louisoix_counter_resolves_each_legal_target() {
             Effect::Counter {
                 target: filter.clone(),
                 source_rider: None,
+                countered_spell_zone: None,
             },
             vec![TargetRef::Object(noncreature_spell)],
             ObjectId(1000),

@@ -30,6 +30,23 @@ fn static_granted_keyword() {
     insta::assert_json_snapshot!(def);
 }
 
+#[test]
+fn static_extra_blockers_group_grant() {
+    let def = parse_static_line(
+        "Each creature you control can block an additional creature each combat.",
+    )
+    .unwrap();
+    insta::assert_json_snapshot!("static_extra_blockers_group_grant", &def);
+}
+
+#[test]
+fn static_tiered_enters_with_additional_counters() {
+    let defs = parse_static_line_multi(
+        "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.",
+    );
+    insta::assert_json_snapshot!("static_tiered_enters_with_additional_counters", &defs);
+}
+
 /// Issue #327: "of that color" anaphor (post-Choose) is the equivalent of
 /// "of the chosen color" and must lower to a filter with IsChosenColor.
 #[test]
@@ -755,6 +772,18 @@ fn panharmonicon_doubler_has_no_source_filter() {
     );
 }
 
+#[test]
+fn hama_pashar_room_ability_doubler_static() {
+    let def = parse_static_line("Room abilities of dungeons you own trigger an additional time.")
+        .expect("expected DoubleTriggers static for Hama Pashar");
+    assert!(matches!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::RoomEntered
+        }
+    ));
+}
+
 /// CR 603.2d: Echoes of Eternity — a second real disjunctive doubler beyond
 /// Harmonic Prodigy. "a colorless spell you control or another colorless
 /// permanent you control" must produce a controller-scoped two-branch `Or`, with
@@ -834,6 +863,68 @@ fn delney_power_suffix_or_is_not_a_disjunction() {
     assert!(
         !tf.properties.is_empty(),
         "expected the `power 2 or less` restriction to be parsed, got no properties"
+    );
+}
+
+/// CR 603.2d + CR 301.5a: Cloud, Midgar Mercenary — an inverted "As long as ~
+/// is equipped, if a triggered ability of ~ or an Equipment attached to it
+/// triggers, that ability triggers an additional time." BOTH the affected SCOPE
+/// (self + attached Equipment) and the equipped CONDITION must survive the
+/// inverted-as-long-as split.
+///
+/// Discriminating: before the fix the DoubleTriggers branch dropped `affected`
+/// (SelfRef was rejected as non-restrictive, and "an Equipment attached to it"
+/// had no dedicated arm) AND the split condition was never re-attached
+/// (`condition: None`) — so the doubler over-fired on every trigger and never
+/// gated on being equipped. Both assertions below flip to failure on revert.
+#[test]
+fn cloud_midgar_mercenary_self_and_equipment_doubler_gated_on_equipped() {
+    let def = parse_static_line(
+        "As long as ~ is equipped, if a triggered ability of ~ or an Equipment attached to it triggers, that ability triggers an additional time.",
+    )
+    .expect("expected DoubleTriggers static for Cloud");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::Any
+        }
+    );
+    // Gate: the "as long as ~ is equipped" clause must re-attach as the condition.
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::SourceIsEquipped),
+        "equipped gate must survive the inverted-as-long-as split"
+    );
+    // Scope: Or[SelfRef, Typed(Equipment, AttachedToSource)].
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be an Or of self + attached Equipment, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
+    assert!(
+        filters.contains(&TargetFilter::SelfRef),
+        "self-reference disjunct (`~`) missing: {filters:?}"
+    );
+    let equip = filters
+        .iter()
+        .find_map(|f| match f {
+            TargetFilter::Typed(tf) => Some(tf),
+            _ => None,
+        })
+        .expect("attached-Equipment disjunct missing");
+    assert!(
+        equip
+            .type_filters
+            .contains(&TypeFilter::Subtype("Equipment".to_string())),
+        "expected Equipment subtype, got {:?}",
+        equip.type_filters
+    );
+    assert!(
+        equip.properties.contains(&FilterProp::AttachedToSource),
+        "expected AttachedToSource property, got {:?}",
+        equip.properties
     );
 }
 

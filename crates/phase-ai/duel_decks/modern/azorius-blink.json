@@ -1,0 +1,21 @@
+{
+  "name": "Azorius Blink",
+  "format": "modern",
+  "frozen_date": "2026-06-17",
+  "source": "https://www.mtggoldfish.com/metagame/modern",
+  "main": [
+    { "name": "Ephemerate", "count": 4 },
+    { "name": "Cloudshift", "count": 4 },
+    { "name": "Ghostly Flicker", "count": 2 },
+    { "name": "Restoration Angel", "count": 3 },
+    { "name": "Soulherder", "count": 3 },
+    { "name": "Mulldrifter", "count": 4 },
+    { "name": "Wall of Omens", "count": 4 },
+    { "name": "Reflector Mage", "count": 3 },
+    { "name": "Man-o'-War", "count": 3 },
+    { "name": "Solemn Simulacrum", "count": 2 },
+    { "name": "Cloudgoat Ranger", "count": 2 },
+    { "name": "Plains", "count": 13 },
+    { "name": "Island", "count": 13 }
+  ]
+}

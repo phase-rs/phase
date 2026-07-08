@@ -44,7 +44,7 @@ use crate::game::game_object::GameObject;
 use crate::game::layers::evaluate_condition;
 use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefinition};
 use crate::types::game_state::GameState;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 /// CR 905.4a + CR 113.6b: Face-down hidden-agenda conspiracies do not function
@@ -105,6 +105,30 @@ pub fn static_opts_in_to_command_zone(def: &StaticDefinition) -> bool {
 /// from their intervening-if source-zone condition.
 pub fn trigger_opts_in_to_command_zone(def: &TriggerDefinition) -> bool {
     def.trigger_zones.contains(&Zone::Command)
+}
+
+/// CR 113.6b + CR 114.4 + CR 311.2 / CR 312.2: object-level command-zone
+/// static-effect-source admission. True when this command-zone object
+/// contributes at least one static that functions from the command zone: an
+/// emblem (CR 114.3/114.4), a face-up conspiracy (CR 905.4), OR any non-emblem
+/// object (e.g. an ACTIVE PLANE / phenomenon, which remains in and functions
+/// from the command zone per CR 311.2 / CR 312.2) carrying a static that opts
+/// in via `active_zones.contains(Command)` (CR 113.6b). This is the single
+/// authority consulted by every continuous-effect source gather (the
+/// static-source index and the layer gather + its fallback), so a plane's
+/// continuous statics (anthems, keyword grants) are visible exactly like an
+/// emblem's. `non_emblem_command_zone_static_functions` handles the face-up
+/// conspiracy sub-case internally, so emblems, conspiracies, and planes all
+/// route through one predicate.
+pub fn object_sources_static_from_command_zone(obj: &GameObject) -> bool {
+    if obj.zone != Zone::Command {
+        return false;
+    }
+    obj.is_emblem
+        || obj
+            .static_definitions
+            .iter_all()
+            .any(|def| non_emblem_command_zone_static_functions(obj, def))
 }
 
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
@@ -205,6 +229,35 @@ pub fn game_functioning_statics(
                 })
                 .map(move |def| (obj, def))
         })
+}
+
+/// CR 604.1: loop-invariant existence gate. True iff any currently-functioning
+/// static (battlefield permanent or CR 114.4 command-zone emblem; CR 702.26b
+/// phased-out excluded) has a mode matching `predicate`. Combat/untap legality
+/// loops hoist this ONCE before iterating N permanents so the per-permanent
+/// `check_static_ability` re-scan (itself O(N)) is skipped when no such static
+/// exists, collapsing O(N^2) to O(N). When one exists the loop falls through to
+/// the exact existing per-permanent check, so verdicts are unchanged.
+pub fn any_functioning_static_mode(
+    state: &GameState,
+    predicate: impl Fn(&StaticMode) -> bool,
+) -> bool {
+    game_functioning_statics(state).any(|(_, def)| predicate(&def.mode))
+}
+
+/// O(1) existence query over FUNCTIONING statics: "does any functioning static have
+/// mode discriminant `kind`?" Reads the [`GameState::static_mode_presence`] cache, which
+/// is rebuilt wholesale from `game_functioning_statics` by the layers pipeline
+/// (`layers::refresh_static_mode_presence`), so it has IDENTICAL scoping to
+/// `game_functioning_statics`: condition unevaluated (CR 604.1 / CR 613.1 — this is a
+/// conservative superset, exactly like `any_functioning_static_mode`); phased-out
+/// permanents excluded (CR 702.26b); command-zone statics included per-def opt-in only
+/// (CR 114.4 / CR 113.6b). A `true` result is a superset gate — callers MUST fall through
+/// to their exact per-object check; a `false` result is precise post-flush and lets the
+/// caller short-circuit the O(battlefield) scan. This is the Unit 2/3 migration target for
+/// discriminant-only scan gates.
+pub fn static_kind_present(state: &GameState, kind: StaticModeKind) -> bool {
+    state.static_mode_presence.contains(kind)
 }
 
 /// Like `battlefield_active_statics` but WITHOUT condition filtering.
@@ -353,6 +406,42 @@ mod tests {
             format!("TestObj{id}"),
             zone,
         )
+    }
+
+    /// CR 113.6b + CR 311.2: a non-emblem command-zone object (active plane) is
+    /// admitted as a static-effect source ONLY when it carries a static that
+    /// opts into the command zone via `active_zones.contains(Command)`. A
+    /// battlefield-default (empty `active_zones`) static on such an object is NOT
+    /// admitted — validates the admission helper, the level synthesis stamps at.
+    #[test]
+    fn object_sources_static_from_command_zone_requires_command_optin() {
+        // Command-zone object with a Command-stamped continuous static → admitted.
+        let mut plane = make_obj(1, Zone::Command);
+        plane.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Command])]
+                .into();
+        assert!(object_sources_static_from_command_zone(&plane));
+
+        // Same object, but the static defaults to the battlefield (empty
+        // active_zones) → NOT admitted (a stray battlefield static can't leak).
+        let mut battlefield_default = make_obj(2, Zone::Command);
+        battlefield_default.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous)].into();
+        assert!(!object_sources_static_from_command_zone(
+            &battlefield_default
+        ));
+
+        // An emblem in the command zone is always admitted.
+        let mut emblem = make_obj(3, Zone::Command);
+        emblem.is_emblem = true;
+        assert!(object_sources_static_from_command_zone(&emblem));
+
+        // A battlefield object is never admitted through THIS command-zone gate.
+        let mut bf = make_obj(4, Zone::Battlefield);
+        bf.static_definitions =
+            vec![StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Command])]
+                .into();
+        assert!(!object_sources_static_from_command_zone(&bf));
     }
 
     #[test]

@@ -152,6 +152,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
             AbilityCondition::TargetMatchesFilter {
                 filter: crate::convert::filter::spells_to_filter(spells)?,
                 use_lki: false,
+                subject_slot: None,
             }
         }
         _ => {
@@ -688,6 +689,7 @@ fn permanent_filter_to_ability(
         PermanentAxis::Target => AbilityCondition::TargetMatchesFilter {
             filter,
             use_lki: false,
+            subject_slot: None,
         },
     })
 }
@@ -870,6 +872,7 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast {
             zone: None,
             controller: None,
+            owner: None,
         },
         // CR 702.33d-f + CR 603.4: ETB intervening-if "if it was kicked".
         Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {
@@ -1061,6 +1064,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::OriginalController => "OriginalController",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
         TargetFilter::SelfRef => "SelfRef",
+        TargetFilter::GrantingObject => "GrantingObject",
         TargetFilter::SourceOrPaired => "SourceOrPaired",
         TargetFilter::Typed(_) => "Typed",
         TargetFilter::Not { .. } => "Not",
@@ -1072,14 +1076,17 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::SpecificPlayer { .. } => "SpecificPlayer",
         TargetFilter::Neighbor { .. } => "Neighbor",
         TargetFilter::AttachedTo => "AttachedTo",
+        TargetFilter::ExiledCardByIndex { .. } => "ExiledCardByIndex",
         TargetFilter::LastCreated => "LastCreated",
         TargetFilter::LastRevealed => "LastRevealed",
         TargetFilter::CostPaidObject => "CostPaidObject",
+        TargetFilter::ChosenCard => "ChosenCard",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
         TargetFilter::ExiledBySource => "ExiledBySource",
         TargetFilter::TriggeringSpellController => "TriggeringSpellController",
         TargetFilter::TriggeringSpellOwner => "TriggeringSpellOwner",
+        TargetFilter::TriggeringSourceController => "TriggeringSourceController",
         TargetFilter::TriggeringPlayer => "TriggeringPlayer",
         TargetFilter::TriggeringSource => "TriggeringSource",
         TargetFilter::ParentTarget => "ParentTarget",
@@ -1088,12 +1095,15 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::ParentTargetOwner => "ParentTargetOwner",
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
         TargetFilter::PostReplacementDamageTarget => "PostReplacementDamageTarget",
+        TargetFilter::PostReplacementDamageTargetOwner => "PostReplacementDamageTargetOwner",
         TargetFilter::DefendingPlayer => "DefendingPlayer",
         TargetFilter::HasChosenName => "HasChosenName",
         TargetFilter::ChosenDamageSource => "ChosenDamageSource",
         TargetFilter::Named { .. } => "Named",
         TargetFilter::Owner => "Owner",
         TargetFilter::SourceChosenPlayer => "SourceChosenPlayer",
+        TargetFilter::EventTarget => "EventTarget",
+        TargetFilter::PlayerWhoChoseLabel { .. } => "PlayerWhoChoseLabel",
     }
 }
 
@@ -1110,7 +1120,7 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
         FilterProp::Attacking { .. } => Some("Attacking"),
         FilterProp::Blocking => Some("Blocking"),
         FilterProp::Unblocked => Some("Unblocked"),
-        FilterProp::AttackedThisTurn => Some("AttackedThisTurn"),
+        FilterProp::AttackedThisTurn { .. } => Some("AttackedThisTurn"),
         FilterProp::BlockedThisTurn => Some("BlockedThisTurn"),
         FilterProp::AttackedOrBlockedThisTurn => Some("AttackedOrBlockedThisTurn"),
         FilterProp::EnchantedBy => Some("EnchantedBy"),
@@ -1162,6 +1172,13 @@ pub struct TriggerCondExt {
 /// engine variants in a separate round).
 pub fn convert_trigger_with_etb_filter(c: &Condition) -> ConvResult<TriggerCondExt> {
     match c {
+        // CR 603.4 + CR 701.9a: "if the discarded card [passes predicate]" on a
+        // discard trigger — lower onto `valid_card` so `match_discarded` gates
+        // the event object (Anje Falkenrath's madness rider).
+        Condition::DiscardedCardPassesFilter(cards) => Ok(TriggerCondExt {
+            condition: None,
+            valid_card: Some(crate::convert::filter::cards_to_filter(cards)?),
+        }),
         Condition::EnteringPermanentPassesFilter(pred) => {
             // Try the event-object condition path first; fall through to the
             // legacy valid_card route only for predicates that still cannot be
@@ -3296,7 +3313,7 @@ fn controls_count_at_least(perms: &Permanents, count: usize) -> ConvResult<Parse
 /// CR 205.2a: Map mtgish `CardType` → engine `CoreType`. Variants without
 /// a CoreType analog (Conspiracy, Phenomenon, Plane, Scheme, Vanguard) have
 /// no place in a permanent-count ParsedCondition and strict-fail.
-fn card_type_to_core(ct: &CardType) -> ConvResult<CoreType> {
+pub(crate) fn card_type_to_core(ct: &CardType) -> ConvResult<CoreType> {
     Ok(match ct {
         CardType::Artifact => CoreType::Artifact,
         CardType::Battle => CoreType::Battle,
@@ -3747,7 +3764,9 @@ mod tests {
         let converted = convert_ability(&condition).unwrap();
 
         match converted {
-            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+            AbilityCondition::TargetMatchesFilter {
+                filter, use_lki, ..
+            } => {
                 assert!(!use_lki);
                 assert!(matches!(
                     filter,

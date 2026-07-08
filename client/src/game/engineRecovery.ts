@@ -32,6 +32,7 @@
 import { debugLog } from "./debugLog";
 import { useGameStore } from "../stores/gameStore";
 import { loadCheckpoints } from "../services/gamePersistence";
+import { trackEvent } from "../services/telemetry";
 import { AdapterError, AdapterErrorCode, type GameState } from "../adapter/types";
 
 /**
@@ -121,6 +122,7 @@ export interface EngineLostEvent {
 type EngineLostListener = (event: EngineLostEvent) => void;
 const engineLostListeners = new Set<EngineLostListener>();
 const nonFatalPanicListeners = new Set<EngineLostListener>();
+const engineSlowListeners = new Set<EngineLostListener>();
 
 export function onEngineLost(listener: EngineLostListener): () => void {
   engineLostListeners.add(listener);
@@ -141,6 +143,16 @@ export function onNonFatalPanic(listener: EngineLostListener): () => void {
 }
 
 /**
+ * Subscribe to slow-but-still-running engine requests. Unlike
+ * [`onEngineLost`], this is not terminal: the worker request remains pending
+ * and a late response will still complete the original dispatch.
+ */
+export function onEngineSlow(listener: EngineLostListener): () => void {
+  engineSlowListeners.add(listener);
+  return () => engineSlowListeners.delete(listener);
+}
+
+/**
  * Escalate to the Layer 3 user-prompt path. Called when
  * `attemptStateRehydrate` returns false during a dispatch or AI action — or
  * when the AI controller hits its hard-failure cap. A single reload carries
@@ -151,6 +163,15 @@ export function onNonFatalPanic(listener: EngineLostListener): () => void {
  */
 export function notifyEngineLost(reason: string, panic?: string): void {
   for (const fn of engineLostListeners) fn({ reason, panic });
+}
+
+/**
+ * Surface a long-running engine operation without classifying the engine as
+ * lost. The request is still alive; this only gives the user a reload escape
+ * hatch and a way to export/report the state.
+ */
+export function notifyEngineSlow(reason: string): void {
+  for (const fn of engineSlowListeners) fn({ reason });
 }
 
 /**
@@ -167,6 +188,16 @@ export function notifyEngineLost(reason: string, panic?: string): void {
  */
 export async function routePanic(reason: string, panic?: string): Promise<void> {
   const rehydrated = await attemptStateRehydrate().catch(() => false);
+  // Telemetry fires on both branches regardless of the toast's session
+  // suppression — it answers "how often / which build / which mode".
+  const { gameMode, gameState } = useGameStore.getState();
+  trackEvent("engine_panic", {
+    fatal: !rehydrated,
+    reason,
+    panic,
+    game_mode: gameMode,
+    turn: gameState?.turn_number ?? null,
+  });
   if (rehydrated) {
     for (const fn of nonFatalPanicListeners) fn({ reason, panic });
     return;

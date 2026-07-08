@@ -6,7 +6,7 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { CardPreview } from "../components/card/CardPreview";
 import { DeckBuilder } from "../components/deck-builder/DeckBuilder";
 import type { BrowserLegalityFilter, CardSearchFilters } from "../components/deck-builder/CardSearch";
-import { FORMAT_REGISTRY } from "../data/formatRegistry";
+import { DECK_CONSTRUCTION_FORMATS } from "../data/formatRegistry";
 import { useAltToggle } from "../hooks/useAltToggle";
 
 const DEFAULT_DECK_FORMAT: GameFormat = "Standard";
@@ -21,7 +21,7 @@ const DEFAULT_SEARCH_FILTERS: CardSearchFilters = {
 
 function parseDeckFormat(value: string | null): GameFormat {
   if (!value) return DEFAULT_DECK_FORMAT;
-  const match = FORMAT_REGISTRY.find(
+  const match = DECK_CONSTRUCTION_FORMATS.find(
     (m) => m.format.toLowerCase() === value.toLowerCase(),
   );
   return match?.format ?? DEFAULT_DECK_FORMAT;

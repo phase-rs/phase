@@ -3,16 +3,18 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, value};
+use nom::character::complete::{multispace0, one_of};
+use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::target as nom_target;
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, PlayerScope, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{parse_counter_type, CounterType};
@@ -89,9 +91,22 @@ fn parse_connector_split(text: &str, connector: &str) -> Option<Vec<ParsedCondit
     }
     fragments
         .into_iter()
-        .map(parse_condition_text)
+        .map(parse_condition_fragment_text)
         .collect::<Option<Vec<_>>>()
         .filter(|v| v.len() >= 2)
+}
+
+fn parse_condition_fragment_text(text: &str) -> Option<ParsedCondition> {
+    parse_condition_text(strip_leading_condition_fragment_marker(text))
+}
+
+fn strip_leading_condition_fragment_marker(text: &str) -> &str {
+    let text = text.trim();
+    if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("if "), tag("only if "))).parse(text) {
+        rest.trim()
+    } else {
+        text
+    }
 }
 
 fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
@@ -148,6 +163,7 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
     {
         return Some(ParsedCondition::YouAttackedWithAtLeast {
             count: count as u32,
+            filter: None,
         });
     }
     if let Some(count) =
@@ -155,7 +171,18 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
     {
         return Some(ParsedCondition::YouAttackedWithAtLeast {
             count: count as u32,
+            filter: None,
         });
+    }
+    // CR 508.1a: "you attacked with a/an <filter> this turn" — at least one
+    // attacker of the given kind. Distinct from the numeric "N creatures"
+    // thresholds above (which carry no type qualifier). The trailing "this turn"
+    // may already be stripped upstream (e.g. an activated-ability duration
+    // parser peels it before the cost-reduction condition is reparsed), so both
+    // the suffixed and bare forms are accepted. Thaumaton Torpedo: "...if you
+    // attacked with a Spacecraft this turn".
+    if let Some(condition) = parse_you_attacked_with_filter(text) {
+        return Some(condition);
     }
     if all_consuming(alt((
         value(
@@ -187,6 +214,47 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
         return Some(condition);
     }
     None
+}
+
+/// CR 508.1a: Parse "you attacked with a/an <filter>[ this turn]" into a
+/// `ParsedCondition::YouAttackedWithAtLeast { count: 1, filter }`. The `<filter>`
+/// is delegated to `parse_type_phrase` so the whole class of attacker qualifiers
+/// (Spacecraft, Vehicle, a specific creature type, …) is covered by the shared
+/// type-phrase combinator rather than a per-card literal. Returns `None` unless
+/// the entire phrase after the filter is consumed (modulo an optional " this
+/// turn"), keeping unrecognized qualifiers an honest gap.
+fn parse_you_attacked_with_filter(text: &str) -> Option<ParsedCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("you attacked with ")
+        .parse(text)
+        .ok()?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    // Reject the bare/untyped case: `parse_type_phrase` returns `Any` when no
+    // type word matched, which would over-match "you attacked with three or more
+    // creatures this turn" (handled by the numeric thresholds above). Require a
+    // concrete typed filter here.
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    // Consume an optional trailing " this turn" and any trailing punctuation with
+    // combinators (no manual string trimming), then require the phrase to be fully
+    // consumed so unrecognized qualifiers stay an honest gap. The duration suffix
+    // may already be stripped upstream, so it is optional.
+    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
+    let (remainder, _) = opt(tag::<_, _, OracleError<'_>>("this turn"))
+        .parse(remainder)
+        .ok()?;
+    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
+    let (remainder, _) = opt(one_of::<_, _, OracleError<'_>>(".,;"))
+        .parse(remainder)
+        .ok()?;
+    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
+    if !remainder.is_empty() {
+        return None;
+    }
+    Some(ParsedCondition::YouAttackedWithAtLeast {
+        count: 1,
+        filter: Some(filter),
+    })
 }
 
 fn parse_quantity_restriction_condition(text: &str) -> Option<ParsedCondition> {
@@ -223,6 +291,22 @@ fn static_condition_to_restriction_condition(
             .map(|condition| ParsedCondition::Not {
                 condition: Box::new(condition),
             }),
+        // CR 601.3 + CR 602.5: a presence check ("a creature is attacking you",
+        // "you control a [type]") is equivalent to "the count of matching
+        // objects is at least one". `ParsedCondition` has no `IsPresent`
+        // variant, so reuse its generic `QuantityComparison` over an
+        // `ObjectCount` of the same filter — letting cast/activation
+        // restrictions ("Cast this spell only if a creature is attacking you" —
+        // Confront the Assault) reuse the full presence-condition vocabulary.
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        } => Some(ParsedCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
         // CR 102.1: "it's your turn" — the active player is the scoped player.
         // The `Not` recursion arm above yields `Not(IsYourTurn)` for
         // "it's not your turn".
@@ -241,6 +325,8 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
         tag::<_, _, OracleError<'_>>("this "),
         tag("enchanted "),
         tag("from your "),
+        tag("in "),
+        tag("on "),
         tag("~'s "),
         tag("~ "),
     ))
@@ -368,9 +454,6 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     if let Some(subtypes) = parse_you_control_land_subtypes(text) {
         return Some(ParsedCondition::YouControlLandSubtypeAny { subtypes });
     }
-    if let Some((count, subtype)) = parse_you_control_subtype_count(text) {
-        return Some(ParsedCondition::YouControlSubtypeCountAtLeast { subtype, count });
-    }
     if let Some(count) = parse_numeric_threshold(
         text,
         "creatures you control have total power ",
@@ -394,6 +477,39 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     }
     if let Some(count) = parse_numeric_threshold(text, "you control ", " or more snow permanents") {
         return Some(ParsedCondition::YouControlSnowPermanentCountAtLeast { count });
+    }
+    // CR 205.4a: A counted "you control N or more <supertype> <type>s" restriction
+    // (two or more basic lands, two or more legendary creatures) must decompose the
+    // supertype into a `HasSupertype` object-count the same way the singular arm
+    // does — otherwise the bare-subtype catch-all below dumps "basic land" /
+    // "legendary creature" into a non-existent subtype and the restriction can never
+    // be satisfied. Runs before `parse_you_control_subtype_count`; the
+    // `parse_supertype_prefix` gate inside the helper keeps ordinary subtype counts
+    // ("two or more vampires") on the subtype path.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control ").parse(text) {
+        if let Ok((type_text, count_text)) = terminated(
+            take_until::<_, _, OracleError<'_>>(" or more "),
+            tag(" or more "),
+        )
+        .parse(rest)
+        {
+            if let Some(count) = parse_count_word(count_text) {
+                let singular = type_text.trim().trim_end_matches('.').trim_end_matches('s');
+                if let Some(cond) = parse_you_control_supertype_count(singular, count) {
+                    return Some(cond);
+                }
+            }
+        }
+    }
+    // The generic bare-subtype catch-all must run AFTER the specific "creatures with
+    // different powers" / "lands with the same name" / "snow permanents" suffix arms
+    // above. Otherwise it greedily consumes those qualifier phrases via its bare
+    // `" or more "` split and dumps the whole phrase into a stringly-typed subtype
+    // (e.g. subtype "creatures with different power"), shadowing the dedicated
+    // YouControlDifferentPowerCreatureCountAtLeast / YouControlLandsWithSameNameAtLeast
+    // variants so those cards never reach the correct parse.
+    if let Some((count, subtype)) = parse_you_control_subtype_count(text) {
+        return Some(ParsedCondition::YouControlSubtypeCountAtLeast { subtype, count });
     }
     // "you control N or more [color] permanents" / "you control N or more [core type]s"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control ").parse(text) {
@@ -481,6 +597,19 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     ))
     .parse(text)
     {
+        // CR 205.4a: A supertype adjective ("snow", "basic", "legendary", "world")
+        // in "you control a <supertype> <type>" must decompose into a
+        // `HasSupertype` filter property plus the core type / subtype — it must NOT
+        // be dumped whole into a stringly-typed `subtype`. No permanent has the
+        // subtype "snow land" or "snow mountain", so the bare-subtype parse below
+        // makes the restriction permanently unsatisfiable (Blizzard could never be
+        // cast; Goblin Ski Patrol's ability could never activate). Reuse
+        // `parse_type_phrase` — the same combinator that decomposes "basic land
+        // card" into `Land` + `HasSupertype Basic` — and count matching permanents
+        // you control via the generic `ObjectCount >= 1` presence check.
+        if let Some(cond) = parse_you_control_supertype_count(rest, 1) {
+            return Some(cond);
+        }
         if let Some(core_type) = parse_core_type_word(rest) {
             return Some(ParsedCondition::YouControlCoreTypeCountAtLeast {
                 core_type,
@@ -919,28 +1048,47 @@ fn parse_you_event_this_turn(text: &str) -> nom::IResult<&str, ParsedCondition, 
     .parse(text)
 }
 
-/// "[type] enter(ed) the battlefield under your control this turn"
+/// CR 603.6a: modern enters templating is written "When [this object] enters"
+/// (the canonical form elides "the battlefield"), so "[type] entered under your
+/// control this turn" is equivalent to the full form "[type] entered the
+/// battlefield under your control this turn". Matches the optional
+/// " the battlefield" then the mandatory control/this-turn suffix.
+fn entered_under_your_control_suffix(text: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    value(
+        (),
+        (
+            opt(tag(" the battlefield")),
+            tag(" under your control this turn"),
+        ),
+    )
+    .parse(text)
+}
+
+/// "[type] enter(ed) [the battlefield] under your control this turn"
 fn parse_etb_this_turn_condition(
     text: &str,
 ) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     alt((
         value(
             ParsedCondition::YouHadCreatureEnterThisTurn,
-            alt((
-                tag("a creature entered the battlefield under your control this turn"),
-                tag("creature enter the battlefield under your control this turn"),
-            )),
+            (
+                alt((tag("a creature entered"), tag("creature enter"))),
+                entered_under_your_control_suffix,
+            ),
         ),
         value(
             ParsedCondition::YouHadAngelOrBerserkerEnterThisTurn,
-            tag("angel or berserker enter the battlefield under your control this turn"),
+            (
+                tag("angel or berserker enter"),
+                entered_under_your_control_suffix,
+            ),
         ),
         value(
             ParsedCondition::YouHadArtifactEnterThisTurn,
-            alt((
-                tag("an artifact entered the battlefield under your control this turn"),
-                tag("artifact entered the battlefield under your control this turn"),
-            )),
+            (
+                alt((tag("an artifact entered"), tag("artifact entered"))),
+                entered_under_your_control_suffix,
+            ),
         ),
     ))
     .parse(text)
@@ -1136,6 +1284,37 @@ fn parse_you_control_subtype_count(text: &str) -> Option<(usize, String)> {
     Some((minimum, subtype))
 }
 
+/// CR 205.4a + CR 205.4g: Decompose a `<supertype> <type>` phrase (snow land,
+/// basic land, legendary creature, …) into a `HasSupertype` object-count
+/// presence condition — count the matching permanents you control and compare
+/// `>= count`. Shared by the singular "you control a snow land" arm and the
+/// plural "you control N or more basic lands" arm so a supertype adjective never
+/// falls through to the stringly-typed subtype dump (which yields a non-existent
+/// subtype like "basic land", leaving the restriction permanently unsatisfiable).
+/// Gated on `parse_supertype_prefix` so genuine bare-subtype counts
+/// ("two or more vampires") are untouched and still reach the subtype path.
+fn parse_you_control_supertype_count(type_phrase: &str, count: usize) -> Option<ParsedCondition> {
+    nom_target::parse_supertype_prefix(type_phrase).ok()?;
+    let (filter, remainder) = parse_type_phrase(type_phrase);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(typed) = filter else {
+        return None;
+    };
+    Some(ParsedCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(typed.controller(ControllerRef::You)),
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+    })
+}
+
 /// CR 601.3d + CR 608.2c: Parse `"it targets a <type_phrase>"` (or `"it targets <type_phrase>"`)
 /// into a `ParsedCondition::SpellTargetsFilter` whose filter is derived from
 /// `parse_type_phrase`. The pronoun `it` refers to the spell being cast — this
@@ -1185,6 +1364,14 @@ pub(crate) fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> 
             },
         });
     }
+    // CR 115.9b: "one or more" is redundant with .any() semantics (Orvar — "if it
+    // targets one or more other permanents you control").
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("one or more "),
+        tag("one or more"),
+    )))
+    .parse(rest)
+    .ok()?;
     let (filter, remainder) = parse_type_phrase(rest);
     if !remainder.trim().is_empty() {
         return None;
@@ -1218,7 +1405,237 @@ fn capitalize_condition_word(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter};
+    use crate::types::ability::{
+        ControllerRef, CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+    };
+    use crate::types::card_type::Supertype;
+
+    /// CR 508.1a: "you attacked with a/an <filter>[ this turn]" parses to a
+    /// filtered `YouAttackedWithAtLeast { count: 1 }`, both with and without the
+    /// trailing "this turn" (the latter is the shape reaching the parser after an
+    /// upstream duration strip). The unfiltered numeric thresholds remain
+    /// `filter: None`, and the bare-creature numeric form must NOT be captured by
+    /// the typed arm.
+    #[test]
+    fn attacked_with_filter_condition_parses_typed_and_preserves_numeric() {
+        for text in [
+            "you attacked with a spacecraft this turn",
+            "you attacked with a spacecraft",
+        ] {
+            match parse_restriction_condition(text) {
+                Some(ParsedCondition::YouAttackedWithAtLeast {
+                    count: 1,
+                    filter: Some(TargetFilter::Typed(tf)),
+                }) => assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Spacecraft")),
+                    "expected Spacecraft subtype, got {:?} for {text}",
+                    tf.type_filters
+                ),
+                other => panic!("expected filtered attacked-with for {text}, got {other:?}"),
+            }
+        }
+        // Numeric thresholds stay unfiltered.
+        assert_eq!(
+            parse_restriction_condition("you attacked with 3 or more creatures this turn"),
+            Some(ParsedCondition::YouAttackedWithAtLeast {
+                count: 3,
+                filter: None,
+            }),
+            "numeric attacker threshold must stay filter: None"
+        );
+    }
+
+    /// CR 207.2c: The "creatures with different powers" (Coven) and "lands with the
+    /// same name" qualifier phrases have dedicated typed condition variants. The
+    /// generic bare-subtype count catch-all must not shadow them by swallowing the
+    /// whole phrase into a stringly-typed subtype. This is a fail-on-revert guard:
+    /// reordering the generic arm back above the specific arms makes these produce
+    /// `YouControlSubtypeCountAtLeast { subtype: "creatures with different power"/… }`.
+    #[test]
+    fn qualifier_phrase_conditions_beat_generic_subtype_count() {
+        // Coven activation/cast restriction (Dawnhart Mentor, Ambitious Farmhand,
+        // Candletrap, Sungold Sentinel).
+        assert_eq!(
+            parse_restriction_condition(
+                "you control three or more creatures with different powers"
+            ),
+            Some(ParsedCondition::YouControlDifferentPowerCreatureCountAtLeast { count: 3 }),
+            "Coven 'different powers' must map to the dedicated variant, not a subtype dump"
+        );
+        // Endless Atlas / Sceptre of Eternal Glory.
+        assert_eq!(
+            parse_restriction_condition("you control three or more lands with the same name"),
+            Some(ParsedCondition::YouControlLandsWithSameNameAtLeast { count: 3 }),
+            "'lands with the same name' must map to the dedicated variant"
+        );
+        // Regression guard: a genuine bare subtype still flows to the generic arm.
+        assert_eq!(
+            parse_restriction_condition("you control five or more vampires"),
+            Some(ParsedCondition::YouControlSubtypeCountAtLeast {
+                subtype: "vampire".to_string(),
+                count: 5,
+            }),
+            "bare subtype threshold must still reach the generic subtype-count arm"
+        );
+        // Regression guard: snow permanents keep their own variant.
+        assert_eq!(
+            parse_restriction_condition("you control two or more snow permanents"),
+            Some(ParsedCondition::YouControlSnowPermanentCountAtLeast { count: 2 }),
+            "snow-permanent threshold must keep its dedicated variant"
+        );
+    }
+
+    /// CR 508.1 + CR 601.3: a presence-style restriction condition ("Cast this
+    /// spell only if a creature is attacking you" — Confront the Assault)
+    /// bridges StaticCondition::IsPresent into ParsedCondition::QuantityComparison
+    /// over an ObjectCount of the same filter.
+    #[test]
+    fn restriction_presence_condition_bridges_to_object_count() {
+        match parse_restriction_condition("a creature is attacking you") {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => assert!(
+                matches!(&filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking { defender: Some(ControllerRef::You) }
+                ))),
+                "filter should be a creature attacking you, got {filter:?}"
+            ),
+            other => panic!("expected QuantityComparison(ObjectCount >= 1), got {other:?}"),
+        }
+    }
+
+    /// CR 508.1 + CR 118.9: Lethargy Trap — "three or more creatures are attacking"
+    /// bridges to ObjectCount(creature + Attacking) >= N.
+    #[test]
+    fn restriction_attacking_creatures_count_ge() {
+        match parse_restriction_condition("three or more creatures are attacking") {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }) => assert!(
+                matches!(&filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking { defender: None }
+                ))),
+                "filter should be attacking creatures, got {filter:?}"
+            ),
+            other => panic!("expected QuantityComparison(ObjectCount >= 3), got {other:?}"),
+        }
+    }
+
+    /// CR 205.4a + CR 205.4g: A supertype adjective in a "you control a
+    /// <supertype> <type>" restriction (Blizzard — "Cast this spell only if you
+    /// control a snow land"; Goblin Ski Patrol — "only if you control a snow
+    /// Mountain") must decompose into a `HasSupertype` filter property plus the
+    /// core type / subtype and count via `ObjectCount >= 1`. It must NOT dump
+    /// "snow land" / "snow mountain" into a stringly-typed
+    /// `YouControlSubtypeCountAtLeast` — no permanent has such a subtype, so that
+    /// parse leaves the restriction permanently unsatisfiable.
+    #[test]
+    fn you_control_supertype_permanent_decomposes_to_filter() {
+        use crate::types::card_type::Supertype;
+
+        fn assert_supertype_filter(
+            text: &str,
+            expect_type: TypeFilter,
+            expect_supertype: Supertype,
+            expect_count: i32,
+        ) {
+            match parse_restriction_condition(text) {
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value },
+                }) => {
+                    assert_eq!(value, expect_count, "{text}: count must be {expect_count}");
+                    match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(
+                                tf.controller,
+                                Some(ControllerRef::You),
+                                "{text}: must be scoped to permanents you control"
+                            );
+                            assert!(
+                                tf.properties.iter().any(|p| matches!(
+                                    p,
+                                    FilterProp::HasSupertype { value } if *value == expect_supertype
+                                )),
+                                "{text}: must carry HasSupertype({expect_supertype:?}), got {:?}",
+                                tf.properties
+                            );
+                            assert!(
+                                tf.type_filters.contains(&expect_type),
+                                "{text}: type_filters {:?} must contain {expect_type:?}",
+                                tf.type_filters
+                            );
+                        }
+                        other => panic!("{text}: expected a Typed filter, got {other:?}"),
+                    }
+                }
+                other => {
+                    panic!("{text}: expected QuantityComparison(ObjectCount >= N), got {other:?}")
+                }
+            }
+        }
+
+        // Singular "you control a <supertype> <type>" (count 1):
+        // Blizzard — supertype Snow + core type Land.
+        assert_supertype_filter(
+            "you control a snow land",
+            TypeFilter::Land,
+            Supertype::Snow,
+            1,
+        );
+        // Goblin Ski Patrol — supertype Snow + subtype Mountain (basic land type).
+        assert_supertype_filter(
+            "you control a snow mountain",
+            TypeFilter::Subtype("Mountain".to_string()),
+            Supertype::Snow,
+            1,
+        );
+
+        // Plural/count "you control N or more <supertype> <type>s" (Matt's sibling
+        // gap): must decompose the same way with the parsed count, NOT dump
+        // "basic land" / "legendary creature" into a stringly subtype.
+        assert_supertype_filter(
+            "you control two or more basic lands",
+            TypeFilter::Land,
+            Supertype::Basic,
+            2,
+        );
+        assert_supertype_filter(
+            "you control two or more legendary creatures",
+            TypeFilter::Creature,
+            Supertype::Legendary,
+            2,
+        );
+
+        // Regression guard: an ordinary bare subtype count keeps the subtype path
+        // (no supertype prefix → must NOT become an ObjectCount comparison).
+        assert_eq!(
+            parse_restriction_condition("you control two or more vampires"),
+            Some(ParsedCondition::YouControlSubtypeCountAtLeast {
+                subtype: "vampire".to_string(),
+                count: 2,
+            }),
+            "bare subtype count must stay on the subtype path"
+        );
+    }
 
     #[test]
     fn parses_source_conditions() {
@@ -1246,6 +1663,12 @@ mod tests {
         );
         assert_eq!(
             parse_restriction_condition("From your graveyard"),
+            Some(ParsedCondition::SourceInZone {
+                zone: Zone::Graveyard
+            }),
+        );
+        assert_eq!(
+            parse_restriction_condition("in your graveyard"),
             Some(ParsedCondition::SourceInZone {
                 zone: Zone::Graveyard
             }),
@@ -1542,6 +1965,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_compound_or_if_restriction_fragments() {
+        let parsed =
+            parse_restriction_condition("~ entered this turn or if you control a basic land");
+        let Some(ParsedCondition::Or { conditions }) = parsed else {
+            panic!("expected compound Or, got {parsed:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            conditions[0],
+            ParsedCondition::SourceEnteredThisTurn
+        ));
+        match &conditions[1] {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::HasSupertype { value } if *value == Supertype::Basic)));
+            }
+            other => panic!("expected ObjectCount basic land condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compound_source_zone_shorthand() {
+        let parsed = parse_restriction_condition("~ is on the battlefield or in your graveyard");
+        assert!(matches!(
+            parsed,
+            Some(ParsedCondition::Or { ref conditions })
+                if conditions.len() == 2
+                    && matches!(conditions[0], ParsedCondition::SourceInZone { zone: Zone::Battlefield })
+                    && matches!(conditions[1], ParsedCondition::SourceInZone { zone: Zone::Graveyard })
+        ));
+    }
+
+    #[test]
     fn parses_compound_not() {
         let parsed = parse_restriction_condition("not you attacked this turn");
         assert!(matches!(
@@ -1709,6 +2179,23 @@ mod tests {
                 assert!(filter.type_filters.contains(&TypeFilter::Creature));
             }
             other => panic!("expected SpellTargetsFilter(Creature), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn it_targets_one_or_more_other_permanents_you_control() {
+        let parsed =
+            parse_restriction_condition("it targets one or more other permanents you control")
+                .expect("Orvar intervening-if should parse");
+        match parsed {
+            ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected SpellTargetsFilter(Typed permanent), got {other:?}"),
         }
     }
 

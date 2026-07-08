@@ -1963,18 +1963,15 @@ fn parse_highest_mana_value_library_suffix(
 ) -> Result<(&str, Vec<FilterProp>), nom::Err<OracleError<'_>>> {
     let (rest, _) = tag("with the highest mana value among cards in your library with mana value ")
         .parse(input)?;
-    let (rest, threshold) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("x or less, where x is ").parse(rest)
-    {
-        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
-            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
-        ("", QuantityExpr::Ref { qty })
-    } else {
-        let (rest, _) = tag("less than or equal to ").parse(rest)?;
-        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
-            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
-        ("", QuantityExpr::Ref { qty })
-    };
+    let (rest, threshold) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x or less, where x is ").parse(rest) {
+            let (_, qty) = nom_quantity::parse_quantity_ref_complete(rest)?;
+            ("", QuantityExpr::Ref { qty })
+        } else {
+            let (rest, _) = tag("less than or equal to ").parse(rest)?;
+            let (_, qty) = nom_quantity::parse_quantity_ref_complete(rest)?;
+            ("", QuantityExpr::Ref { qty })
+        };
 
     let eligible_filter = TargetFilter::Typed(
         TypedFilter::card()
@@ -2329,7 +2326,7 @@ fn parse_search_filter_suffixes(
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("of the chosen kind").parse(remaining) {
             suffix
                 .properties
-                .push(FilterProp::IsChosenLandOrNonlandKind);
+                .push(FilterProp::MatchesLastChosenCardPredicate);
             remaining = rest.trim_start();
             continue;
         }
@@ -2876,6 +2873,69 @@ mod tests {
             }
             other => panic!("expected creature filter, got {other:?}"),
         }
+    }
+
+    /// CR 110.2a: "put that card onto the battlefield under your control" must
+    /// thread `enters_under = Some(You)` all the way onto the chained
+    /// `Effect::ChangeZone`. Bribery routes the pre-chained path (the
+    /// `SearchLibrary` clause is `defs.last()` when the destination continuation
+    /// applies). Revert-failing: before the fix `enters_under` is `None`.
+    #[test]
+    fn search_put_onto_battlefield_under_your_control_sets_enters_under() {
+        use crate::types::ability::Effect;
+        let def = super::super::parse_effect_chain(
+            "Search target opponent's library for a creature card and put that card onto the battlefield under your control. Then that player shuffles.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let enters_under = find_battlefield_change_zone_enters_under(&def)
+            .expect("chain should contain a ChangeZone to the battlefield");
+        assert_eq!(
+            enters_under,
+            Some(ControllerRef::You),
+            "under-your-control tutor must route the found card to the controller"
+        );
+        // Sanity: the search itself was recognized.
+        assert!(
+            matches!(&*def.effect, Effect::SearchLibrary { .. }),
+            "head of chain should be the SearchLibrary"
+        );
+    }
+
+    /// Negative sibling: a search-to-battlefield tutor WITHOUT "under your
+    /// control" must leave `enters_under = None` (the scan must not over-fire).
+    #[test]
+    fn search_put_onto_battlefield_without_control_clause_leaves_enters_under_none() {
+        let def = super::super::parse_effect_chain(
+            "Search your library for a creature card, put it onto the battlefield, then shuffle.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let enters_under = find_battlefield_change_zone_enters_under(&def)
+            .expect("chain should contain a ChangeZone to the battlefield");
+        assert_eq!(
+            enters_under, None,
+            "no control clause -> default owner's control (None)"
+        );
+    }
+
+    /// Walk the `sub_ability` chain and return the `enters_under` of the first
+    /// `ChangeZone` whose destination is the battlefield.
+    fn find_battlefield_change_zone_enters_under(
+        def: &crate::types::ability::AbilityDefinition,
+    ) -> Option<Option<ControllerRef>> {
+        use crate::types::ability::Effect;
+        let mut cursor = Some(def);
+        while let Some(node) = cursor {
+            if let Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                enters_under,
+                ..
+            } = &*node.effect
+            {
+                return Some(enters_under.clone());
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        None
     }
 
     #[test]
@@ -4823,6 +4883,26 @@ mod tests {
             OracleDiagnostic::TargetFallback { context, .. }
                 if context == "search-filter-suffix unmatched"
         )));
+    }
+
+    #[test]
+    fn highest_mana_value_library_suffix_rejects_partial_counter_threshold_tail() {
+        assert!(
+            parse_highest_mana_value_library_suffix(
+                "with the highest mana value among cards in your library with mana value x or less, where x is the number of charge counters on ~ plus one",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn highest_mana_value_library_suffix_rejects_partial_life_gained_threshold_tail() {
+        assert!(
+            parse_highest_mana_value_library_suffix(
+                "with the highest mana value among cards in your library with mana value less than or equal to the amount of life you gained this turn plus one",
+            )
+            .is_err()
+        );
     }
 
     #[test]

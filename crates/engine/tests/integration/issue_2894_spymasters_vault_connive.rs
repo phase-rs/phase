@@ -4,7 +4,7 @@
 //! Oracle: `{B}, {T}: Target creature you control connives X, where X is the
 //! number of creatures that died this turn.`
 //!
-//! CR 701.50e + CR 700.4 + CR 107.3i: X is a dynamic zone-change count over
+//! CR 701.50d + CR 700.4 + CR 107.3i: X is a dynamic zone-change count over
 //! battlefield→graveyard transitions recorded in `zone_changes_this_turn`.
 
 use engine::game::ability_utils::build_resolved_from_def;
@@ -54,7 +54,7 @@ fn spymasters_vault_connive_parses_creatures_died_count() {
     );
 }
 
-/// CR 701.50a/e: With two creatures having died this turn (one nontoken, one
+/// CR 701.50a/d: With two creatures having died this turn (one nontoken, one
 /// token), connive draws and discards two cards, placing one +1/+1 counter per
 /// nonland discarded.
 #[test]

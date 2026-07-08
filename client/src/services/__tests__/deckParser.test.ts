@@ -3,11 +3,13 @@ import {
   parseDeckFile,
   exportDeckFile,
   parseMtgaDeck,
+  exportMtgaDeck,
   detectAndParseDeck,
   deriveImportedDeckName,
   repairParsedDeck,
   resolveCommander,
   expandParsedDeck,
+  parsedDeckHasCards,
 } from '../deckParser';
 
 vi.mock('../engineRuntime', () => ({
@@ -141,6 +143,33 @@ Deck
     expect(result.sideboard).toEqual([]);
     expect(result.main).toHaveLength(1);
   });
+
+  it('parses planar deck sections without mixing them into main or sideboard', () => {
+    const content = `[Main]
+4 Lightning Bolt
+[Planar Deck]
+1 The Aether Flues
+1 Spatial Merging`;
+    const result = parseDeckFile(content);
+    expect(result.main).toEqual([{ count: 4, name: 'Lightning Bolt' }]);
+    expect(result.sideboard).toEqual([]);
+    expect(result.planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
+  });
+
+  it('parses scheme deck sections without mixing them into main or sideboard', () => {
+    const content = `[Main]
+4 Lightning Bolt
+[Scheme Deck]
+1 Your Puny Minds Cannot Fathom
+1 My Genius Knows No Bounds`;
+    const result = parseDeckFile(content);
+    expect(result.main).toEqual([{ count: 4, name: 'Lightning Bolt' }]);
+    expect(result.sideboard).toEqual([]);
+    expect(result.scheme_deck).toEqual([
+      'Your Puny Minds Cannot Fathom',
+      'My Genius Knows No Bounds',
+    ]);
+  });
 });
 
 describe('parseMtgaDeck', () => {
@@ -253,6 +282,65 @@ Deck
     ]);
   });
 
+  it('normalizes multi-part single-slash split names to canonical " // "', () => {
+    const result = parseMtgaDeck('1 Who / What / When / Where / Why');
+    expect(result.main).toEqual([
+      { count: 1, name: 'Who // What // When // Where // Why' },
+    ]);
+  });
+
+  it('preserves a printed name that literally contains "//" (issue #4790)', () => {
+    // "SP//dr, Piloted by Peni" is a single-faced card whose real name contains
+    // "//" with no surrounding spaces. Splitting it into "SP // dr, ..." breaks
+    // the engine's exact-name lookup, so the card is left unrecognized.
+    const result = parseMtgaDeck('1 SP//dr, Piloted by Peni');
+    expect(result.main).toEqual([
+      { count: 1, name: 'SP//dr, Piloted by Peni' },
+    ]);
+  });
+
+  it('leaves an already-canonical split name unchanged', () => {
+    const result = parseMtgaDeck('1 Fire // Ice');
+    expect(result.main).toEqual([
+      { count: 1, name: 'Fire // Ice' },
+    ]);
+  });
+
+  it('canonicalizes irregular spacing around a "//" separator', () => {
+    // A "//" with whitespace on either side is a separator; collapse the
+    // spacing to canonical " // " (but a glued "//" like SP//dr is left alone).
+    expect(parseMtgaDeck('1 Fire// Ice').main).toEqual([{ count: 1, name: 'Fire // Ice' }]);
+    expect(parseMtgaDeck('1 Wear //Tear').main).toEqual([{ count: 1, name: 'Wear // Tear' }]);
+  });
+
+  it('keeps real double-faced card names intact (spaced and one-sided spacing)', () => {
+    // These are genuine DFCs whose two faces are separated by "//". Real
+    // importers (Moxfield/Archidekt/MTGA) emit the canonical spaced form, which
+    // must pass through unchanged; one-sided spacing is repaired to canonical.
+    expect(parseMtgaDeck('1 Peter Parker // The Amazing Spider-Man').main).toEqual([
+      { count: 1, name: 'Peter Parker // The Amazing Spider-Man' },
+    ]);
+    expect(parseMtgaDeck('1 Witch Enchanter // Witch-blessed Meadow').main).toEqual([
+      { count: 1, name: 'Witch Enchanter // Witch-blessed Meadow' },
+    ]);
+    expect(parseMtgaDeck('1 Peter Parker //The Amazing Spider-Man').main).toEqual([
+      { count: 1, name: 'Peter Parker // The Amazing Spider-Man' },
+    ]);
+  });
+
+  it('leaves a glued double-faced name glued (engine resolves it via the front face)', () => {
+    // A fully glued "A//B" is syntactically indistinguishable from a printed
+    // name like "SP//dr", so the parser leaves it verbatim. The engine's
+    // lookup_key splits on bare "//" and resolves it to the front face, so the
+    // deck still loads.
+    expect(parseMtgaDeck('1 Peter Parker//The Amazing Spider-Man').main).toEqual([
+      { count: 1, name: 'Peter Parker//The Amazing Spider-Man' },
+    ]);
+    expect(parseMtgaDeck('1 Witch Enchanter//Witch-blessed Meadow').main).toEqual([
+      { count: 1, name: 'Witch Enchanter//Witch-blessed Meadow' },
+    ]);
+  });
+
   it('preserves an explicit sideboard header instead of promoting commander heuristically', () => {
     const content = `Deck
 1 Sol Ring
@@ -265,6 +353,28 @@ Sideboard
     expect(result.sideboard).toEqual([
       { count: 1, name: 'Dark Leo & Shredder' },
     ]);
+  });
+
+  it('preserves sticker sheets through repair and expansion', () => {
+    const repaired = repairParsedDeck({
+      main: [{ count: 1, name: 'Sol Ring' }],
+      sideboard: [],
+      sticker_sheets: ['sheet-1', 'sheet-2', 'sheet-3'],
+    });
+
+    expect(repaired.sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
+    expect(expandParsedDeck(repaired).sticker_sheets).toEqual(['sheet-1', 'sheet-2', 'sheet-3']);
+  });
+
+  it('preserves planar decks through repair and expansion', () => {
+    const repaired = repairParsedDeck({
+      main: [{ count: 1, name: 'Sol Ring' }],
+      sideboard: [],
+      planar_deck: ['The Aether Flues', 'Spatial Merging'],
+    });
+
+    expect(repaired.planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
+    expect(expandParsedDeck(repaired).planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
   });
 });
 
@@ -311,6 +421,20 @@ Sideboard
     expect(result.sideboard).toEqual([
       { count: 3, name: 'Red Elemental Blast' },
     ]);
+  });
+
+  it('detects simple Deck/Planar Deck sections and preserves planar cards', () => {
+    const content = `Deck
+4 Lightning Bolt
+
+Planar Deck
+1 The Aether Flues
+1 Spatial Merging`;
+    const result = detectAndParseDeck(content);
+    expect(result.main).toEqual([
+      { count: 4, name: 'Lightning Bolt' },
+    ]);
+    expect(result.planar_deck).toEqual(['The Aether Flues', 'Spatial Merging']);
   });
 
   it('parses MTGO TLR exports with SIDEBOARD colon and trailing commander', () => {
@@ -464,6 +588,58 @@ Deck
     });
     expect(result.commander).toEqual(['Zimone, Infinite Analyst']);
     expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+  });
+
+  it('exports planar deck sections that round-trip through the parser', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      planar_deck: ['The Aether Flues', 'Spatial Merging'],
+    };
+    const exported = exportDeckFile(deck);
+    expect(exported).toBe(
+      '[Main]\n4 Lightning Bolt\n[Planar Deck]\n1 The Aether Flues\n1 Spatial Merging\n',
+    );
+    expect(parseDeckFile(exported)).toEqual(deck);
+  });
+
+  it('exports scheme deck sections that round-trip through the parser', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      scheme_deck: ['Your Puny Minds Cannot Fathom', 'My Genius Knows No Bounds'],
+    };
+    const exported = exportDeckFile(deck);
+    expect(exported).toBe(
+      '[Main]\n4 Lightning Bolt\n[Scheme Deck]\n1 Your Puny Minds Cannot Fathom\n1 My Genius Knows No Bounds\n',
+    );
+    expect(parseDeckFile(exported)).toEqual(deck);
+  });
+
+  it('exports planar deck sections in MTGA format', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      planar_deck: ['The Aether Flues', 'Spatial Merging'],
+    };
+    const exported = exportMtgaDeck(deck);
+    expect(exported).toBe(
+      'Deck\n4 Lightning Bolt\n\nPlanar Deck\n1 The Aether Flues\n1 Spatial Merging\n',
+    );
+    expect(parseMtgaDeck(exported)).toEqual(deck);
+  });
+
+  it('exports scheme deck sections in MTGA format', () => {
+    const deck = {
+      main: [{ count: 4, name: 'Lightning Bolt' }],
+      sideboard: [],
+      scheme_deck: ['Your Puny Minds Cannot Fathom', 'My Genius Knows No Bounds'],
+    };
+    const exported = exportMtgaDeck(deck);
+    expect(exported).toBe(
+      'Deck\n4 Lightning Bolt\n\nScheme Deck\n1 Your Puny Minds Cannot Fathom\n1 My Genius Knows No Bounds\n',
+    );
+    expect(parseMtgaDeck(exported)).toEqual(deck);
   });
 });
 
@@ -667,5 +843,15 @@ describe('expandParsedDeck', () => {
       sideboard: [],
     });
     expect(result.commander).toEqual([]);
+  });
+});
+
+describe('parsedDeckHasCards', () => {
+  it('returns false when no deck lines were recognized', () => {
+    expect(parsedDeckHasCards(detectAndParseDeck('asdasd'))).toBe(false);
+  });
+
+  it('returns true when main-deck cards were parsed', () => {
+    expect(parsedDeckHasCards(detectAndParseDeck('4 Lightning Bolt'))).toBe(true);
   });
 });

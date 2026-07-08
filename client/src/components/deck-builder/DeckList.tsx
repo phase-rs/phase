@@ -1,12 +1,19 @@
 import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
+import {
+  detectAndParseDeck,
+  exportDeck,
+  parsedDeckHasCards,
+  resolveCommander,
+} from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
+import type { ScryfallCard } from "../../services/scryfall";
 
 import { MoveList } from "./MoveList";
 import { mouseHoverPreview } from "./hoverPreview";
+import { groupAccent, groupKey, groupOrder, groupTitleKey, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckListProps {
@@ -33,25 +40,12 @@ interface DeckListProps {
   commanders?: string[];
   /** Demotes a commander back into the main deck. Paired with `commanders`. */
   onRemoveCommander?: (name: string) => void;
+  /** Card data used to classify each main-deck entry into its group. */
+  cardDataCache: Map<string, ScryfallCard>;
+  /** Whether the main deck is sub-grouped by card type or by color. */
+  groupMode: GroupMode;
 }
 
-
-interface GroupedEntries {
-  Creatures: DeckEntry[];
-  Spells: DeckEntry[];
-  Lands: DeckEntry[];
-}
-
-function groupByType(entries: DeckEntry[]): GroupedEntries {
-  const groups: GroupedEntries = { Creatures: [], Spells: [], Lands: [] };
-  for (const entry of entries) {
-    // Without full card data, we use name heuristics; actual categorization
-    // will be enhanced when Scryfall data is cached.
-    // For now, all go to Spells unless we integrate card type data.
-    groups.Spells.push(entry);
-  }
-  return groups;
-}
 
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, e) => sum + e.count, 0);
@@ -72,18 +66,31 @@ export function DeckList({
   onOpenArtPicker,
   commanders = [],
   onRemoveCommander,
+  cardDataCache,
+  groupMode,
 }: DeckListProps) {
   const { t } = useTranslation("deck-builder");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [pasteLoading, setPasteLoading] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("dck");
   const [copied, setCopied] = useState(false);
   const [viewMode, setViewMode] = useState<"main" | "sideboard">("main");
   const mainTotal = totalCards(deck.main);
   const sideTotal = totalCards(deck.sideboard);
-  const mainGroups = groupByType(deck.main);
+  const mainGroups = useMemo(() => {
+    const buckets = new Map<string, DeckEntry[]>();
+    for (const entry of deck.main) {
+      const key = groupKey(groupMode, cardDataCache.get(entry.name));
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(entry);
+      else buckets.set(key, [entry]);
+    }
+    return buckets;
+  }, [deck.main, groupMode, cardDataCache]);
 
   // CR 100.4a: Ask the engine for the format's sideboard policy rather than
   // hardcoding 15. The engine is the single authority for format rules; the
@@ -126,22 +133,42 @@ export function DeckList({
     return map;
   }, [compatibility?.coverage?.unsupported_cards]);
 
+  const importParsedDeck = async (content: string): Promise<boolean> => {
+    const parsed = await resolveCommander(detectAndParseDeck(content));
+    if (!parsedDeckHasCards(parsed)) {
+      setPasteError(t("deckList.parseError"));
+      return false;
+    }
+    onImport(parsed);
+    setPasteText("");
+    setPasteError(null);
+    setShowPasteModal(false);
+    return true;
+  };
+
   const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const content = await file.text();
-    const parsed = await resolveCommander(detectAndParseDeck(content));
-    onImport(parsed);
-    // Reset file input so same file can be re-imported
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    setPasteError(null);
+    setPasteLoading(true);
+    try {
+      const content = await file.text();
+      await importParsedDeck(content);
+    } finally {
+      setPasteLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   const handlePasteImport = async () => {
-    if (!pasteText.trim()) return;
-    const parsed = await resolveCommander(detectAndParseDeck(pasteText));
-    onImport(parsed);
-    setPasteText("");
-    setShowPasteModal(false);
+    if (!pasteText.trim() || pasteLoading) return;
+    setPasteError(null);
+    setPasteLoading(true);
+    try {
+      await importParsedDeck(pasteText);
+    } finally {
+      setPasteLoading(false);
+    }
   };
 
   const exportText = showExportModal ? exportDeck(deck, exportFormat) : "";
@@ -170,7 +197,10 @@ export function DeckList({
         </div>
         <div className="flex shrink-0 gap-1">
           <button
-            onClick={() => setShowPasteModal(true)}
+            onClick={() => {
+              setPasteError(null);
+              setShowPasteModal(true);
+            }}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6"
             title={t("deckList.importTitle")}
           >
@@ -276,11 +306,12 @@ export function DeckList({
           → Maybeboard / → Main) so the move target is explicit on touch. */}
       <div>
         {viewMode === "main"
-          ? (["Creatures", "Spells", "Lands"] as const).map((group) => (
+          ? groupOrder(groupMode).map((key) => (
               <MoveList
-                key={group}
-                title={t(`deckList.group.${group}`)}
-                entries={mainGroups[group]}
+                key={key}
+                title={t(`deckList.${groupTitleKey(groupMode, key)}`)}
+                accent={groupAccent(key)}
+                entries={mainGroups.get(key) ?? []}
                 section="main"
                 onRemove={onRemoveCard}
                 onMove={onMoveCard}
@@ -323,22 +354,30 @@ export function DeckList({
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
             className="absolute inset-0 bg-black/60"
-            onClick={() => setShowPasteModal(false)}
+            onClick={() => {
+              setPasteError(null);
+              setShowPasteModal(false);
+            }}
           />
           <div className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
             <h3 className="mb-3 text-sm font-bold text-white">{t("deckList.importModalTitle")}</h3>
             <textarea
               value={pasteText}
-              onChange={(e) => setPasteText(e.target.value)}
+              onChange={(e) => {
+                setPasteText(e.target.value);
+                if (pasteError) setPasteError(null);
+              }}
               placeholder={t("deckList.pastePlaceholder")}
               rows={10}
               className="mb-3 w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
               autoFocus
             />
+            {pasteError && <p className="mb-3 text-xs text-red-400">{pasteError}</p>}
             <div className="flex justify-between">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="rounded-xl border border-white/8 bg-black/18 px-3 py-1.5 text-xs text-gray-300 hover:bg-white/6"
+                disabled={pasteLoading}
+                className="rounded-xl border border-white/8 bg-black/18 px-3 py-1.5 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"
               >
                 {t("deckList.fromFile")}
               </button>
@@ -346,18 +385,20 @@ export function DeckList({
                 <button
                   onClick={() => {
                     setPasteText("");
+                    setPasteError(null);
                     setShowPasteModal(false);
                   }}
-                  className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
+                  disabled={pasteLoading}
+                  className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600 disabled:opacity-40"
                 >
                   {t("common:actions.cancel")}
                 </button>
                 <button
                   onClick={handlePasteImport}
-                  disabled={!pasteText.trim()}
+                  disabled={!pasteText.trim() || pasteLoading}
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
                 >
-                  {t("deckList.parse")}
+                  {pasteLoading ? t("deckList.parsing") : t("deckList.parse")}
                 </button>
               </div>
             </div>

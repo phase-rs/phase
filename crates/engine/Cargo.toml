@@ -9,6 +9,9 @@ cli = ["tracing-subscriber"]
 audit = []
 forge = []
 proptest = ["dep:proptest"]
+# Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
+# `combo-verify` tool bin. Excluded from the default lib / WASM surface.
+combo-verify = []
 
 [dependencies]
 serde = { workspace = true }
@@ -56,6 +59,12 @@ required-features = ["audit"]
 test = false
 
 [[bin]]
+name = "combo-verify"
+path = "src/bin/combo_verify.rs"
+required-features = ["combo-verify"]
+test = false
+
+[[bin]]
 name = "card-data-validate"
 path = "src/bin/card_data_validate.rs"
 test = false
@@ -64,6 +73,12 @@ test = false
 name = "tokens-gen"
 path = "src/bin/tokens_gen.rs"
 test = false
+
+[[bin]]
+name = "coverage-parse-diff"
+path = "src/bin/coverage_parse_diff.rs"
+# `test = true` (default): this bin carries non-trivial diff logic with inline
+# unit tests, unlike the logic-free tool bins above that set `test = false`.
 
 [dev-dependencies]
 tempfile = "3"

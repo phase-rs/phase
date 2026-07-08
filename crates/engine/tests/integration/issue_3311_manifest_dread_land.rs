@@ -3,7 +3,8 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, EffectScope, ReplacementDefinition, TapStateChange,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
@@ -15,15 +16,18 @@ use engine::types::zones::Zone;
 
 const MANIFEST_DREAD_ORACLE: &str = "Manifest dread.";
 
-fn enter_tapped_battlefield_replacement(description: &str) -> ReplacementDefinition {
+fn enter_tap_state_battlefield_replacement(
+    description: &str,
+    state: TapStateChange,
+) -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
         .destination_zone(Zone::Battlefield)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::SetTapState {
                 target: TargetFilter::SelfRef,
-                scope: engine::types::ability::EffectScope::Single,
-                state: engine::types::ability::TapStateChange::Tap,
+                scope: EffectScope::Single,
+                state,
             },
         ))
         .description(description.to_string())
@@ -87,7 +91,7 @@ fn manifest_dread_can_manifest_land_face_down_on_battlefield() {
 }
 
 #[test]
-fn undercity_sewers_manifest_dread_finishes_after_enter_tapped_collision() {
+fn undercity_sewers_manifest_dread_finishes_after_material_tap_state_collision() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let other = scenario.add_card_to_library_top(P0, "Other Card");
@@ -95,14 +99,16 @@ fn undercity_sewers_manifest_dread_finishes_after_enter_tapped_collision() {
     scenario
         .add_creature(P1, "Kismet", 0, 0)
         .as_enchantment()
-        .with_replacement_definition(enter_tapped_battlefield_replacement(
+        .with_replacement_definition(enter_tap_state_battlefield_replacement(
             "Creatures enter the battlefield tapped.",
+            TapStateChange::Tap,
         ));
     scenario
-        .add_creature(P1, "Frozen Aether", 0, 0)
+        .add_creature(P1, "Spelunking", 0, 0)
         .as_enchantment()
-        .with_replacement_definition(enter_tapped_battlefield_replacement(
-            "Permanents enter the battlefield tapped.",
+        .with_replacement_definition(enter_tap_state_battlefield_replacement(
+            "Permanents enter the battlefield untapped.",
+            TapStateChange::Untap,
         ));
     let spell = scenario
         .add_spell_to_hand(P0, "Dread Test", false)
@@ -130,7 +136,7 @@ fn undercity_sewers_manifest_dread_finishes_after_enter_tapped_collision() {
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ),
-        "manifesting a land must still finish after enter-tapped collision, got {:?}",
+        "manifesting a land must still finish after material tap-state collision, got {:?}",
         runner.state().waiting_for
     );
     assert_eq!(

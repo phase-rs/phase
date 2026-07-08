@@ -1,10 +1,12 @@
 use crate::game::targeting::resolve_event_context_target;
 use crate::types::ability::{
     DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError, EffectKind,
-    ReplacementDefinition, ResolvedAbility, RestrictionExpiry, TargetFilter, TargetRef,
+    ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::replacements::ReplacementEvent;
 
 pub(crate) fn expiry_from_duration(
     duration: Option<&Duration>,
@@ -39,19 +41,83 @@ fn replacement_with_ability_expiry(
     if replacement.source_controller.is_none() {
         replacement.source_controller = Some(ability.controller);
     }
+    stamp_for_as_long_as_controlled_gate(&mut replacement, ability);
     freeze_damage_modification_x(&mut replacement, ability);
     replacement
 }
 
+/// CR 611.2b: Translate a "for as long as you control ~" duration on the
+/// installing ability into a `ControllerControlsSource` applicability gate for a
+/// broad untap-prevention rider (Spider-Woman, Secret Agent: "That creature
+/// can't become untapped for as long as you control ~.").
+///
+/// The clause shell peels "for as long as you control ~" onto the ability frame
+/// as `Duration::UntilHostLeavesPlay` (the parser's canonical mapping for
+/// host-control lifetimes). For a replacement installed on a DIFFERENT object
+/// (the chosen creature) that mapping is insufficient on its own — nothing
+/// prunes an `UntilHostLeavesPlay` object-installed replacement, and it must end
+/// on a control SWAP of the originating source, not just when it leaves play.
+/// Stamping the gate with the originating source (`ability.source_id`, e.g.
+/// Spider-Woman) and its controller (`ability.controller`) re-checks "you still
+/// control [the source]" on every untap, matching the Master Thief example.
+///
+/// Tightly scoped: only a bare untap-prevention rider (event `Untap`, no
+/// `execute`, no pre-existing condition) carrying this exact duration is
+/// translated, so unrelated `AddTargetReplacement` installs are untouched.
+///
+/// ACKNOWLEDGED CR 611.2b GAP — presence sub-class is over-gated (NOT fixed
+/// here): `parse_for_as_long_as_condition` (parser/oracle_nom/duration.rs)
+/// collapses BOTH "for as long as you control [subject]" (control-bound: ends
+/// on leave-play OR a control swap of the source — Spider-Woman) AND "[subject]
+/// remains on the battlefield" (presence-bound: per CR 611.2b ends ONLY on
+/// leave-play, NOT on a source control change) into the same
+/// `Duration::UntilHostLeavesPlay`. `ResolvedAbility` carries only `duration`,
+/// so the original phrasing is lost by the time this stamp runs — the two
+/// sub-classes are indistinguishable here. A hypothetical "[creature] can't
+/// become untapped for as long as ~ remains on the battlefield" would therefore
+/// currently receive the `ControllerControlsSource` gate, whose
+/// `controller == installer` re-check would make it lapse EARLY on a source
+/// control swap — rules-wrong for the presence sub-class.
+///
+/// This is left as a documented strict-failure gap rather than silently
+/// distinguished: making the two phrasings carry distinct durations (so the
+/// stamp could tell them apart) was rejected because "remains on the
+/// battlefield" → `UntilHostLeavesPlay` is relied on by several shipped card
+/// classes (Saga goaded tokens, Stern Mentor-style "loses all abilities",
+/// gain-control + lose-abilities, +1/+1 grants) that depend on the
+/// leave-play prune path (layers.rs); re-routing the presence arm to a
+/// presence-bound `ForAsLongAs { IsPresent }` would change the prune semantics
+/// for all of them. No real card currently combines the presence phrasing with
+/// a bare untap-prevention rider, so this gate stays keyed on
+/// `UntilHostLeavesPlay` (correct for Spider-Woman / Secret Agent) and the
+/// presence sub-class waits here until either a distinguishing signal is
+/// threaded through `ResolvedAbility` or a card forces the distinction.
+fn stamp_for_as_long_as_controlled_gate(
+    replacement: &mut ReplacementDefinition,
+    ability: &ResolvedAbility,
+) {
+    let is_bare_untap_prevention = replacement.event == ReplacementEvent::Untap
+        && replacement.execute.is_none()
+        && replacement.condition.is_none();
+    if is_bare_untap_prevention && matches!(ability.duration, Some(Duration::UntilHostLeavesPlay)) {
+        replacement.condition = Some(ReplacementCondition::ControllerControlsSource {
+            source: ability.source_id,
+            controller: ability.controller,
+        });
+    }
+}
+
 /// CR 107.3a + CR 601.2b: Freeze the announced value of X into a "deals that
-/// much damage plus X" replacement at activation time. The parser emits
-/// `DamageModification::Plus { value: 0 }` as a placeholder (the `u32`-typed
-/// modification cannot carry a symbolic X); here the announced X (held on the
-/// activating ability as `chosen_x`) replaces the placeholder so the replacement
-/// applies the locked-in value for the rest of the turn (Taii Wakeen's second
-/// ability). The `chosen_x.is_some()` guard ensures a genuine literal "plus 0"
-/// (no X in the cost) is never clobbered. (CR 107.3a: an activated ability's X
-/// equals its announced value while on the stack and beyond.)
+/// much damage plus X" replacement at activation time. The parser emits the
+/// bare-"plus x" form (no "where X is" binding) as
+/// `DamageModification::Plus { value: QuantityExpr::Fixed { value: 0 } }`
+/// placeholder; here the announced X (held on the activating ability as
+/// `chosen_x`) replaces the placeholder so the replacement applies the
+/// locked-in value for the rest of the turn (Taii Wakeen's second ability). The
+/// `Fixed { value: 0 }` guard ensures a genuine literal "plus 0" (no X) or a
+/// where-bound dynamic offset (`Ref`, e.g. Hawkeye) is never clobbered. (CR
+/// 107.3a: an activated ability's X equals its announced value while on the
+/// stack and beyond.)
 fn freeze_damage_modification_x(
     replacement: &mut ReplacementDefinition,
     ability: &ResolvedAbility,
@@ -59,8 +125,13 @@ fn freeze_damage_modification_x(
     if let (Some(crate::types::ability::DamageModification::Plus { value }), Some(chosen_x)) =
         (replacement.damage_modification.as_mut(), ability.chosen_x)
     {
-        if *value == 0 {
-            *value = chosen_x;
+        if matches!(
+            value,
+            crate::types::ability::QuantityExpr::Fixed { value: 0 }
+        ) {
+            *value = crate::types::ability::QuantityExpr::Fixed {
+                value: chosen_x as i32,
+            };
         }
     }
 }
@@ -133,8 +204,40 @@ pub fn resolve(
         for resolved_target in replacement_targets(state, ability, target) {
             match resolved_target {
                 TargetRef::Object(obj_id) => {
-                    let replacement = replacement_with_ability_expiry(replacement, ability);
+                    let mut replacement = replacement_with_ability_expiry(replacement, ability);
+                    replacement.fix_legacy_parse_time_consumed_flag();
+                    // CR 611.2b: A "for as long as you control [source]" gated
+                    // replacement is a continuous effect that must survive every
+                    // layer reset (evaluate_layers rebuilds live
+                    // replacement_definitions from base — layers.rs). The base
+                    // store is otherwise the printed baseline (CR 613.1,
+                    // game_object.rs); this is a deliberate, prune-bounded
+                    // exception: the three lapse prunes (control swap, source
+                    // leave-play, host leave-play) remove this def on every
+                    // CR 611.2b lapse, so base never accumulates a stale runtime
+                    // rider. printed_cards.rs is the only intrinsic base-write
+                    // precedent; there is no additive-runtime base-push
+                    // precedent, so this exception is documented here. This
+                    // gate-scoping keeps transient riders (die-exile, Crafty
+                    // Cutpurse, end-of-turn) live-only and untouched.
+                    //
+                    // Acknowledged out-of-scope edges (NOT fixed here): (1) Cleave
+                    // re-baselining only touches spells on the stack (casting.rs)
+                    // and structurally cannot hit a battlefield host — non-issue.
+                    // (2) Turning the LOCKED HOST face-down
+                    // (morph.rs apply_face_down_creature_characteristics clears
+                    // base+live replacement defs, CR 708.2a) would end the lock
+                    // early — an under-prune, strictly safer than a revival; rare
+                    // corner, out of scope.
+                    let install_to_base = matches!(
+                        replacement.condition,
+                        Some(ReplacementCondition::ControllerControlsSource { .. })
+                    );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
+                        if install_to_base {
+                            std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+                                .push(replacement.clone());
+                        }
                         obj.replacement_definitions.push(replacement);
                         attached += 1;
                     }
@@ -174,8 +277,8 @@ mod tests {
     use crate::game::replacement::{replace_event, ReplacementResult};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        DamageModification, DamageTargetPlayerScope, Duration, ReplacementDefinition,
-        RestrictionExpiry, TargetFilter,
+        AbilityDefinition, DamageModification, DamageTargetPlayerScope, Duration,
+        ReplacementDefinition, RestrictionExpiry, TargetFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -191,6 +294,83 @@ mod tests {
             is_combat: false,
             applied: Default::default(),
         }
+    }
+
+    #[test]
+    fn die_exile_rider_with_legacy_is_consumed_applies_exile_redirect() {
+        use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ));
+        repl.is_consumed = true;
+        repl.expiry = Some(RestrictionExpiry::EndOfTurn);
+        repl.fix_legacy_parse_time_consumed_flag();
+
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(repl),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(0),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            target,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            None,
+        );
+        let result = crate::game::replacement::replace_event(&mut state, proposed, &mut events);
+        match result {
+            crate::game::replacement::ReplacementResult::Execute(
+                crate::types::proposed_event::ProposedEvent::ZoneChange { to, .. },
+            ) => assert_eq!(to, Zone::Exile),
+            other => panic!("expected exile redirect, got {other:?}"),
+        }
+        assert!(
+            state.objects.get(&target).unwrap().replacement_definitions[0].is_consumed,
+            "one-shot rider must consume after applying"
+        );
     }
 
     #[test]
@@ -227,6 +407,14 @@ mod tests {
         assert_eq!(
             obj.replacement_definitions[0].expiry,
             Some(RestrictionExpiry::EndOfTurn)
+        );
+        // CR 611.2b gate-scoping: a transient (end-of-turn) rider WITHOUT a
+        // `ControllerControlsSource` condition must stay live-only — it must NOT
+        // be mirrored into the printed-baseline base store (CR 613.1). Only the
+        // duration-bound can't-untap class gets the durable base-push.
+        assert!(
+            obj.base_replacement_definitions.is_empty(),
+            "non-ControllerControlsSource rider must not be pushed to base"
         );
         assert!(events.iter().any(|e| matches!(
             e,
@@ -357,7 +545,9 @@ mod tests {
         // of truth.
         let mut state = GameState::new_two_player(42);
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .damage_modification(DamageModification::Plus { value: 1 })
+            .damage_modification(DamageModification::Plus {
+                value: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            })
             .damage_source_filter(TargetFilter::Typed(
                 crate::types::ability::TypedFilter::default()
                     .controller(crate::types::ability::ControllerRef::You),
@@ -425,7 +615,9 @@ mod tests {
         );
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .damage_modification(DamageModification::Plus { value: 1 })
+            .damage_modification(DamageModification::Plus {
+                value: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            })
             .damage_source_filter(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
             ));

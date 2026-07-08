@@ -28,7 +28,9 @@ use engine::game::players;
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
-use super::copy_value::{copy_target_penalties, score_legend_rule_keep};
+use super::copy_value::{
+    copy_effect_strips_legendary, copy_target_penalties, score_legend_rule_keep,
+};
 use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
     extract_target_filter, is_spell_beneficial, lethal_to_creature, targeted_object_impact,
@@ -281,7 +283,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
                             && o.name == source.name
                     }) && !engine::game::sba::legend_rule_exempt(ctx.state, id)
                 })
-                .then_some(-8.0)
+                .then_some(ctx.penalties().wasted_cast_penalty)
         })
         .unwrap_or(0.0);
 
@@ -320,7 +322,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
             && !facts.requires_targets_in_spell_text
             && !etb_trigger_has_valid_targets(ctx, &facts)
         {
-            -8.0
+            ctx.penalties().wasted_cast_penalty
         } else {
             0.0
         }
@@ -360,17 +362,17 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     // Beneficial creature-targeting spell but no own creatures to buff.
     if has_beneficial_creature_target && !has_own_creature {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     // Harmful creature-only spell (e.g. Murder) but no targetable opponent creatures.
     if has_harmful_creature_only_target && !has_targetable_opponent_creature {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     // Harmful bounce with no opposing legal targets will force a self-bounce line.
     if has_harmful_bounce && !has_opponent_bounce_target(ctx, &effects) {
-        penalty -= 8.0;
+        penalty += ctx.penalties().wasted_cast_penalty;
     }
 
     penalty += etb_whiff_penalty;
@@ -696,22 +698,24 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
     {
         if object.tapped {
             score += if object.controller == ctx.ai_player {
-                8.0
+                ctx.penalties().untap_own_tapped_bonus
             } else {
-                -20.0
+                ctx.penalties().untap_opponent_tapped_penalty
             };
         } else {
-            score -= 6.0;
+            score += ctx.penalties().untap_untapped_penalty;
         }
     }
 
-    if ctx
+    if let Some(copy_effect) = ctx
         .effects()
         .iter()
-        .any(|effect| matches!(effect, Effect::CopyTokenOf { .. }))
+        .find(|effect| matches!(effect, Effect::CopyTokenOf { .. }))
     {
         if let Some(source) = ctx.source_object() {
-            score -= copy_target_penalties(ctx.state, ctx.ai_player, Some(source.id), object);
+            let strips = copy_effect_strips_legendary(copy_effect);
+            score -=
+                copy_target_penalties(ctx.state, ctx.ai_player, Some(source.id), object, strips);
         }
     }
 
@@ -828,7 +832,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     .is_some_and(|(dmg, t)| dmg >= t - object.damage_marked as i32);
                 let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
                 if !is_lethal_burn && !is_destroy {
-                    score -= 5.0;
+                    score += ctx.penalties().tapped_removal_no_urgency_penalty;
                 }
             }
         }
@@ -1045,7 +1049,9 @@ mod tests {
         ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticDefinition, TargetFilter,
         TriggerDefinition, TypeFilter, TypedFilter,
     };
-    use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
+    use engine::types::game_state::{
+        CastingVariant, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
@@ -1129,6 +1135,25 @@ mod tests {
         (decision, candidate)
     }
 
+    fn make_mutate_target_selection_ctx(
+        state: &GameState,
+        legal_targets: Vec<TargetRef>,
+        candidate_target: Option<TargetRef>,
+    ) -> (AiDecisionContext, CandidateAction) {
+        let (mut decision, candidate) = make_target_selection_ctx(
+            state,
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            legal_targets,
+            candidate_target,
+        );
+        if let WaitingFor::TargetSelection { pending_cast, .. } = &mut decision.waiting_for {
+            pending_cast.casting_variant = CastingVariant::Mutate;
+        }
+        (decision, candidate)
+    }
+
     fn graveyard_recursion_creature(state: &mut GameState) -> ObjectId {
         let id = create_object(
             state,
@@ -1163,7 +1188,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state
@@ -1216,6 +1243,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1255,6 +1283,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1293,6 +1322,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1311,6 +1341,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1322,6 +1353,207 @@ mod tests {
         assert!(
             score_opp < 0.0,
             "Opponent creature score should be negative"
+        );
+    }
+
+    #[test]
+    fn undying_malice_prefers_own_creature() {
+        // Undying Malice grants target creature "when this dies, return it to the
+        // battlefield" — GenericEffect{ Continuous{ GrantTrigger{ dies →
+        // ChangeZone→Battlefield } } }. Pre-fix `modification_polarity(GrantTrigger)`
+        // fell to `Contextual`, so `player_impact`/`is_spell_beneficial` read the
+        // spell as non-beneficial and `score_target_object` aimed it at an opponent
+        // creature. The fix classifies the grant Beneficial (via the executed
+        // ChangeZone→Battlefield), flipping the preference to the AI's own creature.
+        // Reverting the named `GrantTrigger` arm makes `score_own < score_opp`.
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let config = AiConfig::default();
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )));
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(trigger),
+                }])],
+            target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            duration: None,
+        };
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect.clone(),
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(own_id)),
+        );
+        let ctx_own = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_own = AntiSelfHarmPolicy.score(&ctx_own);
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_opp = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
+
+        assert!(
+            score_own > score_opp,
+            "Undying grant should prefer own creature: own={score_own}, opp={score_opp}"
+        );
+        assert!(score_own > 0.0, "Own creature score should be positive");
+        assert!(
+            score_opp < 0.0,
+            "Opponent creature score should be negative"
+        );
+    }
+
+    #[test]
+    fn strength_of_tajuru_prefers_own_creature() {
+        // VERIFY-ONLY (expected to PASS on unmodified code): Strength of the Tajuru's
+        // payoff leaf is `PutCounterAll{ +1/+1 }`, which `counter_sign_polarity`
+        // already classifies Beneficial, so `is_spell_beneficial` is true and
+        // `score_target_object` prefers the AI's own creature. No code change backs
+        // this — it documents the reported "targets opponent" behavior as already
+        // correct for the counter payoff (the empty `Typed` target mirrors the real
+        // leaf AST). If this ever fails, it is a stop-and-return item, not a fix.
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let config = AiConfig::default();
+
+        let effect = Effect::PutCounterAll {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::default()),
+        };
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect.clone(),
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(own_id)),
+        );
+        let ctx_own = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_own = AntiSelfHarmPolicy.score(&ctx_own);
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_opp = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
+
+        assert!(
+            score_own > score_opp,
+            "PutCounterAll{{+1/+1}} should prefer own creature: own={score_own}, opp={score_opp}"
+        );
+    }
+
+    #[test]
+    fn mutate_target_prefers_own_creature() {
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let (decision, candidate) = make_mutate_target_selection_ctx(
+            &state,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(own_id)),
+        );
+        let ctx_own = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_own = AntiSelfHarmPolicy.score(&ctx_own);
+
+        let (decision, candidate) = make_mutate_target_selection_ctx(
+            &state,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_opp = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
+
+        assert!(
+            score_own > score_opp,
+            "Mutate should prefer own creature: own={score_own}, opp={score_opp}"
         );
     }
 
@@ -1352,6 +1584,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1369,6 +1602,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1404,6 +1638,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -1421,6 +1656,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1458,6 +1694,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_self = AntiSelfHarmPolicy.score(&ctx_self);
 
@@ -1478,6 +1715,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -1549,6 +1787,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let opp_candidate = CandidateAction {
             action: GameAction::ChooseTarget {
@@ -1567,6 +1806,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let self_score = AntiSelfHarmPolicy.score(&self_ctx);
@@ -1638,6 +1878,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let opp_candidate = CandidateAction {
             action: GameAction::ChooseTarget {
@@ -1656,6 +1897,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let self_score = AntiSelfHarmPolicy.score(&self_ctx);
@@ -1841,6 +2083,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -1903,6 +2146,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2001,6 +2245,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2064,6 +2309,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2126,6 +2372,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2188,6 +2435,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2252,6 +2500,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2315,6 +2564,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2346,6 +2596,7 @@ mod tests {
                 amount: engine::types::ability::QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )]);
 
@@ -2377,6 +2628,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2459,6 +2711,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::StackSpell,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             Vec::new(),
             rewind_id,
@@ -2526,6 +2779,7 @@ mod tests {
             config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -2552,6 +2806,7 @@ mod tests {
             config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -2592,6 +2847,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2722,6 +2978,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2880,6 +3137,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -2983,6 +3241,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3035,6 +3294,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let score = AntiSelfHarmPolicy.score(&ctx);
@@ -3090,7 +3350,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 Vec::new(),
                 ObjectId(200),
@@ -3113,6 +3375,9 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: legal_targets.clone(),
                     optional: false,
@@ -3144,6 +3409,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let creature_score = AntiSelfHarmPolicy.score(&creature_ctx);
 
@@ -3165,6 +3431,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let token_score = AntiSelfHarmPolicy.score(&token_ctx);
 
@@ -3199,7 +3466,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 Vec::new(),
                 ObjectId(200),
@@ -3221,6 +3490,9 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
                 target_slots: vec![],
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
@@ -3245,6 +3517,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let effects = ctx.effects();
@@ -3278,6 +3551,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         let ability = ResolvedAbility::new(effect, Vec::new(), fanatic_id, PlayerId(0));
         let mut pending_cast = PendingCast::new(fanatic_id, CardId(100), ability, ManaCost::zero());
@@ -3325,6 +3599,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let verdict_self = AntiSelfHarmPolicy.verdict(&ctx_self);
 
@@ -3346,6 +3621,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -3367,6 +3643,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_player = AntiSelfHarmPolicy.score(&ctx_player);
 
@@ -3417,6 +3694,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_own = AntiSelfHarmPolicy.score(&ctx_own);
 
@@ -3435,6 +3713,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
 
@@ -3470,6 +3749,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -3486,6 +3766,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_creature = AntiSelfHarmPolicy.score(&ctx_creature);
 
@@ -3504,6 +3785,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score_face = AntiSelfHarmPolicy.score(&ctx_face);
 
@@ -3534,6 +3816,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
 
         let (decision, candidate) = make_target_selection_ctx(
@@ -3550,6 +3833,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score = AntiSelfHarmPolicy.score(&ctx);
 
@@ -3580,6 +3864,7 @@ mod tests {
                         ],
                     },
                     damage_source: None,
+                    excess: None,
                 },
             ));
         state
@@ -3593,6 +3878,7 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
             damage_source: None,
+            excess: None,
         };
         let (decision, candidate) = make_target_selection_ctx(
             &state,
@@ -3609,6 +3895,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let score = AntiSelfHarmPolicy.score(&ctx);
         assert!(
@@ -3632,6 +3919,7 @@ mod tests {
             },
             target: TargetFilter::Player,
             damage_source: None,
+            excess: None,
         };
         let config = AiConfig::default();
 
@@ -3652,6 +3940,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let lowest_score = AntiSelfHarmPolicy.score(&ctx_lowest);
 
@@ -3672,6 +3961,7 @@ mod tests {
             config: &config,
             context: &crate::context::AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         let other_score = AntiSelfHarmPolicy.score(&ctx_other);
 
@@ -3720,6 +4010,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.score(&ctx)
     }
@@ -3736,6 +4027,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.verdict(&ctx)
     }
@@ -3746,6 +4038,7 @@ mod tests {
             self_loss.then_some(DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
                 player: PlayerId(0),
+                gate: engine::types::ability::TurnGate::None,
             }),
         )
     }
@@ -3807,7 +4100,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         );
         let mut land_filter = TypedFilter::new(TypeFilter::Land);
@@ -3906,6 +4201,7 @@ mod tests {
             Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::Upkeep,
                 player: PlayerId(0),
+                gate: engine::types::ability::TurnGate::None,
             }),
         );
 
@@ -4070,6 +4366,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         AntiSelfHarmPolicy.verdict(&ctx)
     }
@@ -4114,6 +4411,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         let verdicts = crate::policies::registry::PolicyRegistry::shared().verdicts(&ctx);

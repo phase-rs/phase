@@ -141,8 +141,13 @@ pub fn resolve(
         } => {
             let (inner, up_to) = count.peel_up_to();
             (
-                // CR 107.1b: Use ability context so X resolves against the caster's chosen value.
-                resolve_quantity_with_targets(state, inner, ability) as u32,
+                // CR 107.1b: a calculation that would yield a negative number
+                // uses zero instead. Clamp before the `as u32` cast — a
+                // subtractive count ("discard cards equal to A minus B" when
+                // B > A) would otherwise wrap to ~4 billion and let the player
+                // discard their whole hand. Ability context also resolves X
+                // against the caster's chosen value. Mirrors `draw.rs`.
+                resolve_quantity_with_targets(state, inner, ability).max(0) as u32,
                 up_to,
                 unless_filter.clone(),
                 target.clone(),
@@ -155,6 +160,12 @@ pub fn resolve(
     // Check if targets specify specific cards to discard. Parent chain
     // propagation can inherit non-hand object targets (e.g. Traumatic Critique's
     // damage recipient) — those must not short-circuit the hand-choice path.
+    //
+    // Issue #3257: A bounce head's chosen graveyard creatures are propagated onto
+    // a trailing "discard a card" sub-ability for chain context, but they are NOT
+    // discard targets. Once the bounce moves them to hand they must not bypass the
+    // interactive DiscardChoice path via this fast path — only a *declared* targeted
+    // discard (Oracle uses "target") may consume `ability.targets` here.
     let specific_targets: Vec<_> = ability
         .targets
         .iter()
@@ -171,7 +182,28 @@ pub fn resolve(
         })
         .collect();
 
-    if !specific_targets.is_empty() {
+    // CR 115.1d: Only a declared targeted discard (using the word "target") may consume targets chosen at cast time.
+    let declared_target_discard =
+        crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+    // CR 608.2c: "That player discards that card" (Dread Fugue) binds the reveal
+    // choice via `ParentTarget` — not a cast-time target slot, but the forwarded
+    // object id must still be discarded. Controller-scoped "discard a card"
+    // (Macabre Waltz) must not consume propagated bounce targets (issue #3257).
+    let object_bound_discard = ability.effect.target_filter().is_some_and(|t| {
+        matches!(
+            t,
+            TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::LastRevealed
+                | TargetFilter::SelfRef
+                | TargetFilter::TriggeringSource
+                | TargetFilter::LastCreated
+                | TargetFilter::AttachedTo
+                | TargetFilter::CostPaidObject
+        )
+    });
+
+    if !specific_targets.is_empty() && (declared_target_discard || object_bound_discard) {
         // Discard specific targeted cards
         for obj_id in specific_targets {
             let obj = state
@@ -505,7 +537,9 @@ mod tests {
                     CounterType::Plus1Plus1,
                     QuantityExpr::Fixed { value: 2 },
                 )],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         replacement
@@ -531,7 +565,9 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -593,6 +629,88 @@ mod tests {
         assert_eq!(state.objects[&card].discarded_turn, None);
     }
 
+    /// CR 107.1b: a discard count that resolves negative must clamp to 0, not
+    /// wrap through the `as u32` cast to ~4 billion. "Discard up to (cards in
+    /// your hand − cards in an opponent's hand)" with the opponent holding more
+    /// cards yields a negative count; the player must be offered a discard of 0,
+    /// never their whole hand. This mirrors the clamp `draw.rs` already applies
+    /// for the analogous Mr. Foxglove subtractive-draw shape. Revert-probe:
+    /// without the `.max(0)` the presented count is `u32::MAX - 1`.
+    #[test]
+    fn discard_negative_count_clamps_to_zero() {
+        use crate::types::ability::{
+            AggregateFunction, CardSelectionMode, PlayerScope, QuantityRef,
+        };
+
+        let mut state = GameState::new_two_player(7);
+        // Caster (P0) hand: 1 card. Opponent (P1) hand: 3 cards.
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".into(),
+            Zone::Hand,
+        );
+        for i in 0..3u64 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                "Theirs".into(),
+                Zone::Hand,
+            );
+        }
+
+        // count = up to (HandSize{You} − HandSize{Opponent}) = 1 − 3 = −2.
+        let count = QuantityExpr::up_to(QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                        },
+                    }),
+                },
+            ],
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count,
+                target: TargetFilter::Controller,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DiscardChoice { count, player, .. } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(
+                    *count,
+                    0,
+                    "CR 107.1b: a negative discard count must clamp to 0, not wrap to {}",
+                    u32::MAX - 1
+                );
+            }
+            other => panic!("expected a DiscardChoice of up-to-0, got {other:?}"),
+        }
+    }
+
     /// D1 double-consult guard: the madness class (a Discard-level definition
     /// lowering hand → exile) still works and is not re-applied. The discarded
     /// card ends in exile via the madness redirect, with no Moved present, and
@@ -622,7 +740,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state
@@ -692,6 +812,8 @@ mod tests {
 
     #[test]
     fn discard_specific_target() {
+        use crate::types::ability::{FilterProp, TypedFilter};
+
         let mut state = GameState::new_two_player(42);
         let c1 = create_object(
             &mut state,
@@ -710,7 +832,10 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::DiscardCard {
                 count: 1,
-                target: TargetFilter::Any,
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                ),
             },
             vec![TargetRef::Object(c2)],
             ObjectId(100),
@@ -749,7 +874,9 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )));
         state
@@ -1628,6 +1755,61 @@ mod tests {
         assert!(
             state.players[0].hand.contains(&c1),
             "c1 should still be in hand"
+        );
+    }
+
+    /// Issue #3257: Macabre Waltz — bounce targets propagated onto a trailing
+    /// "discard a card" sub must not auto-discard the just-returned creature.
+    #[test]
+    fn bounce_then_discard_does_not_auto_discard_propagated_return_targets() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+
+        let mut state = GameState::new_two_player(42);
+        let returned = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Returned Bear".into(),
+            Zone::Graveyard,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Rat".into(),
+            Zone::Hand,
+        );
+
+        let def = parse_effect_chain(
+            "Return up to two target creature cards from your graveyard to your hand, then discard a card.",
+            AbilityKind::Spell,
+        );
+        let ability = build_resolved_from_def_with_targets(
+            &def,
+            ObjectId(100),
+            PlayerId(0),
+            vec![TargetRef::Object(returned)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "non-targeted discard must prompt, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.objects.get(&returned).map(|o| o.zone),
+            Some(Zone::Hand),
+            "returned creature must remain in hand pending the discard choice"
+        );
+        assert_eq!(
+            state.objects.get(&other).map(|o| o.zone),
+            Some(Zone::Hand),
+            "other hand card must not be discarded automatically"
         );
     }
 }

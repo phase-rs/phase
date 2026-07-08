@@ -228,6 +228,66 @@ mod tests {
             .contains(&PlayerId(0)));
     }
 
+    /// CR 701.15a + CR 701.15b: Maximum Carnage chapter I — "each creature
+    /// attacks each combat if able and attacks a player other than you if able"
+    /// is the printed goad definition. The parser must lower it to
+    /// `Effect::GoadAll` over all creatures; resolving that effect marks every
+    /// creature (both the controller's and the opponents') as goaded by the
+    /// resolving controller. Reverting `try_parse_goad_equivalent` makes the
+    /// chapter line lower to `Effect::Unimplemented` — there is no GoadAll to
+    /// resolve and no creature gets goaded, so this test fails.
+    #[test]
+    fn maximum_carnage_goads_every_creature_via_real_parser() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Until your next turn, each creature attacks each combat if able and attacks a player other than you if able.",
+            "Maximum Carnage",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let goad_effect = parsed
+            .abilities
+            .iter()
+            .map(|def| def.effect.as_ref().clone())
+            .find(|effect| matches!(effect, Effect::GoadAll { .. }))
+            .expect("Maximum Carnage chapter I must parse to Effect::GoadAll");
+
+        let mut state = GameState::new_two_player(42);
+        let my_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [my_creature, opp_creature] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(goad_effect, vec![], ObjectId(100), PlayerId(0));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        // CR 701.15b: even the controller's own creature is goaded by the
+        // controller — it must then attack a player other than the controller.
+        assert!(state.objects[&my_creature].goaded_by.contains(&PlayerId(0)));
+        assert!(state.objects[&opp_creature]
+            .goaded_by
+            .contains(&PlayerId(0)));
+    }
+
     #[test]
     fn goad_nonexistent_target_is_skipped() {
         let mut state = GameState::new_two_player(42);

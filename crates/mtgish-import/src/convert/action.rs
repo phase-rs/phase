@@ -6,17 +6,19 @@
 //! long tail (token creation, replacement effects, modal/distributed effects)
 //! lands phase by phase.
 
+use std::collections::BTreeSet;
+
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
-    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
+    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope,
+    PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
@@ -35,9 +37,10 @@ use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
     CreatableToken, CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget,
-    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player,
-    Players, ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule,
-    SearchLibraryAction, Spell, Spells, Target, TokenCopyEffects, TokenFlag,
+    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent,
+    PhasedOutEffect, Player, Players, ReplacementActionWouldEnter,
+    RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction, Spell, Spells, Target,
+    TokenCopyEffects, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -269,7 +272,7 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
         | QuantityExpr::Power {
             exponent: inner, ..
         } => rewrite_bound_x_in_quantity_expr(inner, binding),
-        QuantityExpr::Sum { exprs } => exprs
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
             .iter_mut()
             .map(|inner| rewrite_bound_x_in_quantity_expr(inner, binding))
             .sum(),
@@ -306,6 +309,7 @@ fn rewrite_bound_x_in_mana_production(
         ManaProduction::Colorless { count }
         | ManaProduction::AnyOneColor { count, .. }
         | ManaProduction::AnyCombination { count, .. }
+        | ManaProduction::AnyCombinationOfObjectColors { count, .. }
         | ManaProduction::ChosenColor { count, .. }
         | ManaProduction::OpponentLandColors { count }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
@@ -380,6 +384,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         // CR 702.167a/b: Craft materials carry no X-bound quantity.
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
+        // CR 117.1: `ExileWithAggregate`'s threshold is a fixed `i32` (like
+        // `CollectEvidence`'s amount) — no X-bound `QuantityExpr` to rewrite.
+        | AbilityCost::ExileWithAggregate { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
@@ -392,6 +399,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Behold { .. }
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
+        // CR 118.9: the borrowed keyword cost is read at runtime from the cast
+        // spell's keyword — it carries no X-bound `QuantityExpr` to rewrite.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }
@@ -705,10 +715,32 @@ fn target_descriptor_to_filter(targets: &[Target]) -> Option<TargetFilter> {
         | Target::OneOrTwoTargetPermanents(permanents) => filter_mod::convert(permanents).ok(),
         Target::NumberTargetPermanents(_, permanents)
         | Target::UptoNumberTargetPermanents(_, permanents) => filter_mod::convert(permanents).ok(),
-        Target::TargetPlayer(_) | Target::UptoOneTargetPlayer(_) => Some(TargetFilter::Player),
+        Target::TargetPlayer(players) | Target::UptoOneTargetPlayer(players) => {
+            players_to_target_filter(players).ok()
+        }
         // AnyTarget and other shapes stay as-is — no typed constraint to thread.
         _ => None,
     }
+}
+
+fn players_to_target_filter(players: &Players) -> ConvResult<TargetFilter> {
+    Ok(match players {
+        Players::AnyPlayer => TargetFilter::Player,
+        Players::Opponent => {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        }
+        Players::SinglePlayer(player) => {
+            let controller = filter_mod::player_to_controller(player)?;
+            TargetFilter::Typed(TypedFilter::default().controller(controller))
+        }
+        other => {
+            return Err(ConversionGap::MalformedIdiom {
+                idiom: "Players/target-filter",
+                path: String::new(),
+                detail: format!("unsupported target player set: {other:?}"),
+            });
+        }
+    })
 }
 
 /// Top-level entry point: convert an `Actions` body into a typed
@@ -1309,6 +1341,7 @@ fn convert_targeted_distributed(
                     amount,
                     target,
                     damage_source: None,
+                    excess: None,
                 }],
                 multi_target,
                 distribute: DistributionUnit::Damage,
@@ -2232,6 +2265,10 @@ fn convert_action_vec_with_bindings(
     actions: &[Action],
     inherited: &VariableBindings,
 ) -> ConvResult<Vec<Effect>> {
+    if let Some(lowered) = try_lower_choose_color_or_colorless_sequence(actions, inherited) {
+        return lowered;
+    }
+
     let mut out = Vec::with_capacity(actions.len());
     let mut bindings = inherited.clone();
     for a in actions {
@@ -2247,6 +2284,335 @@ fn convert_action_vec_with_bindings(
         }
     }
     Ok(out)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConcreteColorOrColorlessChoice {
+    Color(ManaColor),
+    Colorless,
+}
+
+impl ConcreteColorOrColorlessChoice {
+    fn description(self) -> &'static str {
+        match self {
+            Self::Color(ManaColor::White) => "White",
+            Self::Color(ManaColor::Blue) => "Blue",
+            Self::Color(ManaColor::Black) => "Black",
+            Self::Color(ManaColor::Red) => "Red",
+            Self::Color(ManaColor::Green) => "Green",
+            Self::Colorless => "Colorless",
+        }
+    }
+
+    fn protection_target(self) -> engine::types::keywords::ProtectionTarget {
+        match self {
+            Self::Color(color) => engine::types::keywords::ProtectionTarget::Color(color),
+            Self::Colorless => {
+                engine::types::keywords::ProtectionTarget::Quality("colorless".into())
+            }
+        }
+    }
+
+    fn hexproof_filter(self) -> engine::types::keywords::HexproofFilter {
+        match self {
+            Self::Color(color) => engine::types::keywords::HexproofFilter::Color(color),
+            Self::Colorless => engine::types::keywords::HexproofFilter::Quality("colorless".into()),
+        }
+    }
+}
+
+fn try_lower_choose_color_or_colorless_sequence(
+    actions: &[Action],
+    bindings: &VariableBindings,
+) -> Option<ConvResult<Vec<Effect>>> {
+    let [Action::ChooseAColorOrColorless(choice), tail @ ..] = actions else {
+        return None;
+    };
+    if tail.is_empty() {
+        return None;
+    }
+    Some(lower_choose_color_or_colorless_sequence(
+        choice, tail, bindings,
+    ))
+}
+
+fn lower_choose_color_or_colorless_sequence(
+    choice: &crate::schema::types::ChoosableColor,
+    tail: &[Action],
+    bindings: &VariableBindings,
+) -> ConvResult<Vec<Effect>> {
+    let base_effects = convert_action_vec_with_bindings(tail, bindings)?;
+    let choices = concrete_color_or_colorless_choices(choice)?;
+
+    let mut saw_chosen_ref = false;
+    let mut branches = Vec::with_capacity(choices.len());
+    for concrete_choice in choices {
+        let mut branch_effects = base_effects.clone();
+        saw_chosen_ref |=
+            rewrite_color_or_colorless_choice_refs_in_effects(&mut branch_effects, concrete_choice)
+                > 0;
+        let unresolved_refs = unresolved_chosen_color_refs_in_effects(&branch_effects)?;
+        if !unresolved_refs.is_empty() {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "ActionList/ChooseAColorOrColorless",
+                needed_variant: format!(
+                    "full branch lowering for chosen-color refs ({})",
+                    unresolved_refs.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+        branches.push(
+            crate::convert::build_ability_chain(AbilityKind::Spell, None, branch_effects)?
+                .description(concrete_choice.description().to_string()),
+        );
+    }
+
+    if !saw_chosen_ref {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "ActionList/ChooseAColorOrColorless",
+            path: String::new(),
+            detail: "tail actions never read the chosen color".into(),
+        });
+    }
+
+    Ok(vec![Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches,
+    }])
+}
+
+fn concrete_color_or_colorless_choices(
+    choice: &crate::schema::types::ChoosableColor,
+) -> ConvResult<Vec<ConcreteColorOrColorlessChoice>> {
+    let choice_type = filter_mod::choice_type_for_choosable_color(choice);
+    let ChoiceType::Color { excluded } = choice_type else {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "Action::ChooseAColorOrColorless",
+            path: String::new(),
+            detail: format!("expected color choice, got {choice_type:?}"),
+        });
+    };
+
+    let mut out = Vec::with_capacity(ManaColor::ALL.len() + 1);
+    out.push(ConcreteColorOrColorlessChoice::Colorless);
+    out.extend(
+        ManaColor::ALL
+            .iter()
+            .copied()
+            .filter(|color| !excluded.contains(color))
+            .map(ConcreteColorOrColorlessChoice::Color),
+    );
+    Ok(out)
+}
+
+/// Every engine serde tag that represents a runtime "the chosen color"
+/// reference. Once `ChooseAColorOrColorless` is lowered into concrete
+/// `ChooseOneOf` branches, no sentinel in this catalog may remain anywhere
+/// in the branch effect tree — the choose action that would bind it is gone.
+///
+/// Catalog source (re-run `rg '\bChosenColor\b|AddChosenColor|IsChosenColor|ChosenColorIs' crates/engine/src/types/`):
+/// - `ContinuousModification::AddChosenColor` (`ability.rs:17415`)
+/// - `ProtectionTarget::ChosenColor` / `HexproofFilter::ChosenColor` (`keywords.rs:403,415`)
+/// - `DevotionColors::ChosenColor` / `ManaProduction::ChosenColor { .. }` (`ability.rs:1288,1373`)
+/// - `ColorPredicate::IsChosenColor` (`ability.rs:3140`)
+/// - `ChosenColorIs { .. }` (`ability.rs:5788`)
+///
+/// The scan inspects both serde object **keys** and string **values** so it is
+/// independent of whether the carrying enum is internally tagged
+/// (`{"type":"ChosenColor"}`) or externally tagged (`{"ChosenColor":{..}}`).
+/// `unresolved_chosen_color_scan_is_exhaustive_against_known_engine_variants`
+/// pins the catalog to the engine surface.
+const CHOSEN_COLOR_SENTINELS: &[(&str, &str)] = &[
+    ("AddChosenColor", "AddChosenColor"),
+    ("ChosenColor", "ChosenColor"),
+    ("ChosenColorIs", "ChosenColorIs"),
+    ("IsChosenColor", "IsChosenColor"),
+];
+
+fn classify_chosen_color_sentinel(tag: &str) -> Option<&'static str> {
+    CHOSEN_COLOR_SENTINELS
+        .iter()
+        .find(|(needle, _)| *needle == tag)
+        .map(|(_, unresolved)| *unresolved)
+}
+
+/// Fail closed after `ChooseAColorOrColorless` branch expansion: once the
+/// choose action is lowered away, no engine "chosen color" sentinel may remain
+/// anywhere in the branch effect tree. We scan the serialized effect graph so
+/// newly introduced chosen-color seams also trip the guard until explicitly
+/// rewritten.
+fn unresolved_chosen_color_refs_in_effects(
+    effects: &[Effect],
+) -> ConvResult<BTreeSet<&'static str>> {
+    let value = serde_json::to_value(effects).map_err(|err| ConversionGap::MalformedIdiom {
+        idiom: "ActionList/ChooseAColorOrColorless",
+        path: String::new(),
+        detail: format!("failed to inspect converted branch effects: {err}"),
+    })?;
+    let mut refs = BTreeSet::new();
+    collect_unresolved_chosen_color_refs_in_value(&value, &mut refs);
+    Ok(refs)
+}
+
+fn collect_unresolved_chosen_color_refs_in_value(
+    value: &serde_json::Value,
+    refs: &mut BTreeSet<&'static str>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_unresolved_chosen_color_refs_in_value(item, refs);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                if let Some(unresolved) = classify_chosen_color_sentinel(key) {
+                    refs.insert(unresolved);
+                }
+                collect_unresolved_chosen_color_refs_in_value(item, refs);
+            }
+        }
+        serde_json::Value::String(tag) => {
+            if let Some(unresolved) = classify_chosen_color_sentinel(tag) {
+                refs.insert(unresolved);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_effects(
+    effects: &mut [Effect],
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    effects
+        .iter_mut()
+        .map(|effect| rewrite_color_or_colorless_choice_refs_in_effect(effect, concrete_choice))
+        .sum()
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_effect(
+    effect: &mut Effect,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities
+            .iter_mut()
+            .map(|definition| {
+                rewrite_color_or_colorless_choice_refs_in_static_definition(
+                    definition,
+                    concrete_choice,
+                )
+            })
+            .sum(),
+        Effect::ChooseOneOf { branches, .. } => branches
+            .iter_mut()
+            .map(|branch| {
+                rewrite_color_or_colorless_choice_refs_in_ability_definition(
+                    branch,
+                    concrete_choice,
+                )
+            })
+            .sum(),
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            rewrite_color_or_colorless_choice_refs_in_ability_definition(effect, concrete_choice)
+        }
+        Effect::CreateEmblem { statics, triggers } => {
+            let static_count: usize = statics
+                .iter_mut()
+                .map(|definition| {
+                    rewrite_color_or_colorless_choice_refs_in_static_definition(
+                        definition,
+                        concrete_choice,
+                    )
+                })
+                .sum();
+            let trigger_count: usize = triggers
+                .iter_mut()
+                .filter_map(|trigger| trigger.execute.as_mut())
+                .map(|execute| {
+                    rewrite_color_or_colorless_choice_refs_in_ability_definition(
+                        execute,
+                        concrete_choice,
+                    )
+                })
+                .sum();
+            static_count + trigger_count
+        }
+        _ => 0,
+    }
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_ability_definition(
+    ability: &mut AbilityDefinition,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    let mut rewrites =
+        rewrite_color_or_colorless_choice_refs_in_effect(ability.effect.as_mut(), concrete_choice);
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        rewrites +=
+            rewrite_color_or_colorless_choice_refs_in_ability_definition(sub, concrete_choice);
+    }
+    if let Some(otherwise) = ability.else_ability.as_mut() {
+        rewrites += rewrite_color_or_colorless_choice_refs_in_ability_definition(
+            otherwise,
+            concrete_choice,
+        );
+    }
+    rewrites
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_static_definition(
+    definition: &mut StaticDefinition,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    definition
+        .modifications
+        .iter_mut()
+        .map(|modification| {
+            rewrite_color_or_colorless_choice_refs_in_modification(modification, concrete_choice)
+        })
+        .sum()
+}
+
+fn rewrite_color_or_colorless_choice_refs_in_modification(
+    modification: &mut ContinuousModification,
+    concrete_choice: ConcreteColorOrColorlessChoice,
+) -> usize {
+    match modification {
+        ContinuousModification::AddKeyword { keyword } => match keyword {
+            engine::types::keywords::Keyword::Protection(
+                engine::types::keywords::ProtectionTarget::ChosenColor,
+            ) => {
+                *keyword = engine::types::keywords::Keyword::Protection(
+                    concrete_choice.protection_target(),
+                );
+                1
+            }
+            engine::types::keywords::Keyword::HexproofFrom(
+                engine::types::keywords::HexproofFilter::ChosenColor,
+            ) => {
+                *keyword = engine::types::keywords::Keyword::HexproofFrom(
+                    concrete_choice.hexproof_filter(),
+                );
+                1
+            }
+            _ => 0,
+        },
+        ContinuousModification::GrantTrigger { trigger } => trigger
+            .execute
+            .as_mut()
+            .map(|execute| {
+                rewrite_color_or_colorless_choice_refs_in_ability_definition(
+                    execute,
+                    concrete_choice,
+                )
+            })
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn actions_are_noop(actions: &[Action]) -> bool {
@@ -2279,6 +2645,19 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
     match a {
         Action::CreateValueX(_) => Ok(Vec::new()),
         Action::SearchLibrary(actions) => convert_search_library(actions),
+        Action::SearchPlayersLibrary(player, actions) => {
+            let target_filter =
+                search_library_player_target_filter(player, bindings).ok_or_else(|| {
+                    ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "Effect::SearchLibrary",
+                        needed_variant: format!(
+                            "target_player binding for Player::{}",
+                            variant_name_player(player)
+                        ),
+                    }
+                })?;
+            apply_player_target_chain(convert_search_library(actions)?, target_filter)
+        }
         // CR 120.1 + CR 608.2c: mtgish packs "deal A damage to X and B
         // damage to Y" into one action. The engine represents that as an
         // ordinary effect chain: each DealDamage node consumes the next target
@@ -2315,6 +2694,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::DiscardCard {
                     count: 1,
@@ -2344,6 +2724,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     count: None,
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
+                    reveal: true,
                 },
                 Effect::ChangeZone {
                     origin: Some(Zone::Hand),
@@ -2356,7 +2737,9 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
             ])
         }
@@ -2386,7 +2769,9 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             };
             let return_ability = AbilityDefinition::new(AbilityKind::Spell, return_effect);
             Ok(vec![
@@ -2401,8 +2786,56 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
+                Effect::CreateDelayedTrigger {
+                    condition,
+                    effect: Box::new(return_ability),
+                    uses_tracked_set: false,
+                },
+            ])
+        }
+
+        // CR 702.26a + CR 603.7c: "Phase out target creature until [host]
+        // leaves the battlefield. Tap that creature as it phases in this way."
+        // (Oubliette). Immediate phase-out plus a host-scoped CantPhaseIn lock,
+        // then a delayed PhaseIn (+ optional tap-on-entry) when the host leaves.
+        Action::PhaseOutPermanentUntilWithEffects(perm, expiration, phased_out_effect) => {
+            let target = convert_permanent(perm)?;
+            let condition = expiration_to_delayed_trigger_condition(expiration)?;
+
+            let cant_phase_in = Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CantPhaseIn)
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantPhaseIn,
+                    }])],
+                duration: Some(Duration::UntilHostLeavesPlay),
+                target: Some(TargetFilter::ParentTarget),
+            };
+
+            let mut return_ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PhaseIn {
+                    target: TargetFilter::ParentTarget,
+                },
+            );
+            if matches!(phased_out_effect, PhasedOutEffect::TapAsPhasesIn) {
+                return_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::ParentTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                )));
+            }
+
+            Ok(vec![
+                Effect::PhaseOut { target },
+                cant_phase_in,
                 Effect::CreateDelayedTrigger {
                     condition,
                     effect: Box::new(return_ability),
@@ -2448,6 +2881,7 @@ fn spell_deals_multiple_damage_effects(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         })
     })
 }
@@ -2477,6 +2911,7 @@ fn graveyard_card_deals_multiple_damage_effects(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         })
     })
 }
@@ -2521,6 +2956,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         }),
         Permanent::Ref_TargetPermanent
         | Permanent::Ref_TargetPermanent1
@@ -2528,6 +2964,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: Some(DamageSource::Target),
+            excess: None,
         }),
         Permanent::ThatEnteringPermanent
         | Permanent::Trigger_ThatArtifact
@@ -2539,6 +2976,7 @@ fn permanent_deals_damage_effect(
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: Some(DamageSource::TriggeringSource),
+            excess: None,
         }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "Effect::DealDamage.damage_source",
@@ -2667,6 +3105,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         },
         // CR 120.1 + CR 603.7c + CR 603.10a: "When this dies, [it] deals N
         // damage to <recipient>." The damage source is the dying permanent,
@@ -2677,6 +3116,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             amount: quantity::convert(amount)?,
             target: damage_recipient_to_filter(recipient)?,
             damage_source: None,
+            excess: None,
         },
 
         Action::DestroyPermanent(p) => Effect::Destroy {
@@ -2778,11 +3218,13 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             count: QuantityExpr::Fixed { value: 1 },
             destination: None,
             keep_count: Some(0),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         },
 
         // CR 701.20e + CR 608.2c: "Look at the top N cards of your library.
@@ -2839,7 +3281,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
         Action::ExileAPermanent(filter) => Effect::ChangeZone {
             origin: Some(engine::types::zones::Zone::Battlefield),
@@ -2852,7 +3296,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13 + CR 400.7: Mass exile — "Exile each <filter>"
@@ -2871,7 +3317,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 701.13a + CR 400.3: "Exile target player's graveyard" moves the
@@ -2893,7 +3341,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -2933,6 +3383,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
             source_rider: None,
+            countered_spell_zone: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.
@@ -2998,7 +3449,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7: Mass return-from-graveyard-to-hand — "Return each <filter>
@@ -3018,7 +3471,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 400.7 + CR 614.12: Mass reanimate from a specific player's
@@ -3047,7 +3502,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3072,7 +3529,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3256,7 +3715,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 122.1: Mass counter placement — "Put a [counter] on each
@@ -3472,7 +3933,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3492,7 +3955,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         },
 
         // CR 111.1 + CR 111.5: Token creation with attached `TokenFlag`s.
@@ -3612,6 +4077,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             count: None,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
+            reveal: true,
         },
 
         // CR 701.20a: "Reveal the top N cards of your library." Engine
@@ -3702,7 +4168,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             }
         }
 
@@ -3876,17 +4344,35 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ChooseAColor(choice) => Effect::Choose {
             choice_type: filter_mod::choice_type_for_choosable_color(choice),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 608.2d: choose a creature type — the bounded creature-type
         // registry resolves the option set at runtime.
         Action::ChooseACreatureType => Effect::Choose {
-            choice_type: ChoiceType::CreatureType,
+            choice_type: ChoiceType::creature_type(),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 205.2: choose a card type from the bounded card-type set.
         Action::ChooseACardtype => Effect::Choose {
-            choice_type: ChoiceType::CardType,
+            choice_type: ChoiceType::card_type(),
             persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
+        },
+        // CR 205.2a + CR 607.2d: a restricted card-type enumeration ("choose
+        // creature or land", Winding Way; "choose artifact, creature, or
+        // land", Turnabout) — the spell-action sibling of
+        // `ReplacementActionWouldEnter::ChooseACardtypeFromList` in
+        // `replacement.rs`. Shares `filter::restricted_card_type_choice` so
+        // both schema locations of this shape persist a real
+        // `ChoiceType::CardType { excluded }` (and therefore
+        // `ChosenAttribute::CardType`) instead of a free-form `Labeled`
+        // choice — required for downstream `IsCardtypeVariable` filters and
+        // `IsChosenCardType` prohibitions to bind.
+        Action::ChooseACardtypeFromList(opts) => Effect::Choose {
+            choice_type: filter_mod::restricted_card_type_choice(opts)?,
+            persist: true,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
         },
         // CR 201.3 + CR 608.2d: "choose a card name". Engine
         // `ChoiceType::CardName` is a unit variant (no filter slot), so the
@@ -3899,6 +4385,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 C::AnyCard => Effect::Choose {
                     choice_type: ChoiceType::CardName,
                     persist: true,
+                    selection: engine::types::ability::TargetSelectionMode::Chosen,
                 },
                 other => {
                     return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -3932,8 +4419,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
                     max: max_u8,
+                    distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 608.2d: opponent-scoped player choice when the schema filter
@@ -3947,6 +4436,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             Effect::Choose {
                 choice_type,
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 609.7a + CR 120.7: choose a specific source of damage. The
@@ -4038,8 +4528,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 .map(static_effect::check_hasable_to_keyword_option)
                 .collect::<ConvResult<_>>()?;
             Effect::Choose {
-                choice_type: ChoiceType::Keyword { options },
+                // CR 608.2d: mtgish only models single-keyword choices, so count = 1.
+                choice_type: ChoiceType::Keyword { options, count: 1 },
                 persist: true,
+                selection: engine::types::ability::TargetSelectionMode::Chosen,
             }
         }
         // CR 608.2d: "choose colors" without a fixed count — distinct from
@@ -4128,17 +4620,20 @@ fn future_trigger_to_condition(t: &FutureTrigger) -> ConvResult<DelayedTriggerCo
         F::AtTheBeginningOfPlayersNextUpkeep(p) => DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::Upkeep,
             player: future_trigger_player_id(p)?,
+            gate: engine::types::ability::TurnGate::None,
         },
         // CR 513.1: Player-scoped end step.
         F::AtTheBeginningOfPlayersNextEndStep(p) => DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::End,
             player: future_trigger_player_id(p)?,
+            gate: engine::types::ability::TurnGate::None,
         },
         // CR 504.1: Player-scoped draw step.
         F::AtTheBeginningOfPlayersNextDrawStep(p) => {
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::Draw,
                 player: future_trigger_player_id(p)?,
+                gate: engine::types::ability::TurnGate::None,
             }
         }
         // CR 505.1: Player-scoped main phase. Both "next main phase" and
@@ -4150,6 +4645,7 @@ fn future_trigger_to_condition(t: &FutureTrigger) -> ConvResult<DelayedTriggerCo
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
                 player: future_trigger_player_id(p)?,
+                gate: engine::types::ability::TurnGate::None,
             }
         }
         // CR 508.1: Player-scoped declare attackers step.
@@ -4157,6 +4653,7 @@ fn future_trigger_to_condition(t: &FutureTrigger) -> ConvResult<DelayedTriggerCo
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::DeclareAttackers,
                 player: future_trigger_player_id(p)?,
+                gate: engine::types::ability::TurnGate::None,
             }
         }
 
@@ -4375,11 +4872,13 @@ fn convert_look_at_top(
             count,
             destination: None,
             keep_count: Some(0),
+            keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
             enter_tapped: false,
+            source: DigSource::Library,
         }),
 
         // Brainstorm-style "put one into your hand and the rest on the
@@ -4393,11 +4892,13 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
                 reveal: false,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4410,11 +4911,13 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Graveyard),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4430,11 +4933,13 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4446,11 +4951,13 @@ fn convert_look_at_top(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Graveyard),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
 
@@ -4505,11 +5012,13 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4518,11 +5027,13 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4531,11 +5042,13 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4545,11 +5058,13 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4559,11 +5074,13 @@ fn convert_reveal_top_dig(
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
+                keep_count_expr: None,
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
                 reveal: true,
                 enter_tapped: false,
+                source: DigSource::Library,
             })
         }
         _ => Err(prereq(format!(
@@ -5020,15 +5537,37 @@ fn player_damage_recipient_to_filter(player: &Player) -> Option<TargetFilter> {
     }
 }
 
+fn search_library_player_target_filter(
+    player: &Player,
+    bindings: &VariableBindings,
+) -> Option<TargetFilter> {
+    match player {
+        Player::Ref_TargetPlayer
+        | Player::Ref_TargetPlayer1
+        | Player::Ref_TargetPlayer2
+        | Player::Ref_TargetPlayer3
+        | Player::Ref_TargetPlayers_0
+        | Player::Ref_TargetPlayers_1 => bindings
+            .target_filter
+            .clone()
+            .or_else(|| player_to_target_filter(player)),
+        other => player_damage_recipient_to_filter(other),
+    }
+}
+
 fn apply_player_target_chain(
     effects: Vec<Effect>,
     target_filter: TargetFilter,
 ) -> ConvResult<Vec<Effect>> {
     let mut out = Vec::with_capacity(effects.len());
     for effect in effects {
-        if matches!(out.last(), Some(Effect::RevealHand { .. }))
-            && is_selected_hand_exile_continuation(&effect)
-        {
+        let hand_selection_continuation = matches!(out.last(), Some(Effect::RevealHand { .. }))
+            && is_selected_hand_exile_continuation(&effect);
+        let library_selection_continuation =
+            matches!(out.last(), Some(Effect::SearchLibrary { .. }))
+                && is_search_library_change_zone_continuation(&effect);
+
+        if hand_selection_continuation || library_selection_continuation {
             out.push(effect);
         } else {
             out.push(apply_player_target(effect, target_filter.clone())?);
@@ -5043,6 +5582,17 @@ fn is_selected_hand_exile_continuation(effect: &Effect) -> bool {
         Effect::ChangeZone {
             origin: Some(Zone::Hand),
             destination: Zone::Exile,
+            target: TargetFilter::Any,
+            ..
+        }
+    )
+}
+
+fn is_search_library_change_zone_continuation(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
             target: TargetFilter::Any,
             ..
         }
@@ -5354,10 +5904,18 @@ fn players_to_scope_opt(players: &Players) -> ScopeOutcome {
             engine_type: "PlayerFilter",
             needed_variant: "OpponentOf(reference)".to_string(),
         }),
-        Ps::Other(_) => Err(ConversionGap::EnginePrerequisiteMissing {
-            engine_type: "PlayerFilter",
-            needed_variant: "OtherThan(reference)".to_string(),
-        }),
+        // CR 102.1 + CR 603.2c: "each other player" relative to the trigger
+        // event's named player (the caster on spell-cast triggers). Zenith
+        // Chronicler, Hive Mind, Curse of Echoes class.
+        Ps::Other(inner) => match inner.as_ref() {
+            Player::Trigger_ThatPlayer => Ok(Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })),
+            other => Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "PlayerFilter",
+                needed_variant: format!("OtherThan({other:?})"),
+            }),
+        },
         Ps::Ref_TargetPlayers => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "PlayerFilter",
             needed_variant: "target-ref via Effect::*::target_player (Ref_TargetPlayers)"
@@ -5511,6 +6069,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal,
             ..
         } => Effect::RevealHand {
             target: target_filter,
@@ -5518,6 +6077,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             selection,
             choice_optional,
+            reveal,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."
@@ -5581,6 +6141,11 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             selection_constraint,
             split,
             source_zones: vec![engine::types::zones::Zone::Library],
+        },
+        // CR 701.24 + CR 115.2: "That player shuffles" after searching the
+        // targeted player's library.
+        Effect::Shuffle { .. } => Effect::Shuffle {
+            target: target_filter,
         },
         // No player-target slot on this effect. Strict-fail so the
         // shape-mismatch surfaces in the report rather than silently
@@ -6163,7 +6728,9 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         enters_attacking: enter_repls.enters_attacking,
         up_to: false,
         enter_with_counters: enter_repls.enter_with_counters,
+        conditional_enter_with_counters: vec![],
         face_down_profile: None,
+        enters_modified_if: None,
     });
     if shuffle {
         out.push(Effect::Shuffle {
@@ -6227,7 +6794,9 @@ fn convert_multi_filter_search_library(
             enters_attacking: enter_repls.enters_attacking,
             up_to: false,
             enter_with_counters: enter_repls.enter_with_counters.clone(),
+            conditional_enter_with_counters: vec![],
             face_down_profile: None,
+            enters_modified_if: None,
         });
     }
     if shuffle {
@@ -6686,16 +7255,68 @@ mod tests {
     use super::*;
     use crate::convert::build_ability_from_actions;
     use crate::schema::types::{
-        CardInGraveyard, Cards, Color, ColorList, Comparison, Condition, Cost, CounterType,
-        CreatableToken, CreatureTokenSubtypes, CreatureTokenType, DamageSources, ManaSymbol,
-        PTXValue, Permanent, Permanents, ReplacementActionWouldEnter, SubType, TokenCopyEffects,
-        TokenFlag, PT,
+        CardInGraveyard, Cards, CardtypeVariable, ChoosableColor, Color, ColorList, Comparison,
+        Condition, Cost, CounterType, CreatableToken, CreatureTokenSubtypes, CreatureTokenType,
+        DamageSources, Expiration, LayerEffect, ManaProduce, ManaSymbol, PTXValue, Permanent,
+        Permanents, Protectable, ProtectableColor, ReplacementActionWouldEnter, Rule, SubType,
+        TokenCopyEffects, TokenFlag, PT,
     };
     use engine::types::ability::{
-        AbilityKind, Comparator, ControllerRef, Effect, FilterProp, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        AbilityKind, ChoiceType, Comparator, ContinuousModification, ControllerRef, Effect,
+        FilterProp, PlayerFilter, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
+    use engine::types::card_type::CoreType;
+    use engine::types::keywords::{HexproofFilter, Keyword, ProtectionTarget};
     use engine::types::mana::ManaColor;
+
+    // Issue #4201 follow-up — Turnabout's "choose artifact, creature, or
+    // land" spell action (`Action::ChooseACardtypeFromList`, the
+    // non-replacement sibling of `ReplacementActionWouldEnter::Choose*From
+    // List`) must persist a restricted `ChoiceType::CardType` the same way
+    // the ETB axis does, and the chosen type must feed the downstream
+    // `Permanents::IsCardtypeVariable(TheChosenCardtype)` filter that
+    // Turnabout's tap/untap modes read.
+    #[test]
+    fn choose_a_cardtype_from_list_action_lowers_to_restricted_card_type_choice() {
+        let effect = convert(&Action::ChooseACardtypeFromList(vec![
+            CardType::Artifact,
+            CardType::Creature,
+            CardType::Land,
+        ]))
+        .unwrap();
+
+        match effect {
+            Effect::Choose {
+                choice_type: ChoiceType::CardType { excluded },
+                persist,
+                ..
+            } => {
+                assert!(persist);
+                assert_eq!(
+                    excluded,
+                    vec![
+                        CoreType::Enchantment,
+                        CoreType::Instant,
+                        CoreType::Planeswalker,
+                        CoreType::Sorcery,
+                    ]
+                );
+            }
+            other => panic!("expected a restricted CardType choice, got {other:?}"),
+        }
+
+        // The same persisted choice feeds `IsCardtypeVariable(TheChosenCardtype)`
+        // — Turnabout's tap/untap modes filter permanents by it.
+        let filter = crate::convert::filter::convert(&Permanents::IsCardtypeVariable(
+            CardtypeVariable::TheChosenCardtype,
+        ))
+        .unwrap();
+        assert!(matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { properties, .. })
+                if properties.contains(&FilterProp::IsChosenCardType)
+        ));
+    }
 
     #[test]
     fn player_may_cost_controller_of_target_spell_converts_to_dynamic_player_scope() {
@@ -6794,6 +7415,207 @@ mod tests {
     }
 
     #[test]
+    fn choose_a_color_or_colorless_lowers_to_concrete_choose_one_of_branches() {
+        let effects = convert_list(&Actions::ActionList(vec![
+            Action::ChooseAColorOrColorless(ChoosableColor::AnyColor),
+            Action::CreatePermanentLayerEffectUntil(
+                Box::new(Permanent::ThisPermanent),
+                vec![LayerEffect::AddAbility(vec![Rule::Protection(
+                    Protectable::FromColor(ProtectableColor::TheChosenColor),
+                )])],
+                Expiration::UntilEndOfTurn,
+            ),
+            Action::DrawACard,
+        ]))
+        .unwrap();
+
+        let [Effect::ChooseOneOf { chooser, branches }] = effects.as_slice() else {
+            panic!("expected single ChooseOneOf effect, got {effects:?}");
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 6, "colorless + five colors");
+
+        let colorless_branch = &branches[0];
+        assert_eq!(
+            colorless_branch.description.as_deref(),
+            Some("Colorless"),
+            "branch labels must preserve the concrete color choice for UI prompts"
+        );
+        match colorless_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(ProtectionTarget::Quality(
+                            "colorless".to_string(),
+                        )),
+                    }
+                )));
+            }
+            other => panic!("expected colorless branch grant, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                colorless_branch
+                    .sub_ability
+                    .as_ref()
+                    .map(|sub| sub.effect.as_ref()),
+                Some(Effect::Draw { .. })
+            ),
+            "branch must preserve follow-on effects"
+        );
+
+        let white_branch = &branches[1];
+        assert_eq!(white_branch.description.as_deref(), Some("White"));
+        match white_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+                    }
+                )));
+            }
+            other => panic!("expected white branch grant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_a_color_or_colorless_strict_fails_unresolved_chosen_color_tail() {
+        let err = convert_list(&Actions::ActionList(vec![
+            Action::ChooseAColorOrColorless(ChoosableColor::AnyColor),
+            Action::AddMana(ManaProduce::ManaOfTheChosenColor),
+        ]))
+        .unwrap_err();
+
+        match err {
+            ConversionGap::EnginePrerequisiteMissing {
+                engine_type,
+                needed_variant,
+            } => {
+                assert_eq!(engine_type, "ActionList/ChooseAColorOrColorless");
+                assert!(
+                    needed_variant.contains("ChosenColor"),
+                    "expected unresolved chosen-color detail, got {needed_variant}"
+                );
+            }
+            other => panic!("expected strict-fail for unresolved chosen color, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unresolved_chosen_color_scan_catches_sentinels_in_keys_and_values() {
+        // Internally-tagged shape: `{"type": "ChosenColor"}` (the engine
+        // default for unit variants). The pre-fix scan caught this because it
+        // walked string values.
+        let internally_tagged = serde_json::json!({ "type": "ChosenColor" });
+        let mut refs = BTreeSet::new();
+        collect_unresolved_chosen_color_refs_in_value(&internally_tagged, &mut refs);
+        assert!(
+            refs.contains("ChosenColor"),
+            "internally-tagged ChosenColor value must be caught: {refs:?}"
+        );
+
+        // Externally-tagged shape: `{"ChosenColor": { .. }}` — the
+        // representation struct variants (e.g. `ManaProduction::ChosenColor`)
+        // can take. The pre-fix scan missed this because it only walked
+        // `map.values()`, never keys.
+        let externally_tagged = serde_json::json!({ "ChosenColor": { "count": 1 } });
+        let mut refs = BTreeSet::new();
+        collect_unresolved_chosen_color_refs_in_value(&externally_tagged, &mut refs);
+        assert!(
+            refs.contains("ChosenColor"),
+            "externally-tagged ChosenColor key must be caught (struct-variant regression): {refs:?}"
+        );
+
+        // Every catalogued sentinel is caught in both key and value positions.
+        for (tag, unresolved) in CHOSEN_COLOR_SENTINELS {
+            for value in [
+                serde_json::json!({ "type": tag }),
+                serde_json::json!({ *tag: null }),
+            ] {
+                let mut refs = BTreeSet::new();
+                collect_unresolved_chosen_color_refs_in_value(&value, &mut refs);
+                assert!(
+                    refs.contains(*unresolved),
+                    "sentinel `{tag}` must resolve to `{unresolved}`: {refs:?}"
+                );
+            }
+        }
+
+        // Non-chosen-color data passes through untouched.
+        let clean = serde_json::json!({ "type": "DealDamage", "amount": 3 });
+        let mut refs = BTreeSet::new();
+        collect_unresolved_chosen_color_refs_in_value(&clean, &mut refs);
+        assert!(
+            refs.is_empty(),
+            "non-chosen-color data must not trip the scan: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn choose_a_color_or_colorless_lowers_hexproof_from_chosen_color() {
+        // Regression for the HexproofFrom seam: `convert_hexproof_filter` must
+        // accept `TheChosenColor` and the branch rewriter must rewrite it per
+        // concrete branch (previously the arm was unreachable because the
+        // converter rejected TheChosenColor before rewriting could run).
+        let effects = convert_list(&Actions::ActionList(vec![
+            Action::ChooseAColorOrColorless(ChoosableColor::AnyColor),
+            Action::CreatePermanentLayerEffectUntil(
+                Box::new(Permanent::ThisPermanent),
+                vec![LayerEffect::AddAbility(vec![Rule::HexproofFrom(
+                    Protectable::FromColor(ProtectableColor::TheChosenColor),
+                )])],
+                Expiration::UntilEndOfTurn,
+            ),
+        ]))
+        .unwrap();
+
+        let [Effect::ChooseOneOf { branches, .. }] = effects.as_slice() else {
+            panic!("expected single ChooseOneOf effect, got {effects:?}");
+        };
+        assert_eq!(branches.len(), 6, "colorless + five colors");
+
+        let colorless_branch = &branches[0];
+        assert_eq!(
+            colorless_branch.description.as_deref(),
+            Some("Colorless"),
+            "first branch is the colorless choice"
+        );
+        match colorless_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::HexproofFrom(HexproofFilter::Quality(
+                            "colorless".to_string(),
+                        )),
+                    }
+                )));
+            }
+            other => panic!("expected colorless hexproof grant, got {other:?}"),
+        }
+
+        let white_branch = &branches[1];
+        assert_eq!(white_branch.description.as_deref(), Some("White"));
+        match white_branch.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(static_abilities.iter().any(|s| s.modifications.contains(
+                    &ContinuousModification::AddKeyword {
+                        keyword: Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::White)),
+                    }
+                )));
+            }
+            other => panic!("expected white hexproof grant, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn create_value_x_rewrites_following_damage_and_life_gain() {
         let effects = convert_list(&Actions::ActionList(vec![
             Action::CreateValueX(Box::new(GameNumber::Integer(4))),
@@ -6885,6 +7707,28 @@ mod tests {
     }
 
     #[test]
+    fn each_other_player_than_triggering_player_scopes_all_except() {
+        use crate::schema::types::{Action, Actions, Player, Players};
+        use engine::types::ability::{Effect, PlayerFilter};
+
+        let actions = Actions::ActionList(vec![Action::EachPlayerAction(
+            Box::new(Players::Other(Box::new(Player::Trigger_ThatPlayer))),
+            Box::new(Action::DrawACard),
+        )]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert_eq!(
+            ability.player_scope,
+            Some(PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            })
+        );
+        assert!(matches!(*ability.effect, Effect::Draw { .. }));
+    }
+
+    #[test]
     fn each_opponent_with_no_cards_in_hand_scopes_and_conditions() {
         let actions = Actions::ActionList(vec![Action::EachPlayerAction(
             Box::new(Players::And(vec![
@@ -6912,6 +7756,61 @@ mod tests {
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
             })
+        ));
+    }
+
+    #[test]
+    fn search_players_library_target_opponent_preserves_acquire_shape() {
+        let actions = Actions::Targeted(
+            vec![Target::TargetPlayer(Box::new(Players::Opponent))],
+            Box::new(Actions::ActionList(vec![Action::SearchPlayersLibrary(
+                Box::new(Player::Ref_TargetPlayer),
+                vec![
+                    SearchLibraryAction::MayPutACardOntoTheBattlefield(
+                        Box::new(Cards::IsCardtype(CardType::Artifact)),
+                        vec![ReplacementActionWouldEnter::EntersUnderPlayersControl(
+                            Box::new(Player::You),
+                        )],
+                    ),
+                    SearchLibraryAction::Shuffle,
+                ],
+            )])),
+        );
+
+        let effects = convert_list(&actions).unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(card_filter),
+                count: QuantityExpr::UpTo { .. },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(player_filter)),
+                ..
+            } if card_filter
+                .type_filters
+                .iter()
+                .any(|filter| matches!(filter, TypeFilter::Artifact))
+                && player_filter.type_filters.is_empty()
+                && player_filter.controller == Some(ControllerRef::Opponent)
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                enters_under: Some(ControllerRef::You),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::Shuffle {
+                target: TargetFilter::Typed(player_filter),
+            } if player_filter.type_filters.is_empty()
+                && player_filter.controller == Some(ControllerRef::Opponent)
         ));
     }
 
@@ -7419,6 +8318,7 @@ mod tests {
             amount,
             target,
             damage_source,
+            excess: _,
         } = effect
         else {
             panic!("expected DealDamage, got {effect:?}");
@@ -7567,5 +8467,33 @@ mod tests {
         };
         assert_eq!(counter_type, &EngineCounterType::Plus1Plus1);
         assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    }
+
+    #[test]
+    fn apply_player_target_preserves_private_reveal_hand_flag() {
+        let private_look = Effect::RevealHand {
+            target: TargetFilter::Any,
+            card_filter: TargetFilter::None,
+            count: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: false,
+        };
+        let rebound = apply_player_target(private_look, TargetFilter::Player).unwrap();
+        let Effect::RevealHand {
+            target,
+            reveal,
+            card_filter,
+            ..
+        } = rebound
+        else {
+            panic!("expected RevealHand, got {rebound:?}");
+        };
+        assert_eq!(target, TargetFilter::Player);
+        assert_eq!(card_filter, TargetFilter::None);
+        assert!(
+            !reveal,
+            "apply_player_target must preserve reveal:false for private looks"
+        );
     }
 }

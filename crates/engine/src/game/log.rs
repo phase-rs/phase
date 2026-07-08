@@ -113,6 +113,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
         | GameEvent::CreatureExerted { .. }
         | GameEvent::CreatureEnlisted { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
@@ -134,7 +135,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
-        | GameEvent::Foretold { .. } => LogCategory::Zone,
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. } => LogCategory::Zone,
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
@@ -157,8 +159,10 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
         | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
         | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. }
@@ -171,9 +175,11 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Saddled { .. }
         // CR 702.140c + CR 730.2: a mutating creature spell merged with a permanent.
         | GameEvent::Mutated { .. }
+        // Unstable Host/Augment: a card with augment combined with a Host creature.
+        | GameEvent::Augmented { .. }
         | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
-        GameEvent::SpeedChanged { .. } => LogCategory::Special,
+        GameEvent::SpeedChanged { .. } | GameEvent::ArmyAmassed { .. } => LogCategory::Special,
 
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => LogCategory::Token,
 
@@ -187,6 +193,11 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::CreatureDestroyed { .. } | GameEvent::PermanentSacrificed { .. } => {
             LogCategory::Destroy
         }
+
+        GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => LogCategory::Debug,
 
         GameEvent::MonarchChanged { .. }
         | GameEvent::CityBlessingGained { .. }
@@ -214,8 +225,11 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::SchemeAbandoned { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
         | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
@@ -224,10 +238,6 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {
             LogCategory::Combat
         }
-
-        GameEvent::DebugActionUsed { .. }
-        | GameEvent::DebugPermissionGranted { .. }
-        | GameEvent::DebugPermissionRevoked { .. } => LogCategory::Special,
     }
 }
 
@@ -259,6 +269,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" performed action "),
             text(&format!("{action:?}")),
         ],
+        GameEvent::CardPredicateGuessMade {
+            player_id,
+            source_id,
+            choice,
+        } => {
+            let mut segments = vec![
+                player_seg(state, *player_id),
+                text(" guesses "),
+                text(choice),
+            ];
+            if let Some(source_id) = source_id {
+                segments.push(text(" for "));
+                segments.push(card_seg(state, *source_id));
+            }
+            segments
+        }
 
         GameEvent::SpellCast {
             controller,
@@ -283,6 +309,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AbilityActivated {
             player_id,
             source_id,
+            ..
         } => vec![
             player_seg(state, *player_id),
             text(" activates ability: "),
@@ -315,6 +342,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 // CR 702.165a: Backup is a triggered ability — it never emits a
                 // `KeywordAbilityActivated` event, so this arm is unreachable.
                 AbilityTag::Backup => " activates backup: ",
+                // CR 602.5b: Power-up activation.
+                AbilityTag::PowerUp => " activates power-up: ",
+                // CR 702.6a: Equip activation.
+                AbilityTag::Equip => " activates equip: ",
+                AbilityTag::Augment => " activates augment: ",
             };
             vec![
                 player_seg(state, *player_id),
@@ -343,6 +375,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" enlists "),
             card_seg(state, *tapped),
         ],
+
+        GameEvent::ArmyAmassed { object_id, .. } => {
+            vec![card_seg(state, *object_id), text(" is amassed")]
+        }
 
         GameEvent::StackPushed { object_id } => {
             vec![card_seg(state, *object_id), text(" added to stack")]
@@ -564,6 +600,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             segs
         }
 
+        // CR 509.1h: an effect made an attacker become blocked (no blockers).
+        GameEvent::AttackerBecameBlockedByEffect { attacker } => {
+            vec![card_seg(state, *attacker), text(" becomes blocked")]
+        }
+
         GameEvent::CombatDamageDealtToPlayer {
             player_id,
             source_amounts,
@@ -698,8 +739,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *merged_id),
         ],
 
+        GameEvent::Augmented {
+            merged_id,
+            augmenting_id,
+            ..
+        } => vec![
+            card_seg(state, *augmenting_id),
+            text(" augments "),
+            card_seg(state, *merged_id),
+        ],
+
         GameEvent::TurnedFaceUp { object_id } => {
             vec![card_seg(state, *object_id), text(" is turned face up")]
+        }
+
+        GameEvent::TurnedFaceDown { object_id } => {
+            vec![card_seg(state, *object_id), text(" is turned face down")]
         }
 
         GameEvent::Regenerated { object_id } => {
@@ -708,6 +763,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::CreatureSuspected { object_id } => {
             vec![card_seg(state, *object_id), text(" becomes suspected")]
+        }
+
+        GameEvent::CreatureNoLongerSuspected { object_id } => {
+            vec![card_seg(state, *object_id), text(" is no longer suspected")]
         }
 
         GameEvent::Detained { object_id } => {
@@ -1072,6 +1131,24 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AttractionOpened { object_id, .. } => {
             vec![text("Opened Attraction "), card_seg(state, *object_id)]
         }
+        GameEvent::ContraptionAssembled {
+            object_id,
+            sprocket,
+            ..
+        } => vec![
+            text("Assembled Contraption "),
+            card_seg(state, *object_id),
+            text(" onto sprocket "),
+            text(&sprocket.to_string()),
+        ],
+        GameEvent::StickerPlaced {
+            object_id, kind, ..
+        } => vec![
+            text("Placed "),
+            text(&format!("{kind:?}").to_lowercase()),
+            text(" sticker on "),
+            card_seg(state, *object_id),
+        ],
         GameEvent::AttractionsRolledToVisit { roll, .. } => {
             vec![
                 text("Rolled "),
@@ -1092,6 +1169,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 text(")"),
             ]
         }
+        GameEvent::ContraptionCranked {
+            contraption_id,
+            sprocket,
+            ..
+        } => vec![
+            text("Cranked Contraption "),
+            card_seg(state, *contraption_id),
+            text(" on sprocket "),
+            text(&sprocket.to_string()),
+        ],
         GameEvent::Clash { .. } => vec![text("Clash")],
         GameEvent::VoteCast { voter, choice, .. } => {
             vec![player_seg(state, *voter), text(" voted "), text(choice)]
@@ -1163,6 +1250,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" foretold "),
             card_seg(state, *object_id),
         ],
+        // CR 702.143d: an effect made an exiled card foretold (no foretelling
+        // player — the card itself became foretold).
+        GameEvent::BecameForetold { object_id } => {
+            vec![card_seg(state, *object_id), text(" becomes foretold")]
+        }
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
@@ -1233,6 +1325,41 @@ mod tests {
     }
 
     #[test]
+    fn named_choice_guess_logs_as_debug_with_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let event = GameEvent::CardPredicateGuessMade {
+            player_id: PlayerId(1),
+            source_id: Some(source_id),
+            choice: "Nonland".to_string(),
+        };
+        let entries = resolve_log_entries(&[event], &state);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].category, LogCategory::Debug);
+        assert!(matches!(
+            entries[0].segments.as_slice(),
+            [
+                LogSegment::PlayerName { player_id, .. },
+                LogSegment::Text(guesses),
+                LogSegment::Text(choice),
+                LogSegment::Text(for_text),
+                LogSegment::CardName { name, .. },
+            ] if *player_id == PlayerId(1)
+                && guesses == " guesses "
+                && choice == "Nonland"
+                && for_text == " for "
+                && name == "Gollum, Scheming Guide"
+        ));
+    }
+
+    #[test]
     fn player_name_defaults_to_player_n() {
         let state = GameState::new_two_player(42);
         let name = resolve_player_name(&state, PlayerId(0));
@@ -1261,6 +1388,7 @@ mod tests {
             ObjectId(42),
             crate::types::game_state::LKISnapshot {
                 name: "Grizzly Bears".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -1275,6 +1403,8 @@ mod tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");

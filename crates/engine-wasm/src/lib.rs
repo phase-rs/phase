@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -8,13 +9,16 @@ use wasm_bindgen::prelude::*;
 use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
-use engine::game::engine::apply;
+use engine::game::engine::{
+    apply, resolve_all_fast_forward, ResolveAllCallbackDecision,
+    ResolveAllFastForwardResult as BatchResolveResult,
+};
 use engine::game::{
     can_pair_commanders, deck_copy_limit_for, estimate_bracket, evaluate_deck_compatibility,
     filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
     is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
     rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
-    validate_name_deck_for_format, BracketEstimate, DeckCompatibilityRequest, DeckList,
+    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
@@ -63,8 +67,10 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
     js_sys::JSON::parse(&json).unwrap_or_else(|e| panic!("JSON.parse failed: {e:?}"))
 }
 
-use phase_ai::choose_action;
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
+use phase_ai::{
+    choose_action_with_session, score_candidates_with_session, AiSession, SessionCache,
+};
 thread_local! {
     /// Game state uses Cell<Option<T>> with take/set to avoid RefCell borrow poisoning.
     /// In WASM, panics don't unwind (no RAII cleanup), so a RefCell::borrow_mut() that
@@ -77,6 +83,13 @@ thread_local! {
     /// refused in this mode because rewinding a single client's view would
     /// desync from the authoritative game on the wire. See `restore_game_state`.
     static MULTIPLAYER_MODE: Cell<bool> = const { Cell::new(false) };
+    /// Per-thread cache of the last-built `AiSession`, keyed by deck-composition
+    /// fingerprint. The WASM bridge cannot hold the session on the stack across
+    /// JS round-trips (unlike native `run_ai_actions`), so it caches here and
+    /// reuses whenever `deck_pools` are unchanged. Invalidated on game
+    /// init/clear/resume; deliberately NOT invalidated on `restore_game_state`
+    /// so per-decision pool workers reuse the session.
+    static AI_SESSION_CACHE: Cell<SessionCache> = const { Cell::new(SessionCache::new_empty()) };
 }
 
 /// Toggle the multiplayer enforcement flag. Called by multiplayer adapters
@@ -125,6 +138,27 @@ fn with_state<R>(f: impl FnOnce(&GameState) -> R) -> Result<R, JsValue> {
         cell.set(Some(state));
         Ok(result)
     })
+}
+
+/// Fetch (or lazily build) the per-thread `AiSession` for `state`, reusing the
+/// cached session whenever the deck-composition fingerprint is unchanged.
+fn ai_session_for(state: &GameState) -> Arc<AiSession> {
+    AI_SESSION_CACHE.with(|cell| {
+        let mut cache = cell.take();
+        let session = cache.get_or_build(state);
+        cell.set(cache);
+        session
+    })
+}
+
+/// Drop the cached session so the next `ai_session_for` rebuilds from scratch.
+/// Called whenever the game identity changes (init/clear/resume).
+fn clear_ai_session_cache() {
+    AI_SESSION_CACHE.with(|cell| {
+        let mut cache = cell.take();
+        cache.clear();
+        cell.set(cache);
+    });
 }
 
 thread_local! {
@@ -195,6 +229,7 @@ pub fn take_last_panic_message() -> Option<String> {
 #[wasm_bindgen]
 pub fn clear_game_state() {
     GAME_STATE.with(|cell| cell.set(None));
+    clear_ai_session_cache();
 }
 
 /// Verify WASM integration works.
@@ -221,6 +256,32 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
         *cell.borrow_mut() = Some(db);
     });
     Ok(count)
+}
+
+/// Build a game-scoped AI card-database subset from the loaded full database and
+/// the live game state, serialized as the `AiCardSubsetResult` tagged union
+/// (`{"kind":"full"}` or `{"kind":"subset","json":...,"count":N}`). The MAIN
+/// worker (full CARD_DB + live GAME_STATE) calls this; the AI worker pool loads
+/// the returned subset so its WASM instances don't each parse the full ~93MB
+/// corpus. Returns `{"kind":"full"}` defensively when the database or game state
+/// is absent (the engine is the single authority for this fallback — see
+/// `card_subset::build_ai_card_subset_or_full`). The game state is taken out of
+/// and restored to the thread-local on every path.
+#[wasm_bindgen]
+pub fn build_ai_card_subset() -> Result<String, JsValue> {
+    let result = CARD_DB.with(|db_cell| {
+        let db_ref = db_cell.borrow();
+        GAME_STATE.with(|gs_cell| {
+            let state_opt = gs_cell.take();
+            let r = engine::game::card_subset::build_ai_card_subset_or_full(
+                state_opt.as_ref(),
+                db_ref.as_ref(),
+            );
+            gs_cell.set(state_opt);
+            r
+        })
+    });
+    serde_json::to_string(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Look up a card face by name from the loaded card database.
@@ -538,6 +599,12 @@ pub fn initialize_game(
     };
     let count = player_count.unwrap_or(2);
     let game_format = format_config.format;
+    if let Err(reason) = format_config.validate_for_player_count(count) {
+        return to_js(&serde_json::json!({
+            "error": true,
+            "reasons": [reason],
+        }));
+    }
 
     let mut state = GameState::new(format_config, count, seed);
     state.debug_mode = true;
@@ -552,12 +619,17 @@ pub fn initialize_game(
             state.debug_permitted.insert(PlayerId(i));
         }
     }
-    state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
+    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
     } else {
         MatchConfig::default()
     };
+    // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
+    // onto the runtime `loop_detection` gate via the single engine authority shared
+    // with the server path. The detector is player-count-agnostic, so it carries
+    // through for local 3-/4-player tables too.
+    state.set_match_config(match_config);
 
     // Load deck data if provided — resolve names via the loaded card database.
     //
@@ -603,13 +675,17 @@ pub fn initialize_game(
                     ("Player".to_string(), &deck_list.player),
                     ("AI opponent".to_string(), &deck_list.opponent),
                 ] {
-                    if let Err(reasons) = validate_name_deck_for_format(
+                    if let Err(reasons) = validate_name_deck_for_format_full(
                         db,
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.planar_deck,
+                        &deck.scheme_deck,
+                        &deck.signature_spell,
                         game_format,
                         Some(state.match_config.match_type),
+                        count as usize,
                     ) {
                         return Some(
                             reasons
@@ -621,13 +697,17 @@ pub fn initialize_game(
                 }
                 for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
                     let seat = format!("AI player {}", idx + 2);
-                    if let Err(reasons) = validate_name_deck_for_format(
+                    if let Err(reasons) = validate_name_deck_for_format_full(
                         db,
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.planar_deck,
+                        &deck.scheme_deck,
+                        &deck.signature_spell,
                         game_format,
                         Some(state.match_config.match_type),
+                        count as usize,
                     ) {
                         return Some(
                             reasons
@@ -726,6 +806,7 @@ pub fn initialize_game(
     };
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
+    clear_ai_session_cache();
 
     to_js(&result)
 }
@@ -956,7 +1037,8 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
 /// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
 #[wasm_bindgen]
 pub fn get_legal_actions_js() -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
         to_js(&LegalActionsResult {
@@ -978,7 +1060,8 @@ pub fn get_legal_actions_js() -> JsValue {
 /// game logic into the transport adapter.
 #[wasm_bindgen]
 pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) =
             legal_actions_for_viewer(state, PlayerId(player_id as u8));
         let auto_pass = auto_pass_recommended(state, &actions);
@@ -1016,7 +1099,8 @@ struct ViewerSnapshot {
 
 #[wasm_bindgen]
 pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
-    match with_state(|state| {
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
         let (actions, spell_costs, legal_actions_by_object) =
@@ -1173,6 +1257,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
+    clear_ai_session_cache();
     Ok(())
 }
 
@@ -1184,14 +1269,20 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue> {
     let ai_difficulty = AiDifficulty::from_label(difficulty);
 
-    with_state(|state| {
+    with_state_mut(|state| {
+        // Freshly-restored states carry `layers_dirty = Full` and a conservative
+        // all-present `static_mode_presence`; flush before read-only candidate
+        // generation so derived state and the presence index are precise
+        // (mirrors `get_legal_actions_js`). No-op when layers are clean.
+        engine::game::layers::flush_layers(state);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
 
         let ai_player = PlayerId(player_id);
         let mut rng = rand::rng();
+        let session = ai_session_for(state);
 
-        match choose_action(state, ai_player, &config, &mut rng) {
+        match choose_action_with_session(state, ai_player, &config, &mut rng, &session) {
             Some(action) => Ok(to_js(&action)),
             None => Ok(JsValue::NULL),
         }
@@ -1201,8 +1292,8 @@ pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue
 /// Score all candidate actions and return `[GameAction, score]` tuples.
 /// Used by AI workers for root parallelism — each worker scores independently,
 /// then results are merged on the main thread.
-/// `rng_seed` seeds the game state's RNG so each worker's MCTS explores
-/// different paths through the search tree, producing diverse score vectors.
+/// `rng_seed` seeds the game state's RNG so each worker's beam search explores
+/// different orderings, producing diverse score vectors.
 #[wasm_bindgen]
 pub fn get_ai_scored_candidates(
     difficulty: &str,
@@ -1212,13 +1303,19 @@ pub fn get_ai_scored_candidates(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
 
     with_state_mut(|state| {
+        // Pool workers restore a deserialized state per decision: `layers_dirty =
+        // Full`, presence index conservatively all-present. Flush before scoring so
+        // candidate generation runs on precise derived state (mirrors
+        // `get_legal_actions_js`). No-op when layers are clean.
+        engine::game::layers::flush_layers(state);
         // Re-seed the state RNG so each parallel worker explores different
-        // MCTS rollout paths and beam-search tie-breaking orders.
+        // beam-search rollout paths and tie-breaking orders.
         state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
         let ai_player = PlayerId(player_id);
-        let scored = phase_ai::score_candidates(state, ai_player, &config);
+        let session = ai_session_for(state);
+        let scored = score_candidates_with_session(state, ai_player, &config, &session);
         Ok(to_js(&scored))
     })?
 }
@@ -1255,36 +1352,54 @@ pub fn select_action_from_scores(
 /// this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
 /// each AI opponent.
 ///
-/// Returns a `BatchResolveResult` with all accumulated events, the final
-/// `WaitingFor`, and a count of items resolved.
+/// Returns a compact `BatchResolveResult` with the final `WaitingFor` and a
+/// count of items resolved. The Resolve All UI does not animate individual
+/// events, so the WASM boundary intentionally returns empty event/log arrays
+/// instead of serializing thousands of records for pathological stacks.
 ///
 /// Stop conditions (all CR-compliant):
 /// - Stack empties
-/// - Stack grows beyond baseline (new triggers appeared — pause for human)
+/// - Stack grows beyond the chunk-origin depth
 /// - An interactive `WaitingFor` appears (target selection, scry, etc.)
-/// - An AI player chooses a non-pass action (response spell/ability)
+/// - An unknown/non-requester human actor receives priority
+/// - AI has no action for its priority decision
 /// - Game ends
 /// - Safety cap reached (prevents infinite loops from cascading triggers)
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchResolveResult {
-    events: Vec<engine::types::events::GameEvent>,
-    waiting_for: engine::types::game_state::WaitingFor,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    log_entries: Vec<engine::types::log::GameLogEntry>,
-    items_resolved: u32,
-    /// Stack depth at this chunk's entry. The frontend latches the FIRST
-    /// chunk's `total` as the storm-origin denominator for "resolving X of Y"
-    /// progress (this per-chunk value shrinks across chunks, so only the first
-    /// is the true origin total). Display-only; carries no rules meaning.
-    total: u32,
-}
-
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AiSeatConfig {
     player_id: u8,
     difficulty: String,
+}
+
+fn resolve_all_inner(
+    state: &mut GameState,
+    requester: PlayerId,
+    ai_seats: &[AiSeatConfig],
+    max_resolutions: u32,
+    rng: &mut impl Rng,
+) -> BatchResolveResult {
+    // The first AI decision in the fast-forward loop can run before any
+    // `apply()` (which would flush internally); flush up front so it sees
+    // precise derived state + presence index. No-op when layers are clean.
+    engine::game::layers::flush_layers(state);
+    let session = ai_session_for(state);
+    resolve_all_fast_forward(state, requester, max_resolutions, |state, actor| {
+        if let Some(seat) = ai_seats
+            .iter()
+            .find(|seat| PlayerId(seat.player_id) == actor)
+        {
+            let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
+            let config =
+                create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+            match choose_action_with_session(state, actor, &config, rng, &session) {
+                Some(action) => ResolveAllCallbackDecision::Action(action),
+                None => ResolveAllCallbackDecision::Stop,
+            }
+        } else {
+            ResolveAllCallbackDecision::Stop
+        }
+    })
 }
 
 #[wasm_bindgen]
@@ -1297,113 +1412,13 @@ pub fn resolve_all(
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize AI seats: {e}")))?;
 
     let requester = PlayerId(requester);
-    let resolution_cap = if max_resolutions == 0 {
-        u32::MAX
-    } else {
-        max_resolutions
-    };
 
     with_state_mut(|state| {
-        let initial_stack_len = state.stack.len();
-        let mut all_events = Vec::new();
-        let mut all_log_entries = Vec::new();
-        let mut items_resolved: u32 = 0;
-        // Safety cap: 2 passes per player per stack item + headroom for new triggers
-        let max_iterations = initial_stack_len
-            .saturating_mul(state.players.len())
-            .saturating_mul(4)
-            .clamp(100, 20_000);
-
-        for _ in 0..max_iterations {
-            let wf = &state.waiting_for;
-
-            // Stop: game over
-            if matches!(wf, engine::types::game_state::WaitingFor::GameOver { .. }) {
-                break;
-            }
-
-            // Stop: non-priority interactive WaitingFor
-            let Some(acting) = wf.acting_player() else {
-                break;
-            };
-            if !matches!(wf, engine::types::game_state::WaitingFor::Priority { .. }) {
-                break;
-            }
-
-            // Stop: stack emptied
-            if state.stack.is_empty() {
-                break;
-            }
-
-            // Stop: stack grew beyond initial size (new triggers appeared)
-            if state.stack.len() > initial_stack_len {
-                break;
-            }
-
-            // Determine the action for the current priority holder
-            let action = if acting == requester {
-                // Human requested resolve-all — auto-pass
-                GameAction::PassPriority
-            } else if let Some(seat) = ai_seats.iter().find(|s| PlayerId(s.player_id) == acting) {
-                // AI player — ask the AI what to do
-                let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
-                let config = create_config_for_players(
-                    ai_difficulty,
-                    Platform::Wasm,
-                    state.players.len() as u8,
-                );
-                let mut rng = rand::rng();
-                match choose_action(state, acting, &config, &mut rng) {
-                    Some(action) => {
-                        if !matches!(action, GameAction::PassPriority) {
-                            // AI wants to respond — apply and stop
-                            if let Ok(result) = apply(state, acting, action) {
-                                all_events.extend(result.events);
-                                all_log_entries.extend(result.log_entries);
-                            }
-                            break;
-                        }
-                        GameAction::PassPriority
-                    }
-                    None => GameAction::PassPriority,
-                }
-            } else {
-                // Unknown seat — shouldn't happen, but pass to avoid deadlock
-                GameAction::PassPriority
-            };
-
-            // Track resolutions: a resolution happens when all players pass
-            // and the stack shrinks
-            let stack_before = state.stack.len();
-
-            match apply(state, acting, action) {
-                Ok(result) => {
-                    all_events.extend(result.events);
-                    all_log_entries.extend(result.log_entries);
-
-                    if state.stack.len() < stack_before {
-                        items_resolved += (stack_before - state.stack.len()) as u32;
-                        if items_resolved >= resolution_cap {
-                            break;
-                        }
-                    }
-
-                    // Stop: stack grew (new triggers from resolution)
-                    if state.stack.len() > initial_stack_len {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-
-        Ok(to_js(&BatchResolveResult {
-            events: all_events,
-            waiting_for: state.waiting_for.clone(),
-            log_entries: all_log_entries,
-            items_resolved,
-            total: initial_stack_len as u32,
-        }))
+        let mut rng = rand::rng();
+        let mut result = resolve_all_inner(state, requester, &ai_seats, max_resolutions, &mut rng);
+        result.events.clear();
+        result.log_entries.clear();
+        Ok(to_js(&result))
     })?
 }
 
@@ -1431,6 +1446,10 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
                 attraction_deck: deck_data.attraction_deck,
+                planar_deck: deck_data.planar_deck,
+                scheme_deck: deck_data.scheme_deck,
+                contraption_deck: deck_data.contraption_deck,
+                sticker_sheets: deck_data.sticker_sheets,
                 signature_spell: deck_data.signature_spell,
                 bracket_tier: deck_data.bracket_tier,
             })
@@ -1458,6 +1477,15 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
         Ok(delta) => Ok(to_js(&SeatMutationResult { state, delta })),
         Err(e) => Err(JsValue::from_str(&format!("{e:?}"))),
     }
+}
+
+/// Project an authoritative seat view from Rust so frontend transports do not
+/// need to understand format topology details.
+#[wasm_bindgen]
+pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
+    let state: SeatState = serde_json::from_str(state_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
+    Ok(to_js(&state.to_view()))
 }
 
 #[cfg(test)]
@@ -1525,16 +1553,69 @@ mod bracket_estimate_tests {
     }
 }
 
+#[cfg(test)]
+mod resolve_all_tests {
+    use super::*;
+    use engine::types::ability::{Effect, ResolvedAbility};
+    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
+    use engine::types::identifiers::ObjectId;
+
+    fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
+    }
+
+    fn priority_state(semantic_seat: PlayerId, stack: Vec<StackEntry>) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state.waiting_for = WaitingFor::Priority {
+            player: semantic_seat,
+        };
+        state.priority_player = semantic_seat;
+        state.stack = stack.into_iter().collect();
+        state
+    }
+
+    #[test]
+    fn resolve_all_tls_production_path_substitute_routes_controlled_priority() {
+        let mut state = priority_state(PlayerId(1), vec![no_op_entry(1, PlayerId(1))]);
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(0));
+        state.priority_player = PlayerId(0);
+        state.priority_passes.insert(PlayerId(0));
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let ai_seats: Vec<AiSeatConfig> = serde_json::from_str("[]").unwrap();
+        let result = with_state_mut(|state| {
+            let mut rng = ChaCha20Rng::seed_from_u64(13);
+            resolve_all_inner(state, PlayerId(0), &ai_seats, 0, &mut rng)
+        })
+        .unwrap();
+
+        assert_eq!(result.items_resolved, 1);
+        with_state(|state| assert!(state.stack.is_empty())).unwrap();
+        clear_game_state();
+    }
+}
+
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
     use engine::game::deck_loading::create_object_from_card_face;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, QuantityExpr,
-        TargetFilter,
+        ResolvedAbility, TargetFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
+    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
     use engine::types::identifiers::ObjectId;
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -1623,6 +1704,41 @@ mod tests {
         })
         .to_string();
         load_card_database(&json).unwrap();
+    }
+
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
+    }
+
+    #[test]
+    fn resolve_all_exported_path_routes_controlled_priority_to_requester() {
+        let mut state = GameState::new_two_player(7);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(0));
+        state.priority_player = PlayerId(0);
+        state.priority_passes.insert(PlayerId(0));
+        state.stack.push_back(no_op_stack_entry(1, PlayerId(1)));
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let value = resolve_all(0, "[]", 0).unwrap();
+        let result: BatchResolveResult = serde_wasm_bindgen::from_value(value).unwrap();
+
+        assert_eq!(result.items_resolved, 1);
+        let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
+        assert!(restored.stack.is_empty());
+        clear_game_state();
     }
 
     #[test]

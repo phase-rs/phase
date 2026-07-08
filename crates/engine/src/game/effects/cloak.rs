@@ -1,5 +1,5 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -12,39 +12,158 @@ use crate::types::game_state::GameState;
 /// `target` selects whose library is cloaked from (mirrors `Effect::Manifest`):
 /// `Controller` for "you cloak the top card of your library",
 /// `ParentTargetController` / `TriggeringPlayer` for relative-player bodies.
-/// This first pass covers the top-of-library source; cloaking a card from hand
-/// or a face-down pile is deferred (those need a player-selected source).
+///
+/// `object_source` selects WHICH cards are cloaked. `None` is the CR 701.58e
+/// library-top source (Cryptic Coat, Ransom Note). `Some(filter)` names
+/// explicit objects a preceding `Effect::ChooseFromZone` chose and forwarded
+/// onto this ability's `targets` — Vannifar's "cloak a card from your hand".
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target, count) = match &ability.effect {
-        Effect::Cloak { target, count } => (
+    let (target, count, object_source) = match &ability.effect {
+        Effect::Cloak {
+            target,
+            count,
+            object_source,
+        } => (
             target.clone(),
             resolve_quantity_with_targets(state, count, ability).max(0) as usize,
+            object_source.clone(),
         ),
         _ => return Err(EffectError::MissingParam("count".to_string())),
     };
 
     let player = super::resolve_player_for_context_ref(state, ability, &target);
 
-    // CR 701.58e: If an effect instructs a player to cloak multiple cards from
-    // a single library, those cards are cloaked one at a time.
-    for _ in 0..count {
-        let has_cards = state
-            .players
-            .iter()
-            .find(|p| p.id == player)
-            .map(|p| !p.library.is_empty())
-            .unwrap_or(false);
+    match object_source {
+        // CR 701.58a: Cloak explicit objects chosen upstream. Two source shapes:
+        //
+        // (A) A face-down PILE modeled as the chain's tracked object set (Expose
+        //     the Culprit's "Exile any number of face-up creatures you control
+        //     with disguise in a face-down pile, shuffle that pile, then cloak
+        //     them"). The chosen creatures are on the BATTLEFIELD and a preceding
+        //     `Effect::Shuffle` already reordered the pile (CR 701.24a), so the
+        //     order lives only in `tracked_object_sets` — read it DIRECTLY,
+        //     order-preserving (`ability.targets` never reflects the shuffle).
+        //     Because `manifest_card` on an already-battlefield permanent is a
+        //     total NO-OP (the zone pipeline's Battlefield→Battlefield guard,
+        //     CR 603.2g), each member is EXILED first (a real Battlefield→Exile
+        //     zone change) and then manifested back from exile. object_id is
+        //     stable across zones, so no tracked-set remap is needed.
+        Some(TargetFilter::TrackedSet { .. }) => {
+            // CR 608.2c: bind the `TrackedSetId(0)` sentinel to the chain's
+            // published pile (the same set `Effect::Shuffle` just reordered).
+            let members: Vec<crate::types::identifiers::ObjectId> =
+                match crate::game::targeting::resolve_tracked_set_sentinel(
+                    state,
+                    TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    },
+                ) {
+                    TargetFilter::TrackedSet { id } => state
+                        .tracked_object_sets
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
 
-        if !has_cards {
-            break;
+            // CR 701.58e: cloak the pile one card at a time, in the shuffled order.
+            for object_id in members {
+                // Capture the departing creature's attachments BEFORE the exile —
+                // `sever_battlefield_attachment_graph_on_exit` clears this list as
+                // part of the zone change.
+                let attachments = state
+                    .objects
+                    .get(&object_id)
+                    .map(|obj| obj.attachments.clone())
+                    .unwrap_or_default();
+
+                // CR 603.6c + CR 122.2: a real Battlefield→Exile move — clears
+                // counters, fires leaves-the-battlefield triggers, and detaches
+                // the creature from any Aura/Equipment (host side).
+                crate::game::zones::move_to_zone(
+                    state,
+                    object_id,
+                    crate::types::zones::Zone::Exile,
+                    events,
+                );
+
+                // CR 400.7 + CR 704.5m/704.5n: the exiled creature became a new
+                // object, and the cloaked card it returns as is yet another new
+                // object. The engine reuses `ObjectId` across zones, so the
+                // attachment side of the graph still points at that reused id —
+                // null each former attachment's back-edge to model "the object I
+                // was attached to ceased to exist" (CR 400.7). Without this, the
+                // reused-id face-down 2/2 that returns below would spuriously
+                // satisfy the attachment-legality re-check and the Aura/Equipment
+                // would never fall off. The post-resolution CR 704.5m SBA then
+                // sends orphaned Auras to the graveyard and unattaches Equipment.
+                for attachment_id in attachments {
+                    if let Some(attachment) = state.objects.get_mut(&attachment_id) {
+                        attachment.attached_to = None;
+                    }
+                }
+
+                // CR 701.58a: manifest the now-exiled card back onto the
+                // battlefield face down as a 2/2 with ward {2}.
+                crate::game::morph::manifest_card(
+                    state,
+                    player,
+                    object_id,
+                    ability.source_id,
+                    crate::types::ability::FaceDownProfile::cloaked_2_2(),
+                    None,
+                    events,
+                )
+                .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+            }
+            // The detach/exile/return churn changed the attachment graph and P/T;
+            // force a layer recompute so downstream reads settle (mirrors
+            // `sever_battlefield_attachment_graph_on_exit`).
+            crate::game::layers::mark_layers_full(state);
         }
+        // (B) An explicit object set forwarded onto `ability.targets` by a parent
+        //     `ChooseFromZone` (Vannifar's "cloak a card from your hand"). Those
+        //     cards live in a non-battlefield zone, so `manifest_card` is a real
+        //     move (CR 608.2c — later instructions read the earlier selection).
+        //     Each is turned face down as a 2/2 with ward {2} (CR 701.58a).
+        Some(filter) => {
+            let object_ids = crate::game::effects::effect_object_targets(&filter, &ability.targets);
+            for object_id in object_ids {
+                crate::game::morph::manifest_card(
+                    state,
+                    player,
+                    object_id,
+                    ability.source_id,
+                    crate::types::ability::FaceDownProfile::cloaked_2_2(),
+                    None,
+                    events,
+                )
+                .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+            }
+        }
+        // CR 701.58e: If an effect instructs a player to cloak multiple cards
+        // from a single library, those cards are cloaked one at a time.
+        None => {
+            for _ in 0..count {
+                let has_cards = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == player)
+                    .map(|p| !p.library.is_empty())
+                    .unwrap_or(false);
 
-        crate::game::morph::cloak(state, player, events)
-            .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+                if !has_cards {
+                    break;
+                }
+
+                crate::game::morph::cloak(state, player, events)
+                    .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -81,6 +200,7 @@ mod tests {
             Effect::Cloak {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                object_source: None,
             },
             vec![],
             ObjectId(999),
@@ -103,5 +223,283 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, GameEvent::ZoneChanged { object_id, to, .. } if *object_id == card && *to == Zone::Battlefield)));
+    }
+
+    // ---------------------------------------------------------------------
+    // Expose the Culprit mode 2 — the pile → shuffle → cloak chain, driven
+    // end-to-end through the cast pipeline (CR 701.24a + CR 701.58a/e).
+    // ---------------------------------------------------------------------
+    use crate::game::game_object::AttachTarget;
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
+    use crate::types::ability::{TargetRef, TypedFilter};
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    use crate::types::events::PlayerActionKind;
+    use crate::types::game_state::{ActionResult, WaitingFor};
+    use crate::types::phase::Phase;
+
+    // Verbatim Oracle text so the runtime tests exercise the real parser branch
+    // (`try_parse_exile_pile_shuffle_cloak`) plus the whole
+    // ChooseObjectsIntoTrackedSet → Shuffle{TrackedSet} → Cloak{TrackedSet} chain.
+    const EXPOSE_ORACLE: &str = "Choose one or both —\n\
+        • Turn target face-down creature face up.\n\
+        • Exile any number of face-up creatures you control with disguise in a face-down pile, shuffle that pile, then cloak them.";
+
+    fn disguise_creature(scenario: &mut GameScenario, name: &str) -> ObjectId {
+        scenario
+            .add_creature(P0, name, 2, 2)
+            .with_keyword(Keyword::Disguise(ManaCost::generic(3)))
+            .id()
+    }
+
+    /// Commit an Expose mode-2 cast (mode index 1 only), resolve to the pile
+    /// selection prompt, select `chosen`, and return the selection's
+    /// `ActionResult` — its `.events` carry the Shuffle+Cloak resolution and the
+    /// post-action state-based actions (CR 704.3).
+    fn cast_mode2_select(
+        runner: &mut GameRunner,
+        spell: ObjectId,
+        chosen: &[ObjectId],
+    ) -> ActionResult {
+        // `.commit()` puts the modal spell on the stack; dropping the returned
+        // CastCommit at the statement end releases its &mut borrow of `runner`.
+        runner.cast(spell).modes(&[1]).commit();
+        // Resolve the spell — the ChooseObjectsIntoTrackedSet head raises the
+        // interactive pile-selection prompt (CR 608.2c).
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseObjectsSelection { .. }
+            ),
+            "expected ChooseObjectsSelection, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::SelectTargets {
+                targets: chosen.iter().map(|&id| TargetRef::Object(id)).collect(),
+            })
+            .expect("pile selection accepted")
+    }
+
+    /// CR 701.24a + CR 701.58a/e: casting mode 2 exiles the chosen face-up
+    /// disguise creatures into the pile, shuffles it, and cloaks them back — as
+    /// fresh face-down 2/2s with ward {2}, in the shuffled order, with NO
+    /// library-shuffle side effect.
+    #[test]
+    fn expose_mode2_cloaks_pile_in_shuffled_order_without_library_shuffle() {
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let names = ["Dis A", "Dis B", "Dis C", "Dis D", "Dis E"];
+        let creatures: Vec<ObjectId> = names
+            .iter()
+            .map(|n| disguise_creature(&mut scenario, n))
+            .collect();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Expose the Culprit", true, EXPOSE_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+
+        let result = cast_mode2_select(&mut runner, spell, &creatures);
+
+        // (a) CR 701.58a: every chosen creature is now a face-down 2/2 ward {2}.
+        for &id in &creatures {
+            let obj = &runner.state().objects[&id];
+            assert!(obj.face_down, "creature {id:?} must be face down");
+            assert_eq!(obj.power, Some(2), "creature {id:?} must be a 2/2");
+            assert_eq!(obj.toughness, Some(2), "creature {id:?} must be a 2/2");
+            assert_eq!(obj.zone, Zone::Battlefield);
+            assert!(
+                // allow-raw-authority: test — asserts the cloaked creature's OWN ward keyword, already checked on-battlefield above; not an off-zone effective query.
+                obj.keywords.iter().any(|k| matches!(
+                    k,
+                    Keyword::Ward(WardCost::Mana(c)) if *c == ManaCost::generic(2)
+                )),
+                "creature {id:?} must have ward {{2}}"
+            );
+        }
+
+        // (b) CR 701.24a: reconstruct the cloak (manifest-back) order from the
+        // ZoneChanged{→Battlefield} events. It must be a permutation of the
+        // selection AND differ from the selection order (the pile was shuffled;
+        // seed 7 yields a non-identity permutation of these five creatures).
+        let cloak_order: Vec<ObjectId> = result
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if creatures.contains(object_id) => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        let mut sorted_cloak = cloak_order.clone();
+        sorted_cloak.sort_by_key(|i| i.0);
+        let mut sorted_sel = creatures.clone();
+        sorted_sel.sort_by_key(|i| i.0);
+        assert_eq!(
+            sorted_cloak, sorted_sel,
+            "every selected creature must be cloaked exactly once"
+        );
+        assert_ne!(
+            cloak_order, creatures,
+            "the pile shuffle must reorder the cloak order (non-identity seed)"
+        );
+
+        // (c) CR 701.24a: a PILE shuffle is not a LIBRARY shuffle. The shuffle
+        // effect resolved (reach guard) but emitted NO ShuffledLibrary action, so
+        // "whenever you shuffle your library" triggers cannot fire.
+        assert!(
+            result.events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "the pile-shuffle effect must have resolved (reach guard)"
+        );
+        assert!(
+            !result.events.iter().any(|e| matches!(
+                e,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )),
+            "a pile shuffle must NOT emit ShuffledLibrary"
+        );
+    }
+
+    /// CR 400.7 + CR 122.2 + CR 704.5m: the exile-and-return produces a FRESH
+    /// object — a chosen creature carrying a +1/+1 counter and an attached Aura
+    /// comes back as a face-down 2/2 with NO counter, and the orphaned Aura is
+    /// put into its owner's graveyard by the post-resolution SBA. Discriminates
+    /// rules-correct object reset from an in-place flip.
+    #[test]
+    fn expose_mode2_object_reset_drops_counters_and_auras() {
+        let mut scenario = GameScenario::new_n_player(2, 3);
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario
+            .add_creature(P0, "Countered Disguise", 2, 2)
+            .with_keyword(Keyword::Disguise(ManaCost::generic(3)))
+            .with_plus_counters(1)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Expose the Culprit", true, EXPOSE_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+
+        // Attach a simple "Enchant creature" Aura to the disguise creature.
+        let aura = create_object(
+            runner.state_mut(),
+            CardId(50001),
+            P0,
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let a = runner.state_mut().objects.get_mut(&aura).unwrap();
+            a.card_types.core_types = vec![CoreType::Enchantment];
+            a.card_types.subtypes = vec!["Aura".to_string()];
+            a.base_card_types = a.card_types.clone();
+            a.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
+            a.attached_to = Some(AttachTarget::Object(creature));
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        // Reach guards: the counter is present and the Aura is attached on the
+        // battlefield before the cast.
+        assert_eq!(
+            runner.state().objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(AttachTarget::Object(creature))
+        );
+
+        let _ = cast_mode2_select(&mut runner, spell, &[creature]);
+
+        // CR 122.2: the +1/+1 counter is gone (a real Battlefield→Exile move).
+        assert_eq!(
+            runner.state().objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "the +1/+1 counter must be cleared by the exile-and-return"
+        );
+        // CR 701.58a: it returns as a fresh face-down 2/2, not a boosted 3/3.
+        assert!(runner.state().objects[&creature].face_down);
+        assert_eq!(runner.state().objects[&creature].power, Some(2));
+        // CR 704.5m: the Aura's host became a new object, so the Aura fell off and
+        // the post-resolution SBA put it into its owner's graveyard.
+        assert_eq!(
+            runner.state().objects[&aura].zone,
+            Zone::Graveyard,
+            "the Aura must be in the graveyard after the object reset + SBA, got {:?}",
+            runner.state().objects[&aura].zone
+        );
+    }
+
+    /// CR 608.2c: mode 2 with zero eligible creatures is inert — the
+    /// empty selection publishes an empty pile, the shuffle and cloak resolve as
+    /// no-ops, and no permanent is cloaked. Guards against reading a stale prior
+    /// tracked set.
+    #[test]
+    fn expose_mode2_empty_selection_is_inert() {
+        let mut scenario = GameScenario::new_n_player(2, 1);
+        scenario.at_phase(Phase::PreCombatMain);
+        // A non-disguise bystander — never eligible for the "with disguise" pile.
+        let bystander = scenario.add_creature(P0, "No Disguise", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Expose the Culprit", true, EXPOSE_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+
+        let result = cast_mode2_select(&mut runner, spell, &[]);
+
+        // Reach guard: the chain resolved through Shuffle (so Cloak also ran) —
+        // it just had an empty pile to act on.
+        assert!(
+            result.events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "the empty-pile chain must still resolve the Shuffle (reach guard)"
+        );
+        // Inert: the bystander is untouched and nothing was cloaked.
+        let obj = &runner.state().objects[&bystander];
+        assert!(!obj.face_down, "bystander must be untouched (face up)");
+        assert_eq!(obj.power, Some(3));
+        assert!(
+            !result.events.iter().any(|e| matches!(
+                e,
+                GameEvent::ZoneChanged {
+                    to: Zone::Battlefield,
+                    ..
+                }
+            )),
+            "no creature should be cloaked when the pile is empty"
+        );
     }
 }

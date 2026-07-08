@@ -104,6 +104,7 @@ pub fn resolve(
             None,
             track_exiled_by_source,
             None,
+            None,
             events,
         ) {
             super::change_zone::ZoneMoveResult::Done => {}
@@ -220,9 +221,15 @@ fn extract_property(state: &GameState, obj_id: ObjectId, property: ObjectPropert
     };
     match property {
         ObjectProperty::Power => obj.power.unwrap_or(0),
-        // CR 202.3e: `mana_value()` excludes X (treats X as 0 outside the stack).
-        ObjectProperty::ManaValue => i32::try_from(obj.mana_cost.mana_value()).unwrap_or(i32::MAX),
+        // CR 202.3d + CR 202.3e + CR 709.4b: combined MV for a split card off the
+        // stack (X treated as 0 off the stack, chosen half on the stack).
+        ObjectProperty::ManaValue => i32::try_from(obj.effective_mana_value()).unwrap_or(i32::MAX),
         ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
+        // CR 107.4a + CR 202.1: colored mana symbols of `color` in the cost.
+        ObjectProperty::ManaSymbolCount(color) => i32::try_from(
+            crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, color),
+        )
+        .unwrap_or(i32::MAX),
     }
 }
 
@@ -439,6 +446,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![],
             source,
@@ -543,6 +551,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![],
             source,
@@ -615,7 +624,9 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
                             face_down_profile: None,
+                            enters_modified_if: None,
                         },
                     ))
                     .destination_zone(Zone::Exile),
@@ -781,6 +792,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             vec![],
             source,

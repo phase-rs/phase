@@ -177,6 +177,7 @@ fn mana_drain_refunds_colorless_equal_to_countered_spells_mana_value() {
             phase: Phase::PreCombatMain,
             // Placeholder — delayed_trigger::resolve rewrites this to ability.controller.
             player: PlayerId(0),
+            gate: engine::types::ability::TurnGate::None,
         },
         effect: Box::new(delayed_inner_def),
         uses_tracked_set: false,
@@ -190,6 +191,7 @@ fn mana_drain_refunds_colorless_equal_to_countered_spells_mana_value() {
         Effect::Counter {
             target: TargetFilter::StackSpell,
             source_rider: None,
+            countered_spell_zone: None,
         },
         vec![TargetRef::Object(spell_id)],
         mana_drain_source,

@@ -9,6 +9,7 @@ import {
   getCardPrintings,
   isCardImageFlipLayoutSync,
   isCardImageRotatedSync,
+  pickOldestPrinting,
   resolveFaceIndexSync,
   resolveOracleIdSync,
   resolvePrintingImageUrl,
@@ -116,7 +117,7 @@ function applyChainEntry(
     case "newest":
       return printings[0];
     case "oldest":
-      return printings[printings.length - 1];
+      return pickOldestPrinting(printings);
     case "prefer_borderless":
       return printings.find((p) => p.border_color === "borderless") ?? null;
     case "prefer_extended":

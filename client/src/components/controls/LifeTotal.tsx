@@ -2,7 +2,10 @@ import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { CARD_SLAM_FLIGHT_MS } from "../../animation/types.ts";
+import {
+  impactDelayMsForAnimationEvent,
+  isPlayerDamageAnimationEvent,
+} from "../../animation/types.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -51,12 +54,13 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       const lifeEvent = effect.event;
       if (lifeEvent.data.player_id !== playerId) continue;
 
-      const hasDamageDealt = activeStep.effects.some(
-        (e) =>
-          e.event.type === "DamageDealt" &&
-          "Player" in e.event.data.target &&
-          e.event.data.target.Player === playerId,
+      const playerDamageEvent = activeStep.effects.find(
+        (e) => isPlayerDamageAnimationEvent(e.event, playerId),
       );
+      const groupedDamageEvent = effect.displayOnly
+        ? activeStep.effects.find((e) => e.event.type === "GroupedDamageFlurry")
+        : undefined;
+      const impactEvent = playerDamageEvent?.event ?? groupedDamageEvent?.event;
 
       const newLife = prevLife.current + lifeEvent.data.amount;
       const doAnimate = () => {
@@ -78,8 +82,11 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
         flashTimerRef.current = setTimeout(() => setFlashColor(null), 400);
       };
 
-      if (hasDamageDealt) {
-        impactTimerRef.current = setTimeout(doAnimate, CARD_SLAM_FLIGHT_MS * speedMultiplier);
+      if (impactEvent) {
+        impactTimerRef.current = setTimeout(
+          doAnimate,
+          impactDelayMsForAnimationEvent(impactEvent) * speedMultiplier,
+        );
       } else {
         doAnimate();
       }

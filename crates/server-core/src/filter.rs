@@ -1,4 +1,6 @@
+use engine::game::filter_events_for_viewer;
 use engine::game::filter_state_for_viewer;
+use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -6,6 +8,15 @@ use engine::types::player::PlayerId;
 /// Hides ALL opponents' hand contents and ALL players' library contents.
 pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState {
     filter_state_for_viewer(state, viewer)
+}
+
+/// Returns viewer-safe game events for wire broadcast (library draws, etc.).
+pub fn filter_events_for_player(
+    events: &[GameEvent],
+    state: &GameState,
+    viewer: PlayerId,
+) -> Vec<GameEvent> {
+    filter_events_for_viewer(events, state, viewer)
 }
 
 #[cfg(test)]
@@ -43,6 +54,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         )]);
 
@@ -59,6 +71,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
         )]);
 
@@ -342,7 +355,12 @@ mod tests {
             owner_library: false,
             track_exiled_by_source: false,
             face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
             count_param: 0,
+            is_cost_payment: false,
+            library_position: None,
+            enters_modified_if: None,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
@@ -408,13 +426,16 @@ mod tests {
 
     /// Build a minimal `PendingTriggerContext` whose private fields are all
     /// populated, so a viewer-side redaction can be verified by checking that
-    /// each field is cleared/`None`.
+    /// each private field is cleared/`None` while public scheduling metadata is
+    /// preserved.
     fn make_pending_ctx_with_private_payload(
         controller: PlayerId,
         source_id: ObjectId,
         description: &str,
     ) -> engine::game::triggers::PendingTriggerContext {
-        use engine::game::triggers::{PendingTrigger, PendingTriggerContext};
+        use engine::game::triggers::{
+            PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin,
+        };
         use engine::types::ability::{ModalChoice, PlayerFilter, ResolvedAbility};
         use engine::types::events::GameEvent;
 
@@ -423,6 +444,7 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_rider: None,
+                countered_spell_zone: None,
             },
             Vec::new(),
             source_id,
@@ -436,8 +458,11 @@ mod tests {
             allow_repeat_modes: false,
             constraints: Vec::new(),
             mode_costs: Vec::new(),
+            mode_pawprints: Vec::new(),
             entwine_cost: None,
             chooser: PlayerFilter::Controller,
+            selection: engine::types::ability::TargetSelectionMode::Chosen,
+            dynamic_max_choices: None,
         };
         let pending = PendingTrigger {
             source_id,
@@ -454,6 +479,7 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
+                    countered_spell_zone: None,
                 },
             )],
             description: Some(description.to_string()),
@@ -464,6 +490,7 @@ mod tests {
         PendingTriggerContext {
             pending,
             trigger_events: vec![event],
+            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
         }
     }
 
@@ -534,6 +561,10 @@ mod tests {
         assert_eq!(opp_ctx.pending.source_id, source_id);
         assert_eq!(opp_ctx.pending.controller, controller);
         assert_eq!(opp_ctx.pending.timestamp, 0);
+        assert_eq!(
+            opp_ctx.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         // Private payload redacted.
         assert!(opp_ctx.pending.trigger_event.is_none());
         assert!(opp_ctx.pending.modal.is_none());
@@ -602,6 +633,10 @@ mod tests {
         assert_eq!(p0_opp.triggers.len(), 1);
         let p0_opp_ctx = &p0_opp.triggers[0];
         assert_eq!(p0_opp_ctx.pending.source_id, ObjectId(202));
+        assert_eq!(
+            p0_opp_ctx.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         assert!(p0_opp_ctx.pending.trigger_event.is_none());
         assert!(p0_opp_ctx.pending.modal.is_none());
         assert!(p0_opp_ctx.pending.description.is_none());
@@ -619,6 +654,10 @@ mod tests {
         assert_eq!(p1_opp.controller, PlayerId(0));
         let p1_opp_ctx = &p1_opp.triggers[0];
         assert_eq!(p1_opp_ctx.pending.source_id, ObjectId(101));
+        assert_eq!(
+            p1_opp_ctx.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         assert!(p1_opp_ctx.pending.trigger_event.is_none());
         assert!(p1_opp_ctx.pending.modal.is_none());
         assert!(p1_opp_ctx.pending.description.is_none());
@@ -721,6 +760,10 @@ mod tests {
         let p0_opp = &p0_view.deferred_triggers[1];
         assert_eq!(p0_opp.pending.source_id, ObjectId(402));
         assert_eq!(p0_opp.pending.controller, PlayerId(1));
+        assert_eq!(
+            p0_opp.dispatch_origin,
+            engine::game::triggers::PendingTriggerDispatchOrigin::Normal
+        );
         assert!(p0_opp.pending.trigger_event.is_none());
         assert!(p0_opp.pending.modal.is_none());
         assert!(p0_opp.pending.description.is_none());

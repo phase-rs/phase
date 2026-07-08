@@ -4,6 +4,16 @@
     "message": "Dein Gegner wird zum Sieger erklärt.",
     "concede": "Aufgeben"
   },
+  "takebackDialog": {
+    "requestedTitle": "{{name}} beantragt eine Rücknahme",
+    "requestedMessage": "Das Spiel auf den Moment direkt vor ihrer letzten Aktion zurücksetzen?",
+    "ownTitle": "Rücknahme beantragt",
+    "ownMessage": "Warten auf die Zustimmung der anderen Spieler, um auf den Zustand vor deiner letzten Aktion zurückzusetzen.",
+    "approve": "Zustimmen",
+    "decline": "Ablehnen",
+    "cancel": "Anfrage abbrechen",
+    "declinedToast": "Rücknahmeanfrage abgelehnt"
+  },
   "connectionDot": {
     "connected": "Verbunden",
     "connecting": "Verbinden...",
@@ -100,6 +110,7 @@
     "subtitle": "Wähle eine Region oder verbinde dich mit einer selbst gehosteten Instanz.",
     "noneLabel": "Keiner (nur P2P)",
     "directCodes": "direkte Codes",
+    "official": "Offiziell",
     "selfHosted": "Selbst gehostet",
     "customUrlPlaceholder": "wss://dein-server.beispiel/ws",
     "test": "Testen",

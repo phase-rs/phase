@@ -420,6 +420,7 @@ fn damage_received_trigger_fires_when_creature_dies() {
                 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
         ))
         .valid_card(TargetFilter::SelfRef)
@@ -625,6 +626,53 @@ fn ghostly_prison_accept_pays_tax_and_attacks_proceed() {
     assert_eq!(combat.attackers.len(), 2);
 }
 
+fn add_sphere_of_safety(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    let def = parse_static_line(
+        "Creatures can't attack you or planeswalkers you control unless their controller pays {X} for each of those creatures, where X is the number of enchantments you control.",
+    )
+    .expect("Sphere of Safety should parse");
+    let mut builder = scenario.add_creature(player, "Sphere of Safety", 2, 2);
+    builder.as_enchantment().with_static_definition(def);
+    builder.id()
+}
+
+fn add_enchantment(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
+    scenario
+        .add_creature(player, name, 2, 2)
+        .as_enchantment()
+        .id()
+}
+
+/// CR 508.1h + CR 202.3e: Sphere of Safety — {X} must be concretized from
+/// enchantment count before computing attack tax (issue #3865).
+#[test]
+fn sphere_of_safety_attack_tax_scales_with_enchantment_count() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let _sphere = add_sphere_of_safety(&mut scenario, P1);
+    let _other = add_enchantment(&mut scenario, P1, "Other Aura");
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Sphere of Safety should pause for combat tax");
+
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment { total_cost, .. } => {
+            assert_eq!(total_cost.mana_value(), 2, "two enchantments → X=2 tax");
+        }
+        other => panic!("expected CombatTaxPayment, got {other:?}"),
+    }
+}
+
 /// CR 508.1d + CR 509.1c: Declining the tax drops the taxed attackers. With
 /// Ghostly Prison on defender and only two taxed attackers, decline → zero
 /// attackers → combat ends (CR 508.8).
@@ -668,6 +716,64 @@ fn ghostly_prison_decline_removes_taxed_attackers() {
         !a1_obj.tapped && !a2_obj.tapped,
         "declined attackers stay untapped"
     );
+}
+
+/// CR 508.1d + issue #1303: Summon: Yojimbo chapters II/III grant a transient
+/// combat tax via `GrantStaticAbility`. The tax must reach `compute_combat_tax`
+/// when attackers declare against the saga's controller.
+#[test]
+fn issue_1303_yojimbo_chapter_combat_tax_requires_payment() {
+    use engine::game::effects::effect::resolve;
+    use engine::game::layers::evaluate_layers;
+    use engine::parser::oracle_effect::parse_effect;
+    use engine::types::ability::{Duration, Effect, PlayerScope, ResolvedAbility};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saga = scenario.add_creature(P1, "Summon: Yojimbo", 1, 1).id();
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+
+    let effect = parse_effect(
+        "Until your next turn, creatures can't attack you unless their controller pays {2} for each of those creatures.",
+    );
+    assert!(
+        matches!(effect, Effect::GenericEffect { .. }),
+        "Yojimbo chapter tax must parse to GenericEffect, got {effect:?}"
+    );
+
+    let ability =
+        ResolvedAbility::new(effect, vec![], saga, P1).duration(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        });
+
+    let mut runner = scenario.build();
+    resolve(runner.state_mut(), &ability, &mut Vec::new()).expect("resolve tax grant");
+    evaluate_layers(runner.state_mut());
+    runner.pass_both_players();
+
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("attack declaration should pause for combat tax");
+
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment {
+            player,
+            total_cost,
+            per_creature,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(total_cost.mana_value(), 2);
+            assert_eq!(per_creature.len(), 1);
+        }
+        other => panic!("expected CombatTaxPayment, got {other:?}"),
+    }
 }
 
 /// CR 508.1h: Two Ghostly Prisons stacked aggregate to {4} per attacker.

@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    CastingPermission, Effect, EffectError, EffectKind, PermissionGrantee, ResolvedAbility,
-    TargetFilter, TargetRef,
+    CastingPermission, Effect, EffectError, EffectKind, PermissionGrantee,
+    PlayPermissionInvalidation, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -71,17 +71,28 @@ pub fn resolve(
                 .unwrap_or_default(),
             Some(*id),
         ),
-        TargetFilter::ParentTarget => (
-            ability
+        TargetFilter::ParentTarget => {
+            let ids: Vec<_> = ability
                 .targets
                 .iter()
                 .filter_map(|target| match target {
                     TargetRef::Object(obj_id) => Some(*obj_id),
                     TargetRef::Player(_) => None,
                 })
-                .collect(),
-            None,
-        ),
+                .collect();
+            // CR 608.2c: an anaphoric "it"/"this card" with no explicit target
+            // slot (e.g. The Foretold Soldier — "exile it ... it becomes
+            // foretold") binds to the ability's own source, which the preceding
+            // chained ChangeZone left in the new zone (the engine preserves the
+            // ObjectId across zone moves). Guarded on the empty case so grants
+            // that carry explicit object targets (plotted / PlayFromExile) are
+            // unaffected.
+            if ids.is_empty() {
+                (vec![ability.source_id], None)
+            } else {
+                (ids, None)
+            }
+        }
         TargetFilter::Any | TargetFilter::None if !ability.targets.is_empty() => (
             ability
                 .targets
@@ -137,24 +148,31 @@ pub fn resolve(
                 .map(|o| o.owner)
                 .unwrap_or(ability.controller)
         });
-        if let Some(obj) = state.objects.get_mut(&obj_id) {
-            let mut granted = permission.clone();
-            if let CastingPermission::PlayFromExile {
-                granted_to,
-                source_id,
-                exiled_by_ability_controller,
-                single_use,
-                single_use_group,
-                ..
-            } = &mut granted
-            {
-                *granted_to = granted_to_pid;
-                *source_id = Some(ability.source_id);
-                *exiled_by_ability_controller = Some(ability.controller);
-                if *single_use {
-                    *single_use_group = tracked_set_group;
-                }
+        // CR 702.143d: compute any effective foretell cost (printed OR granted by
+        // a static such as Singing Towers of Darillium, with its derived cost)
+        // BEFORE the mutable object borrow below — `foretell_cost` takes `&state`
+        // and would conflict with the live `&mut obj`. Used only by the Foretold
+        // branch; harmless to precompute for other permissions.
+        let derived_foretell = crate::game::casting::foretell_cost(state, obj_id);
+        let mut granted = permission.clone();
+        if let CastingPermission::PlayFromExile {
+            granted_to,
+            source_id,
+            exiled_by_ability_controller,
+            single_use,
+            single_use_group,
+            ..
+        } = &mut granted
+        {
+            *granted_to = granted_to_pid;
+            *source_id = Some(ability.source_id);
+            *exiled_by_ability_controller = Some(ability.controller);
+            if *single_use {
+                *single_use_group = tracked_set_group;
             }
+        }
+        prune_replaced_play_from_exile_permissions(state, obj_id, &granted);
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
             // CR 611.2a + CR 118.9: Bind `granted_to` for `ExileWithAltCost` and
             // `ExileWithAltAbilityCost` to the resolved grantee. Without this
             // step, an Airbender owned by the controller of the airbended card
@@ -194,9 +212,32 @@ pub fn resolve(
             } else {
                 None
             };
-            if let CastingPermission::Foretold { turn_foretold, .. } = &mut granted {
+            // CR 702.143d: an effect-driven "becomes foretold" designation —
+            // distinct from the CR 702.143a foretell special action.
+            let mut became_foretold = None;
+            if let CastingPermission::Foretold {
+                turn_foretold,
+                cost,
+            } = &mut granted
+            {
+                // CR 702.143d: the turn the card became foretold is stamped here
+                // so the "after the turn it became foretold has ended" cast gate
+                // reflects when the grant resolved (mirrors Plotted above).
                 *turn_foretold = state.turn_number;
                 obj.foretold = true;
+                // CR 702.143a / CR 702.143e: foretold cards sit face down in exile.
+                obj.face_down = true;
+                // CR 702.143d: the card is castable "for any foretell cost it
+                // has" — the printed Foretell keyword is the single authority
+                // for that cost (shared with the foretell special action via
+                // casting::foretell_cost). A parser-baked cost survives whenever
+                // the object has no Foretell keyword of its own, covering the
+                // CR 702.143d case where an effect grants a foretell cost to a
+                // card that lacks one.
+                if let Some(kw_cost) = derived_foretell.clone() {
+                    *cost = kw_cost;
+                }
+                became_foretold = Some(obj_id);
             }
             obj.casting_permissions.push(granted);
             if let Some(player_id) = plotted_for {
@@ -204,6 +245,9 @@ pub fn resolve(
                     object_id: obj_id,
                     player_id,
                 });
+            }
+            if let Some(object_id) = became_foretold {
+                events.push(GameEvent::BecameForetold { object_id });
             }
         }
     }
@@ -214,6 +258,41 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn prune_replaced_play_from_exile_permissions(
+    state: &mut GameState,
+    target_id: crate::types::identifiers::ObjectId,
+    granted: &CastingPermission,
+) {
+    let CastingPermission::PlayFromExile {
+        granted_to,
+        source_id: Some(source_id),
+        invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
+        ..
+    } = granted
+    else {
+        return;
+    };
+
+    for obj_id in state.exile.clone() {
+        if obj_id == target_id {
+            continue;
+        }
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            obj.casting_permissions.retain(|permission| {
+                !matches!(
+                    permission,
+                    CastingPermission::PlayFromExile {
+                        granted_to: prior_grantee,
+                        source_id: Some(prior_source),
+                        invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
+                        ..
+                    } if prior_grantee == granted_to && prior_source == source_id
+                )
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +330,9 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::AbilityController,
@@ -270,6 +352,95 @@ mod tests {
             }
             _ => panic!("expected PlayFromExile"),
         }
+    }
+
+    /// CR 611.2a: Furious Rise-class permissions last until a source-specific
+    /// invalidation event. Granting a new card from the same source replaces the
+    /// prior same-source permission for that player without touching unrelated
+    /// impulse grants.
+    #[test]
+    fn same_source_exile_invalidation_replaces_prior_permission() {
+        let mut state = GameState::new_two_player(1);
+        let source = crate::types::identifiers::ObjectId(100);
+        let prior = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Prior Card".to_string(),
+            Zone::Exile,
+        );
+        let current = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Current Card".to_string(),
+            Zone::Exile,
+        );
+        let unrelated = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Unrelated Card".to_string(),
+            Zone::Exile,
+        );
+        let permission = CastingPermission::PlayFromExile {
+            duration: Duration::Permanent,
+            granted_to: PlayerId(0),
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            source_id: Some(source),
+            exiled_by_ability_controller: Some(PlayerId(0)),
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
+        };
+        state
+            .objects
+            .get_mut(&prior)
+            .unwrap()
+            .casting_permissions
+            .push(permission.clone());
+        let mut unrelated_permission = permission.clone();
+        if let CastingPermission::PlayFromExile { source_id, .. } = &mut unrelated_permission {
+            *source_id = Some(crate::types::identifiers::ObjectId(101));
+        }
+        state
+            .objects
+            .get_mut(&unrelated)
+            .unwrap()
+            .casting_permissions
+            .push(unrelated_permission);
+
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission,
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::AbilityController,
+            },
+            vec![TargetRef::Object(current)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.objects[&prior].casting_permissions.is_empty(),
+            "prior same-source permission should be removed"
+        );
+        assert_eq!(
+            state.objects[&current].casting_permissions.len(),
+            1,
+            "current card should receive the replacement permission"
+        );
+        assert_eq!(
+            state.objects[&unrelated].casting_permissions.len(),
+            1,
+            "different-source permissions must survive"
+        );
     }
 
     /// CR 603.7 + CR 611.2a: A tracked-set `single_use` `PlayFromExile` grant
@@ -302,6 +473,9 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: true,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::TrackedSet { id: tracked_set },
                 grantee: PermissionGrantee::AbilityController,
@@ -403,6 +577,91 @@ mod tests {
         );
     }
 
+    /// CR 702.143d + CR 608.2c: The Foretold Soldier's "exile it ... it becomes
+    /// foretold" grant. The trigger has no explicit target slot, so the
+    /// `ParentTarget` grant must fall back to the ability source (the just-exiled
+    /// card). At resolution the object becomes a face-down foretold card whose
+    /// cost is derived from its printed Foretell keyword, the turn is stamped,
+    /// and a `BecameForetold` event fires (NOT the `Foretold` special-action
+    /// event — CR 702.143c).
+    #[test]
+    fn becomes_foretold_grant_derives_cost_and_falls_back_to_source() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(1);
+        state.turn_number = 5;
+        // The exiled card with its printed Foretell {1}{G}.
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "The Foretold Soldier".to_string(),
+            Zone::Exile,
+        );
+        let foretell_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        {
+            // Mirror production `create_object_from_card_face`, which populates
+            // BOTH the live and copiable-base keyword sets. `foretell_cost` reads
+            // the copiable base (`effective_off_zone_keywords`) for a
+            // non-battlefield card, so the printed foretell must be in
+            // `base_keywords`.
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.keywords.push(Keyword::Foretell(foretell_cost.clone()));
+            obj.base_keywords
+                .push(Keyword::Foretell(foretell_cost.clone()));
+        }
+
+        // Empty target list + `source_id == card` mirrors the anaphoric "it"
+        // trigger after the chained ChangeZone has moved the source to exile.
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Foretold {
+                    cost: ManaCost::zero(),
+                    turn_foretold: 0,
+                },
+                target: TargetFilter::ParentTarget,
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![],
+            card,
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&card];
+        assert!(obj.foretold, "card must become foretold");
+        assert!(
+            obj.face_down,
+            "foretold card sits face down (CR 702.143a/e)"
+        );
+        assert!(
+            matches!(
+                obj.casting_permissions.as_slice(),
+                [CastingPermission::Foretold { cost, turn_foretold }]
+                    if *cost == foretell_cost && *turn_foretold == 5
+            ),
+            "permission must carry the printed foretell cost and the stamped turn, got {:?}",
+            obj.casting_permissions
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, GameEvent::BecameForetold { object_id } if *object_id == card)
+            ),
+            "a BecameForetold event must fire"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Foretold { .. })),
+            "becoming foretold must NOT emit the foretell special-action event (CR 702.143c)"
+        );
+    }
+
     /// CR 108.3: `ObjectOwner` grants the permission to each iterated object's
     /// owner — powers Suspend Aggression's "its owner may play it".
     #[test]
@@ -437,6 +696,9 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -491,6 +753,9 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ParentTargetController,
@@ -558,6 +823,9 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -637,6 +905,9 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         };
 
         state.objects.get_mut(&card_a).unwrap().casting_permissions = vec![mk_perm(
@@ -712,6 +983,9 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         };
         state
             .objects
@@ -773,6 +1047,9 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            invalidation: None,
         }];
 
         // Simulate the ordering in `turns.rs`:
@@ -807,6 +1084,9 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -874,6 +1154,9 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
             }];
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -914,6 +1197,9 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
             }];
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
@@ -969,6 +1255,9 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

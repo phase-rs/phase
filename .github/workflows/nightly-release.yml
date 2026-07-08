@@ -67,27 +67,30 @@ jobs:
 
           major="${BASH_REMATCH[1]}"
           minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
 
-          latest_patch=$(gh release list --limit 100 --json tagName \
-            | jq -r --arg major "$major" --arg minor "$minor" '
+          # Each nightly bumps the MINOR version (patch always resets to 0). Find
+          # the highest minor already released for this major and take the next
+          # one; never go backwards relative to Cargo.toml's own minor.
+          latest_minor=$(gh release list --limit 100 --json tagName \
+            | jq -r --arg major "$major" '
                 [
                   .[].tagName
                   | capture("^v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)$")?
-                  | select(.major == $major and .minor == $minor)
-                  | .patch | tonumber
+                  | select(.major == $major)
+                  | .minor | tonumber
                 ]
                 | max // empty
               ')
 
-          next_patch=0
-          if [ -n "$latest_patch" ]; then
-            next_patch=$((latest_patch + 1))
+          next_minor=0
+          if [ -n "$latest_minor" ]; then
+            next_minor=$((latest_minor + 1))
           fi
 
-          if [ "$patch" -lt "$next_patch" ]; then
-            patch="$next_patch"
+          if [ "$minor" -lt "$next_minor" ]; then
+            minor="$next_minor"
           fi
+          patch=0
 
           if [ "$major" -gt 255 ] || [ "$minor" -gt 255 ] || [ "$patch" -gt 65535 ]; then
             echo "::error::Version $major.$minor.$patch is not valid for the Windows MSI ProductVersion"
@@ -238,9 +241,13 @@ jobs:
 
           cargo release "$VERSION" --workspace --execute --no-confirm --no-publish --no-push --allow-branch main
 
+          # cargo-release bumps the main workspace but not nested lockfiles whose
+          # path-dependencies it just revved. Resync them so the committed locks
+          # match the new version, then fold them into the release commit + tag.
           cargo update --manifest-path client/src-tauri/Cargo.toml --package phase-tauri
-          if ! git diff --quiet -- client/src-tauri/Cargo.lock; then
-            git add client/src-tauri/Cargo.lock
+          cargo update --manifest-path lobby-worker/broker-wasm/Cargo.toml --package engine --package lobby-broker
+          if ! git diff --quiet -- client/src-tauri/Cargo.lock lobby-worker/broker-wasm/Cargo.lock; then
+            git add client/src-tauri/Cargo.lock lobby-worker/broker-wasm/Cargo.lock
             git commit --amend --no-edit
             git tag -f -a "$TAG" -m "$TAG"
           fi
@@ -304,6 +311,7 @@ jobs:
               client/src-tauri/Cargo.lock \
               client/src-tauri/Cargo.toml \
               client/src-tauri/tauri.conf.json \
+              lobby-worker/broker-wasm/Cargo.lock \
               | sort)
             extra=$(comm -23 <(printf '%s\n' "$changed") <(printf '%s\n' "$allowed"))
             if [ -n "$extra" ]; then

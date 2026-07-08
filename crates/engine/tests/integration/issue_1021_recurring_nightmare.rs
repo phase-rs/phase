@@ -33,6 +33,17 @@ fn recurring_nightmare_returns_itself_to_hand_when_activating() {
     let gy_creature = scenario
         .add_creature_to_graveyard(P0, "Graveyard Return", 2, 2)
         .id();
+    // A second pre-existing graveyard creature keeps target selection
+    // genuinely interactive: per CR 601.2c / CR 602.2b (targets are chosen
+    // before costs are paid) and Recurring Nightmare's own Gatherer ruling,
+    // the creature sacrificed to pay this activation's cost can never be the
+    // ability's own target — see `exclude_cost_paid_object_that_left_battlefield`
+    // in `ability_utils.rs`. With only one legal target the engine would
+    // auto-select it and skip the `TargetSelection` round trip this test
+    // exercises.
+    let _other_gy_creature = scenario
+        .add_creature_to_graveyard(P0, "Other Graveyard Resident", 1, 1)
+        .id();
 
     let mut runner = scenario.build();
     let ability_index = runner.state().objects[&nightmare]
@@ -64,7 +75,22 @@ fn recurring_nightmare_returns_itself_to_hand_when_activating() {
                     .expect("sacrifice creature");
                 saw_sacrifice = true;
             }
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+            WaitingFor::TargetSelection { ref selection, .. } => {
+                assert!(
+                    !selection
+                        .current_legal_targets
+                        .contains(&TargetRef::Object(sacrifice)),
+                    "the creature just sacrificed to pay this activation's cost must never \
+                     be offered as the ability's own return target"
+                );
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(gy_creature)],
+                    })
+                    .expect("select graveyard creature");
+                saw_target = true;
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
                 runner
                     .act(GameAction::SelectTargets {
                         targets: vec![TargetRef::Object(gy_creature)],

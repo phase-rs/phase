@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, peek, value};
+use nom::combinator::{all_consuming, eof, opt, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -16,7 +16,9 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
+use super::super::oracle_target::{
+    parse_target, parse_target_with_ctx, parse_type_phrase, parse_type_phrase_with_ctx,
+};
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::parse_for_each_multiplier_prefix;
 use super::{resolve_it_pronoun, ParseContext};
@@ -192,7 +194,21 @@ fn resolve_counter_placement_target<'a>(
         return (TargetFilter::SelfRef, parsed_remainder, None);
     }
     if is_it_pronoun(on_rest) {
-        return (resolve_it_pronoun(ctx), parsed_remainder, None);
+        // CR 608.2c: a bare "it" after a token-creating clause earlier in the
+        // same effect chain binds to that just-created token — the anaphor's
+        // most-recent object referent — not the ability source. Esper Terra:
+        // "Create a token ... It gains haste. If it's a Saga, put up to three
+        // lore counters on it." `ctx.token_created_in_chain` is seeded by the
+        // chunk loop ONLY when the chain's most-recent prior referent is a
+        // Token/CopyTokenOf/Populate creator; explicit "~"/name sources return
+        // above at the SelfRef guard and never reach here, and non-token
+        // self-triggers leave the flag false, so both keep `SelfRef`.
+        let it_target = if ctx.token_created_in_chain {
+            TargetFilter::LastCreated
+        } else {
+            resolve_it_pronoun(ctx)
+        };
+        return (it_target, parsed_remainder, None);
     }
     // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
     // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
@@ -305,6 +321,29 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
+/// CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind on
+/// <anaphor>" → `Effect::PutChosenCounter` on the anaphoric object
+/// (`ParentTarget`). Reads the kind chosen by a preceding `ChooseCounterKind`
+/// at resolution; adds exactly one counter (The Caves of Androzani II/III).
+/// Combinator-based, fully consuming the residual. `input` is the clause with
+/// the leading "put " already stripped.
+pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
+    let parsed = |i| -> OracleResult<'_, ()> {
+        let (i, _) = opt(alt((tag("an "), tag("a ")))).parse(i)?;
+        let (i, _) = opt(tag("additional ")).parse(i)?;
+        let (i, _) = tag("counter of that kind on ").parse(i)?;
+        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, ()))
+    };
+    parsed(input.trim()).ok()?;
+    Some(Effect::PutChosenCounter {
+        target: TargetFilter::ParentTarget,
+        count: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 pub(super) fn try_parse_put_counter<'a>(
     lower: &str,
     text: &'a str,
@@ -314,6 +353,20 @@ pub(super) fn try_parse_put_counter<'a>(
     // Use parse_count_expr to handle Variable("X") for kicker-X patterns.
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
+
+    // CR 608.2d + CR 122.1: "put up to N <type> counters" — the controller may
+    // place fewer than N (down to zero). Strip the leading "up to " marker here
+    // and wrap the parsed count in `QuantityExpr::up_to` at build time so the AST
+    // records the "may pick fewer" grammar. Mirrors the Draw/Discard/PutSticker
+    // up-to convention. Only the COUNT-side "up to" (leading, before the counter
+    // type) is caught here; the TARGET-side "on up to N target(s)" is a distinct
+    // MultiTargetSpec path in `resolve_counter_placement_target`, so the two never
+    // shadow each other.
+    let (after_put, count_is_up_to) =
+        match nom_on_lower(after_put, after_put, |i| value((), tag("up to ")).parse(i)) {
+            Some(((), rest)) => (rest.trim_start(), true),
+            None => (after_put, false),
+        };
 
     // CR 122.1 + CR 208.3: Detect the dynamic-quantity phrasing
     // "a number of {type} counters equal to {qty}" (Gruff Triplets:
@@ -349,6 +402,16 @@ pub(super) fn try_parse_put_counter<'a>(
             let (qty, rest) = parse_count_expr(after_put)?;
             (qty, rest, false, false)
         };
+
+    // CR 122.1: "an additional <type> counter" — the count article was already
+    // read by `parse_count_expr` ("an"/"a" → 1; "two additional ..." keeps its
+    // numeral). "additional" is a flavor qualifier that does not change the
+    // placement count (the counter is added on top of any already present), so
+    // strip it before the counter-type parse. Toph, Hardheaded Teacher:
+    // "put an additional +1/+1 counter on that land".
+    let rest = nom_on_lower(rest, rest, |i| value((), tag("additional ")).parse(i))
+        .map(|((), r)| r)
+        .unwrap_or(rest);
 
     // Counter type (e.g. "+1/+1", "loyalty", "charge", "double strike").
     // CR 122.1 + CR 122.1b: route through the shared `parse_counter_type_typed`
@@ -451,7 +514,14 @@ pub(super) fn try_parse_put_counter<'a>(
     Some((
         Effect::PutCounter {
             counter_type,
-            count: count_expr,
+            // CR 608.2d: wrap the final count in `UpTo` when the clause said
+            // "up to N" (stripped above). `count_expr` is never itself an `UpTo`
+            // here, so the non-nesting `up_to` debug_assert holds.
+            count: if count_is_up_to {
+                QuantityExpr::up_to(count_expr)
+            } else {
+                count_expr
+            },
             target,
         },
         remainder,
@@ -498,16 +568,42 @@ fn parse_counter_equal_to(
         return Ok((rest, qty));
     }
 
-    // CR 706.2: event-context back-reference fallback ("equal to the result").
+    // CR 107.1b: Composed dynamic quantities ("equal to twice …", "equal to
+    // the greatest … among …") live in the CDA grammar, not the nom leaf ref
+    // table. Isolate the phrase up to the first clause boundary so trailing
+    // ", then …" clauses stay in the remainder.
     let (after_equal, _) = tag("equal to ").parse(input)?;
-    // Isolate the quantity phrase from any trailing clause via a nom combinator
-    // (take everything up to the first clause separator). Event-context phrases
-    // are short and clause-final in the counter templates that reach this
-    // fallback; the tail after the separator is preserved as the remainder so a
-    // following clause (", then …") is never swallowed.
-    let (_, phrase) =
+    let (rest, phrase_raw) =
         take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(after_equal)?;
-    let phrase = phrase.trim_end();
+
+    // CR 122.1 + CR 603.4 + CR 603.10a: bare anaphoric "the difference" — the
+    // count is the difference established by the enclosing trigger's
+    // intervening-if comparison ("if it had power greater than ~'s power, put a
+    // number of +1/+1 counters on ~ equal to the difference" — Drizzt
+    // Do'Urden). The two operands live on the hoisted trigger condition, not in
+    // this clause, so emit the deferred placeholder that the trigger-level
+    // difference binding in `lower_trigger_ir` (oracle_trigger.rs) resolves
+    // against the `QuantityComparison` operands. Distinct from the
+    // `parse_cda_quantity` "the difference between A and B" form below, which
+    // carries its own operands. Match on the fully-trimmed phrase (both ends) so
+    // stray leading whitespace ("equal to  the difference") still binds, and
+    // return `take_till`'s own remainder to preserve any trailing ", …" clause.
+    if all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+        .parse(phrase_raw.trim())
+        .is_ok()
+    {
+        return Ok((
+            rest,
+            crate::parser::oracle_effect::difference_anaphor_placeholder(),
+        ));
+    }
+
+    let phrase = phrase_raw.trim_end();
+    if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
+        return Ok((&after_equal[phrase.len()..], expr));
+    }
+
+    // CR 706.2: event-context back-reference fallback ("equal to the result").
     match crate::parser::oracle_quantity::parse_event_context_quantity(phrase) {
         // Remainder starts immediately after the consumed phrase (before any
         // trailing whitespace), preserving the original clause boundary.
@@ -603,6 +699,12 @@ fn rebind_counter_quantity_scope(count: QuantityExpr, scope: ObjectScope) -> Qua
                 .map(|expr| rebind_counter_quantity_scope(expr, scope))
                 .collect(),
         },
+        QuantityExpr::Max { exprs } => QuantityExpr::Max {
+            exprs: exprs
+                .into_iter()
+                .map(|expr| rebind_counter_quantity_scope(expr, scope))
+                .collect(),
+        },
         QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
             max: Box::new(rebind_counter_quantity_scope(*max, scope)),
         },
@@ -691,6 +793,22 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     }) {
         (QuantityExpr::Fixed { value: -1 }, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
+        value((), tag("any number of ")).parse(i)
+    }) {
+        // CR 107.1c + CR 608.2d: "remove any number of counters" is a
+        // resolution-time player choice (any per-type subset, 0..=available,
+        // incl. zero). Encode it as `UpTo` over the "remove all" sentinel so the
+        // runtime resolver discriminates on the peel FLAG (`count.is_up_to()`),
+        // not the scalar: the interactive path derives the legal domain from the
+        // board rather than resolving the inner `Fixed{-1}` numerically. If the
+        // resolver ever fails to peel, the safe-degrade is the existing
+        // "remove all" branch (`Fixed{-1}` clamps to the board — legal, just
+        // non-interactive). Rhys, the Evermore / Tetravus.
+        (
+            QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
+            rest.trim_start(),
+        )
+    } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("up to ")).parse(i)
     }) {
         let (n, r) = parse_number(rest.trim())?;
@@ -723,17 +841,24 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         value((), tag("from ")).parse(i)
     })?;
     let target_text = target_text.trim();
-    let target = if is_self_ref(target_text) {
-        TargetFilter::SelfRef
-    } else if is_it_pronoun(target_text) {
-        // CR 608.2k: Bare pronoun — context-dependent
-        resolve_it_pronoun(ctx)
-    } else {
-        let (t, _rem) = parse_target(target_text);
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, target_text);
-        t
-    };
+
+    // CR 608.2d: "remove any number of counters from among <objects>" distributes
+    // the removal, at resolution, among any number of UNTARGETED permanents — a
+    // MULTI-SOURCE choice. The single-source interactive path (Rhys, Tetravus)
+    // cannot model "from among", so leave such cards Unimplemented (out of scope)
+    // rather than silently collapsing them to a single-source removal (Galloping
+    // Lizrog, Eventide's Shadow). Scoped to the `UpTo` ("any number") branch so
+    // non-interactive removals are untouched.
+    if count.is_up_to()
+        && nom_on_lower(target_text, target_text, |i| {
+            value((), tag("among ")).parse(i)
+        })
+        .is_some()
+    {
+        return None;
+    }
+
+    let target = resolve_remove_counter_from_target(target_text, ctx);
 
     Some(Effect::RemoveCounter {
         counter_type,
@@ -752,6 +877,42 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
 ///   on the runtime `parse_counter_type` lowercase fallback.
 pub(crate) fn normalize_counter_type(raw: &str) -> CounterType {
     parse_counter_type(raw)
+}
+
+/// CR 115.1d + CR 122.1: Strip the distribution prefix "each of any number of "
+/// from a remove-counter "from <objects>" clause. Returns the remainder for
+/// `parse_type_phrase` when the prefix was present (Garnet class — player
+/// chooses any number of matching permanents, not a "target" phrase).
+fn strip_remove_counter_each_of_any_number(input: &str) -> Option<&str> {
+    let after_each_of = nom_on_lower(input, input, |i| value((), opt(tag("each of "))).parse(i))
+        .map(|((), rest)| rest)
+        .unwrap_or(input);
+    nom_on_lower(after_each_of, after_each_of, |i| {
+        value((), tag("any number of ")).parse(i)
+    })
+    .map(|((), rest)| rest.trim_start())
+}
+
+/// CR 122.1 + CR 115.1d: Resolve the "from <objects>" clause of a remove-counter
+/// effect. The optional "each of any number of" prefix denotes a variable-count
+/// non-target distribution — strip it and parse the remainder as a type phrase
+/// instead of routing through `parse_target` (whose bare "each " arm would leave
+/// "of any number of …" for `parse_type_phrase` and collapse to `Any`).
+fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    if is_self_ref(text) {
+        return TargetFilter::SelfRef;
+    }
+    if is_it_pronoun(text) {
+        // CR 608.2k: Bare pronoun — context-dependent
+        return resolve_it_pronoun(ctx);
+    }
+    if let Some(filter_text) = strip_remove_counter_each_of_any_number(text) {
+        let (t, _rem) = parse_type_phrase_with_ctx(filter_text, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_rem, filter_text);
+        return t;
+    }
+    resolve_counter_target(text, ctx)
 }
 
 /// Resolve a counter target from text: self-ref, pronoun, or parse_target.
@@ -819,34 +980,50 @@ pub(super) fn try_parse_move_counters<'a>(
 ) -> Option<(Effect, &'a str)> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
-    // Detect "its counters" / "~'s counters" / "this creature's counters" /
-    // "those counters".
-    let (source, after_possessive) = if let Some(((), rest)) =
-        nom_on_lower(after_put, after_put, |i| {
-            value((), tag("~'s counter")).parse(i)
-        }) {
+    // Detect the possessive source: "~'s " / "its " / "this creature's " /
+    // "those ". The possessive may be followed by a typed counter name
+    // ("its +1/+1 counters", Selfless Police Captain) or the bare noun
+    // ("its counters", "those counters"). Strip the possessive marker, then
+    // parse an optional counter type before the "counter(s)" noun.
+    let (source, after_possessive_marker) = if let Some(((), rest)) =
+        nom_on_lower(after_put, after_put, |i| value((), tag("~'s ")).parse(i))
+    {
         (TargetFilter::SelfRef, rest)
     } else {
         let ((), rest) = nom_on_lower(after_put, after_put, |i| {
             value(
                 (),
-                alt((
-                    tag("its counter"),
-                    tag("this creature's counter"),
-                    tag("those counter"),
-                )),
+                alt((tag("its "), tag("this creature's "), tag("those "))),
             )
             .parse(i)
         })?;
         (resolve_it_pronoun(ctx), rest)
     };
-    // Skip past optional "s" (counter vs counters) then expect " on "
-    let after_counters = nom_on_lower(after_possessive, after_possessive, |i| {
-        value((), tag("s")).parse(i)
+
+    // CR 122.5 + CR 122.8: optional typed counter. "its +1/+1 counters" moves
+    // only that kind; "its counters" / "those counters" moves all kinds. When the
+    // bare "counter(s)" noun follows the possessive directly, there is no typed
+    // qualifier — must check that first, because `parse_counter_type_typed`'s
+    // open-ended Generic arm would otherwise consume the noun "counters" itself
+    // and leave nothing for the noun match below.
+    let bare_counter_noun = nom_on_lower(after_possessive_marker, after_possessive_marker, |i| {
+        value((), alt((tag("counters"), tag("counter")))).parse(i)
     })
-    .map(|((), r)| r)
-    .unwrap_or(after_possessive);
-    let ((), after_on) = nom_on_lower(after_counters, after_counters, |i| {
+    .is_some();
+    let (counter_type, after_type) = if bare_counter_noun {
+        (None, after_possessive_marker)
+    } else {
+        match nom_primitives::parse_counter_type_typed(after_possessive_marker) {
+            Ok((rest, ct)) => (Some(ct), rest.trim_start()),
+            Err(_) => (None, after_possessive_marker),
+        }
+    };
+
+    // Expect the "counter(s)" noun.
+    let ((), after_counter_word) = nom_on_lower(after_type, after_type, |i| {
+        value((), alt((tag("counters"), tag("counter")))).parse(i)
+    })?;
+    let ((), after_on) = nom_on_lower(after_counter_word, after_counter_word, |i| {
         value((), tag(" on ")).parse(i)
     })?;
 
@@ -862,7 +1039,7 @@ pub(super) fn try_parse_move_counters<'a>(
             // object's last-known information (CR 400.7), so the source must be
             // the triggering object, not the ability source.
             source,
-            counter_type: None,
+            counter_type,
             count: None,
             mode: CounterTransferMode::Put,
             selection: CounterMoveSelection::StackTarget,
@@ -1069,18 +1246,42 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
         }
     }
 
-    // CR 701.10b: "double <target>'s power [and toughness]" — possessive form covering
+    // CR 701.10a + CR 613.4c: P/T multiply forms ("double"/"triple" a creature's
+    // power/toughness). Delegated so the same three structural arms serve every
+    // multiplier word — the `factor` axis (not a Double/Triple effect sibling)
+    // distinguishes them.
+    try_parse_multiply_pt_effect(lower, ctx)
+}
+
+/// CR 701.10a + CR 613.4c: P/T multiplier word → factor. "double" multiplies P/T
+/// by 2 (CR 701.10a), "triple" by 3 (Tifa's Limit Break — Final Heaven). The word
+/// is the only axis that differs between the forms, so it is parsed once and
+/// threaded into the shared P/T arms below as `factor`.
+fn parse_pt_multiplier_word(input: &str) -> OracleResult<'_, u32> {
+    alt((value(2u32, tag("double ")), value(3u32, tag("triple ")))).parse(input)
+}
+
+/// CR 701.10a + CR 613.4c: Parse the three "{multiplier} … power/toughness …"
+/// shapes into `Effect::DoublePT`/`DoublePTAll` carrying the parsed `factor`,
+/// where `{mult}` is `double` (factor 2) or `triple` (factor 3). The multiplier
+/// word is the only varying axis, so the same arms cover both words:
+///
+/// 1. "{mult} <target>'s power [and toughness]" (possessive, Bulk Up / Tifa).
+/// 2. "{mult} its power [and toughness]" (anaphoric "it").
+/// 3. "{mult} the power/toughness of <target|each filter>".
+pub(super) fn try_parse_multiply_pt_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    let (factor, after_word) = nom_on_lower(lower, lower, parse_pt_multiplier_word)?;
+
+    // CR 701.10b: "{mult} <target>'s power [and toughness]" — possessive form covering
     // "double target creature's power" (Bulk Up class) and "double ~'s power" (Devilish
     // Valet / Okaun class, where ~ is the self-reference normalization). Composes with
     // existing `parse_target` building block to cover any target phrase, then matches the
-    // possessive P/T tail. Sibling of the `tag("double its ")` and `tag("double the ")`
-    // arms below; placed first so the `parse_target`-driven possessive form takes
-    // precedence and the more specific "its" / "the X of Y" patterns fall through.
-    if let Some(((), after_double)) =
-        nom_on_lower(lower, lower, |i| value((), tag("double ")).parse(i))
+    // possessive P/T tail. Sibling of the "its " and "the " arms below; placed first so
+    // the `parse_target`-driven possessive form takes precedence and the more specific
+    // "its" / "the X of Y" patterns fall through.
     {
         // Skip patterns owned by sibling arms below.
-        let owned_by_sibling = nom_on_lower(after_double, after_double, |i| {
+        let owned_by_sibling = nom_on_lower(after_word, after_word, |i| {
             value(
                 (),
                 alt((
@@ -1096,7 +1297,7 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
         })
         .is_some();
         if !owned_by_sibling {
-            let (target, rem) = parse_target(after_double);
+            let (target, rem) = parse_target(after_word);
             if !matches!(target, TargetFilter::Any) {
                 let rem_lower = rem.to_lowercase();
                 let mode: Option<DoublePTMode> = nom_on_lower(&rem_lower, &rem_lower, |i| {
@@ -1112,14 +1313,19 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
                 })
                 .map(|(m, _)| m);
                 if let Some(mode) = mode {
-                    return Some(Effect::DoublePT { mode, target });
+                    return Some(Effect::DoublePT {
+                        mode,
+                        target,
+                        factor,
+                    });
                 }
             }
         }
     }
 
-    // CR 608.2k: "double its power [and toughness]" — possessive "its" is context-dependent
-    if let Some(((), rest)) = nom_on_lower(lower, lower, |i| value((), tag("double its ")).parse(i))
+    // CR 608.2k: "{mult} its power [and toughness]" — possessive "its" is context-dependent
+    if let Some(((), rest)) =
+        nom_on_lower(after_word, after_word, |i| value((), tag("its ")).parse(i))
     {
         let mode: Option<DoublePTMode> = nom_on_lower(rest, rest, |i| {
             alt((
@@ -1134,13 +1340,14 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
             return Some(Effect::DoublePT {
                 mode,
                 target: resolve_it_pronoun(ctx),
+                factor,
             });
         }
         return None;
     }
 
-    // P/T doubling: "double the power/toughness [and toughness/power] of ..."
-    let ((), rest) = nom_on_lower(lower, lower, |i| value((), tag("double the ")).parse(i))?;
+    // P/T multiply: "{mult} the power/toughness [and toughness/power] of ..."
+    let ((), rest) = nom_on_lower(after_word, after_word, |i| value((), tag("the ")).parse(i))?;
 
     let (mode, after_mode) = nom_on_lower(rest, rest, |i| {
         alt((
@@ -1161,7 +1368,11 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
     .is_some()
     {
         let (target, _) = parse_target(after_mode);
-        return Some(Effect::DoublePT { mode, target });
+        return Some(Effect::DoublePT {
+            mode,
+            target,
+            factor,
+        });
     }
 
     // "each creature you control" / "each other creature" / "each Dragon" → DoublePTAll
@@ -1169,7 +1380,11 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
         value((), alt((tag("each "), tag("all ")))).parse(i)
     })?;
     let (target, _) = parse_type_phrase(filter_text);
-    Some(Effect::DoublePTAll { mode, target })
+    Some(Effect::DoublePTAll {
+        mode,
+        target,
+        factor,
+    })
 }
 
 /// Parse a mana color name from text like "red mana in your mana pool".
@@ -1202,6 +1417,57 @@ mod tests {
                 target: TargetFilter::ParentTargetController,
             })
         ));
+    }
+
+    /// CR 701.10a: "double target creature's power and toughness" → factor 2.
+    /// Building-block test for the multiplier-word axis (Tifa's Limit Break —
+    /// Meteor Strikes; the historical doubling forms must keep factor 2).
+    #[test]
+    fn multiply_pt_double_target_pt_factor_two() {
+        let result = try_parse_multiply_pt_effect(
+            "double target creature's power and toughness",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(
+                result,
+                Some(Effect::DoublePT {
+                    mode: DoublePTMode::PowerAndToughness,
+                    factor: 2,
+                    ..
+                })
+            ),
+            "got {result:?}"
+        );
+    }
+
+    /// CR 613.4c: "triple target creature's power and toughness" → factor 3
+    /// (Tifa's Limit Break — Final Heaven). The multiplier word is the only
+    /// varying axis, so the same arm emits a factor-3 `DoublePT`.
+    #[test]
+    fn multiply_pt_triple_target_pt_factor_three() {
+        let result = try_parse_multiply_pt_effect(
+            "triple target creature's power and toughness",
+            &mut default_ctx(),
+        );
+        let Some(Effect::DoublePT { mode, factor, .. }) = result else {
+            panic!("expected DoublePT, got {result:?}");
+        };
+        assert_eq!(mode, DoublePTMode::PowerAndToughness);
+        assert_eq!(factor, 3, "triple must parse factor 3");
+    }
+
+    /// CR 613.4c: "triple target creature's power" — power-only triple keeps the
+    /// `Power` mode (The Skullspore Nexus is the power-only double sibling).
+    #[test]
+    fn multiply_pt_triple_target_power_only() {
+        let result =
+            try_parse_multiply_pt_effect("triple target creature's power", &mut default_ctx());
+        let Some(Effect::DoublePT { mode, factor, .. }) = result else {
+            panic!("expected DoublePT, got {result:?}");
+        };
+        assert_eq!(mode, DoublePTMode::Power);
+        assert_eq!(factor, 3);
     }
 
     #[test]
@@ -1304,6 +1570,55 @@ mod tests {
                 "{input}: target SelfRef, got {target:?}"
             );
         }
+    }
+
+    /// CR 115.1d + CR 122.1: Garnet, Princess of Alexandria — "remove a lore
+    /// counter from each of any number of Sagas you control" must parse to a
+    /// Saga + you-control filter, not `TargetFilter::Any` (which incorrectly
+    /// prompts for player targets).
+    #[test]
+    fn remove_counter_each_of_any_number_sagas_you_control() {
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let result = try_parse_remove_counter(
+            "remove a lore counter from each of any number of sagas you control",
+            &mut default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        }) = result
+        else {
+            panic!("expected RemoveCounter, got {result:?}");
+        };
+        assert_eq!(counter_type, Some(CounterType::Lore));
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed Saga filter, got {target:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Saga")),
+            "expected Saga subtype, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 115.1d: Post-parse fixup must attach `MultiTargetSpec::unlimited(0)` for
+    /// the Garnet distribution prefix.
+    #[test]
+    fn remove_counter_each_of_any_number_carries_multi_target() {
+        let clause = super::super::parse_effect_clause(
+            "remove a lore counter from each of any number of sagas you control",
+            &mut default_ctx(),
+        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        let Effect::RemoveCounter { target, .. } = clause.effect else {
+            panic!("expected RemoveCounter, got {:?}", clause.effect);
+        };
+        assert!(matches!(target, TargetFilter::Typed(_)));
     }
 
     #[test]
@@ -2244,6 +2559,244 @@ mod tests {
             QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount
             }
+        );
+    }
+
+    // ---- Gap-A ("up to N" counter count) + §B2 (token anaphor bind) ----
+
+    const ESPER_CHAPTER: &str = "Create a token that's a copy of target nonlegendary enchantment you control. It gains haste. If it's a Saga, put up to three lore counters on it. Sacrifice it at the beginning of your next end step.";
+
+    fn collect_defs<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        out: &mut Vec<&'a crate::types::ability::AbilityDefinition>,
+    ) {
+        out.push(def);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_defs(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            collect_defs(els, out);
+        }
+        for m in &def.mode_abilities {
+            collect_defs(m, out);
+        }
+    }
+
+    fn find_put_counter(
+        def: &crate::types::ability::AbilityDefinition,
+    ) -> Option<(Effect, Option<crate::types::ability::AbilityCondition>)> {
+        let mut all = Vec::new();
+        collect_defs(def, &mut all);
+        all.into_iter()
+            .find(|d| matches!(*d.effect, Effect::PutCounter { .. }))
+            .map(|d| ((*d.effect).clone(), d.condition.clone()))
+    }
+
+    fn chain_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
+        let mut all = Vec::new();
+        collect_defs(def, &mut all);
+        all.iter()
+            .any(|d| matches!(*d.effect, Effect::Unimplemented { .. }))
+    }
+
+    /// Gap-A CR 608.2d: "put up to three lore counters on <self>" wraps the parsed
+    /// count in `UpTo{Fixed(3)}` (not a bare `Fixed(3)`); explicit self-reference
+    /// keeps `SelfRef`. Reverting the up-to strip returns `None` (Unimplemented).
+    #[test]
+    fn put_up_to_three_lore_counters_wraps_up_to_fixed() {
+        let text = "put up to three lore counters on this creature";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, CounterType::Lore);
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 3 })
+            },
+            "up-to must wrap Fixed(3), not drop the marker"
+        );
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "explicit self-ref stays SelfRef"
+        );
+    }
+
+    /// Gap-A building-block: "up to X" wraps a `Variable("X")` count (the
+    /// Clockwork class), proving the wrap is count-kind-agnostic, not hardcoded.
+    #[test]
+    fn put_up_to_x_counters_wraps_variable() {
+        let text = "put up to X +1/+1 counters on this creature";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            }
+        );
+    }
+
+    /// Gap-A NEG (count-side vs target-side "up to"): the leading count strip must
+    /// NOT steal the TARGET-side "on up to N target(s)". Count stays `Fixed(1)`; a
+    /// `MultiTargetSpec` carries the target-side "up to".
+    #[test]
+    fn count_side_up_to_strip_does_not_steal_target_side() {
+        let text = "put a +1/+1 counter on up to three target creatures";
+        let (effect, _, multi) =
+            try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 1 },
+            "count-side up-to must not be stolen by the target-side up-to"
+        );
+        assert!(
+            multi.is_some(),
+            "target-side up-to preserved as MultiTargetSpec"
+        );
+    }
+
+    /// §B2 unit: the bare "it" counter branch binds by `token_created_in_chain`.
+    /// Flag false (no token creator — the 1,215-card self-trigger class) → SelfRef;
+    /// flag true (a token creator is the chain's most-recent referent) →
+    /// LastCreated. Directly exercises the `resolve_counter_placement_target`
+    /// it-pronoun branch both ways.
+    #[test]
+    fn put_on_it_binds_by_token_created_in_chain_flag() {
+        let text = "put a +1/+1 counter on it";
+
+        let (no_token, _, _) =
+            try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { target, .. } = no_token else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "no token in chain → bare it stays SelfRef"
+        );
+
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let (with_token, _, _) = try_parse_put_counter(text, text, &mut ctx).expect("parse");
+        let Effect::PutCounter { target, .. } = with_token else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "token in chain → bare it binds the created token"
+        );
+    }
+
+    /// Gap-A + §B2 integration: the real Esper Terra chapter chain parses with zero
+    /// `Unimplemented`, its PutCounter count is `UpTo{Fixed(3)}`, its target is the
+    /// created token (`LastCreated`, NOT `SelfRef`), and it carries the is-a-Saga
+    /// gate. Reverting the §B2 chunk-loop bind → `SelfRef`; reverting the Gap-A
+    /// strip → the whole "put" clause is `Unimplemented`.
+    #[test]
+    fn esper_chapter_put_counter_up_to_binds_last_created() {
+        let def = super::super::parse_effect_chain(
+            ESPER_CHAPTER,
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            !chain_has_unimplemented(&def),
+            "chapter must parse with zero Unimplemented (reach-guard)"
+        );
+        let (effect, condition) = find_put_counter(&def).expect("chapter contains a PutCounter");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, CounterType::Lore);
+        assert_eq!(
+            count,
+            QuantityExpr::UpTo {
+                max: Box::new(QuantityExpr::Fixed { value: 3 })
+            },
+            "count must be UpTo{{Fixed(3)}}, not a bare Fixed(3)"
+        );
+        assert_eq!(
+            target,
+            TargetFilter::LastCreated,
+            "§B2: 'on it' after CopyTokenOf binds the created token, not SelfRef"
+        );
+        assert!(
+            condition.is_some(),
+            "the put node keeps its is-a-Saga condition gate"
+        );
+    }
+
+    /// §B2 guard companion (POSITIVE — original clobber behavior preserved): a
+    /// counter "it" that follows a TYPED target with NO token creator (Turtle Van:
+    /// "Put a +1/+1 counter on target creature, then double the number of +1/+1
+    /// counters on it") STILL binds the parent target (`ParentTarget`). The
+    /// `mod.rs:14753` `LastCreated` guard fires only when the parse bound
+    /// `LastCreated` (a token creator was present), so this non-token anaphor is
+    /// untouched — it must NOT become `LastCreated` or `SelfRef`. Brackets the
+    /// guard's revert-to-red (which proves the NEW token behavior).
+    #[test]
+    fn multiply_counter_on_it_after_typed_target_no_token_stays_parent_target() {
+        let def = super::super::parse_effect_chain(
+            "Put a +1/+1 counter on target creature, then double the number of +1/+1 counters on it.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let mut all = Vec::new();
+        collect_defs(&def, &mut all);
+        let mc_target = all
+            .iter()
+            .find_map(|d| match &*d.effect {
+                Effect::MultiplyCounter { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("chain contains a MultiplyCounter");
+        assert_eq!(
+            mc_target,
+            TargetFilter::ParentTarget,
+            "non-token typed-target counter anaphor must stay ParentTarget (guard untouched)"
+        );
+    }
+
+    /// §B2 NEG (over-rewrite safety, the 9 genuine-source cards — e.g. construct a
+    /// cosmic cube / edgar markov's coffin): an explicit self-reference after a
+    /// token creator STAYS `SelfRef` (it takes the explicit-target path, never the
+    /// it-pronoun branch). Revert-to-red = a post-token structure-only gate would
+    /// flip this to `LastCreated`.
+    #[test]
+    fn explicit_self_ref_after_token_creator_stays_self_ref() {
+        let def = super::super::parse_effect_chain(
+            "Create a 1/1 white Soldier creature token. Put a +1/+1 counter on this creature.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let (effect, _) = find_put_counter(&def).expect("PutCounter present");
+        let Effect::PutCounter { target, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "explicit 'this creature' after a token creator must stay SelfRef"
         );
     }
 }

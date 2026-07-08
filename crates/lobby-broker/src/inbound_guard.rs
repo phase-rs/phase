@@ -12,9 +12,10 @@ use crate::protocol::LobbyClientMessage;
 use crate::validation::{
     validate_create_game_settings_fields, validate_join_game_with_password_fields,
     validate_lobby_message, validate_lookup_join_target_fields, CreateGameSettingsFields,
-    JoinGameWithPasswordFields, LookupJoinTargetFields,
+    JoinGameWithPasswordFields, LookupJoinTargetFields, MAX_PLAYER_COUNT,
 };
 use engine::starter_decks::DeckData;
+use engine::types::format::FormatConfig;
 
 /// Generous ceiling on main-deck entries at the wire boundary. Engine deck
 /// validation enforces format legality later; this rejects multi-megabyte lists
@@ -24,6 +25,10 @@ pub const MAX_MAIN_DECK_ENTRIES: usize = 500;
 pub const MAX_SIDEBOARD_ENTRIES: usize = 100;
 /// Max commander slots accepted on the wire.
 pub const MAX_COMMANDER_ENTRIES: usize = 4;
+/// Max supplementary Planechase planar-deck entries accepted on the wire.
+pub const MAX_PLANAR_DECK_ENTRIES: usize = 200;
+/// Max supplementary Archenemy scheme-deck entries accepted on the wire.
+pub const MAX_SCHEME_DECK_ENTRIES: usize = 200;
 /// Max byte length of a single card name string inside a deck payload.
 pub const MAX_DECK_CARD_NAME_LEN: usize = 256;
 
@@ -73,6 +78,16 @@ pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String>
         &deck.commander,
         MAX_COMMANDER_ENTRIES,
     )?;
+    validate_deck_list(
+        &format!("{field}.planar_deck"),
+        &deck.planar_deck,
+        MAX_PLANAR_DECK_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.scheme_deck"),
+        &deck.scheme_deck,
+        MAX_SCHEME_DECK_ENTRIES,
+    )?;
     Ok(())
 }
 
@@ -82,6 +97,7 @@ pub struct CreateGameSettingsInbound<'a> {
     pub password: Option<&'a str>,
     pub timer_seconds: Option<u32>,
     pub player_count: u8,
+    pub format_config: Option<&'a FormatConfig>,
     pub room_name: Option<&'a str>,
     pub host_peer_id: Option<&'a str>,
     pub draft_metadata: Option<&'a DraftLobbyMetadata>,
@@ -107,6 +123,9 @@ pub fn guard_create_game_settings_inbound(
     fields: CreateGameSettingsInbound<'_>,
 ) -> Result<(), String> {
     validate_create_game_settings_inbound_fields(&fields)?;
+    if let Some(format_config) = fields.format_config {
+        format_config.validate_for_player_count(fields.player_count.clamp(2, MAX_PLAYER_COUNT))?;
+    }
     validate_deck_payload("deck", fields.deck)
 }
 
@@ -149,6 +168,7 @@ pub fn guard_inbound(msg: &LobbyClientMessage) -> Result<(), String> {
             password,
             timer_seconds,
             player_count,
+            format_config,
             room_name,
             host_peer_id,
             draft_metadata,
@@ -159,6 +179,7 @@ pub fn guard_inbound(msg: &LobbyClientMessage) -> Result<(), String> {
             password: password.as_deref(),
             timer_seconds: *timer_seconds,
             player_count: *player_count,
+            format_config: format_config.as_ref(),
             room_name: room_name.as_deref(),
             host_peer_id: host_peer_id.as_deref(),
             draft_metadata: draft_metadata.as_ref(),
@@ -201,6 +222,7 @@ mod tests {
             password: None,
             timer_seconds: None,
             player_count: 2,
+            format_config: None,
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
@@ -219,6 +241,7 @@ mod tests {
             password: None,
             timer_seconds: None,
             player_count: 2,
+            format_config: None,
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
@@ -226,6 +249,27 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("display_name"));
+    }
+
+    #[test]
+    fn borrowed_create_guard_rejects_archenemy_seat_outside_player_count() {
+        let mut format_config = FormatConfig::archenemy();
+        format_config.archenemy_player = Some(engine::types::player::PlayerId(3));
+
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck(1, 0),
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            format_config: Some(&format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("archenemy_player"));
     }
 
     #[test]
@@ -240,6 +284,78 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("sideboard"));
+    }
+
+    #[test]
+    fn borrowed_create_guard_rejects_oversized_planar_deck() {
+        let mut deck = deck(1, 0);
+        deck.planar_deck = vec!["Plane".to_string(); MAX_PLANAR_DECK_ENTRIES + 1];
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck,
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("planar_deck"));
+    }
+
+    #[test]
+    fn borrowed_join_guard_rejects_invalid_planar_deck_entry() {
+        let mut deck = deck(1, 0);
+        deck.planar_deck = vec!["Bad\nPlane".to_string()];
+        let err = guard_join_game_with_password_inbound(JoinGameWithPasswordInbound {
+            game_code: "GAME01",
+            deck: &deck,
+            display_name: "Guest",
+            password: None,
+            reservation_token: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("planar_deck[0]"));
+    }
+
+    #[test]
+    fn borrowed_create_guard_rejects_oversized_scheme_deck() {
+        let mut deck = deck(1, 0);
+        deck.scheme_deck = vec!["Scheme".to_string(); MAX_SCHEME_DECK_ENTRIES + 1];
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck,
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("scheme_deck"));
+    }
+
+    #[test]
+    fn borrowed_join_guard_rejects_invalid_scheme_deck_entry() {
+        let mut deck = deck(1, 0);
+        deck.scheme_deck = vec!["Bad\nScheme".to_string()];
+        let err = guard_join_game_with_password_inbound(JoinGameWithPasswordInbound {
+            game_code: "GAME01",
+            deck: &deck,
+            display_name: "Guest",
+            password: None,
+            reservation_token: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("scheme_deck[0]"));
     }
 
     #[test]

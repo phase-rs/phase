@@ -19,7 +19,7 @@ pub(super) fn run_post_action_pipeline(
 /// Run the normal post-action settlement while scanning only events produced at
 /// or after `event_start`. Use for nested resume paths that carry earlier
 /// payment/choice events in the same output buffer.
-pub(super) fn run_post_action_pipeline_from(
+pub(crate) fn run_post_action_pipeline_from(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     event_start: usize,
@@ -29,6 +29,8 @@ pub(super) fn run_post_action_pipeline_from(
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
+    let mut consumed_trigger_events =
+        std::mem::take(&mut state.consumed_before_priority_trigger_events);
 
     // CR 603.2: Triggered abilities trigger at the moment the event occurs.
     // Scan for triggers BEFORE SBAs so that objects still on the battlefield
@@ -48,7 +50,11 @@ pub(super) fn run_post_action_pipeline_from(
     // and fired a second time by the replay, causing double-fire for ETB
     // observers like Soul Warden (issue #830).
     if !skip_trigger_scan {
-        let filtered_events: Vec<_> = events[event_start..]
+        let unconsumed_events = triggers::filter_consumed_trigger_events(
+            &events[event_start..],
+            &consumed_trigger_events,
+        );
+        let filtered_events: Vec<_> = unconsumed_events
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
@@ -78,6 +84,29 @@ pub(super) fn run_post_action_pipeline_from(
     // Gate on `Priority`: `process_triggers` may have paused on `OrderTriggers`
     // or a resolution-choice handler may already own `waiting_for` — running SBAs
     // in those states would clobber the open prompt (same failure mode as #2420).
+    //
+    // CR 704.4 + CR 616.1: this gate also covers the replacement-order-choice
+    // case — a `WaitingFor::ReplacementChoice` is not `Priority`, so the loop
+    // never runs SBAs while resolution is paused on one. That matters because a
+    // `ReplacementChoice` is a mid-resolution pause: the triggering event (e.g. a
+    // permanent's "enters with X +1/+1 counters" ETB placement, doubled/incremented
+    // by two or more order-material replacements like Branching Evolution + Ozolith,
+    // so CR 616.1 makes the application order the controller's choice) has not
+    // finished happening — the counters are not on the object yet. CR 704.4
+    // ("state-based actions pay no attention to what happens during the resolution
+    // of a spell or ability") means checking SBAs now would wrongly send a
+    // still-entering 0/0 to the graveyard (CR 704.5f) before its counters land. The
+    // loop runs on the next pipeline pass, once the choice is answered and
+    // resolution settles back to Priority.
+    //
+    // Player-loss SBAs remain covered mid-choice by `reconcile_terminal_result`
+    // (engine.rs), which deliberately runs the SBA loop even while paused on a
+    // replacement choice so the engine never waits on a player who has already
+    // lost (#962). That path is safe against the 0/0-destruction described above
+    // because `check_state_based_actions` itself honors the same CR 704.4
+    // exemption: it returns before the object-destroying SBAs whenever
+    // `pending_replacement` is set, so the mid-choice player-loss net processes
+    // the loss without sending the still-entering permanent to the graveyard.
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let events_before = events.len();
         sba::check_state_based_actions(state, events);
@@ -92,6 +121,7 @@ pub(super) fn run_post_action_pipeline_from(
             // next SBA pass.
             if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
                 state.waiting_for = waiting_for.clone();
+                state.consumed_before_priority_trigger_events.clear();
                 return Ok(waiting_for);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -121,6 +151,7 @@ pub(super) fn run_post_action_pipeline_from(
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             match_flow::handle_game_over_transition(state);
         }
+        state.consumed_before_priority_trigger_events.clear();
         return Ok(state.waiting_for.clone());
     }
 
@@ -128,14 +159,29 @@ pub(super) fn run_post_action_pipeline_from(
     // respect the reassignment that eliminate_player() already performed.
     if let Some(player) = default_wf.acting_player() {
         if !players::is_alive(state, player) {
+            state.consumed_before_priority_trigger_events.clear();
             return Ok(state.waiting_for.clone());
         }
     }
 
     check_exile_returns(state, events);
 
-    let delayed_events = triggers::check_delayed_triggers(state, events);
+    consumed_trigger_events.extend(std::mem::take(
+        &mut state.consumed_before_priority_trigger_events,
+    ));
+    let delayed_input = triggers::filter_consumed_trigger_events(events, &consumed_trigger_events);
+    let delayed_events = triggers::check_delayed_triggers(state, &delayed_input);
     events.extend(delayed_events);
+    state.consumed_before_priority_trigger_events.clear();
+
+    // CR 603.3b: check_delayed_triggers may have paused the batch on a same-controller
+    // ordering choice; surface it before check_state_triggers / the priority fallthrough
+    // clobber it. Scoped to OrderTriggers so the Breeches target-selection pause (which
+    // sets pending_trigger and is re-derived at begin_pending_trigger_target_selection)
+    // is untouched.
+    if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
 
     // CR 603.8: Check state triggers after event-based triggers.
     // State triggers fire when a condition is true, checked whenever a player
@@ -148,7 +194,7 @@ pub(super) fn run_post_action_pipeline_from(
     }
 
     if state.stack.len() > stack_before {
-        return Ok(flush_pending_miracle_offer(
+        return Ok(flush_pending_priority_intercepts(
             state,
             WaitingFor::Priority {
                 player: state.active_player,
@@ -158,7 +204,12 @@ pub(super) fn run_post_action_pipeline_from(
 
     super::layers::flush_layers(state);
 
-    Ok(flush_pending_miracle_offer(state, default_wf.clone()))
+    Ok(flush_pending_priority_intercepts(state, default_wf.clone()))
+}
+
+fn flush_pending_priority_intercepts(state: &mut GameState, outgoing: WaitingFor) -> WaitingFor {
+    let outgoing = super::effects::paradigm::flush_pending_remaining_offers(state, outgoing);
+    flush_pending_miracle_offer(state, outgoing)
 }
 
 /// CR 702.94a + CR 603.11: Intercept a `WaitingFor::Priority` and replace it

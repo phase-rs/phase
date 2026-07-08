@@ -77,6 +77,7 @@ fn stomp_back_face() -> BackFaceData {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Any,
                     damage_source: None,
+                    excess: None,
                 },
             ),
         ],
@@ -102,6 +103,7 @@ fn bonecrusher_trigger() -> TriggerDefinition {
             amount: QuantityExpr::Fixed { value: 2 },
             target: TargetFilter::TriggeringSpellController,
             damage_source: None,
+            excess: None,
         },
     ))
 }

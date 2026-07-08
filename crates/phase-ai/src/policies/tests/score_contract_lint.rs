@@ -9,7 +9,6 @@ use std::fs;
 use std::path::Path;
 
 const LEGACY_SCORE_LITERAL_COUNTS: &[(&str, usize)] = &[
-    ("blight_value.rs", 1),
     ("board_development.rs", 1),
     ("chalice_avoidance.rs", 1),
     ("combat_tax.rs", 3),
@@ -28,9 +27,8 @@ const LEGACY_SCORE_LITERAL_COUNTS: &[(&str, usize)] = &[
     ("mill_targeting.rs", 4),
     ("planeswalker_loyalty.rs", 2),
     ("plus_one_counters.rs", 10),
-    ("reactive_self_protection.rs", 4),
+    ("reactive_self_protection.rs", 0),
     ("recursion_awareness.rs", 1),
-    ("sacrifice_value.rs", 1),
     ("spellskite_priority.rs", 1),
     ("stack_awareness.rs", 1),
     ("x_value.rs", 1),
@@ -96,7 +94,11 @@ fn new_policy_files_use_score_contract_helpers() {
 }
 
 fn band_helper_uses_numeric_literal(code: &str) -> bool {
-    ["nudge", "preference", "strong", "critical"]
+    // `score` is the lowercase dispatcher `PolicyVerdict::score(delta, reason)`;
+    // it must receive a computed (config-routed) delta, never a numeric literal —
+    // otherwise a raw magnitude evades the band-helper contract that the four
+    // banded helpers already enforce.
+    ["score", "nudge", "preference", "strong", "critical"]
         .iter()
         .any(|helper| {
             let needle = format!("PolicyVerdict::{helper}(");
@@ -105,6 +107,33 @@ fn band_helper_uses_numeric_literal(code: &str) -> bool {
                 rest.starts_with(|ch: char| ch.is_ascii_digit() || ch == '-' || ch == '.')
             })
         })
+}
+
+/// Guards the loophole this lint closes: a numeric-literal first argument to
+/// `PolicyVerdict::score(...)` must be flagged, while a computed first argument
+/// must not. Both the `-8.0` (leading `-`) and `8.0` (leading digit) shapes,
+/// plus a `.5`-style leading dot, are covered.
+#[test]
+fn score_dispatcher_literal_is_flagged() {
+    assert!(band_helper_uses_numeric_literal(
+        "        return PolicyVerdict::score(-8.0, reason);"
+    ));
+    assert!(band_helper_uses_numeric_literal(
+        "        return PolicyVerdict::score(8.0, reason);"
+    ));
+    assert!(band_helper_uses_numeric_literal(
+        "        PolicyVerdict::score(.5, reason)"
+    ));
+    // Computed / config-routed deltas must pass.
+    assert!(!band_helper_uses_numeric_literal(
+        "        PolicyVerdict::score(self.score(ctx).clamp(-15.0, 15.0), reason)"
+    ));
+    assert!(!band_helper_uses_numeric_literal(
+        "        return PolicyVerdict::score(delta, reason);"
+    ));
+    assert!(!band_helper_uses_numeric_literal(
+        "        PolicyVerdict::score(ctx.penalties().mill_cast_bonus * urgency, reason)"
+    ));
 }
 
 fn legacy_score_literal_count(file_name: &str) -> usize {

@@ -78,19 +78,25 @@ pub fn resolve(
     {
         values.mana_cost = crate::types::mana::ManaCost::NoCost;
     }
+    if let Some(loyalty) =
+        super::token_copy::copy_starting_loyalty_override(&additional_modifications)
+    {
+        values.loyalty = Some(loyalty);
+    }
 
-    // CR 122.1 + CR 614.1c + CR 202.1b: `AddCounterOnEnter` (counter placement)
-    // and `RemoveManaCost` (consumed above) are resolution-time exceptions, not
-    // layered modifications — partition them out so the layer pipeline only sees
-    // the layered variants. The counter-on-enter variants are applied via the
-    // counter primitive after layer evaluation; RemoveManaCost is already
-    // consumed into `values`, so it is dropped here.
+    // CR 122.1 + CR 614.1c + CR 202.1b + CR 707.9b: `AddCounterOnEnter`
+    // (counter placement), `RemoveManaCost`, and `SetStartingLoyalty` are
+    // resolution-time exceptions, not layered modifications — partition them
+    // out so the layer pipeline only sees layered variants. Counter-on-enter is
+    // applied via the counter primitive after layer evaluation; the mana-cost
+    // and starting-loyalty exceptions were already consumed into `values`.
     let (resolution_mods, layered_mods): (Vec<_>, Vec<_>) =
         additional_modifications.into_iter().partition(|m| {
             matches!(
                 m,
                 ContinuousModification::AddCounterOnEnter { .. }
                     | ContinuousModification::RemoveManaCost
+                    | ContinuousModification::SetStartingLoyalty { .. }
             )
         });
 

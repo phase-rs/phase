@@ -21,14 +21,15 @@ fn every_feature_kind_is_exercised() {
 
 /// Cross-check against the gate-covered `DeckFeatures` axes: landfall,
 /// mana_ramp, tribal, control, aristocrats, artifacts, enchantments,
-/// aggro_pressure, tokens_wide, plus_one_counters, spellslinger_prowess — 11
-/// axes, each with a dedicated `MatchupSpec`. When a new gate-covered axis is
-/// added, this assertion fails until `FeatureKind::ALL` is updated to match.
+/// aggro_pressure, tokens_wide, plus_one_counters, spellslinger_prowess,
+/// reanimator, equipment, blink, mill, energy — 16 axes, each with a dedicated `MatchupSpec`.
+/// When a new gate-covered axis is added, this assertion fails until
+/// `FeatureKind::ALL` is updated to match.
 #[test]
 fn feature_kind_matches_deck_features_field_count() {
     assert_eq!(
         FeatureKind::ALL.len(),
-        11,
+        16,
         "FeatureKind::ALL is out of sync with DeckFeatures — add the new variant."
     );
 }
@@ -226,6 +227,298 @@ fn enchantress_mirror_deck_activates_enchantments_payoff() {
         feature.commitment,
         feature.payoff_count,
         feature.enchantment_count
+    );
+}
+
+/// Reanimator sibling of `affinity_mirror_deck_activates_artifact_synergy`:
+/// guards that the `greasefang-mirror` matchup tagged `FeatureKind::Reanimator`
+/// actually clears `reanimator::COMMITMENT_FLOOR`, so the required gate runs
+/// `ReanimatorPayoffPolicy` active (not dormant). Resolves the real snapshot
+/// through the card database and asserts the feature detects a reanimation
+/// payoff and a target, and crosses the activation floor.
+///
+/// `#[ignore]` because it needs the full `card-data.json` export. Run with:
+///   `cargo test -p phase-ai -- --ignored greasefang_mirror_deck_activates_reanimator_payoff`
+#[test]
+#[ignore = "needs full card-data.json export; run with --ignored"]
+fn greasefang_mirror_deck_activates_reanimator_payoff() {
+    use crate::features::reanimator::{detect, COMMITMENT_FLOOR};
+    use engine::database::CardDatabase;
+    use engine::game::{resolve_player_deck_list, PlayerDeckList};
+    use std::path::PathBuf;
+
+    let data_root = std::env::var("PHASE_CARDS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")));
+    let db_path = data_root.join("card-data.json");
+    let db = CardDatabase::from_export(&db_path)
+        .unwrap_or_else(|e| panic!("failed to load card database from {db_path:?}: {e}"));
+
+    let spec = find_matchup("greasefang-mirror").expect("greasefang-mirror matchup must resolve");
+    assert!(
+        spec.exercises.contains(&FeatureKind::Reanimator),
+        "greasefang-mirror must claim to exercise FeatureKind::Reanimator"
+    );
+
+    let names = resolve_deck_ref(&spec.p0).expect("greasefang-mirror p0 snapshot must resolve");
+    let payload = resolve_player_deck_list(
+        &db,
+        &PlayerDeckList {
+            main_deck: names,
+            ..Default::default()
+        },
+    );
+    let feature = detect(&payload.main_deck);
+
+    assert!(
+        feature.reanimation_count >= 1 && feature.target_count >= 1,
+        "greasefang deck must contain a reanimation payoff and a target, got \
+         reanimation_count={} target_count={}",
+        feature.reanimation_count,
+        feature.target_count
+    );
+    assert!(
+        feature.commitment >= COMMITMENT_FLOOR,
+        "greasefang deck must clear COMMITMENT_FLOOR ({COMMITMENT_FLOOR}) so \
+         ReanimatorPayoffPolicy activates during the gate; got commitment={} \
+         (reanimation={}, target={}, enabler={})",
+        feature.commitment,
+        feature.reanimation_count,
+        feature.target_count,
+        feature.enabler_count
+    );
+}
+
+/// Equipment sibling of `affinity_mirror_deck_activates_artifact_synergy`:
+/// guards that the `equipment-mirror` matchup tagged `FeatureKind::Equipment`
+/// actually clears `equipment::COMMITMENT_FLOOR`, so the required gate runs
+/// `EquipmentPayoffPolicy` active (not dormant). Resolves the real snapshot
+/// through the card database and asserts the feature detects Equipment density
+/// and a payoff, and crosses the activation floor.
+///
+/// `#[ignore]` because it needs the full `card-data.json` export. Run with:
+///   `cargo test -p phase-ai -- --ignored equipment_mirror_deck_activates_equipment_payoff`
+#[test]
+#[ignore = "needs full card-data.json export; run with --ignored"]
+fn equipment_mirror_deck_activates_equipment_payoff() {
+    use crate::features::equipment::{detect, COMMITMENT_FLOOR};
+    use engine::database::CardDatabase;
+    use engine::game::{resolve_player_deck_list, PlayerDeckList};
+    use std::path::PathBuf;
+
+    let data_root = std::env::var("PHASE_CARDS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")));
+    let db_path = data_root.join("card-data.json");
+    let db = CardDatabase::from_export(&db_path)
+        .unwrap_or_else(|e| panic!("failed to load card database from {db_path:?}: {e}"));
+
+    let spec = find_matchup("equipment-mirror").expect("equipment-mirror matchup must resolve");
+    assert!(
+        spec.exercises.contains(&FeatureKind::Equipment),
+        "equipment-mirror must claim to exercise FeatureKind::Equipment"
+    );
+
+    let names = resolve_deck_ref(&spec.p0).expect("equipment-mirror p0 snapshot must resolve");
+    let payload = resolve_player_deck_list(
+        &db,
+        &PlayerDeckList {
+            main_deck: names,
+            ..Default::default()
+        },
+    );
+    let feature = detect(&payload.main_deck);
+
+    assert!(
+        feature.equipment_count >= 1 && feature.payoff_count >= 1,
+        "equipment deck must contain Equipment and a payoff, got \
+         equipment_count={} payoff_count={}",
+        feature.equipment_count,
+        feature.payoff_count
+    );
+    assert!(
+        feature.commitment >= COMMITMENT_FLOOR,
+        "equipment deck must clear COMMITMENT_FLOOR ({COMMITMENT_FLOOR}) so \
+         EquipmentPayoffPolicy activates during the gate; got commitment={} \
+         (equipment={}, payoff={})",
+        feature.commitment,
+        feature.equipment_count,
+        feature.payoff_count
+    );
+}
+
+/// Blink sibling of `equipment_mirror_deck_activates_equipment_payoff`: guards
+/// that the `blink-mirror` matchup tagged `FeatureKind::Blink` actually clears
+/// `blink::COMMITMENT_FLOOR`, so the required gate runs `BlinkPayoffPolicy`
+/// active (not dormant). Resolves the real snapshot through the card database
+/// and asserts the feature detects flicker density and an ETB payoff, and
+/// crosses the activation floor.
+///
+/// `#[ignore]` because it needs the full `card-data.json` export. Run with:
+///   `cargo test -p phase-ai -- --ignored blink_mirror_deck_activates_blink_payoff`
+#[test]
+#[ignore = "needs full card-data.json export; run with --ignored"]
+fn blink_mirror_deck_activates_blink_payoff() {
+    use crate::features::blink::{detect, COMMITMENT_FLOOR};
+    use engine::database::CardDatabase;
+    use engine::game::{resolve_player_deck_list, PlayerDeckList};
+    use std::path::PathBuf;
+
+    let data_root = std::env::var("PHASE_CARDS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")));
+    let db_path = data_root.join("card-data.json");
+    let db = CardDatabase::from_export(&db_path)
+        .unwrap_or_else(|e| panic!("failed to load card database from {db_path:?}: {e}"));
+
+    let spec = find_matchup("blink-mirror").expect("blink-mirror matchup must resolve");
+    assert!(
+        spec.exercises.contains(&FeatureKind::Blink),
+        "blink-mirror must claim to exercise FeatureKind::Blink"
+    );
+
+    let names = resolve_deck_ref(&spec.p0).expect("blink-mirror p0 snapshot must resolve");
+    let payload = resolve_player_deck_list(
+        &db,
+        &PlayerDeckList {
+            main_deck: names,
+            ..Default::default()
+        },
+    );
+    let feature = detect(&payload.main_deck);
+
+    assert!(
+        feature.flicker_count >= 1 && feature.etb_payoff_count >= 1,
+        "blink deck must contain a flicker enabler and an ETB payoff, got \
+         flicker_count={} etb_payoff_count={}",
+        feature.flicker_count,
+        feature.etb_payoff_count
+    );
+    assert!(
+        feature.commitment >= COMMITMENT_FLOOR,
+        "blink deck must clear COMMITMENT_FLOOR ({COMMITMENT_FLOOR}) so \
+         BlinkPayoffPolicy activates during the gate; got commitment={} \
+         (flicker={}, etb_payoff={})",
+        feature.commitment,
+        feature.flicker_count,
+        feature.etb_payoff_count
+    );
+}
+
+/// Mill sibling of `equipment_mirror_deck_activates_equipment_payoff`: guards
+/// that the `mill-mirror` matchup tagged `FeatureKind::Mill` actually clears
+/// `mill::COMMITMENT_FLOOR`, so the required gate runs `MillPayoffPolicy`
+/// active (not dormant). Resolves the real snapshot through the card database
+/// and asserts the feature detects opponent-mill enablers and crosses the
+/// activation floor.
+///
+/// `#[ignore]` because it needs the full `card-data.json` export. Run with:
+///   `cargo test -p phase-ai -- --ignored mill_mirror_deck_activates_mill_payoff`
+#[test]
+#[ignore = "needs full card-data.json export; run with --ignored"]
+fn mill_mirror_deck_activates_mill_payoff() {
+    use crate::features::mill::{detect, COMMITMENT_FLOOR};
+    use engine::database::CardDatabase;
+    use engine::game::{resolve_player_deck_list, PlayerDeckList};
+    use std::path::PathBuf;
+
+    let data_root = std::env::var("PHASE_CARDS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")));
+    let db_path = data_root.join("card-data.json");
+    let db = CardDatabase::from_export(&db_path)
+        .unwrap_or_else(|e| panic!("failed to load card database from {db_path:?}: {e}"));
+
+    let spec = find_matchup("mill-mirror").expect("mill-mirror matchup must resolve");
+    assert!(
+        spec.exercises.contains(&FeatureKind::Mill),
+        "mill-mirror must claim to exercise FeatureKind::Mill"
+    );
+
+    let names = resolve_deck_ref(&spec.p0).expect("mill-mirror p0 snapshot must resolve");
+    let payload = resolve_player_deck_list(
+        &db,
+        &PlayerDeckList {
+            main_deck: names,
+            ..Default::default()
+        },
+    );
+    let feature = detect(&payload.main_deck);
+
+    assert!(
+        feature.mill_count >= 1,
+        "mill deck must contain at least one opponent-mill enabler, got mill_count={}",
+        feature.mill_count
+    );
+    assert!(
+        feature.commitment >= COMMITMENT_FLOOR,
+        "mill deck must clear COMMITMENT_FLOOR ({COMMITMENT_FLOOR}) so \
+         MillPayoffPolicy activates during the gate; got commitment={} (mill_count={})",
+        feature.commitment,
+        feature.mill_count
+    );
+}
+
+/// Energy sibling of `mill_mirror_deck_activates_mill_payoff`: guards that the
+/// `kaladesh-energy-mirror` matchup tagged `FeatureKind::Energy` actually clears
+/// `energy::COMMITMENT_FLOOR`, so the required gate runs `EnergyPayoffPolicy`
+/// active (not dormant). Resolves the real snapshot through the card database
+/// and asserts the feature detects both producers and sinks (the two-part
+/// energy economy) and crosses the activation floor.
+///
+/// `#[ignore]` because it needs the full `card-data.json` export. Run with:
+///   `cargo test -p phase-ai -- --ignored kaladesh_energy_deck_activates_energy_payoff`
+#[test]
+#[ignore = "needs full card-data.json export; run with --ignored"]
+fn kaladesh_energy_deck_activates_energy_payoff() {
+    use crate::features::energy::{detect, COMMITMENT_FLOOR};
+    use engine::database::CardDatabase;
+    use engine::game::{resolve_player_deck_list, PlayerDeckList};
+    use std::path::PathBuf;
+
+    let data_root = std::env::var("PHASE_CARDS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")));
+    let db_path = data_root.join("card-data.json");
+    let db = CardDatabase::from_export(&db_path)
+        .unwrap_or_else(|e| panic!("failed to load card database from {db_path:?}: {e}"));
+
+    let spec = find_matchup("kaladesh-energy-mirror")
+        .expect("kaladesh-energy-mirror matchup must resolve");
+    assert!(
+        spec.exercises.contains(&FeatureKind::Energy),
+        "kaladesh-energy-mirror must claim to exercise FeatureKind::Energy"
+    );
+
+    let names =
+        resolve_deck_ref(&spec.p0).expect("kaladesh-energy-mirror p0 snapshot must resolve");
+    let payload = resolve_player_deck_list(
+        &db,
+        &PlayerDeckList {
+            main_deck: names,
+            ..Default::default()
+        },
+    );
+    let feature = detect(&payload.main_deck);
+
+    assert!(
+        feature.producer_count >= 1,
+        "energy deck must contain at least one producer, got producer_count={}",
+        feature.producer_count
+    );
+    assert!(
+        feature.sink_count >= 1,
+        "energy deck must contain at least one sink, got sink_count={}",
+        feature.sink_count
+    );
+    assert!(
+        feature.commitment >= COMMITMENT_FLOOR,
+        "energy deck must clear COMMITMENT_FLOOR ({COMMITMENT_FLOOR}) so \
+         EnergyPayoffPolicy activates during the gate; got commitment={} \
+         (producer_count={}, sink_count={})",
+        feature.commitment,
+        feature.producer_count,
+        feature.sink_count
     );
 }
 

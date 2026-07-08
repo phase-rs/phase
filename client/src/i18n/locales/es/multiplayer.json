@@ -4,6 +4,16 @@
     "message": "Tu oponente será declarado ganador.",
     "concede": "Conceder"
   },
+  "takebackDialog": {
+    "requestedTitle": "{{name}} solicita una repetición",
+    "requestedMessage": "¿Volver al momento justo antes de su última acción?",
+    "ownTitle": "Repetición solicitada",
+    "ownMessage": "Esperando que los demás jugadores aprueben volver a antes de tu última acción.",
+    "approve": "Aprobar",
+    "decline": "Rechazar",
+    "cancel": "Cancelar solicitud",
+    "declinedToast": "Solicitud de repetición rechazada"
+  },
   "connectionDot": {
     "connected": "Conectado",
     "connecting": "Conectando...",
@@ -100,6 +110,7 @@
     "subtitle": "Elige una región o conéctate a una instancia autoalojada.",
     "noneLabel": "Ninguno (solo P2P)",
     "directCodes": "códigos directos",
+    "official": "Oficial",
     "selfHosted": "Autoalojado",
     "customUrlPlaceholder": "wss://tu-servidor.ejemplo/ws",
     "test": "Probar",

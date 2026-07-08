@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 
 import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-import { abilityLabel } from "../../viewmodel/costLabel.ts";
+import { abilityLabel, loyaltyBadge, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
+import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -13,7 +14,10 @@ import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { RichLabel } from "../mana/RichLabel.tsx";
+import { ReportCardButton, type CardReportContext } from "./ReportCardButton.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
   getKeywordDisplayText,
@@ -126,6 +130,12 @@ function CardPreviewInner({
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
+  // `card_report` context needs a live, participating game: `obj == null` (deck
+  // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
+  // no game at all, and spectators don't report — building no context in these
+  // cases keeps both the event and the button's wrapper elements out entirely.
+  const gameId = useGameStore((s) => s.gameId);
+  const gameMode = useGameStore((s) => s.gameMode);
 
   // Auto-derive back face name from " // " separator when not explicitly provided
   // (e.g., deck builder passes "Delver of Secrets // Insectile Aberration" as cardName)
@@ -317,6 +327,29 @@ function CardPreviewInner({
     viewportWidth,
   ]);
 
+  // Identity + parse counts for the "report this card" button, carrying the
+  // DISPLAYED face (back face under Ctrl) so the report matches what the player
+  // sees. Undefined outside a live game (`obj == null` or `gameId == null`), so
+  // the button never renders in the deck builder. On mobile `showOtherFace` is
+  // always false, so this resolves to the front face there.
+  // No front-face fallback for the counts: if the back face's parse details
+  // haven't loaded, 0/0 ("no parse data") is honest — front-face counts under a
+  // back-face identity would corrupt the misparse-vs-known-gap triage columns.
+  const reportItems = showOtherFace ? backParseDetails : frontParseDetails;
+  const reportContext: CardReportContext | undefined =
+    obj != null && gameId !== null && gameMode !== "spectate"
+      ? {
+          oracleId:
+            (showOtherFace ? obj.back_face?.printed_ref?.oracle_id : obj.printed_ref?.oracle_id) ?? "",
+          faceName:
+            (showOtherFace ? obj.back_face?.printed_ref?.face_name : obj.printed_ref?.face_name) ?? "",
+          name: showOtherFace ? (obj.back_face?.printed_ref?.face_name ?? backFaceName ?? obj.name) : obj.name,
+          zone: obj.zone,
+          supported: (reportItems ?? []).filter((item) => item.supported).length,
+          total: (reportItems ?? []).length,
+        }
+      : undefined;
+
   // Mobile overlay mode: centered with backdrop
   if (isMobile) {
     return (
@@ -328,6 +361,7 @@ function CardPreviewInner({
         onDismiss={onDismiss ?? dismissPreview}
         sourcePrinting={sourcePrinting}
         layout={mobileLayout ?? "modal"}
+        report={reportContext}
       />
     );
   }
@@ -370,6 +404,7 @@ function CardPreviewInner({
           localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
           parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
           maxHeight={viewportHeight - margin * 2}
+          report={reportContext}
         />
       ) : (
         <CardImagePreview
@@ -404,6 +439,7 @@ function MobilePreviewOverlay({
   onDismiss,
   sourcePrinting,
   layout = "modal",
+  report,
 }: {
   cardName: string;
   backFaceName: string | null;
@@ -412,6 +448,9 @@ function MobilePreviewOverlay({
   onDismiss: () => void;
   sourcePrinting?: SourcePrinting;
   layout?: "modal" | "compact";
+  /** In-game report context; absent in the deck builder. Only the full modal
+   *  layout hosts the button — the compact peek dismisses on any tap. */
+  report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
   const { src, isRotated, isFlip } = useCardImage(cardName, {
@@ -509,6 +548,11 @@ function MobilePreviewOverlay({
               ⟳ {t("preview.flip")}
             </button>
           )}
+          {report && (
+            <div className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
+              <ReportCardButton key={report.oracleId || report.name} {...report} />
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -548,6 +592,13 @@ function CardImagePreview({
   debugObjectId?: number | null;
 }) {
   const { t } = useTranslation("game");
+  // Card art can 404 even when a URL resolves — future-dated sets whose images
+  // aren't on the CDN yet, or tokens whose preset (and image ref) is missing.
+  // Track the load failure so we render a named placeholder in the image slot
+  // instead of the browser's broken-image glyph, keeping the alt-view info
+  // panel usable. Reset whenever the src changes so navigating cards re-tries.
+  const [imgError, setImgError] = useState(false);
+  useEffect(() => setImgError(false), [src]);
   const frameClass = mobileMode
     ? isRotated
       ? "h-[min(40vw,300px)] w-[min(56vw,420px)] max-h-[75vh] max-w-[84vw]"
@@ -578,15 +629,27 @@ function CardImagePreview({
   // {1}{G}{G}). See cardImageLookup / back_face wiring.
   const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  const activateLabels = useMemo(() => {
+  const activateLabels = useMemo<ActivateLabel[]>(() => {
     if (!obj || obj.zone !== "Battlefield") return [];
-    return collectObjectActions(legalActionsByObject, obj.id)
-      .flatMap((action) => {
-        if (action.type !== "ActivateAbility") return [];
-        const ability = obj.abilities[action.data.ability_index];
-        return ability ? [abilityLabel(ability)] : [];
-      })
-      .filter((label, index, labels) => label && labels.indexOf(label) === index);
+    const seen = new Set<string>();
+    const result: ActivateLabel[] = [];
+    for (const action of collectObjectActions(legalActionsByObject, obj.id)) {
+      if (action.type !== "ActivateAbility") continue;
+      const ability = obj.abilities[action.data.ability_index];
+      if (!ability) continue;
+      const rawLabel = abilityLabel(ability);
+      if (!rawLabel || seen.has(rawLabel)) continue;
+      seen.add(rawLabel);
+      // CR 606.1: a Loyalty ability cost renders as a mana-font badge; strip
+      // the "[+2]"-style prefix so the cost isn't shown twice.
+      const loyalty = loyaltyBadge(ability.cost);
+      result.push({
+        rawLabel,
+        label: loyalty ? stripLoyaltyCostPrefix(rawLabel) : rawLabel,
+        loyalty,
+      });
+    }
+    return result;
   }, [legalActionsByObject, obj]);
   const castManaZones: Zone[] = ["Hand", "Command", "Exile", "Graveyard", "Library"];
   const showCastManaCost =
@@ -608,12 +671,21 @@ function CardImagePreview({
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
       <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
-        <img
-          src={src}
-          alt={cardName}
-          className={imageClass}
-          draggable={false}
-        />
+        {imgError ? (
+          <div
+            className={`${frameClass} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
+          >
+            <span className="text-sm font-medium text-gray-300">{cardName}</span>
+          </div>
+        ) : (
+          <img
+            src={src}
+            alt={cardName}
+            className={imageClass}
+            draggable={false}
+            onError={() => setImgError(true)}
+          />
+        )}
         {displayCost && (
           <ManaCostPips cost={displayCost} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
         )}
@@ -676,7 +748,8 @@ function DetailPills({ details, badgeClass }: { details: [string, string][]; bad
     <div className="mt-1 flex flex-wrap gap-1">
       {details.map(([key, value]) => (
         <span key={key} className={`inline-block rounded-[4px] px-1.5 py-px text-[9px] leading-tight ${badgeClass}`}>
-          <span className="opacity-60">{key}:</span> {value}
+          <span className="opacity-60">{key}:</span>{" "}
+          <RichLabel text={value} size="xs" />
         </span>
       ))}
     </div>
@@ -701,11 +774,19 @@ function ParsedItemRow({ item, depth = 0 }: { item: ParsedItem; depth?: number }
               <span className={`text-[8px] font-bold uppercase tracking-wider ${statusColor} opacity-70`}>
                 {CATEGORY_ABBR[item.category]}
               </span>
-              <span className="text-[11px] leading-snug text-gray-200 font-medium">{item.label}</span>
+              <RichLabel
+                text={item.label}
+                size="xs"
+                className="text-[11px] leading-snug text-gray-200 font-medium"
+              />
               {!item.supported && <span className="text-[9px] text-rose-400">{t("preview.unsupported")}</span>}
             </div>
             {item.source_text && (
-              <div className="text-[10px] leading-snug text-gray-500 mt-0.5 italic">{item.source_text}</div>
+              <RichLabel
+                text={item.source_text}
+                size="xs"
+                className="mt-0.5 block text-[10px] italic leading-snug text-gray-500"
+              />
             )}
             <DetailPills details={item.details ?? []} badgeClass={catStyle.badge} />
           </div>
@@ -751,9 +832,12 @@ interface ParsedAbilitiesPanelProps {
   localizedTypeLine?: string | null;
   parseDetails: ParsedItem[] | null;
   maxHeight?: number;
+  /** In-game report context for the displayed face; absent in the deck builder
+   *  (no live game), where the report button is not shown. */
+  report?: CardReportContext;
 }
 
-function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight }: ParsedAbilitiesPanelProps) {
+function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight, report }: ParsedAbilitiesPanelProps) {
   const { t } = useTranslation("game");
   const items = parseDetails ?? [];
   const rulings = useCardRulings(name);
@@ -774,6 +858,11 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
           <div className="text-[10px] text-gray-500 mt-0.5">{typeLine}</div>
         )}
         <SupportSummary items={items} />
+        {report && (
+          <div className="mt-1 flex justify-end">
+            <ReportCardButton key={report.oracleId || report.name} {...report} />
+          </div>
+        )}
       </div>
       <div className="px-2 py-2 space-y-0.5">
         {items.length === 0 && (
@@ -788,6 +877,14 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
   );
 }
 
+/** A battlefield-activatable ability's cost summary for the preview panel.
+ * `loyalty` is set only for planeswalker Loyalty costs (rendered as a badge). */
+type ActivateLabel = {
+  rawLabel: string;
+  label: string;
+  loyalty: { iconClasses: string; text: string } | null;
+};
+
 function CardInfoPanel({
   obj,
   altAvailable,
@@ -795,11 +892,13 @@ function CardInfoPanel({
 }: {
   obj: GameObject;
   altAvailable: boolean;
-  activateLabels: string[];
+  activateLabels: ActivateLabel[];
 }) {
   const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
-  const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
+  const counters = Object.entries(obj.counters).flatMap(([type, count]) =>
+    type === "loyalty" || count == null ? [] : [[type, count] as const],
+  );
   const keywords = sortKeywords(obj.keywords);
   const colorsChanged =
     obj.color.length !== obj.base_color.length ||
@@ -880,14 +979,33 @@ function CardInfoPanel({
       )}
       {/* Type line */}
       <div className="font-semibold text-gray-300">
-        {formatTypeLine(obj.card_types, obj.keywords)}
+        <RichLabel text={formatTypeLine(obj.card_types, obj.keywords)} size="xs" />
       </div>
 
       {activateLabels.length > 0 && (
         <div className="mt-1 text-cyan-300/90">
-          {activateLabels.map((label) => (
-            <div key={label}>{t("preview.activateCost", { cost: label })}</div>
-          ))}
+          {activateLabels.map((entry) =>
+            entry.loyalty ? (
+              <div key={entry.rawLabel} className="flex items-center gap-1">
+                <ManaFontIcon
+                  iconClass={entry.loyalty.iconClasses}
+                  fallbackText={entry.loyalty.text}
+                  label={entry.loyalty.text}
+                />
+                <RichLabel
+                  text={t("preview.activateCost", { cost: entry.label })}
+                  size="xs"
+                />
+              </div>
+            ) : (
+              <RichLabel
+                key={entry.rawLabel}
+                text={t("preview.activateCost", { cost: entry.label })}
+                size="xs"
+                className="block"
+              />
+            ),
+          )}
         </div>
       )}
 
@@ -906,7 +1024,7 @@ function CardInfoPanel({
                 aria-describedby={tooltipId}
                 className={`group relative cursor-default rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/60 ${granted ? "text-indigo-300" : "text-white"}`}
               >
-                {getKeywordDisplayText(kw)}
+                <RichLabel text={getKeywordDisplayText(kw)} size="xs" />
                 {source && (
                   <span className="ml-1 text-[10px] text-indigo-400/80">
                     {t("preview.fromSource", { source })}
@@ -914,7 +1032,7 @@ function CardInfoPanel({
                 )}
                 {reminder && (
                   <GameplayTooltip id={tooltipId} className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl">
-                    {reminder}
+                    <RichLabel text={reminder} size="xs" />
                   </GameplayTooltip>
                 )}
               </span>
@@ -927,9 +1045,11 @@ function CardInfoPanel({
       {counters.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-3 text-gray-400">
           {counters.map(([type, count]) => (
-            <span key={type}>
-              {formatCounterType(type)}: {count}
-            </span>
+            <CounterTooltip key={type} type={type} count={count}>
+              <span>
+                {formatCounterType(type)}: {count}
+              </span>
+            </CounterTooltip>
           ))}
         </div>
       )}
@@ -976,12 +1096,15 @@ function CardInfoPanel({
             {chosenAttributes.map((attribute, index) => {
               const formatted = formatChosenAttribute(attribute);
               return (
-                <div key={`${attribute.type}-${index}`}>
-                  {t("preview.chosen.entry", {
+                <RichLabel
+                  key={`${attribute.type}-${index}`}
+                  text={t("preview.chosen.entry", {
                     kind: formatted.label,
                     value: formatted.value,
                   })}
-                </div>
+                  size="xs"
+                  className="block"
+                />
               );
             })}
           </div>
@@ -1012,7 +1135,7 @@ function RulingsSection({ rulings }: { rulings: CardRuling[] }) {
         {visible.map((ruling, i) => (
           <li key={`${ruling.date}-${i}`} className="leading-snug">
             <span className="mr-1 text-gray-500">[{ruling.date}]</span>
-            <span>{ruling.text}</span>
+            <RichLabel text={ruling.text} size="xs" />
           </li>
         ))}
       </ul>

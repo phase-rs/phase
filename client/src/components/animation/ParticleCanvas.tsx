@@ -13,6 +13,7 @@ import {
   emitBlockClash,
   emitAttackBurst,
   emitSlamImpact,
+  emitDamageFlurry,
 } from "./particleEffects";
 
 export interface ParticleCanvasHandle {
@@ -26,6 +27,7 @@ export interface ParticleCanvasHandle {
   blockClash: (x: number, y: number) => void;
   attackBurst: (x: number, y: number, color?: RGB) => void;
   slamImpact: (x: number, y: number, amount: number) => void;
+  damageFlurry: (fromPoints: { x: number; y: number }[], to: { x: number; y: number }, hitCount: number, totalDamage: number, durationMs: number) => void;
 }
 
 export const ParticleCanvas = forwardRef<ParticleCanvasHandle>(
@@ -95,6 +97,10 @@ export const ParticleCanvas = forwardRef<ParticleCanvasHandle>(
         slamImpact(x, y, amount) {
           const s = getSystem();
           if (s) emitSlamImpact(s, x, y, amount);
+        },
+        damageFlurry(fromPoints, to, hitCount, totalDamage, durationMs) {
+          const s = getSystem();
+          if (s) emitDamageFlurry(s, fromPoints, to, hitCount, totalDamage, durationMs);
         },
       }),
       [getSystem],

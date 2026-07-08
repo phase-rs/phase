@@ -19,7 +19,7 @@ use crate::types::ability::{
     ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
     TriggerDefinition,
 };
-use crate::types::actions::GameAction;
+use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -69,17 +69,33 @@ fn build_face_from_oracle(
     // The parser's `extract_keyword_line` requires keyword name hints to identify
     // keyword-only lines (returns None when hints are empty). Pre-scan each line
     // through Keyword::from_str to detect bare keywords like "Flying", "Haste".
+    //
+    // A line contributes inferred hints ONLY when it is a genuine keyword line —
+    // every comma-separated part parses to a known keyword (e.g. "Flying,
+    // vigilance, trample"). A line with any prose fragment is an effect/ability
+    // line and contributes nothing, even if it lists keywords inside a sentence
+    // (e.g. Super-Adaptoid / Kathril's "Do the same for flying, first strike,
+    // …"): those keyword names are the OBJECT of an effect, not granted
+    // keywords, and must not be inferred as static abilities on the card.
     let inferred_kw_names: Vec<String>;
     let effective_kw_names = if keyword_names.is_empty() {
         inferred_kw_names = oracle_text
             .lines()
             .flat_map(|line| {
-                line.split(',')
+                let parts: Vec<String> = line
+                    .split(',')
                     .map(|part| part.trim().to_lowercase())
-                    .filter(|lower| {
+                    .collect();
+                let is_keyword_line = !parts.is_empty()
+                    && parts.iter().all(|lower| {
                         let kw: Keyword = lower.parse().unwrap_or(Keyword::Unknown(String::new()));
                         !matches!(kw, Keyword::Unknown(_))
-                    })
+                    });
+                if is_keyword_line {
+                    parts
+                } else {
+                    Vec::new()
+                }
             })
             .collect();
         &inferred_kw_names
@@ -271,9 +287,15 @@ impl GameScenario {
     }
 
     /// Replace a player's mana pool for deterministic payment tests.
+    ///
+    /// CR 118.3a: routes each unit through `add_mana_to_pool` so every seeded
+    /// unit receives a distinct `ManaPipId` (a direct `mana_pool.mana = mana`
+    /// would leave all units at the `ManaPipId(0)` sentinel, so pins would
+    /// collide). All callers seed a fresh pool exactly once per player, so
+    /// appending is equivalent to replacing.
     pub fn with_mana_pool(&mut self, player: PlayerId, mana: Vec<ManaUnit>) -> &mut Self {
-        if let Some(p) = self.state.players.iter_mut().find(|p| p.id == player) {
-            p.mana_pool.mana = mana;
+        for unit in mana {
+            self.state.add_mana_to_pool(player, unit);
         }
         self
     }
@@ -455,6 +477,7 @@ impl GameScenario {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         Arc::make_mut(&mut obj.abilities).push(ability.clone());
@@ -913,6 +936,21 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// CR 305: Make this card a land. Strips the Creature core type pushed by
+    /// `add_creature_to_graveyard` and adds Land. Mirrors `as_artifact`/
+    /// `as_enchantment`; reusable for graveyard-return targeting tests.
+    pub fn as_land(&mut self) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types
+            .core_types
+            .retain(|t| *t != CoreType::Creature);
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            obj.card_types.core_types.push(CoreType::Land);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     /// CR 302: Make this card a creature. Strips the spell core types
     /// (Instant/Sorcery) pushed by `add_spell_to_library_top` and adds Creature.
     /// Mirrors `as_sorcery`/`as_instant`; reusable for search/tutor library tests.
@@ -1285,6 +1323,7 @@ impl GameRunner {
             .iter()
             .map(|p| (p.id, p.hand.len()))
             .collect();
+        let mut events = Vec::new();
 
         // Drive through the combat-damage step(s) to end of combat. The
         // combat-damage assignment and dealing are turn-based actions
@@ -1302,13 +1341,15 @@ impl GameRunner {
             if !matches!(self.state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
             }
-            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
-                break;
+            match apply_as_current(&mut self.state, GameAction::PassPriority) {
+                Ok(result) => events.extend(result.events),
+                Err(_) => break,
             }
         }
 
         Outcome {
             state: self.state.clone(),
+            events,
             hand_baseline,
             life_before,
         }
@@ -1437,7 +1478,6 @@ impl GameRunner {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
-            WaitingFor::MulliganBottomCards { .. } => "MulliganBottomCards",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
             WaitingFor::TargetSelection { .. } => "TargetSelection",
@@ -1455,6 +1495,7 @@ impl GameRunner {
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
@@ -1463,6 +1504,7 @@ impl GameRunner {
             WaitingFor::SearchPartitionChoice { .. } => "SearchPartitionChoice",
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -1473,11 +1515,13 @@ impl GameRunner {
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
             WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
             WaitingFor::CastOffer {
@@ -1528,6 +1572,12 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Mutate => {
                     "AlternativeCastChoice(Mutate)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Prowl => {
+                    "AlternativeCastChoice(Prowl)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::FaceDown => {
+                    "AlternativeCastChoice(FaceDown)"
+                }
             },
             WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
             WaitingFor::CipherEncodeChoice { .. } => "CipherEncodeChoice",
@@ -1543,6 +1593,7 @@ impl GameRunner {
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
+            WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
             WaitingFor::PayCost { .. } => "PayCost",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
@@ -1552,6 +1603,10 @@ impl GameRunner {
                 kind: CastOfferKind::Discover { .. },
                 ..
             } => "DiscoverChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            } => "GraveyardPaidCastChoice",
             WaitingFor::RevealUntilKeptChoice { .. } => "RevealUntilKeptChoice",
             WaitingFor::RepeatDecision { .. } => "RepeatDecision",
             WaitingFor::CastOffer {
@@ -1579,6 +1634,7 @@ impl GameRunner {
             WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
             WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
+            WaitingFor::RemoveCountersChoice { .. } => "RemoveCountersChoice",
             WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
@@ -1596,6 +1652,8 @@ impl GameRunner {
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
+            WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
@@ -1675,14 +1733,25 @@ impl GameRunner {
 pub struct SpellCast<'a> {
     runner: &'a mut GameRunner,
     spell: ObjectId,
+    alternative_cast: Option<AlternativeCastDecision>,
+    adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
     target_players: Vec<PlayerId>,
     target_objects: Vec<ObjectId>,
+    cost_objects: Vec<ObjectId>,
+    distribution: Option<Vec<(TargetRef, u32)>>,
     convoke_with: Vec<ObjectId>,
     optional: OptionalPolicy,
     search_pick: SearchPolicy,
+    modal_back_face: Option<bool>,
+    replacement_choice: Option<usize>,
+    named_choice: Option<String>,
+    discard_cards: Vec<ObjectId>,
+    effect_zone_cards: Vec<ObjectId>,
+    copy_target: Option<ObjectId>,
+    spellbook_pick: Option<String>,
 }
 
 impl<'a> SpellCast<'a> {
@@ -1690,14 +1759,25 @@ impl<'a> SpellCast<'a> {
         SpellCast {
             runner,
             spell,
+            alternative_cast: None,
+            adventure_creature: None,
             casting_variant: None,
             modes: None,
             x: None,
             target_players: Vec::new(),
             target_objects: Vec::new(),
+            cost_objects: Vec::new(),
+            distribution: None,
             convoke_with: Vec::new(),
             optional: OptionalPolicy::default(),
             search_pick: SearchPolicy::default(),
+            modal_back_face: None,
+            replacement_choice: None,
+            named_choice: None,
+            discard_cards: Vec::new(),
+            effect_zone_cards: Vec::new(),
+            copy_target: None,
+            spellbook_pick: None,
         }
     }
 
@@ -1705,6 +1785,13 @@ impl<'a> SpellCast<'a> {
     /// resolution (CR 701.23).
     pub fn search_first_legal(mut self) -> Self {
         self.search_pick = SearchPolicy::FirstLegal;
+        self
+    }
+
+    /// Submit an empty candidate set at any `SearchChoice` during resolution
+    /// (CR 701.23d fail-to-find).
+    pub fn search_none(mut self) -> Self {
+        self.search_pick = SearchPolicy::None;
         self
     }
 
@@ -1742,6 +1829,20 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Choose whether to pay a keyword-granted alternative cost offered during
+    /// announcement (CR 601.2b / CR 118.9).
+    pub fn alternative_cast(mut self, decision: AlternativeCastDecision) -> Self {
+        self.alternative_cast = Some(decision);
+        self
+    }
+
+    /// Choose the creature face (`true`) or Adventure face (`false`) when the
+    /// engine offers an Adventure cast choice (CR 715.3a).
+    pub fn adventure_face(mut self, creature: bool) -> Self {
+        self.adventure_creature = Some(creature);
+        self
+    }
+
     /// Declare a player as an intended target (CR 601.2c). Matched to the first
     /// slot whose `legal_targets` contains it.
     pub fn target_player(mut self, player: PlayerId) -> Self {
@@ -1768,6 +1869,76 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Select objects for an announcement-time `PayCost` prompt such as an
+    /// additional sacrifice cost (CR 601.2f / CR 118.3).
+    pub fn pay_cost_with(mut self, objects: &[ObjectId]) -> Self {
+        self.cost_objects.extend_from_slice(objects);
+        self
+    }
+
+    /// Select permanents for an announcement-time sacrifice cost (CR 701.21a).
+    pub fn sacrifice_with(self, objects: &[ObjectId]) -> Self {
+        self.pay_cost_with(objects)
+    }
+
+    /// Submit an explicit distribution for a `DistributeAmong` prompt
+    /// (CR 601.2d / CR 608.2d).
+    pub fn distribute_among(mut self, distribution: &[(TargetRef, u32)]) -> Self {
+        self.distribution = Some(distribution.to_vec());
+        self
+    }
+
+    /// Choose which face of a spell//spell MDFC or split card to cast (CR
+    /// 712.11b / CR 709.3). Required when the engine surfaces
+    /// `WaitingFor::ModalFaceChoice`.
+    pub fn modal_back_face(mut self, back: bool) -> Self {
+        self.modal_back_face = Some(back);
+        self
+    }
+
+    /// Alias for [`SpellCast::modal_back_face`] matching the engine prompt name.
+    pub fn modal_face(self, back: bool) -> Self {
+        self.modal_back_face(back)
+    }
+
+    /// Choose a replacement candidate index at a `ReplacementChoice` prompt
+    /// during resolution (CR 616.1).
+    pub fn replacement_choice(mut self, index: usize) -> Self {
+        self.replacement_choice = Some(index);
+        self
+    }
+
+    /// Choose a named/string option at a `NamedChoice` prompt.
+    pub fn choose_option(mut self, choice: &str) -> Self {
+        self.named_choice = Some(choice.to_string());
+        self
+    }
+
+    /// Select cards for a resolution-time discard prompt (CR 701.9b).
+    pub fn discard(mut self, cards: &[ObjectId]) -> Self {
+        self.discard_cards.extend_from_slice(cards);
+        self
+    }
+
+    /// Select cards/permanents for a resolution-time zone choice.
+    pub fn effect_zone(mut self, cards: &[ObjectId]) -> Self {
+        self.effect_zone_cards.extend_from_slice(cards);
+        self
+    }
+
+    /// Choose a permanent for a copy-as-enters prompt (CR 707.9).
+    pub fn copy_target(mut self, target: ObjectId) -> Self {
+        self.copy_target = Some(target);
+        self
+    }
+
+    /// Draft this card name at any `SpellbookDraft` prompt during resolution
+    /// (Alchemy `Effect::DraftFromSpellbook`). Mirrors [`choose_option`].
+    pub fn spellbook_pick(mut self, name: &str) -> Self {
+        self.spellbook_pick = Some(name.to_string());
+        self
+    }
+
     /// Tap these creatures to pay the cost via Convoke (CR 702.51a). Each is
     /// tapped during the `ManaPayment { convoke_mode }` window with mana of the
     /// creature's first declared color (falling back to colorless for the
@@ -1781,17 +1952,33 @@ impl<'a> SpellCast<'a> {
     /// priority window opens (CR 601.2i). Use this when a test must inspect the
     /// live stack object before resolution.
     pub fn commit(self) -> CastCommit<'a> {
+        self.try_commit()
+            .expect("SpellCast commit must be accepted by the engine")
+    }
+
+    fn try_commit(self) -> Result<CastCommit<'a>, EngineError> {
         let SpellCast {
             runner,
             spell,
+            alternative_cast,
+            adventure_creature,
             casting_variant,
             modes,
             x,
             target_players,
             target_objects,
+            cost_objects,
+            distribution,
             convoke_with,
             optional,
             search_pick,
+            modal_back_face,
+            replacement_choice,
+            named_choice,
+            discard_cards,
+            effect_zone_cards,
+            copy_target,
+            spellbook_pick,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -1804,15 +1991,18 @@ impl<'a> SpellCast<'a> {
             .collect();
 
         let card_id = runner.state.objects[&spell].card_id;
-        runner
-            .act(GameAction::CastSpell {
+        let mut events = Vec::new();
+        act_collect(
+            runner,
+            GameAction::CastSpell {
                 object_id: spell,
                 card_id,
                 targets: vec![],
 
                 payment_mode: CastPaymentMode::Auto,
-            })
-            .expect("CastSpell must be accepted by the engine");
+            },
+            &mut events,
+        )?;
 
         // Intent the driver matches as it walks slots: object targets are
         // consumed one per slot (most slots are object slots), while player
@@ -1820,6 +2010,7 @@ impl<'a> SpellCast<'a> {
         // several modes — see `pick_slot_target`).
         let mut remaining_objects: Vec<ObjectId> = target_objects;
         let declared_players: Vec<PlayerId> = target_players;
+        let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
 
         // CR 601.2a: the spell leaves hand only at stack commit. Captured when
         // the driver reaches the post-cast `Priority` window.
@@ -1828,7 +2019,48 @@ impl<'a> SpellCast<'a> {
 
         for _ in 0..64 {
             match &runner.state.waiting_for {
-                // CR 601.2b: choose a legal cast variant the engine authored.
+                WaitingFor::CastOffer {
+                    kind: CastOfferKind::Adventure { .. },
+                    ..
+                } => {
+                    let creature = adventure_creature.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::CastOffer(Adventure) but no \
+                             .adventure_face(..) was declared — declare which face to cast"
+                        )
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ChooseAdventureFace { creature },
+                        &mut events,
+                    )?;
+                }
+                WaitingFor::ModalFaceChoice { .. } => {
+                    let back = modal_back_face.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::ModalFaceChoice but no \
+                             .modal_back_face(..) was declared — declare which face to cast"
+                        )
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ChooseModalFace { back_face: back },
+                        &mut events,
+                    )?;
+                }
+                WaitingFor::AlternativeCastChoice { .. } => {
+                    let choice = alternative_cast.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::AlternativeCastChoice but no \
+                             .alternative_cast(..) was declared — declare normal vs alternative"
+                        )
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ChooseAlternativeCast { choice },
+                        &mut events,
+                    )?;
+                }
                 WaitingFor::CastingVariantChoice { options, .. } => {
                     let variant = casting_variant.unwrap_or_else(|| {
                         panic!(
@@ -1846,9 +2078,11 @@ impl<'a> SpellCast<'a> {
                             )
                         });
                     selected_casting_variant = Some(options[index].clone());
-                    runner
-                        .act(GameAction::ChooseCastingVariant { index })
-                        .expect("ChooseCastingVariant must be accepted");
+                    act_collect(
+                        runner,
+                        GameAction::ChooseCastingVariant { index },
+                        &mut events,
+                    )?;
                 }
                 // CR 601.2b: modal spell announces its mode choice.
                 WaitingFor::ModeChoice { .. } => {
@@ -1858,9 +2092,7 @@ impl<'a> SpellCast<'a> {
                              declared — this is a modal spell; declare its chosen mode indices"
                         )
                     });
-                    runner
-                        .act(GameAction::SelectModes { indices })
-                        .expect("SelectModes must be accepted");
+                    act_collect(runner, GameAction::SelectModes { indices }, &mut events)?;
                 }
                 // CR 107.3a / CR 601.2b: announce X.
                 WaitingFor::ChooseXValue { .. } => {
@@ -1870,9 +2102,44 @@ impl<'a> SpellCast<'a> {
                              declared — this spell needs X announced"
                         )
                     });
-                    runner
-                        .act(GameAction::ChooseX { value })
-                        .expect("ChooseX must be accepted");
+                    act_collect(runner, GameAction::ChooseX { value }, &mut events)?;
+                }
+                // CR 601.2f: optional additional costs are chosen during
+                // announcement, before the spell is committed to the stack.
+                WaitingFor::OptionalCostChoice { .. } => {
+                    let pay = matches!(optional, OptionalPolicy::Accept);
+                    act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                }
+                // CR 601.2f / CR 118.3: additional non-mana costs that require
+                // selecting objects, such as sacrificing a creature.
+                WaitingFor::PayCost {
+                    choices,
+                    count,
+                    min_count,
+                    ..
+                } => {
+                    let chosen = pick_declared_cards(
+                        choices,
+                        *min_count,
+                        *count,
+                        &mut remaining_cost_objects,
+                        "PayCost",
+                    );
+                    act_collect(
+                        runner,
+                        GameAction::SelectCards { cards: chosen },
+                        &mut events,
+                    )?;
+                }
+                WaitingFor::DistributeAmong { total, targets, .. } => {
+                    let distribution = distribution
+                        .clone()
+                        .unwrap_or_else(|| default_distribution(*total, targets));
+                    act_collect(
+                        runner,
+                        GameAction::DistributeAmong { distribution },
+                        &mut events,
+                    )?;
                 }
                 // CR 702.51a / CR 601.2g–h: mana payment, possibly via convoke.
                 //
@@ -1896,17 +2163,17 @@ impl<'a> SpellCast<'a> {
                             .and_then(|obj| obj.color.first().copied())
                             .map(ManaType::from)
                             .unwrap_or(ManaType::Colorless);
-                        runner
-                            .act(GameAction::TapForConvoke {
+                        act_collect(
+                            runner,
+                            GameAction::TapForConvoke {
                                 object_id: creature,
                                 mana_type,
-                            })
-                            .expect("TapForConvoke must be accepted");
+                            },
+                            &mut events,
+                        )?;
                     }
                     // CR 601.2h: finalize the (now fully convoke-paid) cost.
-                    runner
-                        .act(GameAction::PassPriority)
-                        .expect("finalizing the convoke payment must be accepted");
+                    act_collect(runner, GameAction::PassPriority, &mut events)?;
                 }
                 // CR 601.2c: declare one target per slot, in written order.
                 WaitingFor::TargetSelection {
@@ -1921,9 +2188,11 @@ impl<'a> SpellCast<'a> {
                         &declared_players,
                         selection.current_slot,
                     );
-                    runner
-                        .act(GameAction::ChooseTarget { target: choice })
-                        .expect("ChooseTarget must be accepted");
+                    act_collect(
+                        runner,
+                        GameAction::ChooseTarget { target: choice },
+                        &mut events,
+                    )?;
                 }
                 // CR 601.2a: spell is on the stack — capture the hand baseline.
                 WaitingFor::Priority { .. } => {
@@ -1952,16 +2221,24 @@ impl<'a> SpellCast<'a> {
             )
         });
 
-        CastCommit {
+        Ok(CastCommit {
             runner,
             hand_baseline,
             life_before,
             remaining_objects,
             declared_players,
             selected_casting_variant,
+            events,
+            distribution,
             optional,
             search_pick,
-        }
+            replacement_choice,
+            named_choice,
+            discard_cards,
+            effect_zone_cards,
+            copy_target,
+            spellbook_pick,
+        })
     }
 
     /// Drive the full cast pipeline to its conclusion and return the outcome.
@@ -1973,6 +2250,12 @@ impl<'a> SpellCast<'a> {
     pub fn resolve(self) -> CastOutcome {
         self.commit().resolve()
     }
+
+    /// Drive the full cast pipeline and return engine rejection instead of
+    /// panicking when the reducer rejects a step.
+    pub fn try_resolve(self) -> Result<CastOutcome, EngineError> {
+        self.try_commit()?.try_resolve()
+    }
 }
 
 /// A spell committed to the stack, before resolution starts.
@@ -1983,8 +2266,16 @@ pub struct CastCommit<'a> {
     remaining_objects: Vec<ObjectId>,
     declared_players: Vec<PlayerId>,
     selected_casting_variant: Option<CastingVariantChoiceOption>,
+    events: Vec<GameEvent>,
+    distribution: Option<Vec<(TargetRef, u32)>>,
     optional: OptionalPolicy,
     search_pick: SearchPolicy,
+    replacement_choice: Option<usize>,
+    named_choice: Option<String>,
+    discard_cards: Vec<ObjectId>,
+    effect_zone_cards: Vec<ObjectId>,
+    copy_target: Option<ObjectId>,
+    spellbook_pick: Option<String>,
 }
 
 impl<'a> CastCommit<'a> {
@@ -2001,14 +2292,29 @@ impl<'a> CastCommit<'a> {
 
     /// Resolve the committed spell and return the usual behavior delta.
     pub fn resolve(self) -> CastOutcome {
+        self.try_resolve()
+            .expect("SpellCast resolution must be accepted by the engine")
+    }
+
+    /// Resolve the committed spell, returning reducer errors instead of
+    /// panicking.
+    pub fn try_resolve(self) -> Result<CastOutcome, EngineError> {
         let CastCommit {
             runner,
             hand_baseline,
             life_before,
             remaining_objects,
             declared_players,
+            mut events,
+            distribution,
             optional,
             search_pick,
+            replacement_choice,
+            named_choice,
+            discard_cards,
+            effect_zone_cards,
+            copy_target,
+            spellbook_pick,
             ..
         } = self;
 
@@ -2023,16 +2329,24 @@ impl<'a> CastCommit<'a> {
         let policy = ResolutionPolicy {
             targets_objects: remaining_objects,
             targets_players: declared_players,
+            distribution,
             optional,
             search_pick,
+            replacement_choice,
+            named_choice,
+            discard_cards,
+            effect_zone_cards,
+            copy_target,
+            spellbook_pick,
         };
-        drive_resolution(runner, &policy);
+        events.extend(drive_resolution(runner, &policy)?);
 
-        Outcome {
+        Ok(Outcome {
             state: runner.state.clone(),
+            events,
             hand_baseline,
             life_before,
-        }
+        })
     }
 }
 
@@ -2093,9 +2407,79 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::ScryChoice { .. } => "ScryChoice",
         WaitingFor::SearchChoice { .. } => "SearchChoice",
         WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+        WaitingFor::CastOffer { .. } => "CastOffer",
+        WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
+        WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
+        WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
+        WaitingFor::PayCost { .. } => "PayCost",
+        WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+        WaitingFor::SurveilChoice { .. } => "SurveilChoice",
+        WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
+        WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+        WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+        WaitingFor::NamedChoice { .. } => "NamedChoice",
+        WaitingFor::TributeChoice { .. } => "TributeChoice",
+        WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+        WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
+        WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
+        WaitingFor::CopyRetarget { .. } => "CopyRetarget",
         WaitingFor::GameOver { .. } => "GameOver",
         _ => "<other>",
     }
+}
+
+fn act_collect(
+    runner: &mut GameRunner,
+    action: GameAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let result = runner.act(action)?;
+    events.extend(result.events);
+    Ok(())
+}
+
+fn pick_declared_cards(
+    legal: &[ObjectId],
+    min_count: usize,
+    count: usize,
+    declared: &mut Vec<ObjectId>,
+    prompt: &str,
+) -> Vec<ObjectId> {
+    let selected: Vec<ObjectId> = declared
+        .iter()
+        .filter(|id| legal.contains(id))
+        .take(count)
+        .copied()
+        .collect();
+    assert!(
+        selected.len() >= min_count,
+        "{prompt} needs at least {min_count} declared legal object(s), found {}.\n  legal: \
+         {legal:?}\n  declared: {declared:?}",
+        selected.len()
+    );
+    declared.retain(|id| !selected.contains(id));
+    selected
+}
+
+fn default_distribution(total: u32, targets: &[TargetRef]) -> Vec<(TargetRef, u32)> {
+    if total == 0 || targets.is_empty() {
+        return Vec::new();
+    }
+
+    let chosen_len = targets.len().min(total as usize);
+    let mut distribution: Vec<_> = targets
+        .iter()
+        .take(chosen_len)
+        .cloned()
+        .map(|target| (target, 1))
+        .collect();
+    let assigned = distribution.len() as u32;
+    if assigned < total {
+        if let Some((_, amount)) = distribution.last_mut() {
+            *amount += total - assigned;
+        }
+    }
+    distribution
 }
 
 // ---------------------------------------------------------------------------
@@ -2131,6 +2515,7 @@ pub struct AbilityActivation<'a> {
     pay_with: Vec<ObjectId>,
     search_pick: SearchPolicy,
     optional: OptionalPolicy,
+    spellbook_pick: Option<String>,
 }
 
 impl<'a> AbilityActivation<'a> {
@@ -2146,6 +2531,7 @@ impl<'a> AbilityActivation<'a> {
             pay_with: Vec::new(),
             search_pick: SearchPolicy::default(),
             optional: OptionalPolicy::default(),
+            spellbook_pick: None,
         }
     }
 
@@ -2216,6 +2602,13 @@ impl<'a> AbilityActivation<'a> {
         self
     }
 
+    /// Draft this card name at any `SpellbookDraft` prompt during resolution
+    /// (Alchemy `Effect::DraftFromSpellbook`). Mirrors [`SpellCast::spellbook_pick`].
+    pub fn spellbook_pick(mut self, name: &str) -> Self {
+        self.spellbook_pick = Some(name.to_string());
+        self
+    }
+
     /// Drive the full activation pipeline to its conclusion and return the
     /// outcome. See [`SpellCast::resolve`] for the shared contract.
     pub fn resolve(self) -> Outcome {
@@ -2227,9 +2620,10 @@ impl<'a> AbilityActivation<'a> {
             x,
             target_players,
             target_objects,
-            pay_with: _pay_with,
+            pay_with,
             search_pick,
             optional,
+            spellbook_pick,
         } = self;
 
         // CR 119.3: snapshot life totals before activation for `life_delta`.
@@ -2242,12 +2636,16 @@ impl<'a> AbilityActivation<'a> {
 
         // CR 602.2a: announce the activation. The engine routes through the
         // same announcement-to-payment steps as casting (CR 602.2b).
-        runner
-            .act(GameAction::ActivateAbility {
+        let mut events = Vec::new();
+        act_collect(
+            runner,
+            GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
-            })
-            .expect("ActivateAbility must be accepted by the engine");
+            },
+            &mut events,
+        )
+        .expect("ActivateAbility must be accepted by the engine");
 
         let mut remaining_objects: Vec<ObjectId> = target_objects;
         let declared_players: Vec<PlayerId> = target_players;
@@ -2266,8 +2664,7 @@ impl<'a> AbilityActivation<'a> {
                              .modes(..) were declared — declare its chosen mode indices"
                         )
                     });
-                    runner
-                        .act(GameAction::SelectModes { indices })
+                    act_collect(runner, GameAction::SelectModes { indices }, &mut events)
                         .expect("SelectModes (ability mode) must be accepted");
                 }
                 // CR 601.2f / CR 602.2b: announce X.
@@ -2278,8 +2675,7 @@ impl<'a> AbilityActivation<'a> {
                              was declared — this ability needs X announced"
                         )
                     });
-                    runner
-                        .act(GameAction::ChooseX { value })
+                    act_collect(runner, GameAction::ChooseX { value }, &mut events)
                         .expect("ChooseX must be accepted");
                 }
                 // CR 601.2c: declare one target per slot, in written order.
@@ -2295,9 +2691,12 @@ impl<'a> AbilityActivation<'a> {
                         &declared_players,
                         selection.current_slot,
                     );
-                    runner
-                        .act(GameAction::ChooseTarget { target: choice })
-                        .expect("ChooseTarget must be accepted");
+                    act_collect(
+                        runner,
+                        GameAction::ChooseTarget { target: choice },
+                        &mut events,
+                    )
+                    .expect("ChooseTarget must be accepted");
                 }
                 // CR 602.2b: ability is on the stack — capture the baseline.
                 WaitingFor::Priority { .. } => {
@@ -2317,9 +2716,26 @@ impl<'a> AbilityActivation<'a> {
                 // it can't cover the cost, PassPriority errors and the `.expect`
                 // below fails loudly.
                 WaitingFor::ManaPayment { .. } => {
-                    runner
-                        .act(GameAction::PassPriority)
+                    act_collect(runner, GameAction::PassPriority, &mut events)
                         .expect("finalizing the ability's mana payment must be accepted");
+                }
+                // CR 602.2b + CR 601.2h: pay a non-mana cost (e.g. sacrificing or
+                // exiling a specific permanent named by the cost). Activating an
+                // ability follows the 601.2 process (602.2b); 601.2h is the
+                // object-moving cost-payment step. Submit the pre-declared
+                // `.pay_with(..)` object(s).
+                WaitingFor::PayCost { .. } => {
+                    if pay_with.is_empty() {
+                        panic!(
+                            "AbilityActivation reached WaitingFor::PayCost but no .pay_with(..) \
+                             objects were declared — declare the object(s) that pay this cost"
+                        );
+                    }
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: pay_with.clone(),
+                        })
+                        .expect("SelectCards (cost payment) must be accepted");
                 }
                 other => panic!(
                     "AbilityActivation driver does not handle WaitingFor::{} yet — extend the \
@@ -2340,13 +2756,23 @@ impl<'a> AbilityActivation<'a> {
         let policy = ResolutionPolicy {
             targets_objects: remaining_objects,
             targets_players: declared_players,
+            distribution: None,
             search_pick,
             optional,
+            replacement_choice: None,
+            named_choice: None,
+            discard_cards: Vec::new(),
+            effect_zone_cards: Vec::new(),
+            copy_target: None,
+            spellbook_pick,
         };
-        drive_resolution(runner, &policy);
+        events.extend(
+            drive_resolution(runner, &policy).expect("ability resolution must be accepted"),
+        );
 
         Outcome {
             state: runner.state.clone(),
+            events,
             hand_baseline,
             life_before,
         }
@@ -2397,10 +2823,27 @@ pub struct ResolutionPolicy {
     /// Player targets the driver may assign, reusable across slots (one player
     /// may be targeted by several modes — see [`pick_slot_target`]).
     pub targets_players: Vec<PlayerId>,
+    /// Explicit distribution for `DistributeAmong`; otherwise the driver uses a
+    /// deterministic legal split.
+    pub distribution: Option<Vec<(TargetRef, u32)>>,
     /// How to answer a `SearchChoice` (CR 701.23). Defaults to `Stop`.
     pub search_pick: SearchPolicy,
     /// How to answer an optional effect / cost prompt. Defaults to `Decline`.
     pub optional: OptionalPolicy,
+    /// Replacement candidate index to choose at `ReplacementChoice` (CR 616.1).
+    pub replacement_choice: Option<usize>,
+    /// Option label/name to choose at `NamedChoice`.
+    pub named_choice: Option<String>,
+    /// Cards to submit at `DiscardChoice`.
+    pub discard_cards: Vec<ObjectId>,
+    /// Objects to submit at `EffectZoneChoice`.
+    pub effect_zone_cards: Vec<ObjectId>,
+    /// Permanent to choose at `CopyTargetChoice`.
+    pub copy_target: Option<ObjectId>,
+    /// Card name to draft at a `SpellbookDraft` prompt (Alchemy
+    /// `Effect::DraftFromSpellbook`). `None` halts the driver so tests without a
+    /// pick can inspect the offered `options` via `final_waiting_for()`.
+    pub spellbook_pick: Option<String>,
 }
 
 /// Drive the engine through resolution, answering the prompts the harness knows
@@ -2413,11 +2856,17 @@ pub struct ResolutionPolicy {
 /// all use one resolution policy. It panics with an extend-me message only on
 /// an *unsatisfiable required slot* — any other unhandled prompt simply breaks
 /// the loop, leaving the state for the caller.
-fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
+fn drive_resolution(
+    runner: &mut GameRunner,
+    policy: &ResolutionPolicy,
+) -> Result<Vec<GameEvent>, EngineError> {
     // Object intent is consumed per slot; player intent is reusable. Mirrors
     // the SpellCast cast-time loop.
     let mut remaining_objects: Vec<ObjectId> = policy.targets_objects.clone();
     let declared_players: &[PlayerId] = &policy.targets_players;
+    let mut discard_cards = policy.discard_cards.clone();
+    let mut effect_zone_cards = policy.effect_zone_cards.clone();
+    let mut events = Vec::new();
 
     for _ in 0..64 {
         match &runner.state.waiting_for {
@@ -2428,9 +2877,23 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
             // CR 701.22a: default scry policy keeps the looked-at cards on top.
             WaitingFor::ScryChoice { cards, .. } => {
                 let cards = cards.clone();
-                runner
-                    .act(GameAction::SelectCards { cards })
-                    .expect("SelectCards (scry) must be accepted");
+                act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
+            }
+            // CR 701.25a: default surveil policy keeps all looked-at cards on
+            // top, mirroring the scry default.
+            WaitingFor::SurveilChoice { cards, .. } => {
+                let cards = cards.clone();
+                act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
+            }
+            // CR 705.1 + CR 614.1a: with replacement-created multiple flip
+            // results, keep the first required result deterministically.
+            WaitingFor::CoinFlipKeepChoice { keep_count, .. } => {
+                let keep_indices = (0..*keep_count).collect();
+                act_collect(
+                    runner,
+                    GameAction::SelectCoinFlips { keep_indices },
+                    &mut events,
+                )?;
             }
             // CR 603.3d: a triggered ability declares one target per slot, in
             // written order — identical mechanics to cast-time TargetSelection.
@@ -2446,9 +2909,11 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                     declared_players,
                     selection.current_slot,
                 );
-                runner
-                    .act(GameAction::ChooseTarget { target: choice })
-                    .expect("ChooseTarget (trigger) must be accepted");
+                act_collect(
+                    runner,
+                    GameAction::ChooseTarget { target: choice },
+                    &mut events,
+                )?;
             }
             // CR 608.2c: Some resolving spell abilities choose targets during
             // resolution. Reuse the same slot-matching policy as cast-time
@@ -2465,9 +2930,11 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                     declared_players,
                     selection.current_slot,
                 );
-                runner
-                    .act(GameAction::ChooseTarget { target: choice })
-                    .expect("ChooseTarget (resolution) must be accepted");
+                act_collect(
+                    runner,
+                    GameAction::ChooseTarget { target: choice },
+                    &mut events,
+                )?;
             }
             // CR 601.2c: a variable-count multi-target set is submitted as one
             // SelectCards of the declared object targets that are legal here.
@@ -2494,38 +2961,149 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                     chosen.len()
                 );
                 remaining_objects.retain(|o| !chosen.contains(o));
-                runner
-                    .act(GameAction::SelectCards { cards: chosen })
-                    .expect("SelectCards (multi-target) must be accepted");
+                act_collect(
+                    runner,
+                    GameAction::SelectCards { cards: chosen },
+                    &mut events,
+                )?;
+            }
+            WaitingFor::DistributeAmong { total, targets, .. } => {
+                let distribution = policy
+                    .distribution
+                    .clone()
+                    .unwrap_or_else(|| default_distribution(*total, targets));
+                act_collect(
+                    runner,
+                    GameAction::DistributeAmong { distribution },
+                    &mut events,
+                )?;
             }
             // CR 701.23: search the library per the declared search policy.
             WaitingFor::SearchChoice { cards, count, .. } => match policy.search_pick {
                 SearchPolicy::Stop => break,
                 SearchPolicy::None => {
-                    runner
-                        .act(GameAction::SelectCards { cards: vec![] })
-                        .expect("SelectCards (search fail-to-find) must be accepted");
+                    act_collect(
+                        runner,
+                        GameAction::SelectCards { cards: vec![] },
+                        &mut events,
+                    )?;
                 }
                 SearchPolicy::FirstLegal => {
                     let picked: Vec<ObjectId> = cards.iter().take(*count).copied().collect();
-                    runner
-                        .act(GameAction::SelectCards { cards: picked })
-                        .expect("SelectCards (search) must be accepted");
+                    act_collect(
+                        runner,
+                        GameAction::SelectCards { cards: picked },
+                        &mut events,
+                    )?;
                 }
             },
             // CR 609.3: accept or decline an optional ("you may") effect.
             WaitingFor::OptionalEffectChoice { .. } => {
                 let accept = matches!(policy.optional, OptionalPolicy::Accept);
-                runner
-                    .act(GameAction::DecideOptionalEffect { accept })
-                    .expect("DecideOptionalEffect must be accepted");
+                act_collect(
+                    runner,
+                    GameAction::DecideOptionalEffect { accept },
+                    &mut events,
+                )?;
+            }
+            WaitingFor::TributeChoice { .. } => {
+                let accept = matches!(policy.optional, OptionalPolicy::Accept);
+                act_collect(
+                    runner,
+                    GameAction::DecideOptionalEffect { accept },
+                    &mut events,
+                )?;
             }
             // CR 601.2f: pay or decline an optional cost during resolution.
             WaitingFor::OptionalCostChoice { .. } => {
                 let pay = matches!(policy.optional, OptionalPolicy::Accept);
-                runner
-                    .act(GameAction::DecideOptionalCost { pay })
-                    .expect("DecideOptionalCost must be accepted");
+                act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                let Some(index) = policy.replacement_choice else {
+                    break;
+                };
+                act_collect(runner, GameAction::ChooseReplacement { index }, &mut events)?;
+            }
+            WaitingFor::NamedChoice { .. } => {
+                let Some(choice) = policy.named_choice.clone() else {
+                    break;
+                };
+                act_collect(runner, GameAction::ChooseOption { choice }, &mut events)?;
+            }
+            // Alchemy `Effect::DraftFromSpellbook`: draft the declared card name
+            // from the drafting source's spellbook `options`. No pick declared →
+            // halt so the caller can assert the offered options and the draft
+            // boundary via `final_waiting_for()`.
+            WaitingFor::SpellbookDraft { options, .. } => {
+                let Some(card) = policy.spellbook_pick.clone() else {
+                    break;
+                };
+                debug_assert!(
+                    options.contains(&card),
+                    "spellbook_pick {card:?} is not in the drafting source's spellbook {options:?}"
+                );
+                act_collect(
+                    runner,
+                    GameAction::SubmitSpellbookDraft { card },
+                    &mut events,
+                )?;
+            }
+            WaitingFor::DiscardChoice {
+                cards,
+                count,
+                up_to,
+                ..
+            } => {
+                if discard_cards.is_empty() {
+                    break;
+                }
+                let min = if *up_to { 0 } else { *count };
+                let chosen =
+                    pick_declared_cards(cards, min, *count, &mut discard_cards, "DiscardChoice");
+                act_collect(
+                    runner,
+                    GameAction::SelectCards { cards: chosen },
+                    &mut events,
+                )?;
+            }
+            WaitingFor::EffectZoneChoice {
+                cards,
+                count,
+                min_count,
+                ..
+            } => {
+                if effect_zone_cards.is_empty() {
+                    break;
+                }
+                let chosen = pick_declared_cards(
+                    cards,
+                    *min_count,
+                    *count,
+                    &mut effect_zone_cards,
+                    "EffectZoneChoice",
+                );
+                act_collect(
+                    runner,
+                    GameAction::SelectCards { cards: chosen },
+                    &mut events,
+                )?;
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                let Some(target) = policy.copy_target else {
+                    break;
+                };
+                assert!(
+                    valid_targets.contains(&target),
+                    "CopyTargetChoice target {target:?} is not in legal set {valid_targets:?}"
+                );
+                act_collect(
+                    runner,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    },
+                    &mut events,
+                )?;
             }
             // CR 605.3b + CR 608.2d: complete a mana-color choice during effect
             // resolution (Vexing Puzzlebox: add one mana of any color, then roll
@@ -2543,19 +3121,24 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                         ManaChoice::Combination(options.first().cloned().unwrap_or_default())
                     }
                 };
-                runner
-                    .act(GameAction::ChooseManaColor {
+                act_collect(
+                    runner,
+                    GameAction::ChooseManaColor {
                         choice: mana_choice,
                         count: 1,
-                    })
-                    .expect("ChooseManaColor must be accepted");
+                    },
+                    &mut events,
+                )?;
             }
             WaitingFor::Priority { .. } => {
                 if runner.state.stack.is_empty() {
                     break;
                 }
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
+                match runner.act(GameAction::PassPriority) {
+                    Ok(result) => events.extend(result.events),
+                    Err(_) => {
+                        break;
+                    }
                 }
             }
             // Any other prompt (e.g. a non-convoke ManaPayment, or a choice the
@@ -2566,6 +3149,7 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
             _ => break,
         }
     }
+    Ok(events)
 }
 
 // ---------------------------------------------------------------------------
@@ -2577,6 +3161,7 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
 /// and [`GameRunner::combat_damage`].
 pub struct Outcome {
     state: GameState,
+    events: Vec<GameEvent>,
     /// Per-player hand sizes captured at stack commit (CR 601.2a) — the clean
     /// baseline for resolution-draw deltas (foot-gun 3 fix).
     hand_baseline: Vec<(PlayerId, usize)>,
@@ -2646,10 +3231,23 @@ impl Outcome {
         &self.state.waiting_for
     }
 
+    /// Engine events emitted by every action the harness drove.
+    pub fn events(&self) -> &[GameEvent] {
+        &self.events
+    }
+
     /// Read-only view of the final game state for assertions the typed
     /// accessors don't yet cover.
     pub fn state(&self) -> &GameState {
         &self.state
+    }
+
+    /// Find an object in the final state by predicate.
+    pub fn find_object(&self, mut pred: impl FnMut(&GameObject) -> bool) -> Option<ObjectId> {
+        self.state
+            .objects
+            .iter()
+            .find_map(|(id, obj)| pred(obj).then_some(*id))
     }
 
     /// Assert net cards drawn since stack commit (foot-gun 3 fix).
@@ -3751,6 +4349,51 @@ mod tests {
     }
 
     #[test]
+    fn from_oracle_text_ixhel_carries_poison_scoped_trigger() {
+        use crate::types::ability::{Effect, PlayerFilter, PlayerRelation};
+
+        const IXHEL: &str = "Flying, vigilance, toxic 2\nCorrupted — At the beginning of your end step, each opponent who has three or more poison counters exiles the top card of their library face down. You may look at and play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.";
+
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature_from_oracle(P0, "Ixhel, Scion of Atraxa", 4, 4, IXHEL)
+            .id();
+        let runner = scenario.build();
+        let trigger = runner.state().objects[&id]
+            .trigger_definitions
+            .iter_all()
+            .find(|t| {
+                t.description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("poison counters"))
+            })
+            .expect("ixhel end-step trigger");
+        let execute = trigger.execute.as_ref().expect("execute");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ExileTop {
+                    face_down: true,
+                    ..
+                }
+            ),
+            "scenario oracle path must lower to face-down ExileTop, got {:?}",
+            execute.effect
+        );
+        assert!(
+            matches!(
+                execute.player_scope,
+                Some(PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    ..
+                })
+            ),
+            "scenario oracle path must preserve poison player scope, got {:?}",
+            execute.player_scope
+        );
+    }
+
+    #[test]
     fn from_oracle_text_trigger() {
         let mut scenario = GameScenario::new();
         let id = scenario
@@ -4049,6 +4692,108 @@ mod tests {
             outcome.state().objects[&victim].damage_marked,
             0,
             "CR 701.19a: regeneration removes all marked damage"
+        );
+    }
+
+    /// CR 613.1f + CR 613.4b + CR 205.1b: Curious Colossus end-to-end. Its ETB
+    /// targets an opponent; each creature that opponent controls "loses all
+    /// abilities, becomes a Coward in addition to its other types, and has base
+    /// power and toughness 1/1". After casting through the real pipeline and
+    /// evaluating layers, the affected creature must (a) have no abilities/
+    /// keywords (layer 6 RemoveAllAbilities), (b) gain the Coward subtype while
+    /// KEEPING its prior subtype (CR 205.1b additive), and (c) have effective
+    /// power/toughness 1/1 (layer 7b set). The comma-split guards are what keep
+    /// the trailing base-P/T conjunct in the GenericEffect; if reverted, the base
+    /// P/T conjunct orphans to Unimplemented and the creature stays 3/4.
+    #[test]
+    fn curious_colossus_etb_strips_abilities_adds_subtype_sets_base_pt() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // The opponent's victim: a 3/4 Bird with flying.
+        let victim = scenario
+            .add_creature(P1, "Victim Bird", 3, 4)
+            .with_subtypes(vec!["Bird"])
+            .flying()
+            .id();
+
+        // Curious Colossus in P0's hand, parsed from its real Oracle text.
+        let colossus = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Curious Colossus",
+                7,
+                7,
+                "When this creature enters, each creature target opponent controls \
+                 loses all abilities, becomes a Coward in addition to its other types, \
+                 and has base power and toughness 1/1.",
+            )
+            .id();
+
+        // Fund {5}{W}{W} from the pool (2 White + 5 Colorless).
+        let mut mana = vec![ManaUnit::new(ManaType::White, ObjectId(9_999), false, vec![]); 2];
+        mana.extend(vec![
+            ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(9_999),
+                false,
+                vec![]
+            );
+            5
+        ]);
+        scenario.with_mana_pool(P0, mana);
+
+        let mut runner = scenario.build();
+
+        // Cast Curious Colossus; its ETB targets opponent P1.
+        let outcome = runner.cast(colossus).target_player(P1).resolve();
+
+        // Evaluate layers on the resolved state and inspect the affected creature.
+        let mut state = outcome.state().clone();
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let obj = state
+            .objects
+            .get(&victim)
+            .expect("victim still on battlefield");
+
+        // (a) CR 613.1f: all abilities/keywords removed.
+        assert!(
+            !crate::game::keywords::has_keyword(obj, &Keyword::Flying),
+            "RemoveAllAbilities must strip flying, keywords={:?}",
+            obj.keywords
+        );
+        assert!(
+            obj.abilities.is_empty(),
+            "RemoveAllAbilities must clear printed abilities, got {:?}",
+            obj.abilities
+        );
+
+        // (b) CR 205.1b: Coward added "in addition to its other types" — prior
+        // Bird subtype is KEPT.
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Coward"),
+            "must gain the Coward subtype, subtypes={:?}",
+            obj.card_types.subtypes
+        );
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Bird"),
+            "must KEEP the prior Bird subtype (additive), subtypes={:?}",
+            obj.card_types.subtypes
+        );
+
+        // (c) CR 613.4b: base power and toughness set to 1/1.
+        assert_eq!(
+            obj.power,
+            Some(1),
+            "effective power must be 1, got {:?}",
+            obj.power
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(1),
+            "effective toughness must be 1, got {:?}",
+            obj.toughness
         );
     }
 }

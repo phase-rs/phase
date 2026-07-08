@@ -32,6 +32,27 @@ pub fn count_devotion(state: &GameState, player: PlayerId, colors: &[ManaColor])
     total
 }
 
+/// CR 107.4a + CR 107.4e + CR 202.1: Count colored mana symbols of `color` in a
+/// single mana cost. Hybrid symbols contribute to each of their colors (so {W/U}
+/// counts toward both white and blue), Phyrexian colored symbols count for their
+/// color, and generic/colorless symbols never count. This is the per-object
+/// building block behind chroma in any zone: summed over a zone-scoped filter via
+/// `QuantityRef::Aggregate` + `ObjectProperty::ManaSymbolCount` (e.g. Umbra
+/// Stalker's "black mana symbols among cards in your graveyard"). `count_devotion`
+/// is the battlefield-permanent analogue (CR 700.5).
+pub fn count_cost_color_symbols(cost: &ManaCost, color: ManaColor) -> u32 {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return 0;
+    };
+    let mut total = 0u32;
+    for shard in shards {
+        if shard.contributes_to(color) {
+            total += 1;
+        }
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +276,43 @@ mod tests {
         assert!(!ManaCostShard::Colorless.contributes_to(ManaColor::White));
         assert!(!ManaCostShard::Snow.contributes_to(ManaColor::Blue));
         assert!(!ManaCostShard::X.contributes_to(ManaColor::Red));
+    }
+
+    // CR 107.4a + CR 202.1: per-cost colored-symbol counting building block.
+    #[test]
+    fn cost_color_symbols_counts_matching_shards() {
+        // {B}{B}{B} → 3 black symbols, 0 red.
+        let cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            generic: 0,
+        };
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Black), 3);
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Red), 0);
+    }
+
+    // CR 107.4e: a hybrid symbol is all of its component colors, so it counts
+    // toward each color (but is still a single symbol).
+    #[test]
+    fn cost_color_symbols_hybrid_counts_for_each_color() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::BlueBlack, ManaCostShard::BlueBlack],
+            generic: 1,
+        };
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Black), 2);
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Blue), 2);
+    }
+
+    // Generic-only mana costs contribute no colored symbols.
+    #[test]
+    fn cost_color_symbols_zero_for_generic_only() {
+        let cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        };
+        assert_eq!(count_cost_color_symbols(&cost, ManaColor::Black), 0);
     }
 }

@@ -61,10 +61,13 @@ pub fn open_attractions(
         // opened object itself (the pre-pipeline raw move recorded no source).
         //
         // CR 616.1: a battlefield-entry pause IS reachable here — two co-played
-        // external enter-tapped `Moved` effects (the Kismet / Frozen Aether
-        // class parses as ChangeZone Moved defs) both write the entry event's
-        // tap field, a material same-field collision that surfaces an ordering
-        // prompt. On the pause, the paused Attraction's open bookkeeping and
+        // external `Moved` effects can write the entry event's tap field in
+        // *opposite* directions (a "enters tapped" Frozen Aether class effect +
+        // a "enters untapped" Spelunking / Archelos class effect), a material
+        // same-field collision (last-applied-wins) that surfaces an ordering
+        // prompt. (Two same-direction writes are idempotent and commute without
+        // a prompt — see replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`.)
+        // On the pause, the paused Attraction's open bookkeeping and
         // the REMAINING opens of this instruction are deferred onto a
         // `BatchCompletion::AttractionOpenRemainder` so the replacement-choice
         // resume runs them — the old bail `break` left `in_attraction_deck`
@@ -258,9 +261,25 @@ mod tests {
             attractions.push(id);
         }
 
-        // Two external enter-tapped Moved replacements (Kismet / Frozen Aether
-        // class) — both write the entry event's tap field, so CR 616.1 prompts.
-        for (offset, name) in [(0u64, "Kismet"), (1, "Frozen Aether")] {
+        // A genuinely *material* enter tap-state collision: one replacement makes
+        // the entering permanent enter tapped (Frozen Aether class), the other
+        // makes it enter untapped (Spelunking / Archelos class). Opposite
+        // directions are last-applied-wins, so CR 616.1e/f requires the
+        // controller to order them and the open parks on a ReplacementChoice.
+        // (Two *same*-direction writes are idempotent and commute — they would
+        // not prompt; see replacement.rs `CommuteClass::EnterTapped`/`EnterUntapped`.)
+        for (offset, name, state_change) in [
+            (
+                0u64,
+                "Frozen Aether",
+                crate::types::ability::TapStateChange::Tap,
+            ),
+            (
+                1,
+                "Spelunking",
+                crate::types::ability::TapStateChange::Untap,
+            ),
+        ] {
             let oid = ObjectId(9000 + offset);
             let mut src = GameObject::new(
                 oid,
@@ -275,7 +294,7 @@ mod tests {
                     Effect::SetTapState {
                         target: TargetFilter::SelfRef,
                         scope: crate::types::ability::EffectScope::Single,
-                        state: crate::types::ability::TapStateChange::Tap,
+                        state: state_change,
                     },
                 ))
                 .destination_zone(Zone::Battlefield)
@@ -288,13 +307,14 @@ mod tests {
         let mut events = Vec::new();
         open_attractions(&mut state, player, 2, &mut events).expect("open attractions");
 
-        // CR 616.1: the first open parked on the enter-tapped collision.
+        // CR 616.1: the first open parked on the tap/untap (opposite-direction)
+        // collision.
         let WaitingFor::ReplacementChoice {
             player: chooser, ..
         } = state.waiting_for.clone()
         else {
             panic!(
-                "expected parked ReplacementChoice for the enter-tapped collision, got {:?}",
+                "expected parked ReplacementChoice for the tap/untap collision, got {:?}",
                 state.waiting_for
             );
         };

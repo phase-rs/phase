@@ -30,7 +30,11 @@
   "deck": {
     "backToDeck": "Voltar ao deck",
     "listView": "Visualização em lista",
-    "stackView": "Visualização em pilha"
+    "stackView": "Visualização em pilha",
+    "groupType": "Tipo",
+    "groupColor": "Cor",
+    "groupByType": "Agrupar por tipo",
+    "groupByColor": "Agrupar por cor"
   },
   "tabs": {
     "ariaLabel": "Superfície do construtor de decks",
@@ -48,7 +52,11 @@
     "clone": "Clonar",
     "cloneTitle": "Salvar uma cópia com um novo nome",
     "loadDeck": "Carregar deck...",
-    "nameToSave": "Dê um nome ao deck para salvá-lo"
+    "nameToSave": "Dê um nome ao deck para salvá-lo",
+    "savedToastTitle": "Deck salvo",
+    "savedToastDescription": "\"{{name}}\" foi salvo nos seus decks.",
+    "clonedToastTitle": "Deck clonado",
+    "clonedToastDescription": "Uma cópia foi salva como \"{{name}}\"."
   },
   "unsaved": {
     "title": "Alterações não salvas",
@@ -95,13 +103,31 @@
     "sideboardEmptyHint": "Passe o mouse sobre uma carta do deck principal e clique em → para movê-la para cá.",
     "group": {
       "Creatures": "Criaturas",
-      "Spells": "Mágicas",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Mágicas Instantâneas",
+      "Sorceries": "Feitiços",
+      "Artifacts": "Artefatos",
+      "Enchantments": "Encantamentos",
+      "Battles": "Batalhas",
+      "Lands": "Terrenos",
+      "Other": "Outros"
+    },
+    "colorGroup": {
+      "White": "Branco",
+      "Blue": "Azul",
+      "Black": "Preto",
+      "Red": "Vermelho",
+      "Green": "Verde",
+      "Multicolor": "Multicolorido",
+      "Colorless": "Incolor",
       "Lands": "Terrenos"
     },
     "importModalTitle": "Importar Deck",
     "pastePlaceholder": "Cole a lista do deck (formato MTGA ou .dck)...",
     "fromFile": "De Arquivo",
     "parse": "Processar",
+    "parsing": "Processando…",
+    "parseError": "Nenhuma carta encontrada. Cole um deck no formato MTGA ou .dck.",
     "exportModalTitle": "Exportar Deck",
     "saveToFile": "Salvar em Arquivo",
     "copied": "Copiado!",
@@ -136,7 +162,23 @@
     "groupCards_other": "{{count}} cartas",
     "group": {
       "Creatures": "Criaturas",
-      "Spells": "Mágicas",
+      "Planeswalkers": "Planeswalkers",
+      "Instants": "Mágicas Instantâneas",
+      "Sorceries": "Feitiços",
+      "Artifacts": "Artefatos",
+      "Enchantments": "Encantamentos",
+      "Battles": "Batalhas",
+      "Lands": "Terrenos",
+      "Other": "Outros"
+    },
+    "colorGroup": {
+      "White": "Branco",
+      "Blue": "Azul",
+      "Black": "Preto",
+      "Red": "Vermelho",
+      "Green": "Verde",
+      "Multicolor": "Multicolorido",
+      "Colorless": "Incolor",
       "Lands": "Terrenos"
     },
     "sideboardGroup": "Sideboard",
@@ -231,5 +273,11 @@
     "minimumCount": "O deck tem {{count}} cartas (mínimo de 60)",
     "maxCopies": "{{name}}: {{count}} cópias (máx. 4)",
     "companionInMain": "{{name}} é seu companheiro, mas também está no deck principal — isso viola sua condição de construção. Remova-o do deck principal para usá-lo como companheiro."
+  },
+  "switcher": {
+    "starred": "Destacados",
+    "unfiled": "Sem pasta",
+    "searchPlaceholder": "Buscar baralhos…",
+    "noMatches": "Nenhum baralho"
   }
 }

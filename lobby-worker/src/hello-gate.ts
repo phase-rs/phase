@@ -1,9 +1,5 @@
 // Mirrors phase-server `classify_hello_gate` for the Cloudflare DO shell.
 
-import { PROTOCOL_VERSION } from "./protocol";
-
-export const MIN_SUPPORTED_PROTOCOL = PROTOCOL_VERSION - 1;
-
 export type HelloGateOutcome =
   | { kind: "accept" }
   | { kind: "reject_handshake" }
@@ -21,18 +17,21 @@ export interface ConnAttachment {
 export function classifyHelloGate(
   helloReceived: boolean,
   frame: { type?: string; data?: Record<string, unknown> },
+  serverProtocolVersion: number,
 ): HelloGateOutcome {
+  const minSupportedProtocol = Math.max(0, serverProtocolVersion - 1);
   if (frame.type === "ClientHello") {
     if (!helloReceived) {
       const protocolVersion = Number(frame.data?.protocol_version ?? 0);
       if (
-        protocolVersion < MIN_SUPPORTED_PROTOCOL ||
-        protocolVersion > PROTOCOL_VERSION
+        Number.isNaN(protocolVersion) ||
+        protocolVersion < minSupportedProtocol ||
+        protocolVersion > serverProtocolVersion
       ) {
         return {
           kind: "reject_protocol",
           client: protocolVersion,
-          server: PROTOCOL_VERSION,
+          server: serverProtocolVersion,
         };
       }
       return { kind: "accept" };

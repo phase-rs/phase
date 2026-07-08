@@ -116,6 +116,7 @@ pub fn gate_candidates(
                     config,
                     context,
                     cast_facts: None,
+                    search_depth: crate::policies::context::SearchDepth::Root,
                 };
                 assess_candidate(&policy_ctx)
             };
@@ -737,6 +738,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
@@ -795,6 +797,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
@@ -869,6 +872,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert_eq!(
@@ -942,6 +946,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
 
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
@@ -960,6 +965,7 @@ mod tests {
                             amount: engine::types::ability::QuantityExpr::Fixed { value: damage },
                             target: TargetFilter::Any,
                             damage_source: None,
+                            excess: None,
                         },
                         Vec::new(),
                         ObjectId(900),
@@ -1011,6 +1017,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
     }
@@ -1034,6 +1041,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
     }
@@ -1061,6 +1069,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
     }
@@ -1087,6 +1096,7 @@ mod tests {
             config: &config,
             context: &AiContext::empty(&config.weights),
             cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
     }

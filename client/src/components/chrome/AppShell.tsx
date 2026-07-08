@@ -1,7 +1,9 @@
 import { Suspense, useState } from "react";
 import { Outlet } from "react-router";
 
+import { useChangelog } from "../../hooks/useChangelog";
 import { SceneParticles } from "../menu/MenuParticles";
+import { WhatsNewModal } from "../modal/WhatsNewModal";
 import { CardDataLoadingBar } from "./CardDataLoadingBar";
 import { ChromeControls } from "./ChromeControls";
 import { Rail } from "./Rail";
@@ -22,6 +24,14 @@ export function AppShell() {
   // The shell owns settings-modal state so the rail's Settings button and the
   // (controlled) ChromeControls cog share one PreferencesModal instance.
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // "What's New": the unread dot lives on the rail, the modal is shell-owned.
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
+  const changelog = useChangelog();
+  const openWhatsNew = () => {
+    setWhatsNewOpen(true);
+    changelog.openAndLoad();
+  };
 
   return (
     <ShellProvider value={true}>
@@ -49,7 +59,11 @@ export function AppShell() {
             occupy real layout space (sticky), so page content can never slide
             under them — no ml/pt reserves, no z-index races for in-flow chrome. */}
         <div className="relative z-10 flex min-h-screen">
-          <Rail onSettings={() => setSettingsOpen(true)} />
+          <Rail
+            onSettings={() => setSettingsOpen(true)}
+            onWhatsNew={openWhatsNew}
+            hasUnread={changelog.hasUnread}
+          />
           <div className="flex min-w-0 flex-1 flex-col">
             {/* Sticky top chrome row: hosts the social strip and reserves the
                 vertical band the fixed top-right ChromeControls occupy (44px
@@ -73,11 +87,21 @@ export function AppShell() {
           </div>
         </div>
 
-        <TabBar />
+        <TabBar onWhatsNew={openWhatsNew} hasUnread={changelog.hasUnread} />
         <ChromeControls
           settingsOpen={settingsOpen}
           onSettingsOpenChange={setSettingsOpen}
         />
+
+        {whatsNewOpen && (
+          <WhatsNewModal
+            entries={changelog.entries}
+            loading={changelog.loading}
+            failed={changelog.failed}
+            onRetry={changelog.openAndLoad}
+            onClose={() => setWhatsNewOpen(false)}
+          />
+        )}
       </div>
     </ShellProvider>
   );

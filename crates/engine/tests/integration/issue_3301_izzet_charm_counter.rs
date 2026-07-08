@@ -7,7 +7,9 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, CastingVariant, StackEntry, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -117,14 +119,39 @@ fn izzet_charm_counter_mode_rejected_without_noncreature_spell_on_stack() {
     scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
 
     let mut runner = scenario.build();
+    let card_id = runner.state().objects[&charm].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: charm,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("CastSpell must be accepted");
 
-    let err = runner.cast(charm).modes(&[0]).resolve();
-
-    assert!(
-        matches!(
-            err.final_waiting_for(),
-            WaitingFor::ModeChoice { .. } | WaitingFor::TargetSelection { .. }
-        ) || runner.state().stack.is_empty(),
-        "counter mode must not fully resolve without a legal stack target"
-    );
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::ModeChoice {
+                unavailable_modes, ..
+            } => {
+                assert!(
+                    unavailable_modes.contains(&0),
+                    "counter mode must be unavailable without a legal stack target, \
+                     got unavailable_modes={unavailable_modes:?}"
+                );
+                assert!(
+                    runner
+                        .act(GameAction::SelectModes { indices: vec![0] })
+                        .is_err(),
+                    "selecting unavailable counter mode must be rejected"
+                );
+                return;
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay mana");
+            }
+            other => panic!("unexpected waiting state before mode choice: {other:?}"),
+        }
+    }
+    panic!("cast pipeline never reached ModeChoice");
 }

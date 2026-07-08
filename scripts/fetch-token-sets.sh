@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SETS_DIR="$REPO_ROOT/data/mtgjson/sets"
 SET_LIST="$REPO_ROOT/data/mtgjson/SetList.json"
-MTGJSON_BASE="https://mtgjson.com/api/v5"
+# shellcheck source=scripts/lib/mtgjson-fetch.sh
+source "$SCRIPT_DIR/lib/mtgjson-fetch.sh"
 
 mkdir -p "$SETS_DIR"
 
@@ -20,9 +21,12 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 mapfile -t CODES < <(
-  jq -r '.data[]
+  # tokenSetCode can name a legacy token pseudo-set that MTGJSON no longer
+  # publishes as its own file; the parent set file already carries data.tokens.
+  jq -r '(reduce .data[].code as $code ({}; .[$code] = true)) as $known_codes
+    | .data[]
     | select(.tokenSetCode != null and .tokenSetCode != "")
-    | .code, .tokenSetCode' "$SET_LIST" | sort -u
+    | .code, (.tokenSetCode | select($known_codes[.]))' "$SET_LIST" | sort -u
 )
 
 if [ "${#CODES[@]}" -eq 0 ]; then
@@ -48,18 +52,15 @@ for CODE in "${CODES[@]}"; do
   fi
   rm -f "$MISSING"
 
-  if curl -fsSL "$MTGJSON_BASE/$CODE.json.gz" 2>/dev/null | gunzip > "$DEST.tmp" 2>/dev/null; then
-    mv "$DEST.tmp" "$DEST"
-    DOWNLOADED=$((DOWNLOADED + 1))
-  elif curl -fsSL "$MTGJSON_BASE/$CODE.json" -o "$DEST.tmp" 2>/dev/null; then
-    mv "$DEST.tmp" "$DEST"
+  if mtgjson_download "$CODE.json" "$DEST"; then
     DOWNLOADED=$((DOWNLOADED + 1))
   else
-    rm -f "$DEST.tmp"
     touch "$MISSING"
     echo "Warning: failed to download $CODE.json" >&2
     FAILED=$((FAILED + 1))
   fi
+  # Throttle the sweep so mtgjson doesn't reset later connections.
+  mtgjson_rate_limit
 done
 
 echo "Token sets: downloaded $DOWNLOADED, skipped $SKIPPED, failed $FAILED"

@@ -32,9 +32,9 @@ pub fn resolve(
     let object_ids = gain_control_object_targets(state, ability, target);
 
     for obj_id in object_ids {
-        if !state.objects.contains_key(&obj_id) {
+        let Some(old_controller) = state.objects.get(&obj_id).map(|obj| obj.controller) else {
             return Err(EffectError::ObjectNotFound(obj_id));
-        }
+        };
 
         // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
         state.add_transient_continuous_effect(
@@ -46,6 +46,17 @@ pub fn resolve(
             None,
         );
         mark_echo_due_for_new_controller(state, obj_id);
+
+        // CR 613.1b: emit the control-change event so "when you lose control"
+        // triggers on the *previous* controller observe the loss (mirrors
+        // `GainControlAll` and `GiveControl`). Skip no-op self-handoffs.
+        if old_controller != new_controller {
+            events.push(GameEvent::ControllerChanged {
+                object_id: obj_id,
+                old_controller,
+                new_controller,
+            });
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -54,6 +65,32 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+pub(crate) fn apply_permanent_control_change(
+    state: &mut GameState,
+    source_id: ObjectId,
+    object_id: ObjectId,
+    new_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let old_controller = state.objects.get(&object_id).map(|obj| obj.controller);
+    state.add_transient_continuous_effect(
+        source_id,
+        new_controller,
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: object_id },
+        vec![ContinuousModification::ChangeController],
+        None,
+    );
+    mark_echo_due_for_new_controller(state, object_id);
+    if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
+        events.push(GameEvent::ControllerChanged {
+            object_id,
+            old_controller,
+            new_controller,
+        });
+    }
 }
 
 /// CR 613.1b: Mass control-change (Layer 2 — control-changing effects) — gain
@@ -153,6 +190,19 @@ fn gain_control_object_targets(
         return vec![ability.source_id];
     }
 
+    // CR 608.2c: a precise slot anaphor ("gain control of that Equipment" →
+    // slot 1) indexes the whole resolving chain's declared targets. The
+    // per-clause `ability.targets` may carry only the nearest propagated target,
+    // so route through the root-chain authority; `effect_object_targets` would
+    // fall through to "all inherited targets" when the index is out of range.
+    if let TargetFilter::ParentTargetSlot { index } = filter {
+        if let Some(TargetRef::Object(id)) =
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+        {
+            return vec![id];
+        }
+    }
+
     let chosen_objects = super::effect_object_targets(filter, &ability.targets);
 
     if !chosen_objects.is_empty() {
@@ -208,6 +258,8 @@ pub fn resolve_give(
             return Err(EffectError::ObjectNotFound(obj_id));
         }
 
+        let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
+
         // CR 613.3: Create a transient continuous effect at Layer 2 (Control)
         // with the recipient as the new controller.
         state.add_transient_continuous_effect(
@@ -219,6 +271,16 @@ pub fn resolve_give(
             None,
         );
         mark_echo_due_for_new_controller(state, obj_id);
+
+        // CR 110.2: Record the handoff for downstream "if they do" riders and
+        // `ControllerChanged` triggers (mirrors `resolve_all`).
+        if old_controller.is_some_and(|old| old != recipient_id) {
+            events.push(GameEvent::ControllerChanged {
+                object_id: obj_id,
+                old_controller: old_controller.unwrap(),
+                new_controller: recipient_id,
+            });
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -289,11 +351,18 @@ fn unique_recipient_from_filter(
         ));
     }
 
-    // CR 603.7c + CR 608.2c: "that player" on triggered abilities lowers to
-    // `TargetFilter::TriggeringPlayer`. The stateless player matcher cannot
-    // resolve event-context refs, so bind the recipient from the active trigger
-    // event (Coveted Jewel: the attacking opponent).
-    if matches!(filter, TargetFilter::TriggeringPlayer) {
+    // CR 603.7c + CR 608.2c: Event-context player anaphors on triggered
+    // abilities. `TriggeringPlayer` ("that player") binds to the player involved
+    // in the trigger (Coveted Jewel: the attacking opponent);
+    // `TriggeringSourceController` ("the attacking player") binds to the
+    // controller of the triggering event's source object (Contested Game Ball:
+    // the player whose creature dealt combat damage). The stateless player
+    // matcher cannot resolve event-context refs, so bind from the active trigger
+    // event.
+    if matches!(
+        filter,
+        TargetFilter::TriggeringPlayer | TargetFilter::TriggeringSourceController
+    ) {
         return crate::game::targeting::resolve_event_context_target(
             state,
             filter,
@@ -1273,6 +1342,137 @@ mod tests {
 
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_err());
+    }
+
+    /// CR 603.7c + CR 608.2c (issue #1335): `TriggeringPlayer` on combat-damage
+    /// triggers must bind from `DamageDealt`, not only `AttackersDeclared`.
+    #[test]
+    fn give_control_triggering_player_recipient_resolves_from_damage_dealt_event() {
+        use crate::types::events::GameEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let kain = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kain, Traitorous Dragoon".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: kain,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            kain,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&kain).unwrap().controller,
+            PlayerId(1),
+            "TriggeringPlayer on DamageDealt must be the damaged player"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ControllerChanged { .. })),
+            "successful handoff must emit ControllerChanged"
+        );
+    }
+
+    /// Issue #1335: end-to-end parsed Kain trigger chain through
+    /// `resolve_ability_chain` with a combat-damage trigger event.
+    #[test]
+    fn issue_1335_kain_full_chain_transfers_control_and_riders() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::card_type::CoreType;
+        use crate::types::events::GameEvent;
+
+        const KAIN_ORACLE: &str = "Jump — During your turn, Kain has flying.\n\
+Whenever Kain deals combat damage to a player, that player gains control of Kain. \
+If they do, you draw that many cards, create that many tapped Treasure tokens, \
+then lose that much life.";
+
+        let parsed = parse_oracle_text(
+            KAIN_ORACLE,
+            "Kain, Traitorous Dragoon",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Knight".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("combat damage trigger");
+
+        let mut state = GameState::new_two_player(42);
+        for (idx, name) in ["Card A", "Card B", "Card C"].into_iter().enumerate() {
+            create_object(
+                &mut state,
+                CardId((idx + 10) as u64),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+        }
+        let kain = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kain, Traitorous Dragoon".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: kain,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        });
+
+        let resolved = build_resolved_from_def(execute, kain, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).expect("Kain chain");
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&kain].controller, PlayerId(1));
+        assert_eq!(state.players[0].hand.len(), 2);
+        assert_eq!(state.players[0].life, 18);
+
+        let treasures = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| {
+                obj.controller == PlayerId(0)
+                    && obj.card_types.subtypes.iter().any(|st| st == "Treasure")
+                    && obj.card_types.core_types.contains(&CoreType::Artifact)
+            })
+            .count();
+        assert_eq!(treasures, 2, "attacker receives two tapped Treasures");
+        assert!(
+            state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|obj| obj.card_types.subtypes.iter().any(|st| st == "Treasure"))
+                .all(|obj| obj.tapped),
+            "Kain's Treasures must enter tapped"
+        );
     }
 
     /// Issue #1987: chained GiveControl with `target: SelfRef` and empty

@@ -246,6 +246,16 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 - `PHASE_CORS_ORIGIN` — Custom CORS origin for phase-server (default: allows common dev ports)
 - `PHASE_LOG_JSON` — Enable JSON-formatted log output for phase-server
 
+## GitHub / git CLI (automation)
+
+For any unattended/loop automation that shells out to `gh`/`git` (PR review/handler loops, ship-commits), prepend this prelude to **every** `gh`/`git` command — rtk does not merely corrupt `gh pr diff`, it can fabricate whole command outputs (fake pushes, invented hashes), so disable it outright rather than only "when output looks wrong":
+
+```bash
+export RTK_DISABLED=1; export GH_TOKEN=$(command gh auth token)
+```
+
+Write GraphQL/JSON to `/tmp` before parsing, and fetch PR diffs via `gh api repos/<owner/repo>/pulls/<N>.diff` (or local `git diff origin/main...pr/<N>`), never `gh pr diff`.
+
 ## Releasing
 
 Use `cargo-release` via the workspace alias — **never tag manually with `git tag`**.

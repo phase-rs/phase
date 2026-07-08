@@ -63,6 +63,13 @@
   },
   "setSelector": {
     "botDifficulty": "Dificuldade dos Bots",
+    "difficultyLevels": {
+      "VeryEasy": "Muito fácil",
+      "Easy": "Fácil",
+      "Medium": "Médio",
+      "Hard": "Difícil",
+      "VeryHard": "Muito difícil"
+    },
     "chooseSet": "Escolha uma Coleção",
     "noPools": "Nenhum pool de draft disponível. Execute primeiro o pipeline de dados do draft.",
     "setIconAlt": "Ícone da coleção {{name}}",

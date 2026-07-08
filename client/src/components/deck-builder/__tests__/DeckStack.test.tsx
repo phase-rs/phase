@@ -90,7 +90,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
-        getEffectiveCap={() => 4}
+        groupMode="type"
       />,
     );
 
@@ -142,7 +142,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
-        getEffectiveCap={() => 4}
+        groupMode="type"
       />,
     );
 
@@ -154,11 +154,9 @@ describe("DeckStack", () => {
     const plainsTile = getTileByRemoveTitle("Plains");
 
     expect(screen.getByText("Creatures")).toBeInTheDocument();
-    expect(screen.getByText("Spells")).toBeInTheDocument();
+    expect(screen.getByText("Enchantments")).toBeInTheDocument();
     expect(screen.getByText("Lands")).toBeInTheDocument();
-    expect(
-      screen.getByTitle("Ajani's Pridemate is at the copy limit"),
-    ).toBeDisabled();
+    expect(screen.getByTitle("Add one Ajani's Pridemate")).toBeEnabled();
     expect(screen.queryByText("MD")).not.toBeInTheDocument();
     expect(screen.queryByText("SB")).not.toBeInTheDocument();
 
@@ -169,10 +167,8 @@ describe("DeckStack", () => {
     expectDocumentOrder(banishingTile, plainsTile);
   });
 
-  it("keeps the add button enabled past 4 copies for 'any number' cards (CR 100.2a)", () => {
-    // Regression for #1494: Relentless Rats / Rat Colony override the 4-copy
-    // deck construction limit per CR 100.2a. The engine resolves the override to
-    // an unbounded cap (Infinity); the tile's + button must stay enabled.
+  it("keeps the add button enabled for main-deck cards regardless of copy count", () => {
+    // Copy-limit legality is enforced by evaluateDeckCompatibility, not the stack UI.
     render(
       <DeckStack
         deck={{
@@ -189,33 +185,15 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
-        getEffectiveCap={(name) => (name === "Relentless Rats" ? Infinity : 4)}
+        groupMode="type"
       />,
     );
 
     expect(screen.getByTitle("Add one Relentless Rats")).toBeEnabled();
   });
 
-  it("respects a bounded 'up to N' override cap (CR 100.2a)", () => {
-    // Seven Dwarves overrides to UpTo(7). At 6 copies the + button is enabled;
-    // at 7 it is disabled.
-    const { rerender } = render(
-      <DeckStack
-        deck={{ main: [{ name: "Seven Dwarves", count: 6 }], sideboard: [] }}
-        commanders={[]}
-        cardDataCache={
-          new Map([["Seven Dwarves", makeCard("Seven Dwarves", "Creature — Dwarf", 4)]])
-        }
-        onAddCard={vi.fn()}
-        onRemoveCard={vi.fn()}
-        onMoveCard={vi.fn()}
-        onRemoveCommander={vi.fn()}
-        getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
-      />,
-    );
-    expect(screen.getByTitle("Add one Seven Dwarves")).toBeEnabled();
-
-    rerender(
+  it("does not disable the add button at an override cap — engine validates copies", () => {
+    render(
       <DeckStack
         deck={{ main: [{ name: "Seven Dwarves", count: 7 }], sideboard: [] }}
         commanders={[]}
@@ -226,15 +204,13 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
-        getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
+        groupMode="type"
       />,
     );
-    expect(
-      screen.getByTitle("Seven Dwarves is at the copy limit"),
-    ).toBeDisabled();
+    expect(screen.getByTitle("Add one Seven Dwarves")).toBeEnabled();
   });
 
-  it("disables the add button at 1 copy for singleton formats", () => {
+  it("keeps the add button enabled in singleton formats — engine validates copies", () => {
     render(
       <DeckStack
         deck={{
@@ -250,11 +226,11 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
-        getEffectiveCap={() => 1}
+        groupMode="type"
       />,
     );
 
-    expect(screen.getByTitle("Sol Ring is at the copy limit")).toBeDisabled();
+    expect(screen.getByTitle("Add one Sol Ring")).toBeEnabled();
   });
 
   it("moves a second-section card back to the main deck via its move button", () => {
@@ -278,7 +254,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={onMoveCard}
         onRemoveCommander={vi.fn()}
-        getEffectiveCap={() => 4}
+        groupMode="type"
       />,
     );
 

@@ -24,6 +24,8 @@
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::create_object_from_card_face;
 use engine::game::{apply, start_game_with_starting_player};
+use engine::parser::parse_oracle_text;
+use engine::types::ability::AbilityKind;
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -32,13 +34,15 @@ use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
 
+const GEMSTONE_CAVERNS_ORACLE: &str = "If this card is in your opening hand and you're not the starting player, you may begin the game with Gemstone Caverns on the battlefield with a luck counter on it. If you do, exile a card from your hand.";
+
 /// Build a 2-player game where the non-starting player (P1) has a 7-card
 /// library consisting of Gemstone Caverns plus six basic lands. After the
 /// opening-hand draw the entire library becomes P1's opening hand regardless of
 /// shuffle order, so Gemstone Caverns is guaranteed to be in the opening hand.
 ///
 /// Returns the state with the game started and the mulligan flow active.
-fn setup_game(db: &CardDatabase) -> GameState {
+fn setup_game_with_gemstone_owner(db: &CardDatabase, gemstone_owner: PlayerId) -> GameState {
     let mut state = GameState::new_two_player(42);
 
     let gemstone = db
@@ -48,16 +52,38 @@ fn setup_game(db: &CardDatabase) -> GameState {
         .get_face_by_name("Forest")
         .expect("Forest must be in the card database");
 
-    // P1 (non-starting player): exactly 7 library cards → full opening hand.
-    create_object_from_card_face(&mut state, gemstone, PlayerId(1));
-    for _ in 0..6 {
-        create_object_from_card_face(&mut state, forest, PlayerId(1));
-    }
-
-    // P0 (starting player): a small library so the mulligan flow has cards to
-    // draw from. P0 has no begin-game cards.
-    for _ in 0..7 {
-        create_object_from_card_face(&mut state, forest, PlayerId(0));
+    for player in [PlayerId(0), PlayerId(1)] {
+        if player == gemstone_owner {
+            let gemstone_id = create_object_from_card_face(&mut state, gemstone, player);
+            let parsed = parse_oracle_text(
+                GEMSTONE_CAVERNS_ORACLE,
+                "Gemstone Caverns",
+                &[],
+                &["Land".to_string()],
+                &[],
+            );
+            let begin_game = parsed
+                .abilities
+                .into_iter()
+                .find(|ability| ability.kind == AbilityKind::BeginGame)
+                .expect("current parser output must include Gemstone Caverns begin-game ability");
+            let abilities = std::sync::Arc::make_mut(
+                &mut state
+                    .objects
+                    .get_mut(&gemstone_id)
+                    .expect("Gemstone Caverns object exists")
+                    .abilities,
+            );
+            abilities.retain(|ability| ability.kind != AbilityKind::BeginGame);
+            abilities.push(begin_game);
+            for _ in 0..6 {
+                create_object_from_card_face(&mut state, forest, player);
+            }
+        } else {
+            for _ in 0..7 {
+                create_object_from_card_face(&mut state, forest, player);
+            }
+        }
     }
 
     // P0 starts → P1 is the non-starting player, matching Gemstone Caverns'
@@ -67,33 +93,46 @@ fn setup_game(db: &CardDatabase) -> GameState {
     state
 }
 
+fn setup_game(db: &CardDatabase) -> GameState {
+    setup_game_with_gemstone_owner(db, PlayerId(1))
+}
+
 /// Drive both players to `Keep` through `apply`, leaving the game at the
 /// begin-game opt-in prompt for Gemstone Caverns.
 fn keep_both_hands(state: &mut GameState) {
-    // Both players keep their opening hands. Mulligan decisions are submitted
-    // in seat order; the starting player decides first.
-    for &player in &[PlayerId(0), PlayerId(1)] {
-        if let WaitingFor::MulliganDecision { .. } = &state.waiting_for {
-            let result = apply(
-                state,
-                player,
-                GameAction::MulliganDecision {
-                    choice: MulliganChoice::Keep,
-                },
-            )
-            .expect("Keep decision must succeed");
-            state.waiting_for = result.waiting_for;
-        }
+    // Both players keep their opening hands. Drive the actual pending player so
+    // the helper remains correct when a begin-game ability belongs to either
+    // seat.
+    while let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for {
+        let Some(entry) = pending.first() else {
+            break;
+        };
+        let result = apply(
+            state,
+            entry.player,
+            GameAction::MulliganDecision {
+                choice: MulliganChoice::Keep,
+            },
+        )
+        .expect("Keep decision must succeed");
+        state.waiting_for = result.waiting_for;
     }
 }
 
 /// Locate Gemstone Caverns in P1's hand.
 fn gemstone_in_hand(state: &GameState) -> engine::types::identifiers::ObjectId {
-    *state.players[1]
+    gemstone_in_player_hand(state, PlayerId(1))
+}
+
+fn gemstone_in_player_hand(
+    state: &GameState,
+    player: PlayerId,
+) -> engine::types::identifiers::ObjectId {
+    *state.players[player.0 as usize]
         .hand
         .iter()
         .find(|id| state.objects[id].name == "Gemstone Caverns")
-        .expect("Gemstone Caverns must be in P1's opening hand")
+        .expect("Gemstone Caverns must be in the player's opening hand")
 }
 
 #[test]
@@ -210,5 +249,27 @@ fn gemstone_caverns_decline_surfaces_no_exile_prompt() {
         state.players[1].hand.len(),
         hand_size_before,
         "declining must not exile any card from hand",
+    );
+}
+
+#[test]
+fn gemstone_caverns_starting_player_gets_no_begin_game_prompt() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut state = setup_game_with_gemstone_owner(db, PlayerId(0));
+    keep_both_hands(&mut state);
+
+    let gemstone_id = gemstone_in_player_hand(&state, PlayerId(0));
+
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "starting player must not receive Gemstone Caverns begin-game prompt: {:?}",
+        state.waiting_for,
+    );
+    assert_eq!(
+        state.objects[&gemstone_id].zone,
+        Zone::Hand,
+        "Gemstone Caverns must stay in the starting player's hand",
     );
 }

@@ -75,7 +75,7 @@ jobs:
     # 99% of failures historically come from cross-platform-agnostic config or
     # generic Rust mistakes, not from platform-specific Tauri internals.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
@@ -121,7 +121,7 @@ jobs:
       - name: Install Linux Tauri build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
 
       - name: Stub frontend dist for tauri::generate_context!
         # `cargo check -p phase-tauri` runs `tauri::generate_context!()` which
@@ -155,7 +155,11 @@ jobs:
     name: Build WASM + Frontend
     needs: [resolve-release-ref, tauri-preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Card-data generation grows with the card/deck corpus: this job hit 28m for
+    # v0.4.0 and crossed the prior 30m ceiling for v0.5.0 (killed mid-frontend
+    # build, stranding the release). Raised to 60m for headroom — the ceiling
+    # only bills the failure case, so a normal ~30m run still ends at ~30m.
+    timeout-minutes: 60
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     steps:
@@ -203,12 +207,19 @@ jobs:
           echo "day=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Cache MTGJSON data
+        # Full data/mtgjson dir under the `mtgjson-full-` namespace (shared with
+        # deploy.yml — both run gen-card-data.sh and populate every file). Kept
+        # distinct from ci.yml's partial `mtgjson-atomic-`/`mtgjson-sets-`
+        # caches; all stay under the `mtgjson-` prefix clear-caches.yml deletes.
+        #
+        # Exact weekly key, NO restore-keys: a new week misses so gen-card-data.sh
+        # re-fetches fresh MTGJSON data; a restore-keys fallback would pin the
+        # file-existence-gated fetches to last week's data forever.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
           path: data/mtgjson
-          key: mtgjson-${{ steps.cache-keys.outputs.week }}
-          restore-keys: mtgjson-
+          key: mtgjson-full-${{ steps.cache-keys.outputs.week }}
 
       # Daily key with NO restore-keys: the gen-scryfall-*.sh scripts skip the
       # download when the file already exists, so a stale restore-key hit would
@@ -222,10 +233,17 @@ jobs:
           key: scryfall-${{ steps.cache-keys.outputs.day }}
 
       - name: Download MTGJSON data
-        if: steps.mtgjson-cache.outputs.cache-hit != 'true'
+        # Gate on file existence, not cache-hit: a restore-keys (non-exact) hit
+        # leaves cache-hit=false even though AtomicCards.json is already present,
+        # so the old `if: cache-hit != true` re-downloaded it every new week.
+        # File-existence gating fetches only when genuinely missing and lets a
+        # poisoned cache self-heal (matches ci.yml / deploy.yml).
         run: |
-          mkdir -p data/mtgjson
-          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          if [ ! -f data/mtgjson/AtomicCards.json ]; then
+            mkdir -p data/mtgjson
+            source scripts/lib/mtgjson-fetch.sh
+            mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          fi
 
       - name: Generate card data and coverage report
         # Single source of truth: gen-card-data.sh produces all 7 public JSON
@@ -328,9 +346,9 @@ jobs:
           # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
           # the directory holding every shared JSON. CARD_DATA_URL pins the
           # WASM bundle to its content-addressed card-data forever.
-          DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
-          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
-          AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          DATA_BASE_URL: "https://data.phase-rs.dev"
+          CARD_DATA_URL: "https://data.phase-rs.dev/${{ steps.card-data-hash.outputs.filename }}"
+          AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Tagged production release: surfaces the "try the preview build" CTA
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
           # deploy (deploy.yml) deliberately omits this so it never self-links.
@@ -340,6 +358,9 @@ jobs:
           # cloud sync stays disabled and the app falls back to file backup.
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # First-party telemetry ingest (lobby Worker → Analytics Engine, see
+          # docs/telemetry-proposal.md). Unset would compile telemetry to a no-op.
+          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -384,12 +405,17 @@ jobs:
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+          BASE="https://data.phase-rs.dev"
           fail=0
           check() {
             local f="$1"
             local status
-            status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$f")
+            status=$(curl -sS -I -o /dev/null -w "%{http_code}" \
+              --connect-timeout 5 \
+              --max-time 15 \
+              --retry 3 \
+              --retry-all-errors \
+              "$BASE/$f" || true)
             if [ "$status" != "200" ]; then
               echo "::error::R2 upload verification failed: $BASE/$f returned $status"
               fail=1
@@ -401,7 +427,7 @@ jobs:
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON.
-          curl -s --compressed "$BASE/scryfall-sets.json" | jq empty \
+          curl -fsS --compressed --connect-timeout 5 --max-time 30 --retry 3 --retry-all-errors "$BASE/scryfall-sets.json" | jq empty \
             || { echo "::error::brotli round-trip failed for scryfall-sets.json"; fail=1; }
           [ "$fail" = "0" ]
       - name: Remove R2-hosted data files from dist (Pages ships only the shell)
@@ -856,7 +882,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf musl-tools
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf musl-tools
           rustup target add x86_64-unknown-linux-musl
 
       - name: Download card data
@@ -935,6 +961,9 @@ jobs:
           # Anon key is client-safe (RLS gates access).
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # Telemetry ingest define reaches vite.config.ts via the same
+          # beforeBuildCommand path as the Supabase vars above.
+          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

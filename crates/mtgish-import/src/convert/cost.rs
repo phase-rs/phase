@@ -5,8 +5,8 @@
 //! cover the overwhelming majority of activated ability costs.
 
 use engine::types::ability::{
-    AbilityCost, CounterCostSelection, QuantityExpr, SacrificeCost, TargetFilter,
-    REMOVE_COUNTER_COST_ALL,
+    AbilityCost, CounterCostSelection, QuantityExpr, SacrificeCost, TapCreaturesRequirement,
+    TargetFilter, REMOVE_COUNTER_COST_ALL,
 };
 use engine::types::ManaCost;
 use engine::types::Zone;
@@ -53,12 +53,12 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
             TargetFilter::SelfRef => AbilityCost::Tap,
             // Tapping a different specific permanent — fold into TapCreatures-shaped cost.
             other => AbilityCost::TapCreatures {
-                count: 1,
+                requirement: TapCreaturesRequirement::count(1),
                 filter: other,
             },
         },
         Cost::TapAPermanent(filter) => AbilityCost::TapCreatures {
-            count: 1,
+            requirement: TapCreaturesRequirement::count(1),
             filter: convert_permanents(filter)?,
         },
         Cost::SacrificeAPermanent(filter) => {
@@ -124,15 +124,15 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
         },
 
         // CR 701.26 + CR 602.5b: Tap N permanents matching a filter.
-        // Engine `TapCreatures.count` is `u32`; X-bound / dynamic counts
-        // strict-fail with a precise extension request — the converter is
-        // correct, the engine slot is too narrow.
+        // Engine `TapCreaturesRequirement::Count.count` is `u32`; X-bound /
+        // dynamic counts strict-fail with a precise extension request — the
+        // converter is correct, the engine slot is too narrow.
         Cost::TapNumberPermanents(n, filter) => AbilityCost::TapCreatures {
-            count: fixed_count_or_engine_gap(
+            requirement: TapCreaturesRequirement::count(fixed_count_or_engine_gap(
                 n,
                 "AbilityCost::TapCreatures",
                 "count: QuantityExpr (X-bound / dynamic count)",
-            )?,
+            )?),
             filter: convert_permanents(filter)?,
         },
 
