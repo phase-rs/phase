@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "Przeglądarka powtórek",
+    "eyebrow": "Obejrzyj nagraną rozgrywkę",
+    "chooseFile": "Wybierz plik powtórki",
+    "loading": "Wczytywanie powtórki…",
+    "errorGeneric": "Nie udało się wczytać tego pliku powtórki.",
+    "backToMenu": "Powrót do menu"
+  },
+  "controls": {
+    "play": "Odtwórz",
+    "pause": "Wstrzymaj",
+    "stepBack": "Krok wstecz",
+    "stepForward": "Krok naprzód",
+    "actionOf": "Akcja {{current}} / {{total}}",
+    "speed": "Szybkość",
+    "speedValue": "{{value}}x",
+    "seekError": "Nie udało się odtworzyć tego momentu powtórki: {{message}}"
+  },
+  "export": {
+    "button": "Eksportuj powtórkę",
+    "success": "Powtórka zapisana jako {{filename}}",
+    "noRecording": "Brak dostępnego nagrania powtórki dla tej rozgrywki.",
+    "error": "Nie udało się wyeksportować powtórki."
+  }
+}

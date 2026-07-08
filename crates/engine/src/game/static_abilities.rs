@@ -1410,8 +1410,12 @@ pub fn player_has_shroud(state: &GameState, player_id: PlayerId) -> bool {
 /// CR 702.11c + CR 702.18a + CR 702.16b: Single authority for whether a player
 /// may be chosen as a target of the spell/ability identified by `source_id`.
 ///
-/// Invoked by every player-candidate enumeration in `targeting` (typed player
-/// filters, `Any`/`add_players`, and specific-player pins). Composes:
+/// `source_controller` is the authoritative controller of the spell or ability
+/// performing the targeting (CR 601.2a / CR 115.1), which may differ from
+/// `state.objects[source_id].controller` when control has changed or the source
+/// object record is not the targeting actor. Invoked by every player-candidate
+/// enumeration in `targeting` (typed player filters, `Any`/`add_players`, and
+/// specific-player pins). Composes:
 /// - Shroud — blocks **every** source (CR 702.18a), including the player's own;
 /// - Hexproof — blocks only **opponents'** sources (CR 702.11c);
 /// - Protection — quality match against the source (CR 702.16b / CR 702.16j).
@@ -1422,6 +1426,7 @@ pub fn player_cannot_be_targeted_by(
     state: &GameState,
     player_id: PlayerId,
     source_id: ObjectId,
+    source_controller: PlayerId,
 ) -> bool {
     // CR 702.18a: shroud on a player — can't be the target of spells or abilities
     // from any player.
@@ -1433,10 +1438,8 @@ pub fn player_cannot_be_targeted_by(
     // (2HG teammates are not opponents), so reuse `players::is_opponent` rather
     // than a bare `ctrl != player_id` inequality that would treat teammates as
     // opponents.
-    let source_controller = state.objects.get(&source_id).map(|o| o.controller);
     if player_has_hexproof(state, player_id)
-        && source_controller
-            .is_some_and(|ctrl| crate::game::players::is_opponent(state, player_id, ctrl))
+        && crate::game::players::is_opponent(state, player_id, source_controller)
     {
         return true;
     }
@@ -3025,12 +3028,53 @@ mod tests {
             "opponent is not hexproof"
         );
         assert!(
-            player_cannot_be_targeted_by(&state, PlayerId(0), opponent_source),
+            player_cannot_be_targeted_by(&state, PlayerId(0), opponent_source, PlayerId(1)),
             "opponent may not target the hexproof player"
         );
         assert!(
-            !player_cannot_be_targeted_by(&state, PlayerId(0), own_source),
+            !player_cannot_be_targeted_by(&state, PlayerId(0), own_source, PlayerId(0)),
             "hexproof player may still be targeted by their own spells"
+        );
+    }
+
+    /// CR 702.11c + CR 601.2a: Player hexproof must key off the spell/ability
+    /// controller passed by targeting, not `state.objects[source_id].controller`.
+    #[test]
+    fn player_cannot_be_targeted_by_uses_authoritative_source_controller() {
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        // Object record says P1 controls the source permanent, but the ability
+        // controller passed into targeting is P0 (authoritative).
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Misrecorded Controller".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), source, PlayerId(0)),
+            "hexproof must not block when authoritative source_controller is the hexproof player"
+        );
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), source, PlayerId(1)),
+            "hexproof must block when authoritative source_controller is an opponent"
         );
     }
 
@@ -3079,11 +3123,11 @@ mod tests {
             "P0 must still report player hexproof in 2HG"
         );
         assert!(
-            !player_cannot_be_targeted_by(&state, PlayerId(0), teammate_source),
+            !player_cannot_be_targeted_by(&state, PlayerId(0), teammate_source, PlayerId(1)),
             "2HG teammate must still be able to target the hexproof player"
         );
         assert!(
-            player_cannot_be_targeted_by(&state, PlayerId(0), opposing_source),
+            player_cannot_be_targeted_by(&state, PlayerId(0), opposing_source, PlayerId(2)),
             "opposing-team source must still be blocked by player hexproof"
         );
     }
@@ -3127,10 +3171,11 @@ mod tests {
         assert!(player_cannot_be_targeted_by(
             &state,
             PlayerId(0),
-            opponent_source
+            opponent_source,
+            PlayerId(1),
         ));
         assert!(
-            player_cannot_be_targeted_by(&state, PlayerId(0), own_source),
+            player_cannot_be_targeted_by(&state, PlayerId(0), own_source, PlayerId(0)),
             "shroud blocks the player's own targeting too"
         );
     }

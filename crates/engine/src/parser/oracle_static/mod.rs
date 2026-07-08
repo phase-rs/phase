@@ -156,6 +156,7 @@ pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_conditional_protection_grant_list;
+pub(crate) use shared::parse_continuous_subject_filter;
 pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
@@ -166,6 +167,8 @@ pub(crate) use shared::{
     parse_tiered_enters_with_additional_counters_pattern,
 };
 pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
+pub(crate) use static_helpers::parse_basic_land_type_plural;
+pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
 pub(crate) use type_change::{
     parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
     parse_every_creature_type_static_prefix,
