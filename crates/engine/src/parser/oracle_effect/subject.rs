@@ -3508,11 +3508,11 @@ fn try_parse_become_basic_land_type_modifications(
     let (rest, _) = opt(alt((tag::<_, _, VE>("a "), tag::<_, _, VE>("an "))))
         .parse(lower.as_str())
         .ok()?;
-    let word_end = rest
-        .find(|c: char| !c.is_alphabetic())
-        .unwrap_or(rest.len());
-    let land_type = crate::parser::oracle_static::parse_basic_land_type_plural(&rest[..word_end])?;
-    let after = rest[word_end..].trim();
+    // Extract the candidate basic-land word with a nom combinator (not manual
+    // scanning), then classify it via the shared `parse_basic_land_type_plural`.
+    let (after, word) = nom::character::complete::alpha1::<_, VE>(rest).ok()?;
+    let land_type = crate::parser::oracle_static::parse_basic_land_type_plural(word)?;
+    let after = after.trim();
     // CR 205.1b: only a bare type word (replacement) or the "in addition to their/
     // its other types" additive marker may follow; anything else is a mixed
     // predicate that must fall through to the animation parser.
