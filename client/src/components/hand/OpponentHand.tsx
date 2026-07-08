@@ -112,7 +112,12 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
       <img
         src={src}
         alt={cardName}
-        className="rounded-lg border border-gray-600 shadow-md object-cover"
+        // `pointer-events-auto` so the card is the hit-test target even when an
+        // ancestor opts out of pointer events (the split-seat fan wrapper does,
+        // so gaps between cards fall through to the seat header beneath). In the
+        // default layout the ancestor chain is already interactive, so this is a
+        // no-op there.
+        className="pointer-events-auto rounded-lg border border-gray-600 shadow-md object-cover"
         style={cardStyle}
         draggable={false}
         {...hoverHandlers}
