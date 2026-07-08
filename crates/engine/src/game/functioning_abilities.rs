@@ -157,18 +157,21 @@ pub fn object_sources_static_from_command_zone(obj: &GameObject) -> bool {
             .any(|def| non_emblem_command_zone_static_functions(obj, def))
 }
 
-/// CR 113.6g: True when a `CantBeCountered`/`CantBeCopied` definition's
-/// `affected` names the object the ability is ON, not some other set of
-/// objects. `Option::None` (no `.affected(...)` call — the runtime stamps in
-/// `casting.rs` that push a bare, unfiltered definition directly onto the one
-/// spell they apply to) and `Some(TargetFilter::SelfRef)` (the printed "this
-/// spell can't be countered" self-reference, e.g. Carnage Tyrant) both mean
-/// "this ability describes the object it's on." Any other `TargetFilter`
-/// (e.g. `Typed`) means the ability instead GRANTS un-counterability /
-/// un-copyability to some other set of objects (Allosaurus Shepherd's
-/// "Green spells you control can't be countered") and is not self-referential.
-fn is_self_referential_prohibition(affected: Option<&TargetFilter>) -> bool {
-    matches!(affected, None | Some(TargetFilter::SelfRef))
+/// CR 113.6g: True when a `CantBeCountered`/`CantBeCopied` definition names
+/// the object the ability is ON, not some other set of objects. `affected:
+/// None` (runtime stamps in `casting.rs` that push a bare, unfiltered
+/// definition directly onto the one spell they apply to) and
+/// `Some(TargetFilter::SelfRef)` (the printed "this spell can't be countered"
+/// self-reference, e.g. Carnage Tyrant) both mean "this ability describes the
+/// object it's on." Any other `TargetFilter` (e.g. `Typed`) means the ability
+/// instead GRANTS un-counterability / un-copyability to some other set of
+/// objects (Allosaurus Shepherd's "Green spells you control can't be
+/// countered") and is not self-referential.
+pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
+    matches!(
+        def.mode,
+        StaticMode::CantBeCountered | StaticMode::CantBeCopied
+    ) && matches!(def.affected.as_ref(), None | Some(TargetFilter::SelfRef))
 }
 
 /// CR 113.6 + CR 113.6b + CR 114.3 / CR 114.4: Single-authority zone-of-
@@ -220,13 +223,7 @@ pub fn active_static_definitions<'a>(
         // self-referential and must fall through to the ordinary default,
         // so it keeps functioning from the battlefield like any other
         // static. Fixes #1033.
-        if def.active_zones.is_empty()
-            && matches!(
-                def.mode,
-                StaticMode::CantBeCountered | StaticMode::CantBeCopied
-            )
-            && is_self_referential_prohibition(def.affected.as_ref())
-        {
+        if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
             if obj.zone != Zone::Stack {
                 return false;
             }
