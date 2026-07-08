@@ -115,6 +115,7 @@
     "recoveryDescription": "If a card misbehaves, export state first. The advanced debug panel is available when you need to inspect or adjust the game.",
     "copyState": "Copy State",
     "exportState": "Export State",
+    "exportReplay": "Export Replay",
     "openAdvancedDebug": "Open Advanced Debug",
     "sections": {
       "Flow": "Flow",
@@ -125,7 +126,10 @@
       "copied": "Copied game state to clipboard.",
       "copyFailed": "Could not copy game state.",
       "exported": "Exported {{filename}}.",
-      "exportFailed": "Could not export game state."
+      "exportFailed": "Could not export game state.",
+      "replayExported": "Replay saved as {{filename}}.",
+      "replayExportUnavailable": "No replay recording is available for this game.",
+      "replayExportFailed": "Could not export the replay."
     },
     "prompt": {
       "starting": "The game is starting or restoring state.",

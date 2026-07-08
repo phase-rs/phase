@@ -115,6 +115,7 @@
     "recoveryDescription": "Si une carte se comporte mal, exportez d'abord l'état. Le panneau de débogage avancé est disponible lorsque vous devez inspecter ou ajuster la partie.",
     "copyState": "Copier l'état",
     "exportState": "Exporter l'état",
+    "exportReplay": "Exporter le replay",
     "openAdvancedDebug": "Ouvrir le débogage avancé",
     "sections": {
       "Flow": "Déroulement",
@@ -125,7 +126,10 @@
       "copied": "État de la partie copié dans le presse-papiers.",
       "copyFailed": "Impossible de copier l'état de la partie.",
       "exported": "{{filename}} exporté.",
-      "exportFailed": "Impossible d'exporter l'état de la partie."
+      "exportFailed": "Impossible d'exporter l'état de la partie.",
+      "replayExported": "Replay enregistré sous {{filename}}.",
+      "replayExportUnavailable": "Aucun enregistrement de replay n'est disponible pour cette partie.",
+      "replayExportFailed": "Impossible d'exporter le replay."
     },
     "prompt": {
       "starting": "La partie démarre ou restaure son état.",

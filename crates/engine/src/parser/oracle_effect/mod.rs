@@ -9204,10 +9204,17 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
 /// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
 /// one-shot step skips. Handles controller and target-player forms.
 fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    // CR 614.10a: "[you ]skip your next <step>" — controller-subject one-shot
+    // step skip. The "skip their next <step>" form is the per-player body a
+    // for-each-player distributor leaves after stripping its "each opponent" /
+    // "each player" head (Brine Elemental: "each opponent skips their next untap
+    // step"); it resolves relative to the iterating player, so it lowers to the
+    // same `Controller`-targeted skip.
     if let Some((step, rest)) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = alt((
             tag::<_, _, OracleError<'_>>("you skip your next "),
             tag("skip your next "),
+            tag("skip their next "),
         ))
         .parse(input)?;
         let (input, step) = parse_skip_step_name(input)?;

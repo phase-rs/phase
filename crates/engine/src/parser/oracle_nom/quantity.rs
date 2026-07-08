@@ -2811,6 +2811,11 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("that creature's toughness"),
         ),
+        // CR 608.2k + CR 700.4: of-genitive form of the dies-trigger referent's
+        // P/T ("the power of the creature that died" — Death's Presence). The
+        // property axis is composed from the object phrase rather than enumerated
+        // as full-phrase tags — see `parse_died_creature_property_ref`.
+        parse_died_creature_property_ref,
         // "Whenever you cast an enchantment spell, ... equal to that spell's
         // mana value" (Dusty Parlor) — the SpellCast event's source object is
         // the spell itself, so CMC reads cleanly off it.
@@ -2845,6 +2850,42 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_anaphoric_target_card_property_ref,
     ))
     .parse(input)
+}
+
+/// CR 608.2k + CR 700.4: Parse the of-genitive form of a dies-trigger's dead
+/// creature P/T reference — "the power/toughness of the creature that died
+/// [this turn]" (Death's Presence: "put X +1/+1 counters …, where X is the power
+/// of the creature that died").
+///
+/// Composes the property axis (`power` ↔ `toughness`) with the fixed
+/// died-creature event phrase rather than enumerating full-phrase tags, so the
+/// next equivalent wording reuses this one combinator instead of adding another
+/// verbatim string. Both properties resolve through `ObjectScope::CostPaidObject`
+/// — the trigger event's source (the same referent as the possessive "that
+/// creature's power" arm); since that creature is now in the graveyard its P/T is
+/// read from last-known information (CR 603.10a / CR 113.7a). The optional
+/// " this turn" tolerates the qualified phrasing without changing the (singular)
+/// referent.
+fn parse_died_creature_property_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, qty) = alt((
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("toughness"),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" of the creature that died").parse(rest)?;
+    let (rest, _) = opt(tag(" this turn")).parse(rest)?;
+    Ok((rest, qty))
 }
 
 /// Parse target-creature power refs:
@@ -7394,6 +7435,36 @@ mod tests {
             }
         );
         assert_eq!(rest2, "");
+
+        // CR 608.2k + CR 700.4 (issue #5333): of-genitive form of the dies-trigger
+        // referent's P/T — Death's Presence's "the power of the creature that
+        // died" must bind the same CostPaidObject scope as the possessive form,
+        // not fall through to an unbound Variable (which resolved to 0 counters).
+        for (phrase, expected) in [
+            (
+                "the power of the creature that died",
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+            (
+                "the toughness of the creature that died",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+            // The optional " this turn" qualifier keeps the same singular referent.
+            (
+                "the power of the creature that died this turn",
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(q, expected, "phrase {phrase:?}");
+            assert_eq!(rest, "", "phrase {phrase:?} must fully consume");
+        }
 
         let (rest3, q3) = parse_quantity_ref("the amassed Army's power").unwrap();
         assert_eq!(

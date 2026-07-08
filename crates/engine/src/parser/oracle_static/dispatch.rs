@@ -511,6 +511,36 @@ fn filter_prop_has_power_comparison(prop: &FilterProp) -> bool {
     }
 }
 
+/// CR 508.1b + CR 303.4b: Parse the `"[all ]creatures attacking <scope> "` prefix
+/// of an attacker-scoped continuous static, returning the remaining predicate
+/// text (original case) and the defending-player [`ControllerRef`]. The defender
+/// scope is the sole varying axis, so it is a single `alt` rather than one
+/// dispatch arm per scope: controller (`you`), any opponent (`your opponents`,
+/// whose `and/or planeswalkers they control` long form collapses to the same
+/// `Opponent` scope), or the enchanted player (`enchanted player`). The trailing
+/// space in each phrase enforces a word boundary — `"you "` never swallows the
+/// `"your"` of `"your opponents"`.
+fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, ControllerRef)> {
+    let rest = nom_tag_tp(tp, "all creatures attacking ")
+        .or_else(|| nom_tag_tp(tp, "creatures attacking "))?;
+    // Longest-first so the "your opponents and/or …" long form wins before the
+    // bare "your opponents ".
+    for (phrase, defender) in [
+        ("you ", ControllerRef::You),
+        (
+            "your opponents and/or planeswalkers they control ",
+            ControllerRef::Opponent,
+        ),
+        ("your opponents ", ControllerRef::Opponent),
+        ("enchanted player ", ControllerRef::EnchantedPlayer),
+    ] {
+        if let Some(after) = nom_tag_tp(&rest, phrase) {
+            return Some((after.original, defender));
+        }
+    }
+    None
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -1166,54 +1196,25 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // CR 508.1b: "All creatures attacking you <predicate>" — filter scoped to attackers
-    // whose defending player is the source's controller. Must precede the generic
-    // "all creatures " branch below since that would otherwise consume the prefix
-    // and leave "attacking you <predicate>" as input to `parse_continuous_gets_has`,
-    // which expects a verb ("gets"/"has"/"is"), not a subject continuation.
-    if let Some(rest) = nom_tag_tp(&tp, "all creatures attacking you ") {
+    // CR 508.1b + CR 303.4b: "[All ]creatures attacking <scope> <predicate>" — a
+    // continuous modification (keyword grant, +N/+M pump, ...) applied to
+    // attackers by the identity of their defending player. The defender scope is
+    // the only axis that varies — controller ("you"; Boarded Window), any
+    // opponent ("your opponents [and/or planeswalkers they control]";
+    // Blast-Furnace Hellkite, Neyali), or the enchanted player ("enchanted
+    // player"; Curse of Hospitality) — so it is parsed as one `alt` in
+    // `parse_attacking_defender_scope` rather than a dispatch arm per scope. Must
+    // precede the generic "all creatures " branch below, which would otherwise
+    // consume the "all creatures " prefix and leave a subject continuation that
+    // `parse_continuous_gets_has` (which expects a verb) can't parse.
+    if let Some((rest, defender)) = parse_attacking_defender_scope(&tp) {
         let filter =
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::Attacking {
-                    defender: Some(ControllerRef::You),
+                    defender: Some(defender),
                 }]),
             );
-        if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
-            return Some(def);
-        }
-    }
-
-    // CR 508.1b: "Creatures attacking you <predicate>" — same defender scope as
-    // the "all creatures" form above (Boarded Window, Watchdog-class statics
-    // without the quantifier).
-    if let Some(rest) = nom_tag_tp(&tp, "creatures attacking you ") {
-        let filter =
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking {
-                    defender: Some(ControllerRef::You),
-                }]),
-            );
-        if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
-            return Some(def);
-        }
-    }
-
-    // CR 508.1b: "Creatures attacking your opponents [and/or planeswalkers they
-    // control] have/get ..." — attackers whose defending player is an opponent
-    // of the source's controller (Blast-Furnace Hellkite, Neyali).
-    if let Some(rest) = nom_tag_tp(
-        &tp,
-        "creatures attacking your opponents and/or planeswalkers they control ",
-    )
-    .or_else(|| nom_tag_tp(&tp, "creatures attacking your opponents "))
-    {
-        let filter =
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::Attacking {
-                    defender: Some(ControllerRef::Opponent),
-                }]),
-            );
-        if let Some(def) = parse_continuous_gets_has(rest.original, filter, &text) {
+        if let Some(def) = parse_continuous_gets_has(rest, filter, &text) {
             return Some(def);
         }
     }

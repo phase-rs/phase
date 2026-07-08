@@ -3852,6 +3852,40 @@ fn compound_subject_land_type_change_single_subject_falls_through() {
     );
 }
 
+// CR 611.3: shared `peel_compound_all_quantified_conjuncts` authority — the
+// `" and all "` seam splits quantified compound subjects for static and effect
+// handlers (#5219 / #5377 class).
+#[test]
+fn peel_compound_all_quantified_conjuncts_splits_animation_subject() {
+    use super::static_helpers::peel_compound_all_quantified_conjuncts;
+
+    let conjuncts = peel_compound_all_quantified_conjuncts("All Forests and all Saprolings")
+        .expect("Life and Limb subject must peel");
+    assert_eq!(conjuncts.len(), 2);
+    assert_eq!(conjuncts[0], "All Forests");
+    assert_eq!(conjuncts[1], "all Saprolings");
+}
+
+#[test]
+fn peel_compound_all_quantified_conjuncts_splits_become_effect() {
+    use super::static_helpers::peel_compound_all_quantified_conjuncts;
+
+    let conjuncts = peel_compound_all_quantified_conjuncts(
+        "all creatures become black and all lands become Swamps",
+    )
+    .expect("Nightcreep must peel");
+    assert_eq!(conjuncts.len(), 2);
+    assert_eq!(conjuncts[0], "all creatures become black");
+    assert_eq!(conjuncts[1], "all lands become Swamps");
+}
+
+#[test]
+fn peel_compound_all_quantified_conjuncts_single_quantifier_declines() {
+    use super::static_helpers::peel_compound_all_quantified_conjuncts;
+
+    assert!(peel_compound_all_quantified_conjuncts("All Mountains are Plains").is_none());
+}
+
 #[test]
 fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     let def = parse_static_line(
@@ -9309,6 +9343,30 @@ fn static_creatures_attacking_your_opponents_have_double_strike() {
         .modifications
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::DoubleStrike,
+        }));
+}
+
+#[test]
+fn static_creatures_attacking_enchanted_player_have_trample() {
+    // CR 303.4b + CR 508.1b: Curse of Hospitality — an Aura enchanting a player
+    // grants trample to creatures attacking the enchanted player. Parameterizes
+    // the attacking-scope axis with the `EnchantedPlayer` defender, reusing the
+    // same `FilterProp::Attacking` + `parse_continuous_gets_has` path as the
+    // "attacking you" / "attacking your opponents" scopes.
+    let def = parse_static_line("Creatures attacking enchanted player have trample.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::EnchantedPlayer)
+            }]
+        ),))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
         }));
 }
 
@@ -15406,6 +15464,25 @@ fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
         "retention form must NOT replace card types: {:?}",
         retain.modifications
     );
+}
+
+// Follow-up to #5305: nom P/T remainder combinator for parse_enchanted_is_type.
+#[test]
+fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
+    let (rest, (p, t)) = super::grammar::parse_pt_mod_with_remainder("0/4 and loses all abilities")
+        .expect("unsigned base P/T + trailing clause");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), "and loses all abilities");
+
+    let (rest, (p, t)) =
+        super::grammar::parse_pt_mod_with_remainder("0/4.").expect("trailing period only");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), ".");
+
+    let (rest, (p, t)) =
+        super::grammar::parse_pt_mod_with_remainder("0/4").expect("bare base P/T with no tail");
+    assert_eq!((p, t), (0, 4));
+    assert!(rest.trim().is_empty());
 }
 
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land

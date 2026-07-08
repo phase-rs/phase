@@ -5550,6 +5550,49 @@ mod tests {
         id
     }
 
+    /// CR 608.2c: The player-control superlative gate evaluates at
+    /// resolution across all creatures on the battlefield.
+    #[test]
+    fn you_control_creature_tied_for_greatest_toughness_condition_evaluates_table_wide() {
+        use crate::parser::oracle_nom::condition::parse_inner_condition;
+
+        let (rest, condition) = parse_inner_condition(
+            "you control the creature with the greatest toughness or tied for the greatest toughness.",
+        )
+        .expect("Abzan Beastmaster condition should parse");
+        assert!(
+            rest.is_empty(),
+            "condition must fully consume, leftover: {rest:?}"
+        );
+
+        let mut state = setup();
+        let source = make_creature(&mut state, "Abzan Beastmaster", 2, 1, PlayerId(0));
+        make_creature(&mut state, "Controlled Bear", 2, 2, PlayerId(0));
+        make_creature(&mut state, "Opponent Wall", 0, 5, PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should be false when only an opponent controls the greatest toughness"
+        );
+
+        make_creature(&mut state, "Controlled Wall", 0, 5, PlayerId(0));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should be true when you control a creature tied for greatest toughness"
+        );
+
+        make_creature(&mut state, "Opponent Colossus", 0, 6, PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should become false when an opponent controls the sole greatest toughness"
+        );
+    }
+
     #[test]
     fn prototyped_permanent_keeps_secondary_characteristics_after_type_change() {
         let mut state = setup();

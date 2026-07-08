@@ -36,8 +36,10 @@ use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
-    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
-    parse_continuous_modifications, parse_static_line, parse_static_line_multi,
+    parse_basic_land_type_plural, parse_cant_be_activated_exemption_in_text,
+    parse_chosen_qualifier_subject, parse_continuous_modifications,
+    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
+    peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
@@ -156,10 +158,13 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(clause);
     }
 
-    // CR 611.3: Compound-subject become — "all <X> become <p1> and all <Y> become
-    // <p2>" (Nightcreep) distributes each conjunct into its own affected set. Must
-    // run before the single-subject handler, which would claim only the first
-    // conjunct and drop the rest into the description.
+    // CR 611.3 + CR 105.2 + CR 305.7: "all <X> become <P> and all <Y> become <Q>"
+    // — a compound-quantified dual-subject become effect (Nightcreep: "all
+    // creatures become black and all lands become Swamps"). Each conjunct carries
+    // its own subject and predicate; must run before `try_parse_subject_become_clause`,
+    // which would claim only the first conjunct and drop the second into the
+    // static description. Sibling of the compound-subject static handlers in
+    // `oracle_static/type_change.rs` (#5219 class).
     if let Some(clause) = try_parse_compound_all_subjects_become_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
@@ -600,107 +605,74 @@ fn build_additive_type_continuous_clause(
     })
 }
 
-/// Split "all `<A>` become `<p1>` and all `<B>` become `<p2>` [and all `<C>` …]"
-/// into its per-subject conjuncts, re-prepending the "all " elided by the
-/// ` and all ` seam to every conjunct after the first. Structural split on a fixed
-/// literal seam — each returned conjunct is re-parsed with nom combinators by
-/// [`try_parse_compound_all_subjects_become_clause`] via
-/// [`try_parse_subject_become_clause`]. The seam is lowercase mid-sentence in
-/// Oracle text, so the case-sensitive `split_once_on` matches it without folding
-/// the capitalized subject words.
-fn peel_and_all_become_conjuncts(body: &str) -> Vec<String> {
-    let mut parts: Vec<String> = Vec::new();
-    let mut remaining = body.trim().trim_end_matches('.').trim().to_string();
-    loop {
-        match nom_primitives::split_once_on(&remaining, " and all ") {
-            Ok((_, (before, after))) => {
-                let before = before.trim().to_string();
-                let next = format!("all {}", after.trim_start());
-                parts.push(before);
-                remaining = next;
-            }
-            Err(_) => {
-                parts.push(remaining.trim().to_string());
-                break;
-            }
-        }
-    }
-    parts
-}
-
-/// CR 611.3 + CR 105.2 / CR 613.1e + CR 305.7: Effect-layer compound-subject become
-/// — "[`<duration>`,] all `<X>` become `<p1>` and all `<Y>` become `<p2>`"
-/// (Nightcreep: "Until end of turn, all creatures become black and all lands become
-/// Swamps."). The single-subject [`try_parse_subject_become_clause`] claims only the
-/// first conjunct and drops the remaining predicate into the static `description`,
-/// so the second animation is lost.
-///
-/// This peels each "all `<subject>` become `<predicate>`" conjunct on the
-/// ` and all ` seam, lowers each through the single-subject become builder, and
-/// emits ONE `Effect::GenericEffect` carrying every conjunct's continuous
-/// `static_ability` — CR 611.3: each conjunct is its own affected set, so the
-/// creature half (`SetColor(Black)`) and the land half (`SetBasicLandType(Swamp)`)
-/// apply to distinct object sets under a single duration.
-///
-/// Declines (falls through to the single-subject handler) when there is no
-/// ` and all ` conjunction, or when a conjunct lacks its own `become` verb — a
-/// shared-predicate compound ("all creatures and all lands become black") whose
-/// first conjunct is a bare subject.
+/// CR 611.3 + CR 105.2 + CR 305.7: "all `<X>` become `<P>` and all `<Y>` become
+/// `<Q>`" — compound-quantified dual-subject become. Nightcreep is the exemplar:
+/// each conjunct applies its own subject-specific transformation (creatures →
+/// black, lands → Swamp). Declines when fewer than two conjuncts resolve, when
+/// any conjunct lacks a become verb, or when subjects share one predicate
+/// ("all creatures and all lands become Swamps").
 fn try_parse_compound_all_subjects_become_clause(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    // A leading duration ("Until end of turn,") scopes every conjunct.
-    let (body, leading_duration) = strip_leading_duration(text);
-
-    // Require a genuine "… and all …" conjunction; single-subject become lines
-    // fall through to `try_parse_subject_become_clause`.
-    nom_primitives::split_once_on(&body.to_lowercase(), " and all ").ok()?;
-
-    let conjuncts = peel_and_all_become_conjuncts(body);
-    if conjuncts.len() < 2 {
-        return None;
-    }
-
+    let conjuncts = peel_compound_all_quantified_conjuncts(text)?;
     let mut static_abilities = Vec::new();
-    let mut duration = leading_duration;
-    let mut target = None;
-    for conjunct in &conjuncts {
-        // Each conjunct must independently be an "all <subject> become <predicate>"
-        // animation; a bare subject (shared-predicate compound) declines here.
-        let clause = try_parse_subject_become_clause(conjunct, ctx)?;
+    let mut merged_duration = None;
+    let mut merged_target = None;
+
+    for conjunct in conjuncts {
+        let conjunct_lower = conjunct.to_lowercase();
+        let tp = TextPair::new(&conjunct, &conjunct_lower);
+        let (subject_tp, predicate_tp) = tp
+            .split_around(" becomes ")
+            .or_else(|| tp.split_around(" become "))?;
+        let predicate_with_verb = if nom_primitives::scan_contains(&conjunct_lower, " becomes ") {
+            format!("becomes {}", predicate_tp.original.trim())
+        } else {
+            format!("become {}", predicate_tp.original.trim())
+        };
+        let predicate_lower = predicate_with_verb.to_lowercase();
+        alt((tag::<_, _, OracleError<'_>>("become "), tag("becomes ")))
+            .parse(predicate_lower.as_str())
+            .ok()?;
+        let affected = parse_continuous_subject_filter(subject_tp.original.trim())?;
+        let application = SubjectApplication {
+            affected,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        };
+        let clause = build_become_clause(application, &predicate_with_verb, ctx)?;
         let Effect::GenericEffect {
-            static_abilities: conjunct_statics,
-            duration: conjunct_duration,
-            target: conjunct_target,
+            static_abilities: mut defs,
+            duration,
+            target,
+            ..
         } = clause.effect
         else {
             return None;
         };
-        static_abilities.extend(conjunct_statics);
-        // A trailing "until end of turn" rides the final conjunct; prefer any
-        // explicit (non-Permanent) duration over the per-conjunct default.
-        if matches!(duration, None | Some(Duration::Permanent))
-            && !matches!(conjunct_duration, None | Some(Duration::Permanent))
-        {
-            duration = conjunct_duration;
+        if merged_duration.is_none() {
+            merged_duration = duration.or(clause.duration);
         }
-        target = target.or(conjunct_target);
+        if merged_target.is_none() {
+            merged_target = target;
+        }
+        static_abilities.append(&mut defs);
     }
 
-    // Two subjects must each have contributed an animation modification.
     if static_abilities.len() < 2 {
         return None;
     }
 
-    let effect = Effect::GenericEffect {
-        static_abilities,
-        duration: duration.clone(),
-        target,
-    };
     Some(ParsedEffectClause {
-        effect,
-        duration,
+        effect: Effect::GenericEffect {
+            static_abilities,
+            duration: merged_duration.clone(),
+            target: merged_target,
+        },
+        duration: merged_duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -4159,6 +4131,14 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
     None
 }
 
+/// CR 305.7: A bare basic land type name after "become" — "Swamps", "Plains", etc.
+fn try_parse_become_basic_land_type_modification(
+    become_text: &str,
+) -> Option<ContinuousModification> {
+    parse_basic_land_type_plural(become_text.trim())
+        .map(|land_type| ContinuousModification::SetBasicLandType { land_type })
+}
+
 /// True when `lower` ends with the "of your choice" anchor. Pattern 2 (whole
 /// input parsed, trailing fixed phrase consumed last): `take_until` skips to the
 /// final occurrence and `all_consuming` requires the suffix to terminate the
@@ -5691,7 +5671,7 @@ fn add_another_property(filter: TargetFilter) -> TargetFilter {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, ContinuousModification, ControllerRef, Effect, TypeFilter,
+        AbilityKind, BasicLandType, ContinuousModification, ControllerRef, Effect, TypeFilter,
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
@@ -5716,6 +5696,13 @@ mod tests {
         ));
         // Unrelated predicates still fall through (the animation path handles them).
         assert!(try_parse_become_color_modification("a giant lizard").is_none());
+        assert!(matches!(
+            try_parse_become_basic_land_type_modification("Swamps"),
+            Some(ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Swamp,
+            })
+        ));
+        assert!(try_parse_become_basic_land_type_modification("black").is_none());
     }
 
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
