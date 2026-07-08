@@ -106,9 +106,10 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_you_have_conditions,
         parse_that_player_has_conditions,
         parse_there_are_conditions,
-        // CR 201.2 + CR 608.2c: Named-pair MUST precede the generic compound
+        // CR 201.2: Named-pair MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
+        parse_repeated_named_control_presence,
         parse_control_named_pair,
         parse_compound_control_presence,
         parse_filter_have_total_property,
@@ -555,6 +556,95 @@ fn parse_compound_control_presence(input: &str) -> OracleResult<'_, StaticCondit
             conditions: vec![first, second],
         },
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamedControlConnector {
+    And,
+    Or,
+}
+
+/// CR 201.2: Parse repeated named-control items where each item
+/// carries its own type phrase:
+///
+/// - "you control an enchantment named A and a land named B"
+/// - "you control a permanent named A or a permanent named B"
+///
+/// This must precede `parse_control_named_pair`: that parser owns the sibling
+/// shape "artifacts named A and B" where a single shared type phrase applies
+/// to both names.
+fn parse_repeated_named_control_presence(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, first) = parse_named_control_presence_item(rest)?;
+    let (rest, connector) = parse_named_control_item_connector(rest)?;
+    let (rest, second) = parse_named_control_presence_item(rest)?;
+    let conditions = vec![first, second];
+    let condition = match connector {
+        NamedControlConnector::And => StaticCondition::And { conditions },
+        NamedControlConnector::Or => StaticCondition::Or { conditions },
+    };
+    Ok((rest, condition))
+}
+
+fn parse_named_control_presence_item(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (after_named, filter_base) = parse_named_control_item_prefix(input)?;
+    let name_end = named_control_item_name_end(after_named);
+    let name = after_named[..name_end].trim();
+    if name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let rest = &after_named[name_end..];
+    Ok((
+        rest,
+        StaticCondition::IsPresent {
+            filter: Some(inject_controller_you(with_named_property(
+                filter_base,
+                name,
+            ))),
+        },
+    ))
+}
+
+fn parse_named_control_item_prefix(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (after_named, type_text) = take_until(" named ").parse(input)?;
+    let (after_named, _) = tag(" named ").parse(after_named)?;
+    let (filter_base, type_remainder) = parse_type_phrase(type_text);
+    if matches!(filter_base, TargetFilter::Any) || !type_remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((after_named, strip_filter_named_property(filter_base)))
+}
+
+fn parse_named_control_item_connector(input: &str) -> OracleResult<'_, NamedControlConnector> {
+    let (rest, connector) = alt((
+        value(NamedControlConnector::And, tag(" and ")),
+        value(NamedControlConnector::Or, tag(" or ")),
+    ))
+    .parse(input)?;
+    parse_named_control_item_prefix(rest)?;
+    Ok((rest, connector))
+}
+
+fn named_control_item_name_end(input: &str) -> usize {
+    input
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            (ch == ' ' || ch == '.')
+                .then(|| {
+                    parse_named_control_item_connector(&input[idx..]).is_ok()
+                        || tag::<_, _, OracleError<'_>>(".")
+                            .parse(&input[idx..])
+                            .is_ok()
+                })
+                .and_then(|is_boundary| is_boundary.then_some(idx))
+        })
+        .unwrap_or(input.len())
 }
 
 /// CR 201.2 + CR 603.4: Parse "you control [type] named [Name1] and [Name2]"
@@ -9218,6 +9308,68 @@ mod tests {
                 }
             }
             other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_named_control_presence_parses_item_specific_and() {
+        let (rest, condition) = parse_inner_condition(
+            "you control an enchantment named arguel's blood fast and a land named temple of aclazotz",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = condition else {
+            panic!("expected And condition");
+        };
+        assert_eq!(conditions.len(), 2);
+        let expected = [
+            ("arguel's blood fast", TypeFilter::Enchantment),
+            ("temple of aclazotz", TypeFilter::Land),
+        ];
+        for (condition, (expected_name, expected_type)) in conditions.iter().zip(expected) {
+            let StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } = condition
+            else {
+                panic!("expected typed IsPresent, got {condition:?}");
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&expected_type),
+                "missing type {expected_type:?} in {tf:?}"
+            );
+            assert!(tf
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Named { name } if name == expected_name)));
+        }
+    }
+
+    #[test]
+    fn repeated_named_control_presence_preserves_comma_names_and_or_connector() {
+        let (rest, condition) = parse_inner_condition(
+            "you control a permanent named guan yu, sainted warrior or a permanent named zhang fei, fierce warrior",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::Or { conditions } = condition else {
+            panic!("expected Or condition");
+        };
+        assert_eq!(conditions.len(), 2);
+        let expected = ["guan yu, sainted warrior", "zhang fei, fierce warrior"];
+        for (condition, expected_name) in conditions.iter().zip(expected) {
+            let StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            } = condition
+            else {
+                panic!("expected typed IsPresent, got {condition:?}");
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+            assert!(tf
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Named { name } if name == expected_name)));
         }
     }
 
