@@ -821,7 +821,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - A-Paragon of Modernity
 - A-Sigil of Myrkul
-- Abzan Beastmaster
 - Adaptive Training Post
 - Adrestia
 - Aether Revolt
