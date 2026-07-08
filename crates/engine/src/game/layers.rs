@@ -6054,6 +6054,71 @@ mod tests {
         );
     }
 
+    /// CR 113.6 + CR 113.6b + CR 613.11: combat-assignment rule effects use the
+    /// same zone-of-function gate as other statics. A graveyard object can be
+    /// visited by the static-source gather because it has some other
+    /// opt-in-zone static; an empty-`active_zones` combat-assignment static on
+    /// that same object still defaults to battlefield-only and must not leak.
+    #[test]
+    fn combat_assignment_rule_effects_respect_zone_of_function_active_zones() {
+        fn add_graveyard_source(state: &mut GameState, combat_active_zones: Vec<Zone>) -> ObjectId {
+            let source_id = create_object(
+                state,
+                CardId(0),
+                PlayerId(0),
+                "Graveyard Combat Rule Source".to_string(),
+                Zone::Graveyard,
+            );
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+                    .active_zones(combat_active_zones),
+            );
+            state.players[0].graveyard.push_back(source_id);
+            source_id
+        }
+
+        {
+            let mut state = setup();
+            let _source_id = add_graveyard_source(&mut state, vec![]);
+            let target_id = make_creature(&mut state, "Battlefield Bear", 2, 3, PlayerId(0));
+
+            evaluate_layers(&mut state);
+
+            assert!(
+                !state.objects[&target_id].assigns_damage_from_toughness,
+                "empty active_zones defaults to battlefield-only and must not \
+                 leak a combat-assignment rule from the graveyard"
+            );
+        }
+
+        {
+            let mut state = setup();
+            let _source_id = add_graveyard_source(&mut state, vec![Zone::Graveyard]);
+            let target_id = make_creature(&mut state, "Battlefield Bear", 2, 3, PlayerId(0));
+
+            evaluate_layers(&mut state);
+
+            assert!(
+                state.objects[&target_id].assigns_damage_from_toughness,
+                "a combat-assignment rule that explicitly opts into the \
+                 graveyard still functions from the graveyard"
+            );
+        }
+    }
+
     /// Helper: creatures you control filter
     fn creature_you_ctrl() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
