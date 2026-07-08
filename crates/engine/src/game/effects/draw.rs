@@ -135,14 +135,10 @@ pub fn resolve(
         _ => (1, ability.controller),
     };
 
-    // CR 614.1a: Route draw through replacement pipeline (e.g. Dredge, Abundance).
-    match draw_through_replacement(
-        state,
-        drawing_player,
-        num_cards,
-        events,
-        apply_draw_after_replacement,
-    ) {
+    // CR 121.6b: Route through `resume_multi_draw` so a multi-card draw
+    // (num_cards > 1) offers replacement independently to each unit instead
+    // of the whole count being replaced or drawn as one atomic batch.
+    match resume_multi_draw(state, drawing_player, num_cards, 0, events) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
@@ -153,6 +149,70 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 121.6b: Resolve `remaining` independent draw events for `player`, one at
+/// a time, offering each its own replacement choice — "if an effect replaces a
+/// draw within a sequence of card draws, the replacement effect is completed
+/// before resuming the sequence." Called both by `resolve`'s first pass
+/// (`remaining` = the full requested count, `accumulated` = 0) and by
+/// `handle_replacement_choice`'s resume path (`remaining`/`accumulated` =
+/// whatever `PendingMultiDraw` recorded when the previous unit parked).
+///
+/// CR 609.3: `accumulated` is the running total of cards ACTUALLY delivered
+/// across every completed unit of this instruction (0 for a unit whose draw
+/// was replaced by something else, e.g. Dredge; the post-replacement count for
+/// a unit doubled by a count-modifier like Teferi's Ageless Insight). Committed
+/// to `state.last_effect_count` exactly once, when `remaining` reaches 0, so a
+/// chained "discard that many" sub-ability sees the true total across the
+/// WHOLE original multi-draw, not just the last unit processed.
+///
+/// Returns `NeedsChoice` and stashes `state.pending_multi_draw` if a unit
+/// pauses with units still left; otherwise returns the terminal
+/// `Execute`/`Prevented`-equivalent result with `state.last_effect_count`
+/// already committed. The `Execute(ProposedEvent::Draw{count: 0, ..})` used as
+/// the completion sentinel reuses the engine's existing zero-count draw shape
+/// (already produced today by `Effect::Draw{count: 0}` via
+/// `resolve_quantity_with_targets(...).max(0)`), not a new event shape.
+pub(crate) fn resume_multi_draw(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    remaining: u32,
+    accumulated: u32,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    let mut total = accumulated;
+    let mut left = remaining;
+    while left > 0 {
+        // This unit is now in flight — decrement BEFORE attempting so a park
+        // mid-attempt stores the count of units AFTER this one, not including
+        // it (the paused unit resumes via the accepted/declined choice itself,
+        // not via a fresh loop iteration).
+        left -= 1;
+        let mut unit_drawn: u32 = 0;
+        let result = draw_through_replacement(state, player, 1, events, |state, event, events| {
+            unit_drawn = apply_draw_after_replacement(state, event, events);
+        });
+        match result {
+            ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+                total += unit_drawn;
+            }
+            ReplacementResult::NeedsChoice(waiting_player) => {
+                state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
+                    player,
+                    remaining: left,
+                    accumulated: total,
+                });
+                return ReplacementResult::NeedsChoice(waiting_player);
+            }
+        }
+    }
+    state.last_effect_count = Some(total as i32);
+    ReplacementResult::Execute(ProposedEvent::Draw {
+        player_id: player,
+        count: 0,
+        applied: HashSet::new(),
+    })
 }
 
 /// CR 614.6 + CR 614.11 + CR 704.3: Single authority for the
@@ -211,11 +271,21 @@ pub(crate) fn draw_through_replacement(
 /// Extracted from `resolve`'s Execute arm so the same logic can be invoked by
 /// `handle_replacement_choice` when a player accepts a draw-replacement choice.
 /// Caller is responsible for emitting `EffectResolved`.
+///
+/// Returns the number of cards actually delivered by this call. CR 609.3: this
+/// function does NOT write `state.last_effect_count` itself — `resume_multi_draw`
+/// accumulates the returned counts across every unit of the original
+/// multi-card draw and commits the TRUE total once, when the whole instruction
+/// completes, so a chained "discard that many" sees the real total rather than
+/// just the last unit's count. Callers outside `resume_multi_draw` that invoke
+/// this directly for a single, non-multi-draw event (the two unit tests below,
+/// `scry.rs`'s delegation arm, `handle_replacement_choice`'s non-multi-draw
+/// resume path) may ignore the return value — Rust does not require consuming it.
 pub fn apply_draw_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) {
+) -> u32 {
     let ProposedEvent::Draw {
         player_id,
         count,
@@ -226,7 +296,7 @@ pub fn apply_draw_after_replacement(
             false,
             "apply_draw_after_replacement called with non-Draw ProposedEvent"
         );
-        return;
+        return 0;
     };
 
     let allowed_count = allowed_draw_count(state, player_id, count);
@@ -242,12 +312,7 @@ pub fn apply_draw_after_replacement(
         }
     }
 
-    // CR 609.3: Record the actually-drawn count so chained sub-abilities like
-    // "draw cards equal to N, then discard that many" can resolve their
-    // dynamic count via `EventContextAmount`'s `last_effect_count` fallback.
-    // Mirrors the convention used by `change_zone.rs`, `sacrifice.rs`, etc.
-    let drawn_count = cards_to_draw.len() as i32;
-    state.last_effect_count = Some(drawn_count);
+    let drawn_count = cards_to_draw.len() as u32;
 
     for obj_id in cards_to_draw {
         // CR 121.1 (PLAN Risk #5, tranche 4): drawing IS a Library → Hand zone
@@ -326,6 +391,8 @@ pub fn apply_draw_after_replacement(
         super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
         record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
     }
+
+    drawn_count
 }
 
 /// CR 702.94a + CR 603.11: Shared first-draw hook — record the drawn
