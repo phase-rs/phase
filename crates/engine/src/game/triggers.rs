@@ -6099,18 +6099,36 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
-        // CR 508.1a + CR 603.2c: Count co-attackers excluding the source creature.
-        // CR 702.149a: when `filter` is present, only co-attackers matching it
-        // count (e.g. Training's "another creature with power greater than this
-        // creature's power"); the filter is resolved with the source creature as
-        // its source object so power-relative comparisons read the source.
+        // CR 506.5 + CR 508.1a + CR 603.2c: Count co-attackers excluding the
+        // creature that fired this trigger instance. "Attacks alone" (CR 702.83b,
+        // Exalted) and "attacks with another" (CR 702.149a, Training) are both
+        // evaluated relative to the ATTACKING creature named by the trigger
+        // event, not the ability's source: an observer (Exalted / Agent 13,
+        // Sharon Carter) that stays back while another creature attacks alone is
+        // not itself in combat, so excluding `source_id` would leave the lone
+        // attacker counted as a co-attacker and wrongly report co-attackers >= 1.
+        // The per-attacker `AttackersDeclared` event (produced by
+        // `matching_attack_events` and re-checked at resolution, CR 603.4) names
+        // exactly the triggering attacker. `source_id` still resolves the
+        // filter's source object so Training's power-relative comparison reads
+        // the source creature. Falls back to `source_id` when the event does not
+        // name a single attacker (e.g. a self-referential trigger where the
+        // source is itself the attacker).
         TriggerCondition::MinCoAttackers { minimum, filter } => {
+            let triggering_attacker = match trigger_event {
+                Some(GameEvent::AttackersDeclared { attacker_ids, .. })
+                    if attacker_ids.len() == 1 =>
+                {
+                    Some(attacker_ids[0])
+                }
+                _ => source_id,
+            };
             state.combat.as_ref().is_some_and(|combat| {
                 let co_attacker_count = combat
                     .attackers
                     .iter()
                     .filter(|a| {
-                        a.object_id != source_id.unwrap_or(ObjectId(0))
+                        Some(a.object_id) != triggering_attacker
                             && state
                                 .objects
                                 .get(&a.object_id)
