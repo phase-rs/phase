@@ -31563,9 +31563,10 @@ fn perpetual_parser_maps_modify_cost() {
     );
 }
 
-/// Anaphoric "that card perpetually gains …" — the EXACT clause printed on
-/// Paths of Tuinvale and Talion's Throneguard. Back-references the parent
-/// target ([`TargetFilter::ParentTarget`]).
+/// Definite "that card perpetually gains ..." back-references the parent
+/// target ([`TargetFilter::ParentTarget`]). Bare "It ..." needs the surrounding
+/// chain context and is covered by `perpetual_anaphor_after_chosen_card_targets_parent_target`
+/// and `perpetual_modify_cost_bound_it_uses_prior_referent`.
 #[test]
 fn perpetual_modify_cost_anaphor_that_card() {
     use crate::types::ability::PerpetualModification;
@@ -31585,36 +31586,6 @@ fn perpetual_modify_cost_anaphor_that_card() {
             } if *amount == ManaCost::generic(1)
         ),
         "'that card' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
-    );
-
-    let e = parse_effect("It perpetually gains \"This spell costs {1} less to cast.\"");
-    assert!(
-        matches!(
-            &e,
-            Effect::ApplyPerpetual {
-                target: TargetFilter::ParentTarget,
-                modification: PerpetualModification::ModifyCost {
-                    mode: CostModifyMode::Reduce,
-                    amount,
-                },
-            } if *amount == ManaCost::generic(1)
-        ),
-        "'it' anaphor must map to ParentTarget Reduce generic(1), got {e:?}"
-    );
-
-    let e = parse_effect("It perpetually gains \"This spell costs {2} more to cast.\"");
-    assert!(
-        matches!(
-            &e,
-            Effect::ApplyPerpetual {
-                target: TargetFilter::ParentTarget,
-                modification: PerpetualModification::ModifyCost {
-                    mode: CostModifyMode::Raise,
-                    amount,
-                },
-            } if *amount == ManaCost::generic(2)
-        ),
-        "'it' anaphor must map to ParentTarget Raise generic(2), got {e:?}"
     );
 }
 
