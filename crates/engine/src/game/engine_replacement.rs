@@ -21,7 +21,7 @@ use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
-use super::effects::draw::apply_draw_after_replacement;
+use super::effects::draw::{apply_draw_after_replacement, resume_multi_draw};
 use super::effects::life::{apply_life_gain_after_replacement, apply_life_loss_after_replacement};
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
@@ -645,6 +645,33 @@ pub(super) fn handle_replacement_choice(
             {
                 if let Some(wf) = super::turns::drain_pending_team_draw_step(state, events) {
                     waiting_for = wf;
+                }
+            }
+
+            // CR 121.6b: a multi-card draw (`Effect::Draw{count: N}`, N > 1)
+            // paused mid-sequence because a per-unit replacement (Dredge,
+            // Notion Thief, Hullbreacher, a count-doubling static, etc.) needed
+            // this choice. The just-resolved unit was applied above (Draw arm);
+            // drain the remaining units via `resume_multi_draw`, which
+            // internally re-parks `pending_multi_draw` and sets
+            // `state.waiting_for` (via `draw_through_replacement`) if the next
+            // unit surfaces its own choice — an arbitrary number of sequential
+            // re-pauses compose correctly since each drain call re-reads
+            // whatever the previous one stashed.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_multi_draw.is_some()
+            {
+                if let Some(pending) = state.pending_multi_draw.take() {
+                    let _ = resume_multi_draw(
+                        state,
+                        pending.player,
+                        pending.remaining,
+                        pending.accumulated,
+                        events,
+                    );
+                }
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
                 }
             }
 

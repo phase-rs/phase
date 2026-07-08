@@ -6463,6 +6463,25 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_connive_reentry: Option<PendingConniveReentry>,
 
+    /// CR 121.6b: "If an effect replaces a draw within a sequence of card
+    /// draws, the replacement effect is completed before resuming the
+    /// sequence." Tracks an in-progress multi-card draw (`Effect::Draw{count:
+    /// N}`, N > 1) paused mid-way by a per-unit replacement choice (Dredge,
+    /// Notion Thief, Hullbreacher, etc.) so the remaining units resolve
+    /// independently instead of the whole count being replaced or drawn as
+    /// one atomic batch. `accumulated` (CR 609.3) is the running total of
+    /// cards ACTUALLY delivered across every already-completed unit of this
+    /// instruction — committed to `state.last_effect_count` exactly once,
+    /// when the full original count is exhausted, so chained "discard that
+    /// many" sub-abilities see the true total, not just the last unit's
+    /// count. Drained only by `engine_replacement::handle_replacement_choice`
+    /// (the `Draw` arm) and `replacement::abandon_post_replacement_continuation`
+    /// (player departure, CR 800.4a) — single-player-scoped, safe to null
+    /// outright on departure unlike the deliberately-preserved multi-player
+    /// queue fields (`pending_team_draw_step` etc.) nearby in `elimination.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_multi_draw: Option<PendingMultiDraw>,
+
     /// Transient: post-resolution context for a permanent spell whose ETB replacement
     /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
     /// after the zone change completes.
@@ -8112,6 +8131,17 @@ pub struct PendingConniveReentry {
     pub applied: HashSet<ReplacementId>,
 }
 
+/// CR 121.6b + CR 609.3: See the doc comment on `GameState::pending_multi_draw`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMultiDraw {
+    pub player: PlayerId,
+    /// Units of the original multi-card draw not yet attempted.
+    pub remaining: u32,
+    /// Running total of cards actually delivered across every already-completed
+    /// unit — committed to `state.last_effect_count` once `remaining` reaches 0.
+    pub accumulated: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
@@ -8565,6 +8595,7 @@ impl GameState {
             post_replacement_event_target: None,
             post_replacement_token_choice_applied: None,
             pending_connive_reentry: None,
+            pending_multi_draw: None,
             pending_spell_resolution: None,
             pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
@@ -9231,6 +9262,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.pending_connive_reentry == other.pending_connive_reentry
+            && self.pending_multi_draw == other.pending_multi_draw
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty
