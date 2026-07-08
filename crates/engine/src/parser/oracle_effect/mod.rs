@@ -8436,10 +8436,15 @@ fn try_parse_perpetual_modify_cost(tp: TextPair, ctx: &ParseContext) -> Option<E
         tail.is_empty() || tail == "."
     }
 
-    let (rest, target) = parse_perpetual_self_subject(tp.lower).or_else(|| {
+    let (rest, target) = if tag::<_, _, OracleError<'_>>("it perpetually ")
+        .parse(tp.lower)
+        .is_ok()
+    {
         parse_bound_it_perpetual_gain_cost_subject(tp.lower, ctx)
-            .map(|rest| (rest, TargetFilter::ParentTarget))
-    })?;
+            .map(|rest| (rest, TargetFilter::ParentTarget))?
+    } else {
+        parse_perpetual_self_subject(tp.lower)?
+    };
 
     // Quoted body: "this spell costs {N} less/more to cast[.,]".
     let ((amount, mode), rest) = nom_on_lower(rest, rest, |input| {
