@@ -6121,12 +6121,13 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
     ))
 }
 
-/// CR 608.2c: "[effect] if at least one <filter> was <verb> this way" — the
-/// trailing (suffix) form of the prior-effect outcome gate. CR 608.2c states
-/// later text on a card may reference an earlier instruction in the same
-/// effect; here "this way" refers to the set of objects affected by the
-/// immediately-preceding instruction, and the condition fires when that set
-/// contains at least one object matching `<filter>`. Kaya, Orzhov Usurper's
+/// CR 608.2c + CR 400.7j: "[effect] if at least one <filter> was <verb> this
+/// way" — the trailing (suffix) form of the prior-effect outcome gate. Later
+/// text may reference an earlier instruction in the same effect, and objects
+/// moved to public zones remain findable. Here "this way" refers to the set of
+/// objects affected by the immediately-preceding instruction, and the condition
+/// fires when that set contains at least one object matching `<filter>`. Kaya,
+/// Orzhov Usurper's
 /// +1 ("Exile up to two target
 /// cards from a single graveyard. You gain 2 life if at least one creature
 /// card was exiled this way.") is the motivating case.
