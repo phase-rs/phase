@@ -5646,6 +5646,27 @@ fn handle_play_land(
         None,
     );
 
+    // CR 110.2 + CR 110.2a (GitHub #696): A played land's controller
+    // defaults to whoever played it, not the card's owner. `player` is the
+    // acting land-player already resolved above (turn_resource_owner, or
+    // acting_player under shared team turns) — the same identity already
+    // used throughout this function for hand/zone lookups, and the correct
+    // one even under Mindslaver-style turn control (the turn's rightful
+    // player controls what gets played on their turn, not whoever is
+    // making the decisions). This is a no-op for the overwhelmingly common
+    // owner==player case. A genuine self-ETB "enters under [X]'s control"
+    // replacement (enters_under) still wins — it runs later in the same
+    // replacement pipeline this event is routed through below, and
+    // hard-overwrites this default unconditionally (identical safety
+    // property to the stack.rs spell-cast seam this mirrors).
+    if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+        controller_override,
+        ..
+    } = &mut proposed
+    {
+        *controller_override = Some(player);
+    }
+
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
     // counters" replacement for planeswalkers and battles entering the
     // battlefield via a play-from-zone action.

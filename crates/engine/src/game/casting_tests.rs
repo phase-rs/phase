@@ -451,6 +451,126 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
     assert_eq!(state.players[0].mana_pool.mana.len(), 0);
 }
 
+#[test]
+fn cast_permanent_from_granted_permission_enters_under_caster_control() {
+    // GitHub phase-rs/phase#696 (Evelyn, the Covetous) — surfaced independently
+    // via Ragavan, Nimble Pilferer. CR 601.2a + CR 110.2/110.2a: casting a
+    // permanent you don't own via a granted CastingPermission::PlayFromExile
+    // must put it under the CASTER's control, not the card's owner.
+    let mut state = setup_game_at_main_phase();
+    // Owned by P1, sitting in exile, with a permission granting P0 the right
+    // to cast it — mirrors spell_auto_tap_honors_exile_any_color_permission's
+    // construction pattern above, but with owner != granted_to.
+    let permanent = create_object(
+        &mut state,
+        CardId(51),
+        PlayerId(1),
+        "Borrowed Creature".to_string(),
+        Zone::Exile,
+    );
+    {
+        let obj = state.objects.get_mut(&permanent).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        };
+        obj.casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::Permanent,
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+    }
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    let outcome = runner.cast(permanent).resolve();
+
+    // Reach-guard: the permanent must actually resolve onto the battlefield
+    // before the controller assertion below means anything.
+    outcome.assert_zone(&[permanent], Zone::Battlefield);
+    outcome.assert_controls(PlayerId(0), permanent);
+    assert_eq!(
+        outcome.state().objects[&permanent].owner,
+        PlayerId(1),
+        "owner must remain P1 — only controller should change"
+    );
+}
+
+#[test]
+fn play_land_from_granted_permission_enters_under_player_control() {
+    // GitHub phase-rs/phase#696 (Evelyn, the Covetous): her "you may play a
+    // card from exile" grants CastingPermission::PlayFromExile the same as
+    // the spell case above, but "play" also covers lands (CR 305.1), which
+    // never touch the stack — a structurally separate code path
+    // (handle_play_land) from the spell-cast test above. Same CR 110.2/
+    // 110.2a defaulting bug, independently reachable.
+    let mut state = setup_game_at_main_phase();
+    let land = create_object(
+        &mut state,
+        CardId(52),
+        PlayerId(1),
+        "Borrowed Land".to_string(),
+        Zone::Exile,
+    );
+    {
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::Permanent,
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+    }
+    let card_id = state.objects[&land].card_id;
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    let result = runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .unwrap();
+    let _ = result;
+
+    // Reach-guard: the land must actually resolve onto the battlefield
+    // before the controller assertion below means anything.
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Battlefield,
+        "land must actually enter the battlefield"
+    );
+    assert_eq!(
+        runner.state().objects[&land].controller,
+        PlayerId(0),
+        "controller must be P0 (the player who played it), not P1 (the owner)"
+    );
+    assert_eq!(
+        runner.state().objects[&land].owner,
+        PlayerId(1),
+        "owner must remain P1 — only controller should change"
+    );
+}
+
 fn foretell_test_cost() -> ManaCost {
     ManaCost::Cost {
         shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::White],
