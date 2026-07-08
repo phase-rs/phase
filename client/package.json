@@ -29,6 +29,7 @@
     "framer-motion": "^12.35.1",
     "i18next": "^26.2.0",
     "idb-keyval": "^6.2.2",
+    "mana-font": "^1.18.0",
     "peerjs": "^1.5.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
