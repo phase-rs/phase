@@ -5550,6 +5550,8 @@ mod tests {
         id
     }
 
+    /// CR 608.2c: The player-control superlative gate evaluates at
+    /// resolution across all creatures on the battlefield.
     #[test]
     fn you_control_creature_tied_for_greatest_toughness_condition_evaluates_table_wide() {
         use crate::parser::oracle_nom::condition::parse_inner_condition;
