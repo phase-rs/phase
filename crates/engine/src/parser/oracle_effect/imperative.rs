@@ -9990,15 +9990,15 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
         return None;
     }
 
-    // CR 122.1b: Map to typed PlayerCounterKind — reject anything that's an object counter.
-    // Energy counters are NOT included — they use the dedicated GainEnergy effect.
-    let kind = match counter_kind {
-        "poison" => PlayerCounterKind::Poison,
-        "experience" => PlayerCounterKind::Experience,
-        "rad" => PlayerCounterKind::Rad,
-        "ticket" => PlayerCounterKind::Ticket,
-        _ => return None,
-    };
+    // CR 122.1: Map to typed PlayerCounterKind — reject anything that's an object
+    // counter. Energy counters are NOT included (they use the dedicated
+    // GainEnergy effect). Single authority: `nom_primitives::parse_player_counter_kind`,
+    // shared with the oracle_nom threshold rider. `all_consuming` enforces that
+    // the whole kind word is a recognized player counter (so "poisonx" is
+    // rejected rather than matching the "poison" prefix).
+    let (_, kind) = all_consuming(nom_primitives::parse_player_counter_kind)
+        .parse(counter_kind)
+        .ok()?;
 
     let _ = plural; // plural is just grammatical, doesn't affect semantics
     Some(ImperativeFamilyAst::GivePlayerCounter {

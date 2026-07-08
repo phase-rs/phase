@@ -630,6 +630,7 @@ mod vigor_regression;
 mod virulent_emissary_trigger;
 mod vivien_invocation_reflexive_power;
 mod volatile_fault_that_player_search;
+mod vraska_betrayals_sting;
 mod wedding_ring_etb_token_copy;
 mod well_of_lost_dreams_may_pay_x;
 mod wernog_riders_chaplain_investigate_count;
