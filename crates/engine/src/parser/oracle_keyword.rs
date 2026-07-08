@@ -1586,8 +1586,25 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // fails and we fall through to the generic path, preserving today's
     // Vanishing(0) routing.
     let param: Cow<'_, str> = if is_numeric_count_keyword(name) {
-        match nom_primitives::parse_number.parse(rest) {
-            Ok((remainder, _)) => Cow::Borrowed(&rest[..rest.len() - remainder.len()]),
+        // CR 702.82c: "Devour [quality] N" is a variant where the count follows a
+        // leading type qualifier — Famished Worldsire's "Devour land 3" enters
+        // with three +1/+1 counters per sacrificed LAND, so the numeric token
+        // sits after "land". Take the count at the head; if a non-numeric
+        // qualifier word precedes it, skip that one word and retry, so the count
+        // is captured rather than lost to the keyword's `FromStr` `unwrap_or(1)`
+        // fallback (which produced the reported Devour 1).
+        let count_src = if nom_primitives::parse_number.parse(rest).is_ok() {
+            rest
+        } else {
+            (
+                take_until::<_, _, OracleError<'_>>(" "),
+                tag::<_, _, OracleError<'_>>(" "),
+            )
+                .parse(rest)
+                .map_or(rest, |(after_qualifier, _)| after_qualifier)
+        };
+        match nom_primitives::parse_number.parse(count_src) {
+            Ok((remainder, _)) => Cow::Borrowed(&count_src[..count_src.len() - remainder.len()]),
             Err(_) => Cow::Borrowed(rest),
         }
     } else {
@@ -2202,6 +2219,29 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_keyword_from_oracle("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.82c: "Devour [quality] N" (Famished Worldsire — "Devour land 3")
+    /// puts the count after the type qualifier. The numeric-count extractor must
+    /// skip the leading qualifier word so the count is 3, not the `FromStr`
+    /// `unwrap_or(1)` fallback (which produced the reported Devour 1).
+    #[test]
+    fn parse_keyword_from_oracle_devour_quality_qualifier_count() {
+        assert_eq!(
+            parse_keyword_from_oracle("devour land 3"),
+            Some(Keyword::Devour(3))
+        );
+        // CR 702.82a: the plain "Devour N" form is unaffected.
+        assert_eq!(
+            parse_keyword_from_oracle("devour 3"),
+            Some(Keyword::Devour(3))
+        );
+        // Regression: a sibling numeric-count keyword still extracts its leading
+        // count — the qualifier-skip only fires on the parse_number-fails branch.
+        assert_eq!(
+            parse_keyword_from_oracle("vanishing 3"),
+            Some(Keyword::Vanishing(3))
+        );
     }
 
     /// CR 702.24: a GRANTED cumulative upkeep (the quoted-ability grant path
