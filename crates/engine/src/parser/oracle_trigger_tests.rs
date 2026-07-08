@@ -5398,6 +5398,29 @@ fn molten_echoes_chosen_type_filter_preserves_last_created_anaphors() {
             _ => None,
         })
     }
+    fn haste_target(effs: &[&Effect]) -> Option<TargetFilter> {
+        effs.iter().find_map(|e| match e {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } if static_abilities.iter().any(|static_def| {
+                static_def.affected == Some(TargetFilter::LastCreated)
+                    && static_def.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Haste,
+                            }
+                        )
+                    })
+            }) =>
+            {
+                target.clone()
+            }
+            _ => None,
+        })
+    }
 
     let text = "Whenever a nontoken creature you control of the chosen type enters, create a token that's a copy of that creature. That token gains haste. Exile it at the beginning of the next end step.";
     let def = parse_trigger_line(text, "Molten Echoes");
@@ -5425,6 +5448,11 @@ fn molten_echoes_chosen_type_filter_preserves_last_created_anaphors() {
         copy_source(&effs),
         Some(TargetFilter::TriggeringSource),
         "CopyTokenOf source must stay TriggeringSource (copy the entering creature that matched the chosen-type filter)"
+    );
+    assert_eq!(
+        haste_target(&effs),
+        Some(TargetFilter::LastCreated),
+        "haste grant must bind the created token (LastCreated), not the entering creature"
     );
     assert_eq!(
         exile_target(&effs),
