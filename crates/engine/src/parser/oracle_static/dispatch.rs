@@ -2767,16 +2767,25 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
-    // --- "Activated abilities of [filter] cost {N} less/more to activate" ---
+    // --- "Activated/Loyalty abilities of [filter] cost {N} less/more to activate" ---
     // CR 602.1 + CR 601.2f + CR 118.7: Generic activated-ability cost modifier,
     // directional. Reduce (Training Grounds: "Activated abilities of creatures you
     // control cost {2} less to activate") and Raise (Skyseer's Chariot: "Activated
     // abilities of sources with the chosen name cost {2} more to activate").
+    // CR 606.1: Loyalty abilities are activated abilities, so the same shape covers
+    // "Loyalty abilities of planeswalkers your opponents control cost {1} more to
+    // activate" (Eidolon of Obstruction) — the leading noun is the only axis that
+    // varies, so it is a single `alt` that sets the matched `keyword` tag; the
+    // runtime gate matches `keyword == "loyalty"` against a loyalty ability's cost.
     // Combinator: prefix → subject → " cost {N} " → direction. The subject is
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
-    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count), _)) =
+    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, _) = tag("activated abilities of ").parse(i)?;
+            let (i, keyword) = alt((
+                value("activated", tag("activated abilities of ")),
+                value("loyalty", tag("loyalty abilities of ")),
+            ))
+            .parse(i)?;
             let (i, subject) = take_until(" cost ").parse(i)?;
             let (i, _) = tag(" cost ").parse(i)?;
             // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds)
@@ -2802,7 +2811,14 @@ pub(crate) fn parse_static_line_inner(
             let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
             Ok((
                 i,
-                (amount_n, is_x, mode, subject.to_string(), dynamic_count),
+                (
+                    amount_n,
+                    is_x,
+                    mode,
+                    subject.to_string(),
+                    dynamic_count,
+                    keyword,
+                ),
             ))
         })
     {
@@ -2827,13 +2843,13 @@ pub(crate) fn parse_static_line_inner(
             return Some(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
                     mode,
-                    keyword: "activated".to_string(),
+                    keyword: keyword.to_string(),
                     amount,
                     minimum_mana,
                     dynamic_count,
                     exemption: ActivationExemption::None,
-                    // Source-scoped ("Activated abilities of <filter>"): scope is
-                    // the `affected` filter below; no activator gate.
+                    // Source-scoped ("Activated/Loyalty abilities of <filter>"):
+                    // scope is the `affected` filter below; no activator gate.
                     activator: None,
                 })
                 .affected(affected)
