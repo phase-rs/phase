@@ -15207,7 +15207,7 @@ fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
     );
 }
 
-// Issue #5300: combinator boundary for unsigned base P/T + trailing clause.
+// Follow-up to #5305: nom P/T remainder combinator for parse_enchanted_is_type.
 #[test]
 fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
     let (rest, (p, t)) = super::grammar::parse_pt_mod_with_remainder("0/4 and loses all abilities")
@@ -15224,123 +15224,6 @@ fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
         super::grammar::parse_pt_mod_with_remainder("0/4").expect("bare base P/T with no tail");
     assert_eq!((p, t), (0, 4));
     assert!(rest.trim().is_empty());
-}
-
-// Issue #5300: Lignify via dedicated dispatch arm — subtype + base P/T + ability
-// strip only (CR 205.1a: no SetCardTypes). Sibling of
-// `lignify_subtype_only_with_base_pt_type_change`.
-#[test]
-fn lignify_creature_subtype_with_base_pt_and_loses_abilities() {
-    let def = parse_static_line(
-        "Enchanted creature is a Treefolk with base power and toughness 0/4 and loses all abilities.",
-    )
-    .unwrap();
-    assert_eq!(def.mode, StaticMode::Continuous);
-    let mods = &def.modifications;
-    assert!(
-        !mods
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
-        "subtype-only Lignify must not emit SetCardTypes: {mods:?}"
-    );
-    assert!(
-        mods.contains(&ContinuousModification::AddSubtype {
-            subtype: "Treefolk".to_string(),
-        }),
-        "must gain Treefolk subtype: {mods:?}"
-    );
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
-    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
-    let wipe_idx = mods
-        .iter()
-        .position(|m| {
-            matches!(
-                m,
-                ContinuousModification::RemoveAllSubtypes {
-                    set: crate::types::card_type::SubtypeSet::Creature
-                }
-            )
-        })
-        .expect("must wipe creature subtypes before AddSubtype (CR 205.1a)");
-    let add_idx = mods
-        .iter()
-        .position(|m| {
-            matches!(
-                m,
-                ContinuousModification::AddSubtype { subtype } if subtype == "Treefolk"
-            )
-        })
-        .expect("must add Treefolk");
-    assert!(
-        wipe_idx < add_idx,
-        "RemoveAllSubtypes(Creature) must precede AddSubtype(Treefolk): {mods:?}"
-    );
-    match &def.affected {
-        Some(TargetFilter::Typed(tf)) => assert!(
-            tf.properties.contains(&FilterProp::EnchantedBy),
-            "affected must be enchanted creature: {tf:?}"
-        ),
-        other => panic!("expected Typed EnchantedBy filter, got {other:?}"),
-    }
-}
-
-// Issue #5300: trailing period on base P/T must not feed "." into clause parsing.
-#[test]
-fn lignify_trailing_dot_on_base_pt_does_not_parse_spurious_clause() {
-    let def =
-        parse_static_line("Enchanted creature is a Treefolk with base power and toughness 0/4.")
-            .unwrap();
-    assert!(
-        !def.modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
-        "trailing dot must not synthesize a clause mod: {:?}",
-        def.modifications
-    );
-}
-
-// Issue #5300 sibling — Frogify-style leading ability-strip before the copula.
-#[test]
-fn lignify_prefix_loses_abilities_before_subtype_copula() {
-    let def = parse_static_line(
-        "Enchanted creature loses all abilities and is a Treefolk with base power and toughness 0/4.",
-    )
-    .unwrap();
-    let mods = &def.modifications;
-    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
-    assert!(
-        !mods
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
-        "prefix-order sibling must still be subtype-only: {mods:?}"
-    );
-    assert!(
-        mods.contains(&ContinuousModification::AddSubtype {
-            subtype: "Treefolk".to_string(),
-        }),
-        "prefix-order sibling must still grant Treefolk: {mods:?}"
-    );
-}
-
-// Issue #5300 regression: multi-core-type enchanted-is-type lines stay on the
-// general handler, not the subtype-only arm.
-#[test]
-fn darksteel_mutation_not_claimed_by_subtype_only_handler() {
-    let def = parse_static_line(
-        "Enchanted creature is an Insect artifact creature with base power and \
-             toughness 0/1 and has indestructible, and it loses all other abilities, \
-             card types, and creature types.",
-    )
-    .unwrap();
-    assert!(
-        def.modifications
-            .contains(&ContinuousModification::AddKeyword {
-                keyword: Keyword::Indestructible,
-            }),
-        "general parse_enchanted_is_type path must preserve indestructible: {:?}",
-        def.modifications
-    );
 }
 
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land

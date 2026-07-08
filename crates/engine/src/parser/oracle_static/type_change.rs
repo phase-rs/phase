@@ -547,98 +547,6 @@ pub(crate) fn try_parse_self_is_also_subtypes(
     )
 }
 
-/// CR 205.1a + CR 613.1d (Layer 4) + CR 613.4b (Layer 7b) + CR 613.1f (Layer 6):
-/// Lignify-class — "Enchanted <subject> is a <creature subtype> with base power
-/// and toughness N/N [and loses all abilities]." The grammar names only a
-/// creature subtype (Treefolk, Wall, …) before the base-P/T seam — no explicit
-/// "creature" core-type word. CR 205.1a: setting a creature subtype replaces
-/// creature subtypes but does NOT set or overwrite card types, so this arm must
-/// NOT emit `SetCardTypes` (an enchanted Artifact/Land creature keeps
-/// Artifact/Land). Emits `RemoveAllSubtypes { Creature }` + `AddSubtype`
-/// (subtype set replacement), base P/T (CR 613.4b), and optional
-/// `RemoveAllAbilities` (CR 613.1f) from either the leading "loses all abilities
-/// and is a" prefix or the trailing "and loses all abilities" clause. No new
-/// variant, no new runtime.
-///
-/// Dispatched AFTER [`parse_enchanted_becomes_type_with_ability`] and BEFORE
-/// [`parse_enchanted_is_type`], which owns multi-core-type phrases ("Insect
-/// artifact creature", "blue Frog creature", …). Closes #5300.
-pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
-    tp: &TextPair<'_>,
-    description: &str,
-) -> Option<StaticDefinition> {
-    let (before_pt, after_pt) = tp.split_around(" with base power and toughness ")?;
-
-    let before_rest = nom_tag_tp(&before_pt, "enchanted ")?;
-    let (r, perm_tf) = nom_target::parse_type_filter_word(before_rest.lower).ok()?;
-
-    let mut modifications = Vec::new();
-    type VE<'a> = OracleError<'a>;
-
-    let is_rest = if let Ok((r, _)) = alt((
-        tag::<_, _, VE>("loses all abilities and is a "),
-        tag::<_, _, VE>("loses all abilities and is an "),
-    ))
-    .parse(r.trim_start())
-    {
-        modifications.push(ContinuousModification::RemoveAllAbilities);
-        r
-    } else if let Ok((r, _)) =
-        alt((tag::<_, _, VE>("is a "), tag::<_, _, VE>("is an "))).parse(r.trim_start())
-    {
-        r
-    } else {
-        return None;
-    };
-
-    let is_rest = is_rest.trim_end_matches('.');
-
-    // Parse one or more creature subtypes; decline if a core-type word appears.
-    let mut r = is_rest.trim();
-    let mut subtypes: Vec<String> = Vec::new();
-    while let Some((canonical, consumed)) = parse_subtype(r) {
-        if core_type_from_additive_word(&canonical.to_lowercase()).is_some() {
-            return None;
-        }
-        subtypes.push(canonical);
-        r = r[consumed..].trim_start();
-    }
-    if subtypes.is_empty() || !r.trim().is_empty() {
-        return None;
-    }
-
-    let pt_tail = after_pt.lower.trim().trim_end_matches('.');
-    let (remainder, (p, t)) = parse_pt_mod_with_remainder(pt_tail).ok()?;
-    let remainder = remainder.trim().trim_end_matches('.').trim();
-    let clause_mods = if remainder.is_empty() {
-        Vec::new()
-    } else {
-        parse_continuous_modifications(remainder)
-    };
-
-    // CR 613.4b: Layer 7b — "with base power and toughness N/N" sets base P/T.
-    modifications.push(ContinuousModification::SetPower { value: p });
-    modifications.push(ContinuousModification::SetToughness { value: t });
-    // CR 205.1a: new creature subtype(s) replace existing creature subtypes only —
-    // card types are unchanged (no SetCardTypes).
-    modifications.push(ContinuousModification::RemoveAllSubtypes {
-        set: SubtypeSet::Creature,
-    });
-    modifications.extend(clause_mods);
-    for subtype in subtypes {
-        modifications.push(ContinuousModification::AddSubtype { subtype });
-    }
-
-    Some(
-        StaticDefinition::continuous()
-            .affected(TargetFilter::Typed(
-                TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
-            ))
-            .modifications(modifications)
-            .description(description.to_string()),
-    )
-}
-
 /// CR 205.1a + CR 613.1d (Layer 4) + CR 613.1f (Layer 6): Imprisoned-in-the-Moon
 /// class — an Aura that turns the enchanted permanent into a colorless permanent
 /// of a single card type (optionally with subtype[s]) carrying a granted ability
@@ -977,14 +885,9 @@ pub(crate) fn parse_enchanted_is_type(
             type_part.rsplit_once(" with base power and toughness ")
         // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         {
-            if let Some((p, t)) = parse_pt_mod(pt_part) {
-                // Locate the end of the "N/N" token to capture the remainder.
-                let slash_pos = pt_part.find('/').unwrap_or(0);
-                let after_slash = &pt_part[slash_pos + 1..];
-                let t_end = after_slash
-                    .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-                    .unwrap_or(after_slash.len());
-                let remainder = after_slash[t_end..].trim();
+            let pt_tail = pt_part.trim().trim_end_matches('.');
+            if let Ok((remainder, (p, t))) = parse_pt_mod_with_remainder(pt_tail) {
+                let remainder = remainder.trim().trim_end_matches('.').trim();
                 let clause = (!remainder.is_empty()).then_some(remainder);
                 (before_pt.trim(), Some((p, t)), clause)
             } else {
@@ -996,15 +899,9 @@ pub(crate) fn parse_enchanted_is_type(
 
     // Parse "N/N [color] [type] [subtype]" patterns for Darksteel Mutation style
     // e.g., "0/1 green Insect creature"
-    let (type_part, inline_pt) = if let Some((p, t)) = parse_pt_mod(type_part) {
-        // parse_pt_mod trims and finds the slash — get remainder after P/T
-        let slash_pos = type_part.find('/').unwrap_or(0);
-        let after_slash = &type_part[slash_pos + 1..];
-        let t_end = after_slash
-            .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-            .unwrap_or(after_slash.len());
-        let rest = after_slash[t_end..].trim();
-        (rest, Some((p, t)))
+    let (type_part, inline_pt) = if let Ok((rest, (p, t))) = parse_pt_mod_with_remainder(type_part)
+    {
+        (rest.trim(), Some((p, t)))
     } else {
         (type_part, None)
     };
