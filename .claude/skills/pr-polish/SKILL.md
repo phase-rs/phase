@@ -20,6 +20,11 @@ description: Alternate `review-impl` and `pr-contribution-handler` on a PR until
 
 - "Polish PR #N" / "polish this PR" / "keep reviewing and addressing until it's mergeable" / "loop /review + /address until done" / "make sure the PR is actually enqueue-ready"
 
+## Prerequisites
+
+- GitHub CLI 2.46.0 or newer. This skill depends on `gh pr checks --json`;
+  older `gh` versions do not support that flag.
+
 ## When NOT to use
 
 - User wants just one review pass → `review-impl`.
