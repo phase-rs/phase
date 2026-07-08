@@ -15207,10 +15207,7 @@ fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
     );
 }
 
-// Issue #5300: Lignify — "Enchanted creature is a Treefolk with base power and
-// toughness 0/4 and loses all abilities." Names only a creature subtype before
-// the base-P/T seam; must become a creature (SetCardTypes), wipe/replace the
-// creature subtype set, set base P/T, and strip abilities.
+// Issue #5300: combinator boundary for unsigned base P/T + trailing clause.
 #[test]
 fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
     let (rest, (p, t)) = super::grammar::parse_pt_mod_with_remainder("0/4 and loses all abilities")
@@ -15229,6 +15226,9 @@ fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
     assert!(rest.trim().is_empty());
 }
 
+// Issue #5300: Lignify via dedicated dispatch arm — subtype + base P/T + ability
+// strip only (CR 205.1a: no SetCardTypes). Sibling of
+// `lignify_subtype_only_with_base_pt_type_change`.
 #[test]
 fn lignify_creature_subtype_with_base_pt_and_loses_abilities() {
     let def = parse_static_line(
@@ -15238,10 +15238,10 @@ fn lignify_creature_subtype_with_base_pt_and_loses_abilities() {
     assert_eq!(def.mode, StaticMode::Continuous);
     let mods = &def.modifications;
     assert!(
-        mods.contains(&ContinuousModification::SetCardTypes {
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-        }),
-        "must become a creature: {mods:?}"
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "subtype-only Lignify must not emit SetCardTypes: {mods:?}"
     );
     assert!(
         mods.contains(&ContinuousModification::AddSubtype {
@@ -15309,6 +15309,12 @@ fn lignify_prefix_loses_abilities_before_subtype_copula() {
     .unwrap();
     let mods = &def.modifications;
     assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "prefix-order sibling must still be subtype-only: {mods:?}"
+    );
     assert!(
         mods.contains(&ContinuousModification::AddSubtype {
             subtype: "Treefolk".to_string(),

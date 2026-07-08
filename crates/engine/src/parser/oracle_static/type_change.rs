@@ -551,12 +551,14 @@ pub(crate) fn try_parse_self_is_also_subtypes(
 /// Lignify-class — "Enchanted <subject> is a <creature subtype> with base power
 /// and toughness N/N [and loses all abilities]." The grammar names only a
 /// creature subtype (Treefolk, Wall, …) before the base-P/T seam — no explicit
-/// "creature" core-type word — so [`parse_enchanted_is_type`] declines with an
-/// empty `granted_core_types` list. Emits `SetCardTypes { Creature }` (CR 205.1a
-/// replacement), `RemoveAllSubtypes { Creature }` + `AddSubtype` (subtype set
-/// replacement), base P/T (CR 613.4b), and optional `RemoveAllAbilities` (CR
-/// 613.1f) from either the leading "loses all abilities and is a" prefix or the
-/// trailing "and loses all abilities" clause. No new variant, no new runtime.
+/// "creature" core-type word. CR 205.1a: setting a creature subtype replaces
+/// creature subtypes but does NOT set or overwrite card types, so this arm must
+/// NOT emit `SetCardTypes` (an enchanted Artifact/Land creature keeps
+/// Artifact/Land). Emits `RemoveAllSubtypes { Creature }` + `AddSubtype`
+/// (subtype set replacement), base P/T (CR 613.4b), and optional
+/// `RemoveAllAbilities` (CR 613.1f) from either the leading "loses all abilities
+/// and is a" prefix or the trailing "and loses all abilities" clause. No new
+/// variant, no new runtime.
 ///
 /// Dispatched AFTER [`parse_enchanted_becomes_type_with_ability`] and BEFORE
 /// [`parse_enchanted_is_type`], which owns multi-core-type phrases ("Insect
@@ -614,14 +616,11 @@ pub(crate) fn parse_enchanted_is_creature_subtype_with_base_pt(
         parse_continuous_modifications(remainder)
     };
 
-    // CR 205.1a: "is a Treefolk" replaces existing card types with Creature.
-    modifications.push(ContinuousModification::SetCardTypes {
-        core_types: vec![CoreType::Creature],
-    });
     // CR 613.4b: Layer 7b — "with base power and toughness N/N" sets base P/T.
     modifications.push(ContinuousModification::SetPower { value: p });
     modifications.push(ContinuousModification::SetToughness { value: t });
-    // CR 205.1a: new creature subtype(s) replace existing creature subtypes.
+    // CR 205.1a: new creature subtype(s) replace existing creature subtypes only —
+    // card types are unchanged (no SetCardTypes).
     modifications.push(ContinuousModification::RemoveAllSubtypes {
         set: SubtypeSet::Creature,
     });
