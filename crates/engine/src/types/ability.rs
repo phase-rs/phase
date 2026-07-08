@@ -2189,6 +2189,10 @@ pub enum Duration {
     ForAsLongAs {
         condition: StaticCondition,
     },
+    /// CR 611.2a + CR 607.2a: Permission/effect lasts until the same linked
+    /// source exiles another card. Used by "you may play that card until you
+    /// exile another card with [this object]" source-linked exile grants.
+    UntilSourceExilesAnotherCard,
     Permanent,
 }
 
@@ -2481,7 +2485,9 @@ pub enum CastingPermission {
         #[serde(default, skip_serializing_if = "CastFrequency::is_unlimited")]
         frequency: CastFrequency,
         /// Source object whose once-per-turn slot is consumed when
-        /// `frequency` is bounded. Filled by `grant_permission::resolve`.
+        /// `frequency` is bounded, and whose later source-linked exile expires
+        /// `Duration::UntilSourceExilesAnotherCard` grants. Filled by
+        /// `grant_permission::resolve`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
         /// Controller of the ability that exiled this card and attached this
@@ -21205,6 +21211,7 @@ mod tests {
                 player: PlayerScope::Controller,
             },
             Duration::UntilHostLeavesPlay,
+            Duration::UntilSourceExilesAnotherCard,
             Duration::Permanent,
         ];
         let json = serde_json::to_string(&durations).unwrap();
