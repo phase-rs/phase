@@ -2811,6 +2811,33 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("that creature's toughness"),
         ),
+        // CR 608.2k + CR 700.4: of-genitive form of the dies-trigger referent's
+        // P/T — "the power of the creature that died" (Death's Presence: "where X
+        // is the power of the creature that died"). Names the same triggering
+        // (dead) creature as the possessive "that creature's power" arm above, so
+        // it resolves through the same `ObjectScope::CostPaidObject` (the trigger
+        // event's source). CR 603.10a + CR 113.7a: since that creature is now in
+        // the graveyard, its power/toughness is read from last-known information.
+        // The optional " this turn" tolerates the qualified phrasing without
+        // changing the (singular) referent.
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+            (
+                tag("the power of the creature that died"),
+                opt(tag(" this turn")),
+            ),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
+            (
+                tag("the toughness of the creature that died"),
+                opt(tag(" this turn")),
+            ),
+        ),
         // "Whenever you cast an enchantment spell, ... equal to that spell's
         // mana value" (Dusty Parlor) — the SpellCast event's source object is
         // the spell itself, so CMC reads cleanly off it.
@@ -7394,6 +7421,36 @@ mod tests {
             }
         );
         assert_eq!(rest2, "");
+
+        // CR 608.2k + CR 700.4 (issue #5333): of-genitive form of the dies-trigger
+        // referent's P/T — Death's Presence's "the power of the creature that
+        // died" must bind the same CostPaidObject scope as the possessive form,
+        // not fall through to an unbound Variable (which resolved to 0 counters).
+        for (phrase, expected) in [
+            (
+                "the power of the creature that died",
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+            (
+                "the toughness of the creature that died",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+            // The optional " this turn" qualifier keeps the same singular referent.
+            (
+                "the power of the creature that died this turn",
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(q, expected, "phrase {phrase:?}");
+            assert_eq!(rest, "", "phrase {phrase:?} must fully consume");
+        }
 
         let (rest3, q3) = parse_quantity_ref("the amassed Army's power").unwrap();
         assert_eq!(
