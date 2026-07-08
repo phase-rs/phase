@@ -26281,6 +26281,74 @@ fn granted_escape_requires_exile_cost_payment() {
     ));
 }
 
+/// Regression for GitHub issue #1033's second part: Underworld Breach's own
+/// grant ("Each nonland card in your graveyard has escape") must stop
+/// applying once Breach itself has left the battlefield (CR 604.2 — a
+/// static ability's continuous effect exists only while its source remains
+/// on the battlefield). If this regressed, Breach sitting in the graveyard
+/// after its own end-step sacrifice could grant itself (or anything else)
+/// escape, which would be wrong. This is distinct from the "exile cost
+/// enforcement" bug covered by `granted_escape_requires_exile_cost_payment`
+/// above (both were reported together in #1033; only the exile-cost part
+/// reproduced).
+#[test]
+fn escape_grant_from_graveyard_source_does_not_apply_to_itself() {
+    let mut state = setup_game_at_main_phase();
+
+    // Underworld Breach placed directly in the GRAVEYARD (simulating "already
+    // sacrificed"), not the battlefield — its own static grant should be
+    // inert here, per CR 604.2.
+    let source_id = create_object(
+        &mut state,
+        CardId(1002),
+        PlayerId(0),
+        "Underworld Breach".to_string(),
+        Zone::Graveyard,
+    );
+    let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
+            "Underworld Breach",
+            &[],
+            &[String::from("Enchantment")],
+            &[],
+        );
+    let source = state.objects.get_mut(&source_id).unwrap();
+    source.card_types.core_types.push(CoreType::Enchantment);
+    source.base_card_types = source.card_types.clone();
+    source.static_definitions = parsed.statics.clone().into();
+    source.base_static_definitions = Arc::new(parsed.statics);
+    source.mana_cost = ManaCost::Cost {
+        generic: 1,
+        shards: vec![ManaCostShard::Red],
+    };
+
+    // A second nonland card also sitting in the graveyard, which WOULD be
+    // escape-eligible if Breach's grant were (incorrectly) still active.
+    let filler_id = create_object(
+        &mut state,
+        CardId(1200),
+        PlayerId(0),
+        "Filler".to_string(),
+        Zone::Graveyard,
+    );
+    let filler = state.objects.get_mut(&filler_id).unwrap();
+    filler.card_types.core_types.push(CoreType::Sorcery);
+    filler.base_card_types = filler.card_types.clone();
+
+    let castable = spell_objects_available_to_cast(&state, PlayerId(0));
+    assert!(
+        !castable.contains(&source_id),
+        "Underworld Breach must not be able to escape-cast ITSELF from the \
+         graveyard once its granting source has left the battlefield"
+    );
+    assert!(
+        !castable.contains(&filler_id),
+        "no other graveyard card should show escape availability either, \
+         since Breach's grant is inert while Breach itself is off the \
+         battlefield"
+    );
+}
+
 #[test]
 fn escape_phyrexian_cost_deducts_life_after_exile() {
     let mut state = setup_game_at_main_phase();
