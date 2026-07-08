@@ -353,12 +353,16 @@ pub(crate) fn parse_compound_subject_rule_static(
 }
 
 /// CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: Compound-subject keyword-grant
-/// statics of the form `"You and <object subject> have <keyword>"` — a single
-/// keyword grant bound to a player plus an object subset.
+/// statics of the form `"You and <object subject> have <keyword>"` (the bare
+/// 2-item form) or `"You, <object subject>, …, and <object subject> have
+/// <keyword>"` (the Oxford-comma N-item form; Shalai, Voice of Plenty: "You,
+/// planeswalkers you control, and other creatures you control have hexproof.")
+/// — a single keyword grant bound to a player plus one or more object subsets.
 ///
 /// A single `StaticDefinition` cannot carry both a player scope and an object
 /// scope, so decompose into two:
-///   - an object-half `Continuous` def whose `affected` is the object subset;
+///   - an object-half `Continuous` def whose `affected` is the object subset
+///     (an `Or` of every conjunct's filter when 2+ object subjects are listed);
 ///   - a player-half def whose mode is the player-applicable keyword mode
 ///     (`PlayerProtection` / `Hexproof` / `Shroud`) and whose `affected` is the
 ///     controller.
@@ -366,6 +370,9 @@ pub(crate) fn parse_compound_subject_rule_static(
 /// Object subjects reuse [`parse_rule_static_subject_filter`] so subtype scopes
 /// ("Humans you control"), self refs ("this creature"), and "other <subtype>
 /// you control" all resolve — not a hard-coded alt of three controller phrases.
+/// The N-item form delegates conjunct splitting to
+/// [`parse_oxford_object_conjuncts`], which resolves each conjunct through that
+/// same subject resolver rather than a bespoke list grammar.
 ///
 /// Only player-applicable keywords claim this pattern (a player cannot
 /// meaningfully "have flying"). Leading `"During your turn, "` gates both
@@ -387,8 +394,18 @@ pub(crate) fn parse_compound_subject_keyword_static(
         (input, None)
     };
 
-    // Subject: "you and <object subject phrase>".
-    let after_you = nom_tag_tp(&body, "you and ")?;
+    // Subject: the bare 2-item form "you and <object subject phrase>", or the
+    // Oxford-comma N-item form "you, <object subject phrase>, …". The comma-led
+    // form is a disjoint grammar path from the bare "and" form — gating on the
+    // leading comma leaves the 2-item path's existing fallthrough to
+    // `parse_rule_static_subject_filter` (which itself resolves an object
+    // subject with an internal bare "and", e.g. "artifacts and creatures you
+    // control", via `parse_type_phrase`'s own trailing-suffix distribution)
+    // completely unchanged.
+    let (after_you, multi_object) = match nom_tag_tp(&body, "you, ") {
+        Some(rest) => (rest, true),
+        None => (nom_tag_tp(&body, "you and ")?, false),
+    };
 
     // Locate the continuous predicate verb ("have"/"has"/"gain"/"gains"/…) so
     // the object subject can be any phrase `parse_rule_static_subject_filter`
@@ -401,12 +418,17 @@ pub(crate) fn parse_compound_subject_keyword_static(
         return None;
     }
 
-    let affected = parse_rule_static_subject_filter(object_subject.original)?;
-    // Player half is reserved for the controller; refuse a second player scope
-    // ("you and each player have …") so we never emit two player defs.
-    if rule_static_affected_is_player_scope(&affected) {
-        return None;
-    }
+    let affected = if multi_object {
+        parse_oxford_object_conjuncts(object_subject.original)?
+    } else {
+        let filter = parse_rule_static_subject_filter(object_subject.original)?;
+        // Player half is reserved for the controller; refuse a second player
+        // scope ("you and each player have …") so we never emit two player defs.
+        if rule_static_affected_is_player_scope(&filter) {
+            return None;
+        }
+        filter
+    };
 
     // Object-half: delegate the predicate to the shared keyword-grant builder
     // (also peels trailing " as long as <cond>" onto `object_def.condition`).
@@ -446,6 +468,59 @@ pub(crate) fn parse_compound_subject_keyword_static(
     player_def.condition = object_def.condition.clone();
 
     Some(vec![object_def, player_def])
+}
+
+/// CR 611.3a: Resolve an Oxford-comma object-subject list (`"<A>, <B>, and
+/// <C>"`) into an `Or` of per-conjunct filters for
+/// [`parse_compound_subject_keyword_static`]'s N-item form. Shalai, Voice of
+/// Plenty is the anchor card: "You, planeswalkers you control, and other
+/// creatures you control have hexproof." — after the caller peels the leading
+/// `"You, "`, the object list handed here is "planeswalkers you control, and
+/// other creatures you control".
+///
+/// Each conjunct is a COMPLETE, independently-resolvable subject phrase — unlike
+/// the Silkguard-class object list in `parse_type_phrase` (`oracle_target.rs`),
+/// where a single trailing suffix distributes backward across bare type nouns
+/// with no clause of their own ("Auras, Equipment, and modified creatures you
+/// control"). So every conjunct here is resolved one at a time through the same
+/// [`parse_rule_static_subject_filter`] the 2-item form uses, rather than a
+/// bespoke list grammar. Splitting is nom-based (`split_once_on`), peeling
+/// `", "`-separated conjuncts and stripping the final conjunct's `"and "`
+/// connector — never a bare `" and "` split, so the 2-item form's own
+/// internal-"and" handling (via `parse_type_phrase`'s trailing-suffix
+/// distribution) is never shadowed.
+///
+/// Declines (returns `None`, the strict-fail signal) if any conjunct fails to
+/// resolve or is itself a player scope — the same "no second player scope"
+/// guard the 2-item form applies, now checked per conjunct. A partial resolve
+/// would silently drop a disjunct rather than surfacing the failure.
+fn parse_oxford_object_conjuncts(text: &str) -> Option<TargetFilter> {
+    let mut conjuncts: Vec<&str> = Vec::new();
+    let mut remaining = text;
+    while let Ok((_, (item, rest))) = nom_primitives::split_once_on(remaining, ", ") {
+        conjuncts.push(item.trim());
+        remaining = rest;
+    }
+    // Pattern 1 (PATTERNS.md): strip the Oxford "and " connector from the final
+    // conjunct via `opt(tag(...))` rather than `strip_prefix` — the connector is
+    // genuinely optional (absent when only 2 total object conjuncts follow "you").
+    let (last, _) = opt(tag::<_, _, OracleError<'_>>("and "))
+        .parse(remaining.trim())
+        .ok()?;
+    conjuncts.push(last.trim());
+    if conjuncts.len() < 2 {
+        return None;
+    }
+
+    let mut filters = Vec::with_capacity(conjuncts.len());
+    for conjunct in conjuncts {
+        let filter = parse_rule_static_subject_filter(conjunct)?;
+        if rule_static_affected_is_player_scope(&filter) {
+            return None;
+        }
+        filters.push(filter);
+    }
+    Some(TargetFilter::Or { filters })
 }
 
 /// CR 702.16 + CR 702.16k + CR 702.16i: Player-SUBJECT protection of the form

@@ -1036,9 +1036,9 @@ fn compound_target_player_continuations_share_one_target() {
 }
 
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AggregateFunction, Comparator, ContinuousModification,
-    ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec,
+    AbilityCondition, AbilityDefinition, AggregateFunction, BasicLandType, Comparator,
+    ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec,
     ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
     PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode,
     SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, ShieldKind,
@@ -2698,6 +2698,143 @@ fn attacked_with_filter_gates_play_permission() {
 /// DIDN'T attack (negated gate); Berserk's delayed end-step trigger destroys
 /// only when the creature DID attack (positive gate). Before the fix both
 /// produced a `Destroy { target: ParentTarget }` with `condition: null`.
+#[test]
+fn nightcreep_compound_become_distributes_both_conjuncts() {
+    // CR 611.3 (issue #5377): "all creatures become black and all lands become
+    // Swamps" — the single-subject handler claimed only the first conjunct and
+    // dropped the land half into the description. Both conjuncts must now survive
+    // as distinct affected sets in one GenericEffect under a single duration.
+    let r = parse(
+        "Until end of turn, all creatures become black and all lands become Swamps.",
+        "Nightcreep",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "{:?}", r.abilities);
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected GenericEffect, got {:?}", r.abilities[0].effect);
+    };
+    assert_eq!(
+        static_abilities.len(),
+        2,
+        "both conjuncts must distribute: {static_abilities:?}"
+    );
+    assert_eq!(duration, &Some(Duration::UntilEndOfTurn));
+
+    // Creature conjunct → SetColor(Black) over the creature affected set.
+    let creature = static_abilities
+        .iter()
+        .find(|s| format!("{:?}", s.affected).contains("Creature"))
+        .expect("creature affected set");
+    assert!(
+        creature
+            .modifications
+            .contains(&ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            }),
+        "creature half: {:?}",
+        creature.modifications
+    );
+    // Land conjunct → SetBasicLandType(Swamp) over the land affected set (CR 305.7).
+    let land = static_abilities
+        .iter()
+        .find(|s| format!("{:?}", s.affected).contains("Land"))
+        .expect("land affected set");
+    assert!(
+        land.modifications
+            .contains(&ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Swamp
+            }),
+        "land half must be SetBasicLandType(Swamp): {:?}",
+        land.modifications
+    );
+}
+
+#[test]
+fn nightcreep_real_additive_land_adds_subtype() {
+    // CR 205.1b: the printed card carries "in addition to their other types and
+    // colors", so the land conjunct RETAINS existing land types and adds Swamp
+    // (`AddSubtype`), not the replacing `SetBasicLandType`.
+    let r = parse(
+        "Until end of turn, all creatures become black and all lands become Swamps in addition to their other types and colors.",
+        "Nightcreep",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let s = format!("{:?}", r.abilities); // allow-noncombinator: Debug-string assertion over AST
+    assert!(
+        s.contains("AddSubtype") && s.contains("Swamp"),
+        "additive land half must AddSubtype(Swamp): {s}"
+    );
+    assert!(
+        !s.contains("SetBasicLandType"),
+        "additive form must not replace land types: {s}"
+    );
+}
+
+#[test]
+fn single_subject_become_black_unchanged() {
+    // Acceptance: a single-subject become line is untouched — the compound handler
+    // declines (no " and all " conjunction) and one static_ability results.
+    let r = parse(
+        "Until end of turn, all creatures become black.",
+        "Test",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected GenericEffect, got {:?}", r.abilities[0].effect);
+    };
+    assert_eq!(static_abilities.len(), 1, "{static_abilities:?}");
+    assert!(static_abilities[0]
+        .modifications
+        .contains(&ContinuousModification::SetColor {
+            colors: vec![ManaColor::Black]
+        }));
+}
+
+#[test]
+fn single_subject_land_become_swamp_sets_basic_land_type() {
+    // Building-block fix: "all lands become Swamps" (single subject) lowers the
+    // basic-land-type predicate to SetBasicLandType(Swamp), not the mis-tokenized
+    // creature-subtype AddSubtype("Swamps").
+    let r = parse(
+        "Until end of turn, all lands become Swamps.",
+        "Test",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!("expected GenericEffect, got {:?}", r.abilities[0].effect);
+    };
+    assert_eq!(static_abilities.len(), 1, "{static_abilities:?}");
+    // Non-additive land become replaces the land subtypes; it must NOT emit the
+    // old mis-tokenized creature-subtype (`AddSubtype`/`RemoveAllSubtypes{Creature}`).
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::SetBasicLandType {
+            land_type: BasicLandType::Swamp
+        }],
+        "land become must be exactly SetBasicLandType(Swamp): {:?}",
+        static_abilities[0].modifications
+    );
+}
+
 #[test]
 fn target_attacked_this_turn_trailing_if_survives_full_parse() {
     let aggression = parse(

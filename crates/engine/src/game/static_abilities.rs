@@ -7,7 +7,9 @@ use crate::game::functioning_abilities::{
     battlefield_active_statics, game_active_statics, game_functioning_statics, static_kind_present,
 };
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
-use crate::types::ability::{ContinuousModification, Duration, TargetFilter, TypedFilter};
+use crate::types::ability::{
+    ContinuousModification, ControllerRef, Duration, TargetFilter, TypedFilter,
+};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -1208,17 +1210,22 @@ pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
         || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
 }
 
-/// CR 702.11b + CR 702.11e: Whether a FUNCTIONING `IgnoreHexproof` static whose
-/// `condition` currently holds and which is scoped by an object `affected` filter
-/// makes `target_id` targetable as though it had no hexproof (CR 702.11e extends
-/// the bypass to hexproof-from-quality). Nowhere to Run — "Creatures your
-/// opponents control can be the targets of spells and abilities as though they
-/// didn't have hexproof." The card carries no "you control" qualifier on the
-/// spells or abilities, so the bypass applies to ANY targeting player: it is
-/// keyed solely on the would-be target matching the static's `affected` filter
-/// (evaluated from the static's own source), independent of the targeting
-/// source's controller — hexproof (CR 702.11b) only ever blocks opponents, so
-/// removing it for the matched permanents opens them to every player.
+/// CR 702.11b + CR 702.11e + CR 609.4: Whether a FUNCTIONING `IgnoreHexproof`
+/// static whose `condition` currently holds and which is scoped by an object
+/// `affected` filter makes `target_id` targetable, by a spell or ability
+/// `source_controller` controls, as though it had no hexproof (CR 702.11e
+/// extends the bypass to hexproof-from-quality).
+///
+/// The static's `bypass_beneficiary` decides which players the bypass serves:
+///   - `None` (Nowhere to Run — "... can be the targets of spells and abilities
+///     as though they didn't have hexproof", no "you control" qualifier): the
+///     bypass applies to ANY targeting player. Hexproof (CR 702.11b) only ever
+///     blocks the affected creature's opponents, so removing it opens the
+///     matched permanents to every player.
+///   - `Some(ControllerRef::You)` (Glaring Spotlight — "... spells and abilities
+///     YOU CONTROL as though they didn't have hexproof"): the bypass serves only
+///     the static controller's spells and abilities, so `source_controller` must
+///     be that controller (CR 109.5). Any other player stays blocked by hexproof.
 ///
 /// CR 604.1 + CR 613.1: mirrors [`player_ignores_hexproof`] — uses
 /// `game_functioning_statics` (so a source whose abilities are suppressed, or a
@@ -1229,7 +1236,11 @@ pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
 /// than skipped. Object-scoped (`affected = Some`) only; the player-scoped
 /// Detection Tower form (`affected = None`) is handled by
 /// [`player_ignores_hexproof`].
-pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
+pub fn target_ignores_hexproof(
+    state: &GameState,
+    target_id: ObjectId,
+    source_controller: PlayerId,
+) -> bool {
     // CR 702.11b + CR 702.11e existence gate: with no functioning `IgnoreHexproof`
     // static on the board, no object-scoped hexproof-bypass grant is possible — skip the O(battlefield)
     // scan. Precise post-flush; conservatively all-present before the first flush, where it
@@ -1248,6 +1259,13 @@ pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
                     &FilterContext::from_source(state, source_obj.id),
                 )
             })
+            // CR 609.4 + CR 109.5: honor the "you control" beneficiary qualifier.
+            && ignore_hexproof_beneficiary_allows(
+                state,
+                def.bypass_beneficiary.as_ref(),
+                source_obj.controller,
+                source_controller,
+            )
             && static_condition_matches_context(
                 state,
                 source_obj.id,
@@ -1259,6 +1277,32 @@ pub fn target_ignores_hexproof(state: &GameState, target_id: ObjectId) -> bool {
                 },
             )
     })
+}
+
+/// CR 609.4 + CR 109.5: Whether an object-scoped `IgnoreHexproof` static with the
+/// given `bypass_beneficiary` grants its bypass to a spell or ability controlled
+/// by `source_controller`, given the static's controller is `static_controller`.
+///
+/// `None` = unrestricted (Nowhere to Run) → every player benefits. A
+/// `ControllerRef` is resolved relative to the static controller (CR 109.5):
+/// `You` = the static controller only; `Opponent` = that controller's opponents.
+/// No printed hexproof-bypass targets any other beneficiary scope, so every other
+/// `ControllerRef` fails closed — it never widens the bypass beyond what the card
+/// grants.
+fn ignore_hexproof_beneficiary_allows(
+    state: &GameState,
+    beneficiary: Option<&ControllerRef>,
+    static_controller: PlayerId,
+    source_controller: PlayerId,
+) -> bool {
+    match beneficiary {
+        None => true,
+        Some(ControllerRef::You) => source_controller == static_controller,
+        Some(ControllerRef::Opponent) => {
+            crate::game::players::is_opponent(state, static_controller, source_controller)
+        }
+        Some(_) => false,
+    }
 }
 
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static

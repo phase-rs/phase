@@ -3012,38 +3012,34 @@ fn graveyard_permission_sources(
             if !source_belongs_to_player {
                 return None;
             }
-            active_static_definitions(state, obj)
-                .filter(|definition| graveyard_permission_functions_in_zone(definition, obj.zone))
-                .find_map(|definition| match definition.mode {
-                    StaticMode::GraveyardCastPermission {
-                        frequency,
-                        play_mode,
-                        graveyard_destination_replacement,
-                        ref extra_cost,
-                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
-                        definition
-                            .affected
-                            .as_ref()
-                            .map(|filter| GraveyardPermissionSource {
-                                source_id,
-                                filter,
-                                frequency,
-                                graveyard_destination_replacement,
-                                extra_cost,
-                            })
-                    }
-                    _ => None,
-                })
+            // The zone-of-function gate is now fully owned by
+            // `active_static_definitions` (CR 113.6 / CR 113.6b), which also
+            // correctly admits emblem-sourced graveyard-cast permissions —
+            // the previously-inlined gate never exempted `is_emblem` unlike
+            // every other command-zone consumer, an independent latent bug
+            // now fixed as a side effect.
+            active_static_definitions(state, obj).find_map(|definition| match definition.mode {
+                StaticMode::GraveyardCastPermission {
+                    frequency,
+                    play_mode,
+                    graveyard_destination_replacement,
+                    ref extra_cost,
+                } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
+                    definition
+                        .affected
+                        .as_ref()
+                        .map(|filter| GraveyardPermissionSource {
+                            source_id,
+                            filter,
+                            frequency,
+                            graveyard_destination_replacement,
+                            extra_cost,
+                        })
+                }
+                _ => None,
+            })
         })
         .collect()
-}
-
-fn graveyard_permission_functions_in_zone(definition: &StaticDefinition, zone: Zone) -> bool {
-    if zone == Zone::Battlefield {
-        definition.active_zones.is_empty() || definition.active_zones.contains(&Zone::Battlefield)
-    } else {
-        definition.active_zones.contains(&zone)
-    }
 }
 
 fn graveyard_permission_play_mode_matches(
