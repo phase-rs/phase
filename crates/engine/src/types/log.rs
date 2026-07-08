@@ -44,4 +44,5 @@ pub enum LogCategory {
     Trigger,
     Special,
     Destroy,
+    Debug,
 }

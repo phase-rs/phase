@@ -219,7 +219,9 @@ fn find_legal_targets_with_context(
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
                     Some(ControllerRef::ScopedPlayer) => false,
-                    Some(ControllerRef::TargetPlayer) => false,
+                    // CR 109.4: TargetOpponent, like TargetPlayer, is what's being
+                    // chosen here — fail closed as a candidate-enumeration scope.
+                    Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     Some(ControllerRef::ParentTargetOwner) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
@@ -234,6 +236,10 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::TriggeringPlayer) => false,
                     // CR 303.4b: Enchanted-player scope is not enumerated as a target candidate. Fail closed.
                     Some(ControllerRef::EnchantedPlayer) => false,
+                    // CR 102.1: the active player is a single, well-defined
+                    // player and is a valid candidate for an active-player-scoped
+                    // target filter (read live).
+                    Some(ControllerRef::ActivePlayer) => player.id == state.active_player,
                     None => true,
                 };
                 if include {
@@ -635,7 +641,14 @@ pub fn resolved_targets(
     // before the `ability.targets` fallback so chained "Exile ~" sub-abilities
     // don't accidentally inherit the parent's targets via the chain target
     // propagation in `effects::mod.rs::resolve_chain`.
-    if matches!(target_filter, TargetFilter::SelfRef) {
+    // CR 201.5a: `GrantingObject` is always concretized to `SpecificObject` at
+    // grant-clone time and should never reach here; the arm is a fail-safe that
+    // degrades an un-concretized granter ref to the ability source (host) — the
+    // pre-fix binding, never worse.
+    if matches!(
+        target_filter,
+        TargetFilter::SelfRef | TargetFilter::GrantingObject
+    ) {
         // CR 400.7: The self-reference resolves to the source only while it is
         // still the same object. A source that left and re-entered the
         // battlefield (blink/flicker) since the ability was created is a new
@@ -859,7 +872,10 @@ pub(crate) fn resolved_object_ids_for_filter(
     match filter {
         // CR 400.7: self-reference resolves only while the source is the same
         // object; a blinked-and-returned source (higher incarnation) finds nothing.
-        TargetFilter::SelfRef => ability
+        // CR 201.5a: an un-concretized `GrantingObject` degrades to the source
+        // (host) — fail-safe; it is normally rewritten to `SpecificObject` at
+        // grant-clone time.
+        TargetFilter::SelfRef | TargetFilter::GrantingObject => ability
             .source_is_current(state)
             .then_some(ability.source_id)
             .into_iter()
@@ -1144,6 +1160,11 @@ fn blocked_attacker_from_event(
     event: &crate::types::events::GameEvent,
     source_id: ObjectId,
 ) -> Option<ObjectId> {
+    // CR 509.3c: an effect-driven "becomes blocked" carries only the attacker
+    // (the blocked creature); "that creature" resolves to that attacker.
+    if let crate::types::events::GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
+        return Some(*attacker);
+    }
     let crate::types::events::GameEvent::BlockersDeclared { assignments } = event else {
         return None;
     };
@@ -1310,6 +1331,9 @@ pub(crate) fn extract_source_from_event(
             let first = blockers.next()?;
             blockers.all(|blocker| blocker == first).then_some(first)
         }
+        // CR 509.3c: an effect-driven "becomes blocked" trigger's source is the
+        // attacker that became blocked.
+        GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(*attacker),
         _ => None,
     }
 }
@@ -1901,8 +1925,12 @@ fn hexproof_filter_matches(
         Some(o) => o,
         None => return false,
     };
+    // CR 709.4b: A split source has its chosen-half colors on the stack (the
+    // usual hexproof-source case) and its combined colors off the stack; no-op
+    // for single-face and on-stack sources.
+    let source_colors = source_obj.effective_colors();
     match filter {
-        HexproofFilter::Color(color) => source_obj.color.contains(color),
+        HexproofFilter::Color(color) => source_colors.contains(color),
         HexproofFilter::CardType(type_name) => {
             crate::game::keywords::source_matches_card_type(source_obj, type_name)
         }
@@ -1919,7 +1947,7 @@ fn hexproof_filter_matches(
             .objects
             .get(&source_id)
             .and_then(|src| src.chosen_color())
-            .is_some_and(|color| source_obj.color.contains(&color)),
+            .is_some_and(|color| source_colors.contains(&color)),
     }
 }
 

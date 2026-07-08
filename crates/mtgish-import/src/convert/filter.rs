@@ -1923,6 +1923,9 @@ fn has_ability_filter(check: &CheckHasable) -> ConvResult<TargetFilter> {
         C::AnyFlashback => FilterProp::HasKeywordKind {
             value: KeywordKind::Flashback,
         },
+        C::AnyMadness => FilterProp::HasKeywordKind {
+            value: KeywordKind::Madness,
+        },
         C::AnySuspend => FilterProp::HasKeywordKind {
             value: KeywordKind::Suspend,
         },

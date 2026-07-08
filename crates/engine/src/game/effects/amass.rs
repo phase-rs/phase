@@ -1,10 +1,12 @@
 use crate::game::effects::counters::{
-    add_counter_with_replacement, stash_pending_counter_completion_with_actions,
+    add_counter_with_replacement, stash_pending_counter_post_actions,
 };
 use crate::game::effects::token::apply_create_token_after_replacement;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, ResolvedAbility,
+};
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -36,55 +38,14 @@ pub fn resolve(
     // CR 701.47a: Find an existing Army creature on the controller's battlefield.
     let army_id = find_army(state, controller);
 
-    let target_id = if let Some(id) = army_id {
-        id
+    let Some(target_id) = (if let Some(id) = army_id {
+        Some(id)
     } else {
-        let Some(id) = create_army_token(state, controller, &subtype, ability, events) else {
-            return Ok(());
-        };
-        id
-    };
-
-    // CR 701.47a: Put N +1/+1 counters on the chosen Army.
-    if n > 0
-        && !add_counter_with_replacement(
-            state,
-            ability.controller,
-            target_id,
-            CounterType::Plus1Plus1,
-            n,
-            events,
-        )
-    {
-        stash_pending_counter_completion_with_actions(
-            state,
-            EffectKind::Amass,
-            ability.source_id,
-            vec![PendingCounterPostAction::AddSubtype {
-                object_id: target_id,
-                subtype: subtype.clone(),
-            }],
-        );
+        create_army_token(state, controller, &subtype, n, ability, events)
+    }) else {
         return Ok(());
-    }
-
-    // CR 701.47a: If it isn't a [subtype], it becomes a [subtype] in addition to its other types.
-    if let Some(obj) = state.objects.get_mut(&target_id) {
-        if !obj
-            .card_types
-            .subtypes
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(&subtype))
-        {
-            obj.card_types.subtypes.push(subtype.clone());
-            obj.base_card_types.subtypes.push(subtype);
-        }
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::Amass,
-        source_id: ability.source_id,
-    });
+    };
+    continue_amass_on_army(state, controller, target_id, &subtype, n, ability, events);
 
     Ok(())
 }
@@ -105,11 +66,122 @@ fn find_army(state: &GameState, controller: crate::types::player::PlayerId) -> O
         .min_by_key(|id| id.0) // deterministic: lowest ObjectId
 }
 
+pub(crate) fn continue_amass_after_token_creation(
+    state: &mut GameState,
+    controller: crate::types::player::PlayerId,
+    subtype: &str,
+    count: u32,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(object_id) = find_army(state, controller) else {
+        return true;
+    };
+    continue_amass_on_army(
+        state, controller, object_id, subtype, count, ability, events,
+    )
+}
+
+pub(crate) fn continue_amass_on_army(
+    state: &mut GameState,
+    controller: crate::types::player::PlayerId,
+    object_id: ObjectId,
+    subtype: &str,
+    count: u32,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    // CR 701.47a + CR 614.16: Counter replacement choices interrupt the amass
+    // instruction before subtype addition and CR 701.47c binding complete.
+    if count > 0
+        && !add_counter_with_replacement(
+            state,
+            controller,
+            object_id,
+            CounterType::Plus1Plus1,
+            count,
+            events,
+        )
+    {
+        stash_pending_counter_post_actions(
+            state,
+            EffectKind::Amass,
+            ability.source_id,
+            vec![PendingCounterPostAction::FinalizeAmass {
+                object_id,
+                subtype: subtype.to_string(),
+                ability: Box::new(ability.clone()),
+            }],
+        );
+        return false;
+    }
+
+    finalize_amass(state, object_id, subtype, ability, events);
+    true
+}
+
+pub(crate) fn finalize_amass(
+    state: &mut GameState,
+    object_id: ObjectId,
+    subtype: &str,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 701.47a: If the chosen Army isn't a [subtype], it becomes a [subtype]
+    // in addition to its other types.
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        if !obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(subtype))
+        {
+            obj.card_types.subtypes.push(subtype.to_string());
+            obj.base_card_types.subtypes.push(subtype.to_string());
+        }
+    }
+
+    crate::game::layers::flush_layers(state);
+    let Some(snapshot) = amassed_army_snapshot(state, object_id) else {
+        return;
+    };
+
+    // CR 701.47c + CR 608.2c: Chained reflexive continuations may have been
+    // stashed before a replacement choice finished. Stamp them with the final
+    // post-replacement Army snapshot before they resume.
+    if let Some(continuation) = state.pending_continuation.as_mut() {
+        continuation
+            .chain
+            .set_amassed_army_object_recursive(snapshot.clone());
+    }
+
+    events.push(GameEvent::ArmyAmassed {
+        object_id,
+        source_id: ability.source_id,
+        controller: ability.controller,
+    });
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Amass,
+        source_id: ability.source_id,
+    });
+}
+
+fn amassed_army_snapshot(state: &GameState, object_id: ObjectId) -> Option<CostPaidObjectSnapshot> {
+    state
+        .objects
+        .get(&object_id)
+        .map(|obj| CostPaidObjectSnapshot {
+            object_id,
+            lki: obj.snapshot_public_characteristics(),
+        })
+}
+
 /// Create a 0/0 black [subtype] Army creature token on the battlefield.
 fn create_army_token(
     state: &mut GameState,
     controller: crate::types::player::PlayerId,
     subtype: &str,
+    count: u32,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Option<ObjectId> {
@@ -154,6 +226,17 @@ fn create_army_token(
         }
         ReplacementResult::Prevented => None,
         ReplacementResult::NeedsChoice(player) => {
+            stash_pending_counter_post_actions(
+                state,
+                EffectKind::Amass,
+                ability.source_id,
+                vec![PendingCounterPostAction::ContinueAmassAfterTokenCreation {
+                    controller,
+                    subtype: subtype.to_string(),
+                    count,
+                    ability: Box::new(ability.clone()),
+                }],
+            );
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             None
         }
@@ -201,8 +284,8 @@ mod tests {
         assert_eq!(armies.len(), 1);
         let army = armies[0];
         assert!(army.is_token);
-        assert_eq!(army.power, Some(0));
-        assert_eq!(army.toughness, Some(0));
+        assert_eq!(army.power, Some(2));
+        assert_eq!(army.toughness, Some(2));
         assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
         assert!(army.card_types.subtypes.contains(&"Army".to_string()));
         assert_eq!(army.color, vec![ManaColor::Black]);

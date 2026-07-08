@@ -124,7 +124,9 @@ pub(crate) fn eligible_candidates(
                 let mv = state
                     .objects
                     .get(&id)
-                    .map(|obj| obj.mana_cost.mana_value())
+                    // CR 202.3d + CR 709.4b: candidate cards are in a non-stack
+                    // zone, so a split card's MV budget is its combined halves.
+                    .map(|obj| obj.effective_mana_value())
                     .unwrap_or(0);
                 if mv > budget {
                     continue;

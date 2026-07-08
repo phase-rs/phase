@@ -5,8 +5,8 @@ use crate::types::actions::MulliganChoice;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    GameState, MulliganBottomEntry, MulliganDecisionEntry, OpeningHandBottomReason,
-    PendingBeginGameAbility, WaitingFor,
+    GameState, MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase,
+    OpeningHandBottomReason, PendingBeginGameAbility, PendingMulliganAction, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -66,7 +66,7 @@ pub fn kept_hand_size_after(mulligan_count: u8, free_first: bool) -> usize {
     STARTING_HAND_SIZE.saturating_sub(bottom_count_for(mulligan_count, free_first) as usize)
 }
 
-/// CR 103.4: Start the mulligan process — shuffle libraries and draw 7 for each player.
+/// CR 103.3 + CR 103.5: Start the mulligan process — shuffle libraries and draw 7 for each player.
 ///
 /// CR 103.5 + 103.5b: All players decide simultaneously. The returned
 /// `WaitingFor::MulliganDecision` carries every living player in seat order;
@@ -117,6 +117,7 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
                 .get(&player)
                 .copied()
                 .unwrap_or(0),
+            phase: MulliganDecisionPhase::Declare,
         })
         .collect();
 
@@ -154,28 +155,28 @@ fn tiny_leaders_forced_mulligan_pending(state: &GameState) -> Vec<MulliganBottom
 
 /// CR 103.5 + 103.5b: Resolve one player's `MulliganDecision { choice }` action.
 ///
-/// - `Keep` removes the player from `pending`. The player has locked in their
-///   hand for the game; their bottom-cards selection is deferred to the second
-///   phase (CR 103.5 second sentence: "all players who decided to take
-///   mulligans do so at the same time" — bottoms happen after every player has
-///   kept).
+/// - `Keep` locks in the hand (CR 103.5). If the player still owes bottoms
+///   against the `prepaid_mulligan_bottoms` ledger, their entry transitions to
+///   `BottomCards { then: Keep }`; otherwise they are removed from `pending`.
 /// - `Mulligan` increments that player's `mulligan_count`, shuffles their hand
-///   back into their library, and redraws the starting hand size. The player
-///   remains in `pending` to decide again.
-/// - `UseSerumPowder { object_id }` (CR 103.5b + Serum Powder Oracle text)
-///   exiles **every** card from the player's hand — including the named Serum
-///   Powder itself — and redraws the same number of cards. The player's
-///   `mulligan_count` is *not* incremented (this is not a mulligan). The
-///   player remains in `pending` and may then keep, mulligan, or use another
-///   Serum Powder if their new hand contains one.
+///   back into their library, redraws the starting hand size, and RESETS that
+///   player's bottoms ledger to 0 (CR 103.5 — a fresh redraw invalidates prior
+///   credit). The player remains in `pending` to decide again. At the mulligan
+///   cap (CR 103.5 final sentence) the mulligan is treated as an implicit Keep
+///   at the new count.
+/// - `UseSerumPowder { object_id }` (CR 103.5b + Serum Powder Oracle text) is a
+///   declare-point action. If bottoms are still owed, the entry transitions to
+///   `BottomCards { then: UseSerumPowder { object_id } }` and the exile+redraw
+///   is deferred until that obligation resolves; otherwise the Powder's effect
+///   runs immediately. The player's `mulligan_count` is *not* incremented (this
+///   is not a mulligan) and the entry returns to `Declare` afterward.
 ///
-/// If `Mulligan` brings the player to the maximum mulligan count (CR 103.5
-/// final sentence: a player may not take a mulligan that would result in a
-/// zero-card hand), the player is force-removed from `pending` and will
-/// bottom every card in their hand.
+/// A decision is rejected if the player's entry is not in the `Declare` phase
+/// (they owe bottoms first).
 ///
-/// When `pending` becomes empty, advance to `MulliganBottomCards` (or, if no
-/// one owes bottoms, directly to `finish_mulligans`).
+/// When `pending` becomes empty, advance directly to `finish_mulligans` — each
+/// player's bottoms are resolved at their own declare point, so there is no
+/// separate batch bottoms phase.
 pub fn handle_mulligan_decision(
     state: &mut GameState,
     player: PlayerId,
@@ -195,61 +196,117 @@ pub fn handle_mulligan_decision(
         .iter()
         .position(|e| e.player == player)
         .ok_or_else(|| format!("Player {:?} is not in the mulligan pending set", player))?;
+
+    if !matches!(pending[idx].phase, MulliganDecisionPhase::Declare) {
+        return Err(format!(
+            "Player {:?} owes bottom cards before making another mulligan decision",
+            player
+        ));
+    }
     let current_count = pending[idx].mulligan_count;
 
     match choice {
         MulliganChoice::Keep => {
-            // Record the final mulligan_count for the bottoms phase. Track in
-            // state.final_mulligan_counts indexed by PlayerId — populated as
-            // each player locks in their hand.
-            record_final_count(state, player, current_count);
-            pending.remove(idx);
+            resolve_declare_point(
+                state,
+                &mut pending,
+                idx,
+                free_first,
+                PendingMulliganAction::Keep,
+                events,
+            )?;
         }
         MulliganChoice::Mulligan => {
             let new_count = current_count + 1;
             shuffle_hand_into_library(state, player, events);
             draw_n(state, player, STARTING_HAND_SIZE, events);
+            // CR 103.5: a fresh redraw makes any prior "already bottomed"
+            // credit meaningless — the obligation for the new count starts
+            // from scratch.
+            state.prepaid_mulligan_bottoms.insert(player, 0);
+            pending[idx].mulligan_count = new_count;
 
             if new_count >= max_mulligans_for(free_first) {
-                // CR 103.5 + 103.5c: A player may take mulligans until their
-                // opening hand would be zero cards. In free-first formats the
-                // first mulligan is uncounted, so the cap is one higher.
-                // Force-remove from pending; the bottoms phase will bottom
-                // every card in their hand.
-                record_final_count(state, player, new_count);
-                pending.remove(idx);
-            } else {
-                pending[idx].mulligan_count = new_count;
+                // CR 103.5 final sentence: this is the last legal mulligan.
+                // Treat it as an implicit Keep at the new count.
+                resolve_declare_point(
+                    state,
+                    &mut pending,
+                    idx,
+                    free_first,
+                    PendingMulliganAction::Keep,
+                    events,
+                )?;
             }
         }
         MulliganChoice::UseSerumPowder { object_id } => {
-            // CR 103.5b + Serum Powder Oracle text: validate the referenced
-            // object is in the actor's hand and is named "Serum Powder"
-            // (CR 201.2 — name match is exact), then exile the entire hand
-            // and redraw the same number of cards. Mulligan count unchanged.
-            handle_serum_powder(state, player, object_id, events)?;
-            // Player remains in `pending` with the same mulligan_count.
+            // CR 103.5b + Serum Powder Oracle text + CR 201.2: reject an
+            // invalid reference at declare time, before any owed-bottom
+            // sub-phase is created.
+            validate_serum_powder_reference(state, player, object_id)?;
+            resolve_declare_point(
+                state,
+                &mut pending,
+                idx,
+                free_first,
+                PendingMulliganAction::UseSerumPowder { object_id },
+                events,
+            )?;
         }
     }
 
     Ok(advance_after_decision(state, pending, free_first, events))
 }
 
-/// CR 103.5b + Serum Powder Oracle text: "Any time you could mulligan and this
-/// card is in your hand, you may exile all the cards from your hand, then draw
-/// that many cards."
-///
-/// Validates `serum_powder_id` is in `player`'s hand and is named "Serum
-/// Powder" (case-insensitive — CR 201.2 names are case-canonical but card data
-/// casing should still tolerate variation). Then moves every card in the
-/// hand — including the Serum Powder itself — to exile, and draws that many
-/// cards. Does not shuffle, does not change the library, does not increment
-/// the mulligan counter.
-fn handle_serum_powder(
+/// CR 103.5 + 103.5b: Shared declare-point resolution for `Keep` and
+/// `UseSerumPowder` (and the implicit-Keep at the mulligan cap). Computes the
+/// still-owed bottom count against the ledger and either completes the action
+/// immediately (owed == 0, calling `handle_serum_powder` right away for the
+/// UseSerumPowder case) or parks the entry in `BottomCards`.
+fn resolve_declare_point(
     state: &mut GameState,
+    pending: &mut Vec<MulliganDecisionEntry>,
+    idx: usize,
+    free_first: bool,
+    then: PendingMulliganAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), String> {
+    let player = pending[idx].player;
+    let mulligan_count = pending[idx].mulligan_count;
+    let prepaid = state
+        .prepaid_mulligan_bottoms
+        .get(&player)
+        .copied()
+        .unwrap_or(0);
+    let owed = bottom_count_for(mulligan_count, free_first).saturating_sub(prepaid);
+
+    if owed == 0 {
+        match then {
+            PendingMulliganAction::Keep => {
+                pending.remove(idx);
+            }
+            PendingMulliganAction::UseSerumPowder { object_id } => {
+                handle_serum_powder(state, player, object_id, events)?;
+                // Stays in `Declare`, same mulligan_count — Serum Powder is
+                // not a mulligan.
+            }
+        }
+    } else {
+        pending[idx].phase = MulliganDecisionPhase::BottomCards { count: owed, then };
+    }
+    Ok(())
+}
+
+/// CR 103.5b + Serum Powder Oracle text + CR 201.2: Validate that
+/// `serum_powder_id` is a legal Serum Powder activation for `player` — in
+/// their hand, and named "Serum Powder" (case-insensitive). Called at
+/// declare-time, before any owed-bottom `BottomCards` sub-phase is created, so
+/// an invalid reference is rejected immediately rather than after prompting
+/// for an unrelated bottom-cards selection.
+fn validate_serum_powder_reference(
+    state: &GameState,
     player: PlayerId,
     serum_powder_id: ObjectId,
-    events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
     let player_data = state
         .players
@@ -274,6 +331,30 @@ fn handle_serum_powder(
             serum_powder_id, referenced.name
         ));
     }
+    Ok(())
+}
+
+/// CR 103.5b + Serum Powder Oracle text: "Any time you could mulligan and this
+/// card is in your hand, you may exile all the cards from your hand, then draw
+/// that many cards."
+///
+/// Validates `serum_powder_id` is in `player`'s hand and is named "Serum
+/// Powder" (case-insensitive — CR 201.2 names are case-canonical but card data
+/// casing should still tolerate variation). Then moves every card in the
+/// hand — including the Serum Powder itself — to exile, and draws that many
+/// cards. Does not shuffle, does not change the library, does not increment
+/// the mulligan counter.
+fn handle_serum_powder(
+    state: &mut GameState,
+    player: PlayerId,
+    serum_powder_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), String> {
+    // Primary validation is delegated to `validate_serum_powder_reference`.
+    // This is called from a second call site (`handle_mulligan_bottom`'s `then`
+    // dispatch) as well as the declare-point fast path, so re-validating here
+    // is defense-in-depth against a caller that skips the declare-time check.
+    validate_serum_powder_reference(state, player, serum_powder_id)?;
 
     // CR 103.5b: Exile every card from the hand (including the Powder). The
     // exiled cards are gone for the rest of the game (per the official ruling
@@ -307,14 +388,10 @@ fn handle_serum_powder(
     Ok(())
 }
 
-/// CR 103.5: Stash the locked-in mulligan count for `player` so the bottoms
-/// phase knows how many cards they owe.
-fn record_final_count(state: &mut GameState, player: PlayerId, count: u8) {
-    state.final_mulligan_counts.insert(player, count);
-}
-
-/// CR 103.5: After updating `pending`, either re-emit `MulliganDecision` or
-/// transition to the bottom-cards phase (or finish entirely).
+/// CR 103.5: After updating `pending`, either re-emit `MulliganDecision` or,
+/// once every player is out of `pending`, finish the mulligan flow directly.
+/// Bottoming is resolved per-entry at each declare point, so there is no
+/// separate batch bottoms phase.
 fn advance_after_decision(
     state: &mut GameState,
     pending: Vec<MulliganDecisionEntry>,
@@ -327,53 +404,8 @@ fn advance_after_decision(
             free_first_mulligan: free_first,
         };
     }
-
-    // All players have locked in their hands. Build the bottoms-phase pending
-    // list from each player's final mulligan count.
-    enter_bottom_phase(state, events)
-}
-
-/// CR 103.5: Enter the bottoms phase. Each player who took at least one
-/// counted mulligan (after free-first discount) must put N cards on the
-/// bottom of their library. Players choose simultaneously.
-fn enter_bottom_phase(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
-    let free_first = free_first_mulligan(state);
-    let pending: Vec<MulliganBottomEntry> = state
-        .seat_order
-        .iter()
-        .filter(|&&player_id| super::players::is_alive(state, player_id))
-        .filter_map(|&player_id| {
-            // CR 800.4a: A player who conceded during the decision phase is
-            // skipped — they cannot submit bottoms and would deadlock the game.
-            let count = state
-                .final_mulligan_counts
-                .get(&player_id)
-                .copied()
-                .unwrap_or(0);
-            let prepaid = state
-                .prepaid_mulligan_bottoms
-                .get(&player_id)
-                .copied()
-                .unwrap_or(0);
-            let bottom = bottom_count_for(count, free_first).saturating_sub(prepaid);
-            if bottom > 0 {
-                Some(MulliganBottomEntry {
-                    player: player_id,
-                    count: bottom,
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if pending.is_empty() {
-        state.final_mulligan_counts.clear();
-        state.prepaid_mulligan_bottoms.clear();
-        finish_mulligans(state, events)
-    } else {
-        WaitingFor::MulliganBottomCards { pending }
-    }
+    state.prepaid_mulligan_bottoms.clear();
+    finish_mulligans(state, events)
 }
 
 /// TL:R 906.6a/e: Resolve a forced opening-hand bottom before any normal
@@ -423,26 +455,56 @@ pub fn handle_opening_hand_bottom(
     }
 }
 
-/// CR 103.5: Resolve one player's `SelectCards { cards }` during the bottoms
-/// phase. Validates the count and contents, moves cards to the bottom of the
-/// library, removes the player from `pending`. When `pending` is empty,
-/// advance to `finish_mulligans`.
+/// CR 103.5: Resolve one player's `SelectCards { cards }` while their entry is
+/// in the `BottomCards` sub-phase of `MulliganDecision`. Validates the count
+/// and hand-membership, rejects the earmarked Serum Powder object (if `then`
+/// is `UseSerumPowder`) from being selected as one of the bottomed cards —
+/// that object is committed to its own activation. Moves the selected cards to
+/// the bottom of the library, credits the ledger, then dispatches `then`.
 pub fn handle_mulligan_bottom(
     state: &mut GameState,
     player: PlayerId,
     cards: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, String> {
-    let WaitingFor::MulliganBottomCards { pending } = &state.waiting_for else {
-        return Err("handle_mulligan_bottom called outside MulliganBottomCards".to_string());
+    let WaitingFor::MulliganDecision {
+        pending,
+        free_first_mulligan,
+    } = &state.waiting_for
+    else {
+        return Err("handle_mulligan_bottom called outside MulliganDecision".to_string());
     };
+    let free_first = *free_first_mulligan;
     let mut pending = pending.clone();
 
     let idx = pending
         .iter()
         .position(|e| e.player == player)
-        .ok_or_else(|| format!("Player {:?} is not in the bottoms pending set", player))?;
-    let expected_count = pending[idx].count;
+        .ok_or_else(|| format!("Player {:?} is not in the mulligan pending set", player))?;
+
+    let MulliganDecisionPhase::BottomCards {
+        count: expected_count,
+        then,
+    } = pending[idx].phase
+    else {
+        return Err(format!(
+            "Player {:?} has no owed bottom-cards obligation",
+            player
+        ));
+    };
+
+    // Engine invariant (no CR citation — not an explicit CR clause): the Serum
+    // Powder object earmarked by a pending `UseSerumPowder { object_id }`
+    // continuation cannot itself be selected as one of the bottomed cards; it
+    // is committed to its own activation.
+    if let PendingMulliganAction::UseSerumPowder { object_id } = then {
+        if cards.contains(&object_id) {
+            return Err(format!(
+                "Cannot bottom Serum Powder object {:?} — it is committed to its own activation",
+                object_id
+            ));
+        }
+    }
 
     validate_bottom_selection(state, player, &cards, expected_count)?;
 
@@ -455,15 +517,19 @@ pub fn handle_mulligan_bottom(
         crate::game::zone_pipeline::move_object(state, req, events);
     }
 
-    pending.remove(idx);
+    *state.prepaid_mulligan_bottoms.entry(player).or_insert(0) += expected_count;
 
-    if pending.is_empty() {
-        state.final_mulligan_counts.clear();
-        state.prepaid_mulligan_bottoms.clear();
-        Ok(finish_mulligans(state, events))
-    } else {
-        Ok(WaitingFor::MulliganBottomCards { pending })
+    match then {
+        PendingMulliganAction::Keep => {
+            pending.remove(idx);
+        }
+        PendingMulliganAction::UseSerumPowder { object_id } => {
+            handle_serum_powder(state, player, object_id, events)?;
+            pending[idx].phase = MulliganDecisionPhase::Declare;
+        }
     }
+
+    Ok(advance_after_decision(state, pending, free_first, events))
 }
 
 fn validate_bottom_selection(
@@ -549,15 +615,6 @@ pub fn resume_begin_game_abilities(
     state.resolving_begin_game_abilities = false;
     crate::game::planechase::reveal_starting_plane(state);
     turns::auto_advance(state, events)
-}
-
-/// CR 103.5 + CR 800.4a: Re-entry point for elimination cleanup — drives the
-/// flow to the bottoms phase as if the decision phase had ended naturally.
-pub(crate) fn enter_bottom_phase_public(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> WaitingFor {
-    enter_bottom_phase(state, events)
 }
 
 /// TL:R 906.6a: Re-entry point after pruning an opening-hand bottom prompt.
@@ -776,11 +833,17 @@ mod tests {
         }
     }
 
-    fn pending_bottom_for(wf: &WaitingFor, player: PlayerId) -> Option<u8> {
+    /// Test helper: read the `(count, then)` of a pending player's `BottomCards`
+    /// phase, if any.
+    fn bottom_phase_for(wf: &WaitingFor, player: PlayerId) -> Option<(u8, PendingMulliganAction)> {
         match wf {
-            WaitingFor::MulliganBottomCards { pending } => {
-                pending.iter().find(|e| e.player == player).map(|e| e.count)
-            }
+            WaitingFor::MulliganDecision { pending, .. } => pending
+                .iter()
+                .find(|e| e.player == player)
+                .and_then(|e| match e.phase {
+                    MulliganDecisionPhase::BottomCards { count, then } => Some((count, then)),
+                    MulliganDecisionPhase::Declare => None,
+                }),
             _ => None,
         }
     }
@@ -979,33 +1042,43 @@ mod tests {
         );
     }
 
+    /// CR 103.5 + 103.5b: `Keep` with an owed bottom enters `BottomCards`
+    /// immediately at declare time — independent of whether other players are
+    /// still deciding. This replaces the old batch model where bottoms were
+    /// deferred until every player had kept.
     #[test]
-    fn keep_after_mulligan_defers_bottoms_until_all_keep() {
+    fn keep_after_mulligan_enters_bottom_cards_immediately_independent_of_other_pending() {
         let mut state = setup_with_libraries(20);
         let mut events = Vec::new();
         state.waiting_for = start_mulligan(&mut state, &mut events);
 
-        // P0 mulligans once then keeps; P1 still pending → still decision phase.
         decide(&mut state, PlayerId(0), false, &mut events);
         let waiting = decide(&mut state, PlayerId(0), true, &mut events);
+
         assert!(
             matches!(waiting, WaitingFor::MulliganDecision { .. }),
-            "should still be decision phase while P1 is pending, got {:?}",
+            "still MulliganDecision (P1 hasn't acted), got {:?}",
             waiting
         );
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((1, PendingMulliganAction::Keep)),
+            "P0 should be in BottomCards immediately, before P1 has acted at all"
+        );
+        assert!(
+            pending_decision_players(&waiting).contains(&PlayerId(1)),
+            "P1 is still in Declare phase, untouched by P0's bottoming"
+        );
 
-        // P1 keeps → enters bottoms phase for P0 only.
+        let card_to_bottom = state.players[0].hand[0];
+        let waiting = bottom(&mut state, PlayerId(0), vec![card_to_bottom], &mut events).unwrap();
+        assert!(
+            !pending_decision_players(&waiting).contains(&PlayerId(0)),
+            "P0 is fully locked in and removed from pending"
+        );
+
         let waiting = decide(&mut state, PlayerId(1), true, &mut events);
-        assert_eq!(
-            pending_bottom_for(&waiting, PlayerId(0)),
-            Some(1),
-            "P0 owes 1 bottom card after 1 mulligan in 2-player Standard"
-        );
-        assert_eq!(
-            pending_bottom_for(&waiting, PlayerId(1)),
-            None,
-            "P1 owes nothing"
-        );
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
     }
 
     #[test]
@@ -1111,19 +1184,14 @@ mod tests {
         assert_eq!(decision_count_for(&waiting, PlayerId(3)), Some(1));
     }
 
-    /// CR 103.5: 4-player pod bottoms phase — three players owe bottoms,
-    /// they submit in non-seat order, all resolve concurrently.
+    /// Four players can independently reach and resolve BottomCards in any
+    /// order, none blocking another.
     #[test]
     fn four_player_concurrent_bottom_in_any_order() {
-        // Need a 4-player game without free-first-mulligan so all three mulligans
-        // produce bottoms. Multiplayer (≥3 seats) always grants free first per
-        // CR 103.5c, so a single mulligan is free. Take TWO mulligans per player
-        // to ensure each owes one bottom card.
         let mut state = setup_n_player_with_libraries(4, 30);
         let mut events = Vec::new();
         state.waiting_for = start_mulligan(&mut state, &mut events);
 
-        // P0, P2, P3 each mulligan twice then keep; P1 keeps immediately.
         for &pid in &[PlayerId(0), PlayerId(2), PlayerId(3)] {
             decide(&mut state, pid, false, &mut events);
             decide(&mut state, pid, false, &mut events);
@@ -1131,13 +1199,20 @@ mod tests {
         }
         let waiting = decide(&mut state, PlayerId(1), true, &mut events);
 
-        // Bottoms phase: P0/P2/P3 each owe 1 (2 mulligans - 1 free).
-        assert_eq!(pending_bottom_for(&waiting, PlayerId(0)), Some(1));
-        assert_eq!(pending_bottom_for(&waiting, PlayerId(2)), Some(1));
-        assert_eq!(pending_bottom_for(&waiting, PlayerId(3)), Some(1));
-        assert_eq!(pending_bottom_for(&waiting, PlayerId(1)), None);
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((1, PendingMulliganAction::Keep))
+        );
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(2)),
+            Some((1, PendingMulliganAction::Keep))
+        );
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(3)),
+            Some((1, PendingMulliganAction::Keep))
+        );
+        assert_eq!(bottom_phase_for(&waiting, PlayerId(1)), None);
 
-        // Submit bottom cards in non-seat order.
         let card3 = state.players[3].hand[0];
         let card0 = state.players[0].hand[0];
         let card2 = state.players[2].hand[0];
@@ -1145,11 +1220,7 @@ mod tests {
         bottom(&mut state, PlayerId(0), vec![card0], &mut events).unwrap();
         let waiting = bottom(&mut state, PlayerId(2), vec![card2], &mut events).unwrap();
 
-        assert!(
-            matches!(waiting, WaitingFor::Priority { .. }),
-            "all bottoms submitted → game should start, got {:?}",
-            waiting
-        );
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
     }
 
     #[test]
@@ -1210,36 +1281,27 @@ mod tests {
         assert!(!state.resolving_begin_game_abilities);
     }
 
+    /// CR 103.5c: In multiplayer, the first mulligan is free (doesn't count
+    /// toward bottoms). After a single mulligan + Keep, nothing is owed.
     #[test]
     fn multiplayer_first_mulligan_is_free() {
         let mut state = setup_n_player_with_libraries(3, 30);
         let mut events = Vec::new();
         state.waiting_for = start_mulligan(&mut state, &mut events);
 
-        // CR 103.5c: First mulligan in multiplayer doesn't count.
         let waiting = decide(&mut state, PlayerId(0), false, &mut events);
-        assert_eq!(
-            decision_count_for(&waiting, PlayerId(0)),
-            Some(1),
-            "Mulligan count should increment to 1"
-        );
+        assert_eq!(decision_count_for(&waiting, PlayerId(0)), Some(1));
 
-        // Keep after first mulligan — drive into bottoms phase by keeping others too.
         decide(&mut state, PlayerId(0), true, &mut events);
         decide(&mut state, PlayerId(1), true, &mut events);
         let waiting = decide(&mut state, PlayerId(2), true, &mut events);
 
-        assert_eq!(
-            pending_bottom_for(&waiting, PlayerId(0)),
-            None,
-            "P0 had 1 free mulligan → owes 0 bottom cards"
-        );
-        assert!(
-            matches!(waiting, WaitingFor::Priority { .. }),
-            "with no bottoms owed, game should start immediately"
-        );
+        assert_eq!(bottom_phase_for(&waiting, PlayerId(0)), None);
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
     }
 
+    /// CR 103.5c: In multiplayer, the second mulligan is the first COUNTED one
+    /// — after 2 mulligans total (1 free), 1 card is owed at Keep.
     #[test]
     fn multiplayer_two_mulligans_bottoms_one() {
         let mut state = setup_n_player_with_libraries(3, 30);
@@ -1252,9 +1314,8 @@ mod tests {
         decide(&mut state, PlayerId(1), true, &mut events);
         let waiting = decide(&mut state, PlayerId(2), true, &mut events);
         assert_eq!(
-            pending_bottom_for(&waiting, PlayerId(0)),
-            Some(1),
-            "After 2 mulligans in multiplayer, P0 should bottom 1 card"
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((1, PendingMulliganAction::Keep))
         );
     }
 
@@ -1356,11 +1417,7 @@ mod tests {
         decide(&mut state, PlayerId(0), false, &mut events);
         decide(&mut state, PlayerId(0), true, &mut events);
         let waiting = decide(&mut state, PlayerId(1), true, &mut events);
-        assert_eq!(
-            pending_bottom_for(&waiting, PlayerId(0)),
-            None,
-            "Commander duel: first mulligan should be free — no MulliganBottomCards"
-        );
+        assert_eq!(bottom_phase_for(&waiting, PlayerId(0)), None);
     }
 
     /// CR 103.5c: A Brawl duel grants a free first mulligan.
@@ -1389,7 +1446,7 @@ mod tests {
         decide(&mut state, PlayerId(0), false, &mut events);
         decide(&mut state, PlayerId(0), true, &mut events);
         let waiting = decide(&mut state, PlayerId(1), true, &mut events);
-        assert_eq!(pending_bottom_for(&waiting, PlayerId(0)), None);
+        assert_eq!(bottom_phase_for(&waiting, PlayerId(0)), None);
     }
 
     /// CR 103.5c only applies to multiplayer (3+ players) and Brawl. A
@@ -1420,9 +1477,8 @@ mod tests {
         decide(&mut state, PlayerId(0), true, &mut events);
         let waiting = decide(&mut state, PlayerId(1), true, &mut events);
         assert_eq!(
-            pending_bottom_for(&waiting, PlayerId(0)),
-            Some(1),
-            "Standard duel: after 1 mulligan, should bottom 1 card"
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((1, PendingMulliganAction::Keep))
         );
     }
 
@@ -1622,31 +1678,35 @@ mod tests {
         assert_eq!(state.objects[&top_of_library].zone, Zone::Exile);
     }
 
-    /// CR 103.5 + 103.5c: In a non-free-first format (Standard duel), the 7th
-    /// `Mulligan` brings the player to a 0-card opening hand and must
-    /// force-remove them from `pending`. The 8th is never accepted because
-    /// they were already force-removed.
+    /// CR 103.5 + 103.5c: In a non-free-first format, the 7th `Mulligan` brings
+    /// the player to a 0-card opening hand and is treated as an implicit Keep at
+    /// that count — the entry transitions to `BottomCards` (still pending). A
+    /// further `MulliganDecision` submission is rejected.
     #[test]
     fn max_mulligans_standard_duel_caps_at_seven() {
         let mut state = setup_with_libraries(60);
         let mut events = Vec::new();
         state.waiting_for = start_mulligan(&mut state, &mut events);
 
-        // Seven mulligans in a row. The 7th hits the cap and force-removes P0.
         for _ in 0..7 {
             decide(&mut state, PlayerId(0), false, &mut events);
         }
+
         assert!(
-            !pending_decision_players(&state.waiting_for).contains(&PlayerId(0)),
-            "P0 should be force-removed after 7 mulligans in a non-free-first format"
+            pending_decision_players(&state.waiting_for).contains(&PlayerId(0)),
+            "P0 stays pending, now mid-BottomCards from the implicit Keep at the cap"
         );
         assert_eq!(
-            state.final_mulligan_counts.get(&PlayerId(0)).copied(),
+            decision_count_for(&state.waiting_for, PlayerId(0)),
             Some(7),
-            "P0's locked-in mulligan count should be 7"
+            "P0's mulligan_count should be 7"
+        );
+        assert_eq!(
+            bottom_phase_for(&state.waiting_for, PlayerId(0)),
+            Some((7, PendingMulliganAction::Keep)),
+            "P0 owes the full bottom_count_for(7, false) = 7, matching kept_hand_size_after(7,false) = 0"
         );
 
-        // 8th submission must be rejected — P0 is no longer in pending.
         let result = handle_mulligan_decision(
             &mut state,
             PlayerId(0),
@@ -1655,14 +1715,13 @@ mod tests {
         );
         assert!(
             result.is_err(),
-            "8th Mulligan must be rejected in non-free-first format"
+            "no MulliganDecision is legal while mid-BottomCards"
         );
     }
 
-    /// CR 103.5 + 103.5c: In a free-first format (Commander duel, Brawl, or
-    /// any multiplayer game), the player gets one uncounted mulligan, so the
-    /// 8th `Mulligan` submission is still permitted (bringing them to a
-    /// 1-card opening hand: 7→6→5→4→3→2→1). Only the 9th would hit the cap.
+    /// CR 103.5 + 103.5c: In a free-first format, the mulligan cap is 8
+    /// (`max_mulligans_for(true) = MAX_MULLIGANS + 1`). The 8th `Mulligan`
+    /// force-routes to an implicit Keep, owing `bottom_count_for(8, true) = 7`.
     #[test]
     fn max_mulligans_free_first_format_permits_eighth() {
         use crate::types::format::FormatConfig;
@@ -1684,7 +1743,6 @@ mod tests {
         let mut events = Vec::new();
         state.waiting_for = start_mulligan(&mut state, &mut events);
 
-        // 7 mulligans must keep P0 still in pending (free-first → cap is 8).
         for _ in 0..7 {
             decide(&mut state, PlayerId(0), false, &mut events);
         }
@@ -1692,22 +1750,20 @@ mod tests {
             pending_decision_players(&state.waiting_for).contains(&PlayerId(0)),
             "free-first format: P0 should still be pending after 7 mulligans"
         );
+        assert_eq!(decision_count_for(&state.waiting_for, PlayerId(0)), Some(7));
         assert_eq!(
-            decision_count_for(&state.waiting_for, PlayerId(0)),
-            Some(7),
-            "P0 mulligan_count should be 7"
+            bottom_phase_for(&state.waiting_for, PlayerId(0)),
+            None,
+            "still in Declare — the 7th mulligan does not hit the free-first cap of 8"
         );
 
-        // 8th mulligan is the cap-triggering submission in a free-first format.
-        decide(&mut state, PlayerId(0), false, &mut events);
-        assert!(
-            !pending_decision_players(&state.waiting_for).contains(&PlayerId(0)),
-            "8th mulligan force-removes in free-first format"
-        );
+        let waiting = decide(&mut state, PlayerId(0), false, &mut events);
+        assert_eq!(decision_count_for(&waiting, PlayerId(0)), Some(8));
         assert_eq!(
-            state.final_mulligan_counts.get(&PlayerId(0)).copied(),
-            Some(8),
-            "P0's locked-in mulligan count should be 8"
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((7, PendingMulliganAction::Keep)),
+            "8th mulligan force-routes to Keep, owing bottom_count_for(8, true) = 7 (kept_hand_size_after(8, true) = 0), got {:?}",
+            waiting
         );
     }
 
@@ -1755,33 +1811,27 @@ mod tests {
         assert_eq!(kept_hand_size_after(8, true), 0);
     }
 
-    /// CR 103.5 + CR 800.4a: A player who concedes during the mulligan
-    /// decision phase must not appear in the bottoms phase entry list, even
-    /// if they kept with a non-zero mulligan count beforehand. Tested in a
-    /// 3-player pod so the game does not end on concede.
+    /// CR 800.4a: A player who concedes while mid-`BottomCards { then: Keep }`
+    /// is pruned from `pending` and from `prepaid_mulligan_bottoms`. Remaining
+    /// players complete the flow normally.
     #[test]
     fn concede_during_mulligan_excludes_from_bottoms() {
         use crate::game::engine::apply;
         use crate::types::actions::GameAction;
 
-        // Multiplayer (3 seats) grants free-first per CR 103.5c — take TWO
-        // mulligans so P0's locked-in bottoms count is non-zero (2 - 1 = 1).
         let mut state = setup_n_player_with_libraries(3, 30);
         let mut events = Vec::new();
         state.waiting_for = start_mulligan(&mut state, &mut events);
 
-        // P0 mulligans twice then keeps (locks in mulligan_count = 2 → owes 1 bottom).
         decide(&mut state, PlayerId(0), false, &mut events);
         decide(&mut state, PlayerId(0), false, &mut events);
-        decide(&mut state, PlayerId(0), true, &mut events);
+        let waiting = decide(&mut state, PlayerId(0), true, &mut events);
         assert_eq!(
-            state.final_mulligan_counts.get(&PlayerId(0)).copied(),
-            Some(2),
-            "P0 should have a final mulligan count of 2 after keeping"
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((1, PendingMulliganAction::Keep)),
+            "P0 should owe 1 bottom card (2 mulligans, 1 free) before conceding"
         );
 
-        // P0 concedes before P1/P2 keep. Game does not end (2 living players
-        // remain). Elimination prunes pending and final_mulligan_counts.
         let _ = apply(
             &mut state,
             PlayerId(0),
@@ -1790,18 +1840,364 @@ mod tests {
             },
         )
         .expect("concede");
+
         assert!(
-            !state.final_mulligan_counts.contains_key(&PlayerId(0)),
-            "eliminated player should be pruned from final_mulligan_counts"
+            !pending_decision_players(&state.waiting_for).contains(&PlayerId(0)),
+            "conceded P0 must be pruned from pending, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !state.prepaid_mulligan_bottoms.contains_key(&PlayerId(0)),
+            "conceded P0's prepaid ledger entry must be pruned"
         );
 
-        // P1 and P2 keep → bottoms phase should not include P0.
         decide(&mut state, PlayerId(1), true, &mut events);
         let waiting = decide(&mut state, PlayerId(2), true, &mut events);
+        assert!(
+            matches!(waiting, WaitingFor::Priority { .. }),
+            "remaining players should be able to complete the mulligan flow after P0's concession, got {:?}",
+            waiting
+        );
+    }
+
+    /// CR 103.5: Two mulligans then `Keep` bottoms the FULL cumulative count
+    /// (2), in a single resolution.
+    #[test]
+    fn mull_to_five_bottoms_full_cumulative_count_not_incremental_delta() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        decide(&mut state, PlayerId(0), false, &mut events);
+        decide(&mut state, PlayerId(0), false, &mut events);
+        let waiting = decide(&mut state, PlayerId(0), true, &mut events);
+
         assert_eq!(
-            pending_bottom_for(&waiting, PlayerId(0)),
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((2, PendingMulliganAction::Keep)),
+            "P0 should owe the full cumulative count of 2, not an incremental delta, got {:?}",
+            waiting
+        );
+
+        let cards_to_bottom: Vec<ObjectId> =
+            state.players[0].hand.iter().take(2).copied().collect();
+        let waiting =
+            bottom(&mut state, PlayerId(0), cards_to_bottom, &mut events).expect("bottom");
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            5,
+            "hand should land at kept_hand_size_after(2, false) = 5 in one resolution"
+        );
+        assert!(!pending_decision_players(&waiting).contains(&PlayerId(0)));
+    }
+
+    /// CR 103.5: HEADLINE TEST for the reset/accumulate discipline. Reaches a
+    /// 2-mulligan "mull to 5" checkpoint via `UseSerumPowder` (not `Keep`, since
+    /// `Keep` would lock the player out of further mulligans), takes a genuine
+    /// third `Mulligan`, then `Keep`s — asserts the owed amount is the FULL
+    /// cumulative count for mulligan_count=3 (3), not an incremental delta off
+    /// the count-2 payment already made (which would incorrectly yield 1).
+    #[test]
+    fn mull_to_five_then_third_mulligan_owes_full_amount_not_incremental_delta() {
+        let mut state = setup_with_libraries(40);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        decide(&mut state, PlayerId(0), false, &mut events);
+        decide(&mut state, PlayerId(0), false, &mut events);
+
+        let powder_id = inject_serum_powder(&mut state, PlayerId(0), 0);
+
+        let waiting = use_serum_powder(&mut state, PlayerId(0), powder_id, &mut events)
+            .expect("use_serum_powder declare point");
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((2, PendingMulliganAction::UseSerumPowder { object_id: powder_id })),
+            "UseSerumPowder at count=2 should owe the full cumulative count of 2 before the Powder's own effect applies, got {:?}",
+            waiting
+        );
+
+        let hand_before_bottom: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+        let cards_to_bottom: Vec<ObjectId> = hand_before_bottom
+            .iter()
+            .copied()
+            .filter(|&id| id != powder_id)
+            .take(2)
+            .collect();
+        let waiting = bottom(&mut state, PlayerId(0), cards_to_bottom, &mut events)
+            .expect("bottom resolves the owed BottomCards obligation");
+
+        assert_eq!(state.players[0].hand.len(), 5);
+        assert_eq!(state.objects[&powder_id].zone, Zone::Exile);
+        assert_eq!(
+            decision_count_for(&waiting, PlayerId(0)),
+            Some(2),
+            "Serum Powder use does not change mulligan_count"
+        );
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
             None,
-            "conceded P0 must not be in bottoms phase, got {:?}",
+            "back in Declare after the Powder's effect resolves"
+        );
+
+        let waiting = decide(&mut state, PlayerId(0), false, &mut events);
+        assert_eq!(decision_count_for(&waiting, PlayerId(0)), Some(3));
+        assert_eq!(state.players[0].hand.len(), STARTING_HAND_SIZE);
+
+        let waiting = decide(&mut state, PlayerId(0), true, &mut events);
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((3, PendingMulliganAction::Keep)),
+            "owed must be the full cumulative count for mulligan_count=3 (3), not an incremental delta off the count-2 payment already made — got {:?}",
+            waiting
+        );
+    }
+
+    /// CR 103.5 + 103.5b: `UseSerumPowder` with an owed bottom must NOT run its
+    /// exile+redraw effect until the `BottomCards` obligation is resolved.
+    #[test]
+    fn use_serum_powder_resolves_owed_bottom_before_exiling_hand() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        decide(&mut state, PlayerId(0), false, &mut events);
+        let powder_id = inject_serum_powder(&mut state, PlayerId(0), 0);
+        let hand_before: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+
+        let waiting = use_serum_powder(&mut state, PlayerId(0), powder_id, &mut events)
+            .expect("use_serum_powder declare point");
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((
+                1,
+                PendingMulliganAction::UseSerumPowder {
+                    object_id: powder_id
+                }
+            ))
+        );
+
+        assert_eq!(state.players[0].hand.len(), 7, "hand must still be 7 cards");
+        assert!(state.players[0].hand.contains(&powder_id));
+        for card_id in &hand_before {
+            assert_eq!(
+                state.objects[card_id].zone,
+                Zone::Hand,
+                "card {:?} must remain in hand until the bottom obligation resolves",
+                card_id
+            );
+        }
+
+        let card_to_bottom = *hand_before.iter().find(|&&id| id != powder_id).unwrap();
+        bottom(&mut state, PlayerId(0), vec![card_to_bottom], &mut events).expect("bottom");
+
+        assert_eq!(state.objects[&card_to_bottom].zone, Zone::Library);
+        assert_eq!(*state.players[0].library.back().unwrap(), card_to_bottom);
+        assert_eq!(state.objects[&powder_id].zone, Zone::Exile);
+        assert_eq!(state.players[0].hand.len(), 6);
+    }
+
+    /// Engine invariant (no CR citation — not an explicit CR clause): the
+    /// Serum Powder object earmarked by a pending `UseSerumPowder { object_id }`
+    /// continuation cannot be selected as one of the bottomed cards.
+    #[test]
+    fn use_serum_powder_cannot_bottom_the_earmarked_powder_itself() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        decide(&mut state, PlayerId(0), false, &mut events);
+        let powder_id = inject_serum_powder(&mut state, PlayerId(0), 0);
+        let waiting = use_serum_powder(&mut state, PlayerId(0), powder_id, &mut events)
+            .expect("use_serum_powder declare point");
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((
+                1,
+                PendingMulliganAction::UseSerumPowder {
+                    object_id: powder_id
+                }
+            ))
+        );
+
+        let result = bottom(&mut state, PlayerId(0), vec![powder_id], &mut events);
+        assert!(
+            result.is_err(),
+            "bottoming the earmarked Powder itself must be rejected, got {:?}",
+            result
+        );
+        assert_eq!(
+            bottom_phase_for(&state.waiting_for, PlayerId(0)),
+            Some((
+                1,
+                PendingMulliganAction::UseSerumPowder {
+                    object_id: powder_id
+                }
+            ))
+        );
+        assert_eq!(state.players[0].hand.len(), 7);
+    }
+
+    /// CR 103.5 + 103.5b: HEADLINE TEST, the direct fix for the round-3
+    /// "double-charge" regression. First `UseSerumPowder` resolves an owed-1
+    /// bottom (`prepaid` becomes 1); a second, distinct Serum Powder found in
+    /// the redrawn hand is used at the SAME `mulligan_count` — asserts no
+    /// recharge occurs.
+    #[test]
+    fn use_serum_powder_twice_in_a_row_at_same_count_does_not_recharge() {
+        let mut state = setup_with_libraries(40);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        decide(&mut state, PlayerId(0), false, &mut events);
+
+        let first_powder = inject_serum_powder(&mut state, PlayerId(0), 0);
+        let future_second_powder = state.players[0].library[0];
+        state.objects.get_mut(&future_second_powder).unwrap().name = SERUM_POWDER_NAME.to_string();
+
+        let waiting = use_serum_powder(&mut state, PlayerId(0), first_powder, &mut events)
+            .expect("first use_serum_powder declare point");
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((
+                1,
+                PendingMulliganAction::UseSerumPowder {
+                    object_id: first_powder
+                }
+            ))
+        );
+
+        let non_powder_card = *state.players[0]
+            .hand
+            .iter()
+            .find(|&&id| id != first_powder)
+            .unwrap();
+        bottom(&mut state, PlayerId(0), vec![non_powder_card], &mut events)
+            .expect("bottom resolves the first owed BottomCards obligation");
+
+        assert_eq!(state.prepaid_mulligan_bottoms.get(&PlayerId(0)), Some(&1));
+        assert_eq!(state.objects[&first_powder].zone, Zone::Exile);
+        assert_eq!(state.players[0].hand.len(), 6);
+        assert!(state.players[0].hand.contains(&future_second_powder));
+
+        let second_powder = future_second_powder;
+        let library_before_second_use = state.players[0].library.len();
+
+        let waiting = use_serum_powder(&mut state, PlayerId(0), second_powder, &mut events)
+            .expect("second use_serum_powder at the same count must succeed directly");
+
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            None,
+            "a second Serum Powder use at the same, already-paid mulligan_count must not recharge a BottomCards phase — got {:?}",
+            waiting
+        );
+        assert_eq!(
+            state.prepaid_mulligan_bottoms.get(&PlayerId(0)),
+            Some(&1),
+            "the ledger must remain unchanged by a zero-owed declare point"
+        );
+        assert_eq!(decision_count_for(&waiting, PlayerId(0)), Some(1));
+        assert_eq!(
+            state.players[0].library.len(),
+            library_before_second_use - 6,
+            "second Powder use should only draw 6 cards from the library, with no additional card silently bottomed"
+        );
+    }
+
+    /// CR 103.5: Documents the owed==0 fast path explicitly — `Keep` with
+    /// `mulligan_count = 0` never enters `BottomCards`.
+    #[test]
+    fn keep_with_zero_mulligans_resolves_immediately_no_bottom_phase() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        let waiting = decide(&mut state, PlayerId(0), true, &mut events);
+
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            None,
+            "Keep with 0 mulligans must not enter BottomCards"
+        );
+        assert!(!pending_decision_players(&waiting).contains(&PlayerId(0)));
+        assert!(pending_decision_players(&waiting).contains(&PlayerId(1)));
+    }
+
+    /// Hostile-fixture coverage: a `SelectCards` submission while the player's
+    /// entry is still in `Declare` (nothing owed) must be rejected outright.
+    #[test]
+    fn select_cards_while_declare_phase_rejected() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        assert_eq!(bottom_phase_for(&state.waiting_for, PlayerId(0)), None);
+
+        let some_card = state.players[0].hand[0];
+        let result = handle_mulligan_bottom(&mut state, PlayerId(0), vec![some_card], &mut events);
+        assert!(
+            result.is_err(),
+            "SelectCards must be rejected while the player's entry is in Declare phase (nothing owed), got {:?}",
+            result
+        );
+        assert_eq!(state.players[0].hand.len(), 7);
+        assert!(state.players[0].hand.contains(&some_card));
+    }
+
+    /// CR 800.4a: A player who concedes while mid-`BottomCards { then:
+    /// UseSerumPowder { object_id } }` (not just the simpler `then: Keep` case)
+    /// must be pruned cleanly, with no panic or dangling reference to the
+    /// earmarked Serum Powder object.
+    #[test]
+    fn concede_during_mulligan_use_serum_powder_bottoming_excludes_cleanly() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let mut state = setup_n_player_with_libraries(3, 30);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        decide(&mut state, PlayerId(0), false, &mut events);
+        decide(&mut state, PlayerId(0), false, &mut events);
+        let powder_id = inject_serum_powder(&mut state, PlayerId(0), 0);
+        let waiting = use_serum_powder(&mut state, PlayerId(0), powder_id, &mut events)
+            .expect("use_serum_powder declare point");
+        assert_eq!(
+            bottom_phase_for(&waiting, PlayerId(0)),
+            Some((
+                1,
+                PendingMulliganAction::UseSerumPowder {
+                    object_id: powder_id
+                }
+            ))
+        );
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Concede {
+                player_id: PlayerId(0),
+            },
+        );
+        assert!(result.is_ok(), "concede must not panic, got {:?}", result);
+
+        assert!(
+            !pending_decision_players(&state.waiting_for).contains(&PlayerId(0)),
+            "conceded P0 must be pruned from pending regardless of their phase, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !state.prepaid_mulligan_bottoms.contains_key(&PlayerId(0)),
+            "conceded P0's ledger row must be pruned"
+        );
+
+        decide(&mut state, PlayerId(1), true, &mut events);
+        let waiting = decide(&mut state, PlayerId(2), true, &mut events);
+        assert!(
+            matches!(waiting, WaitingFor::Priority { .. }),
+            "remaining players should complete the flow after P0's concession, got {:?}",
             waiting
         );
     }

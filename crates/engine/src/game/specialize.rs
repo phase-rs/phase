@@ -171,6 +171,7 @@ mod tests {
     fn empty_lki() -> LKISnapshot {
         LKISnapshot {
             name: String::new(),
+            token_image_ref: None,
             power: None,
             toughness: None,
             base_power: None,

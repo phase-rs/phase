@@ -95,6 +95,81 @@ describe("ChooseXValueUI", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "ChooseX", data: { value: 3 } });
   });
 
+  it("supports manual numeric input and stepper buttons", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const waitingFor = chooseXWaitingFor(5);
+
+    setGameStoreForTest({
+      gameState: createGameState({ waiting_for: waitingFor }),
+      waitingFor,
+      dispatch,
+    });
+
+    render(<ChooseXValueUI />);
+
+    const input = screen.getByLabelText("Enter X value") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "4" } });
+    expect(screen.getByRole("button", { name: "Confirm X = 4" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Increase X value" }));
+    expect(screen.getByRole("button", { name: "Confirm X = 5" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Increase X value" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Decrease X value" }));
+    fireEvent.click(screen.getByRole("button", { name: "Decrease X value" }));
+    expect(screen.getByRole("button", { name: "Confirm X = 3" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm X = 3" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "ChooseX", data: { value: 3 } });
+  });
+
+  it("clamps manual numeric input upper bound immediately and lower bound on blur", () => {
+    const waitingFor = chooseXWaitingFor(5, 2);
+
+    setGameStoreForTest({
+      gameState: createGameState({ waiting_for: waitingFor }),
+      waitingFor,
+    });
+
+    render(<ChooseXValueUI />);
+
+    const input = screen.getByLabelText("Enter X value") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "99" } });
+    expect(input.value).toBe("5");
+    expect(screen.getByRole("button", { name: "Confirm X = 5" })).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "0" } });
+    expect(input.value).toBe("0");
+    expect(screen.getByRole("button", { name: "Confirm X = 2" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Decrease X value" })).toBeDisabled();
+
+    fireEvent.blur(input);
+    expect(input.value).toBe("2");
+  });
+
+  it("allows typing a multi-digit X value that starts below the minimum", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const waitingFor = chooseXWaitingFor(20, 10);
+
+    setGameStoreForTest({
+      gameState: createGameState({ waiting_for: waitingFor }),
+      waitingFor,
+      dispatch,
+    });
+
+    render(<ChooseXValueUI />);
+
+    const input = screen.getByLabelText("Enter X value") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "1" } });
+    expect(input.value).toBe("1");
+    expect(screen.getByRole("button", { name: "Confirm X = 10" })).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "15" } });
+    expect(input.value).toBe("15");
+    fireEvent.click(screen.getByRole("button", { name: "Confirm X = 15" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "ChooseX", data: { value: 15 } });
+  });
+
   it("dispatches CancelCast when cancel is clicked", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const waitingFor = chooseXWaitingFor(3);

@@ -11,9 +11,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import type { FormatConfig } from "../types";
+import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
+import type { FormatConfig, GameEvent, GameLogEntry, GameState } from "../types";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
+import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 
 // `vi.mock` is hoisted above imports, so the factory can't reference module
 // scope. Inline the wire-format stub. See `./protocolTestStub.ts` for the
@@ -134,6 +135,28 @@ function deferred<T>() {
     resolve = r;
   });
   return { promise, resolve };
+}
+
+function debugLogEntry(value: string): GameLogEntry {
+  return {
+    seq: 0,
+    turn: 1,
+    phase: "PreCombatMain",
+    category: "Debug",
+    segments: [{ type: "Text", value }],
+  };
+}
+
+function remoteState(label: string): GameState {
+  return {
+    label,
+    turn_number: 1,
+    active_player: 0,
+    priority_player: 0,
+    phase: "PreCombatMain",
+    players: [],
+    objects: {},
+  } as unknown as GameState;
 }
 
 function projectSeatViewFromState(stateJson: string) {
@@ -504,8 +527,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
           type: "MulliganDecision",
           data: {
             pending: [
-              { player: 0, mulligan_count: 0 },
-              { player: 1, mulligan_count: 0 },
+              { player: 0, mulligan_count: 0, phase: { type: "Declare" } },
+              { player: 1, mulligan_count: 0, phase: { type: "Declare" } },
             ],
             free_first_mulligan: false,
           },
@@ -1082,5 +1105,98 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(ack).toBeDefined();
     expect(ack!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(ack!.spellCosts).toEqual(spellCosts);
+  });
+
+  it("state_update broadcasts engine log entries to guests", async () => {
+    const logEntries = [debugLogEntry("AI guesses Nonland")];
+    const events: GameEvent[] = [{ type: "ChoiceMade", data: { player: 1 } } as unknown as GameEvent];
+    (mocks.submitAction as unknown as {
+      mockResolvedValueOnce: (value: unknown) => void;
+    }).mockResolvedValueOnce({ events, log_entries: logEntries });
+
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    guest.sent.length = 0;
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+
+    const stateUpdate = (await guest.getSentMessages()).find(
+      (m): m is { type: "state_update"; logEntries?: GameLogEntry[] } =>
+        typeof m === "object" && m !== null && (m as { type: string }).type === "state_update",
+    );
+    expect(stateUpdate).toBeDefined();
+    expect(stateUpdate!.logEntries).toEqual(logEntries);
+  });
+
+  it("guest receive path exposes state_update log entries for pending and unsolicited updates", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+    });
+    await adapter.initializeGame();
+
+    const pendingLogs = [debugLogEntry("AI guesses Land")];
+    const pendingEvents: GameEvent[] = [
+      { type: "ChoiceMade", data: { player: 1 } } as unknown as GameEvent,
+    ];
+    const pendingSubmit = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({
+      type: "state_update",
+      state: remoteState("pending"),
+      events: pendingEvents,
+      logEntries: pendingLogs,
+      legalActions: [],
+      autoPassRecommended: false,
+    });
+    await expect(pendingSubmit).resolves.toEqual({
+      events: pendingEvents,
+      log_entries: pendingLogs,
+    });
+
+    const unsolicitedLogs = [debugLogEntry("Player guesses Nonland")];
+    const unsolicitedEvents: GameEvent[] = [
+      { type: "CardPredicateGuessMade", data: { player: 1 } } as unknown as GameEvent,
+    ];
+    const unsolicitedState = remoteState("unsolicited");
+    await conn.simulateData({
+      type: "state_update",
+      state: unsolicitedState,
+      events: unsolicitedEvents,
+      logEntries: unsolicitedLogs,
+      legalActions: [],
+      autoPassRecommended: false,
+    });
+
+    expect(emitted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "stateChanged",
+        state: unsolicitedState,
+        events: unsolicitedEvents,
+        logEntries: unsolicitedLogs,
+      }),
+    );
   });
 });

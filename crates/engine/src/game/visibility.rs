@@ -62,6 +62,52 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 608.2d: While an `OpponentGuess` is pending, strip the secret the
+    // guesser must not see so the round-trip can't be auto-won. Two redactions:
+    //
+    //   * `proposition_truth` — the resolved yes/no answer for a
+    //     `GuessSubject::Proposition` (The Seventh Doctor: "is the face-down
+    //     card's mana value greater than your artifact count"). For that card the
+    //     guesser IS the viewer who receives this `WaitingFor`, so leaving the
+    //     answer in would let them guess correctly every time. The engine always
+    //     resolves correctness on the UNFILTERED state and the frontend never
+    //     reads this field, so it is stripped for EVERY viewer.
+    //
+    //   * the controller's most-recently committed number for a
+    //     `GuessSubject::CommittedChoice` (The Toymaker's Trap) — hidden from
+    //     everyone except the controller until "then you reveal the number you
+    //     chose" makes it public. Only the LAST committed number is hidden;
+    //     numbers revealed on earlier upkeeps are already public and stay
+    //     visible (re-hiding them would misreport which numbers were used up).
+    if let WaitingFor::OpponentGuess {
+        player,
+        ref options,
+        ref choice_type,
+        source_id,
+        proposition_truth: _,
+    } = state.waiting_for
+    {
+        filtered.waiting_for = WaitingFor::OpponentGuess {
+            player,
+            options: options.clone(),
+            choice_type: choice_type.clone(),
+            source_id,
+            proposition_truth: None,
+        };
+        let is_controller = state.objects.get(&source_id).map(|o| o.controller) == Some(viewer);
+        if !is_controller {
+            if let Some(obj) = filtered.objects.get_mut(&source_id) {
+                if let Some(pos) = obj
+                    .chosen_attributes
+                    .iter()
+                    .rposition(|a| matches!(a, crate::types::ability::ChosenAttribute::Number(_)))
+                {
+                    obj.chosen_attributes.remove(pos);
+                }
+            }
+        }
+    }
+
     let (manifest_dread_visible, manifest_dread_cards): (HashSet<ObjectId>, HashSet<ObjectId>) =
         if let WaitingFor::ManifestDreadChoice {
             player, ref cards, ..
@@ -283,7 +329,21 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                             .get(&link.source_id)
                             .is_some_and(|src| can_view_private_for_player(src.controller))
                 });
-                !(foretell_ok || hideaway_lookable_by_viewer)
+                // CR 406.3a + CR 406.3b: a player who holds an active
+                // play-from-exile grant for this face-down card may look at it —
+                // the grant that lets them cast it is the same authority that
+                // lets them look (single source:
+                // `casting::player_may_look_at_facedown_exile`). Scoped by the
+                // grant's `granted_to`, so a face-down card exiled by a different
+                // source (no grant to this viewer) stays redacted, and the
+                // targeted opponent (no grant) cannot see the cards either.
+                let play_from_exile_lookable = state.players.iter().any(|pl| {
+                    can_view_private_for_player(pl.id)
+                        && crate::game::casting::player_may_look_at_facedown_exile(
+                            state, obj, pl.id,
+                        )
+                });
+                !(foretell_ok || hideaway_lookable_by_viewer || play_from_exile_lookable)
             })
         })
         .collect();
@@ -536,6 +596,26 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2 + CR 701.4a: A pending `BeholdChoice` carries the choosing player's
+    // mixed-zone candidate set (battlefield-you-control ∪ HAND). The hand leg is a
+    // hidden zone — exposing the raw candidate ids to an opponent would leak which
+    // of the controller's hand cards are matching (e.g. which Dragons) BEFORE they
+    // choose. Redact the candidate list to opaque placeholders for viewers who
+    // cannot see the controller's private zones. The post-choice reveal of the
+    // single chosen card flows through the separate `CardsRevealed` pipeline.
+    if let WaitingFor::BeholdChoice {
+        player,
+        ref choices,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::BeholdChoice {
+                player,
+                choices: choices.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
+    }
+
     // CR 400.2: Hand is a hidden zone. `FreeCastWindow` (Invoke Calamity) is the
     // first `CastOffer` kind whose `candidates` reference cards in the
     // controller's HAND (as well as the public graveyard). Exposing the raw
@@ -751,6 +831,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
         .may_trigger_auto_choices
         .retain(|record| record.key.player == viewer);
+    filtered.priority_yields.retain(|y| y.player == viewer);
     filtered
         .lands_tapped_for_mana
         .retain(|pid, _| *pid == viewer);
@@ -1175,6 +1256,7 @@ mod tests {
             ),
             cost: ManaCost::NoCost,
             base_cost: None,
+            declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],
@@ -1186,6 +1268,7 @@ mod tests {
             deferred_required_additional_cost: None,
             additional_cost_queue: Vec::new(),
             additional_cost_source: crate::types::game_state::SpellCostSource::Other,
+            additional_cost_payment_mode: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -1209,6 +1292,7 @@ mod tests {
             player,
             source_id,
             ability_index: 0,
+            ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             chosen_tappers: Vec::new(),
@@ -1437,6 +1521,32 @@ mod tests {
 
         assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
         assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
+    }
+
+    /// CR 117.3d: priority yields are private preference state — a viewer sees
+    /// only their own, never an opponent's.
+    #[test]
+    fn filters_other_players_priority_yields() {
+        let mut state = GameState::new_two_player(42);
+        state.add_priority_yield(
+            PlayerId(0),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(9),
+                trigger_description: None,
+            },
+        );
+        state.add_priority_yield(
+            PlayerId(1),
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(10),
+                trigger_description: None,
+            },
+        );
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(filtered.priority_yields.len(), 1);
+        assert_eq!(filtered.priority_yields[0].player, PlayerId(0));
     }
 
     #[test]
@@ -3127,5 +3237,107 @@ mod tests {
             }
             other => panic!("expected FreeCastWindow for opponent, got {other:?}"),
         }
+    }
+
+    /// CR 608.2d: The resolved yes/no answer to a `GuessSubject::Proposition`
+    /// (`proposition_truth`) must never reach any viewer over the wire — for The
+    /// Seventh Doctor the guesser IS the viewer receiving the `WaitingFor`, so an
+    /// un-redacted answer would let them guess correctly every time. The engine
+    /// resolves correctness on the unfiltered state, so it is stripped for all.
+    #[test]
+    fn opponent_guess_proposition_truth_is_redacted_for_all_viewers() {
+        use crate::types::ability::ChoiceType;
+        let mut state = GameState::new_two_player(42);
+        // Source controlled by PlayerId(1); the guesser is PlayerId(0).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "The Seventh Doctor".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: vec!["greater".to_string(), "not greater".to_string()],
+            choice_type: ChoiceType::Labeled {
+                options: vec!["greater".to_string(), "not greater".to_string()],
+            },
+            source_id: source,
+            proposition_truth: Some(true),
+        };
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            match filtered.waiting_for {
+                WaitingFor::OpponentGuess {
+                    proposition_truth, ..
+                } => assert_eq!(
+                    proposition_truth, None,
+                    "proposition_truth must be stripped for viewer {viewer:?}"
+                ),
+                other => panic!("expected OpponentGuess, got {other:?}"),
+            }
+        }
+        // The unfiltered state keeps the answer so the engine can resolve it.
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OpponentGuess {
+                proposition_truth: Some(true),
+                ..
+            }
+        ));
+    }
+
+    /// CR 608.2d: For a `GuessSubject::CommittedChoice` (The Toymaker's Trap),
+    /// only the MOST-RECENTLY committed number is hidden from the guesser — it is
+    /// the secret of the pending guess. Numbers chosen on earlier upkeeps were
+    /// already revealed ("then you reveal the number you chose") and stay public,
+    /// so the guesser's client can still see which numbers are used up. The
+    /// controller always sees the full committed history.
+    #[test]
+    fn opponent_guess_hides_only_last_committed_number_from_guesser() {
+        use crate::types::ability::{ChoiceType, ChosenAttribute, NumberDistinctness};
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "The Toymaker's Trap".to_string(),
+            Zone::Battlefield,
+        );
+        // Number(3) was revealed on a prior upkeep; Number(5) is this upkeep's
+        // secret commit.
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Number(3), ChosenAttribute::Number(5)];
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: (1..=5).map(|n| n.to_string()).collect(),
+            choice_type: ChoiceType::NumberRange {
+                min: 1,
+                max: 5,
+                distinctness: NumberDistinctness::DistinctFromSourceHistory,
+            },
+            source_id: source,
+            proposition_truth: None,
+        };
+
+        // Guesser (non-controller): the last committed number (5) is hidden, the
+        // already-revealed earlier number (3) stays visible.
+        let guesser_view = filter_state_for_viewer(&state, PlayerId(0));
+        let guesser_attrs = &guesser_view.objects[&source].chosen_attributes;
+        assert!(
+            guesser_attrs.contains(&ChosenAttribute::Number(3)),
+            "the earlier, already-revealed number must stay visible to the guesser"
+        );
+        assert!(
+            !guesser_attrs.contains(&ChosenAttribute::Number(5)),
+            "the pending-guess secret (last committed number) must be hidden"
+        );
+
+        // Controller: sees the full committed history.
+        let controller_view = filter_state_for_viewer(&state, PlayerId(1));
+        let controller_attrs = &controller_view.objects[&source].chosen_attributes;
+        assert!(controller_attrs.contains(&ChosenAttribute::Number(3)));
+        assert!(controller_attrs.contains(&ChosenAttribute::Number(5)));
     }
 }

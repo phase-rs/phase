@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerDraftAdapter } from "../server-draft-adapter";
+import { PROTOCOL_VERSION } from "../ws-adapter";
 import type { DraftPlayerView } from "../draft-adapter";
+import type { GameLogEntry, GameState } from "../types";
 
 // ── MockWebSocket (copied from ws-adapter.test.ts) ─────────────────────
 
@@ -37,7 +39,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 11,
+    protocol_version: PROTOCOL_VERSION,
     mode: "Full",
   },
 });
@@ -77,6 +79,28 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pairings: [],
     ...overrides,
   };
+}
+
+function debugLogEntry(value: string): GameLogEntry {
+  return {
+    seq: 0,
+    turn: 1,
+    phase: "PreCombatMain",
+    category: "Debug",
+    segments: [{ type: "Text", value }],
+  };
+}
+
+function matchState(label: string): GameState {
+  return {
+    label,
+    turn_number: 1,
+    active_player: 0,
+    priority_player: 0,
+    phase: "PreCombatMain",
+    players: [],
+    objects: {},
+  } as unknown as GameState;
 }
 
 describe("ServerDraftAdapter", () => {
@@ -224,6 +248,51 @@ describe("ServerDraftAdapter", () => {
     );
 
     expect(adapter.currentPhase).toBe("between_rounds");
+  });
+
+  it("emits log entries for unsolicited match StateUpdate messages", () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    const state = matchState("server-draft-unsolicited");
+    const logEntries = [debugLogEntry("AI guesses Land")];
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftMatchStart",
+        data: {
+          match_id: "r1-t0",
+          round: 1,
+          game_code: "GAME01",
+          player_token: "gametok",
+          your_player: 0,
+          opponent_name: "Bob",
+        },
+      }),
+    );
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "StateUpdate",
+        data: {
+          state,
+          events: [],
+          log_entries: logEntries,
+          legal_actions: [],
+          auto_pass_recommended: false,
+        },
+      }),
+    );
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "gameStateUpdated",
+        state,
+        events: [],
+        logEntries,
+      }),
+    );
   });
 
   it("does not send ReportMatchResult on GameOver", () => {

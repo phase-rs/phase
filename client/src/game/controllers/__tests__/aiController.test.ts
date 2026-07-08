@@ -55,6 +55,7 @@ vi.mock("../../../stores/gameStore", () => ({
 }));
 
 import { createAIController } from "../aiController";
+import { debugLog } from "../../debugLog";
 
 // --- Fixtures --------------------------------------------------------------
 
@@ -118,6 +119,7 @@ describe("aiController stuck-fallback (issue #484)", () => {
     vi.useFakeTimers();
     dispatchAction.mockReset();
     notifyEngineLost.mockReset();
+    vi.mocked(debugLog).mockReset();
   });
 
   afterEach(() => {
@@ -282,6 +284,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     vi.useFakeTimers();
     dispatchAction.mockReset();
     notifyEngineLost.mockReset();
+    vi.mocked(debugLog).mockReset();
   });
 
   afterEach(() => {
@@ -364,6 +367,117 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     expect(getAiAction).toHaveBeenCalled();
     expect(dispatchAction).toHaveBeenCalled();
     expect(dispatchAction.mock.calls.every(([, playerId]) => playerId === 1)).toBe(true);
+
+    controller.dispose();
+  });
+
+  it("logs the actual random card-predicate guess returned by the AI", async () => {
+    const gollumId = 300;
+    const guess: GameAction = {
+      type: "ChooseOption",
+      data: { choice: "Nonland" },
+    };
+    const waitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
+        options: ["Land", "Nonland"],
+        source_id: gollumId,
+      },
+    };
+    const state = buildGameState({
+      waiting_for: waitingFor,
+      priority_player: 1,
+      active_player: 1,
+      objects: {
+        [gollumId]: {
+          name: "Gollum, Scheming Guide",
+        } as GameState["objects"][number],
+      },
+    });
+    const getAiAction = vi.fn(async () => guess);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushMicrotasks();
+    }
+
+    expect(debugLog).toHaveBeenCalledWith(
+      "AI player 2 randomly guesses Nonland for Gollum, Scheming Guide",
+      "info",
+    );
+
+    controller.dispose();
+  });
+
+  it("ignores a delayed card-predicate guess after the prompt changes", async () => {
+    const gollumId = 300;
+    const guess: GameAction = {
+      type: "ChooseOption",
+      data: { choice: "Nonland" },
+    };
+    const scheduledWaitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
+        options: ["Land", "Nonland"],
+        source_id: gollumId,
+      },
+    };
+    const currentWaitingFor: WaitingFor = {
+      type: "NamedChoice",
+      data: {
+        player: 1,
+        choice_type: "Opponent",
+        options: ["1"],
+        source_id: gollumId,
+      },
+    };
+    const scheduledState = buildGameState({
+      waiting_for: scheduledWaitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
+    const currentState = buildGameState({
+      waiting_for: currentWaitingFor,
+      priority_player: 1,
+      active_player: 1,
+    });
+    const getAiAction = vi.fn(async () => guess);
+    storeState = {
+      gameState: scheduledState,
+      waitingFor: scheduledState.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    storeState = {
+      ...storeState,
+      gameState: currentState,
+      waitingFor: currentState.waiting_for,
+    };
+
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(debugLog).toHaveBeenCalledWith(
+      expect.stringContaining("AI ignored stale ChooseOption"),
+      "info",
+    );
 
     controller.dispose();
   });

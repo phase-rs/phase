@@ -205,8 +205,11 @@ pub fn init_logging(
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "phase_server=info,server_core=info".parse().unwrap());
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        "phase_server=info,server_core=info,phase_ai=info"
+            .parse()
+            .unwrap()
+    });
 
     match log_dir {
         Some(dir) => {
