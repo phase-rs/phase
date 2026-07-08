@@ -186,7 +186,8 @@ jobs:
 
       - name: Cache generated card data
         # Output of `oracle-gen` is deterministic given (MTGJSON input + engine
-        # source). Hash both into the key; on hit, skip the ~30k-card pass.
+        # source + parser data tables). Hash all into the key; on hit, skip the
+        # ~30k-card pass.
         # Exact-match only (no restore-keys) — a stale hit would feed wrong
         # card-data into the validate/coverage gates downstream. Cargo.lock is
         # included so dep bumps that affect parsing (e.g. nom) invalidate.
@@ -196,7 +197,7 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         # All engine-backed tools in this job use the SAME (profile, features)
