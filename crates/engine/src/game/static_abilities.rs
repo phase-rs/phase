@@ -1473,6 +1473,55 @@ pub fn player_protection_from(
     false
 }
 
+/// CR 702.11c + CR 702.16b + CR 702.18a: Single authority for player-scoped
+/// targeting shields. Protection and shroud stop the source outright; hexproof
+/// stops only sources controlled by an opponent of the protected player, unless
+/// the source controller has an active hexproof-bypass grant.
+pub fn player_cant_be_targeted_by_source(
+    state: &GameState,
+    player_id: PlayerId,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if player_protection_from(state, player_id, Some(source_id)) {
+        return true;
+    }
+
+    let shroud_present = static_kind_present(state, StaticModeKind::Shroud);
+    let hexproof_present = static_kind_present(state, StaticModeKind::Hexproof);
+    if !shroud_present && !hexproof_present {
+        return false;
+    }
+
+    let source_ignores_hexproof =
+        hexproof_present && player_ignores_hexproof(state, source_controller);
+    let context = StaticCheckContext {
+        player_id: Some(player_id),
+        ..Default::default()
+    };
+
+    crate::game::perf_counters::record_static_full_scan();
+    game_functioning_statics(state).any(|(source_obj, def)| {
+        let blocks_targeting = match &def.mode {
+            StaticMode::Shroud => shroud_present,
+            StaticMode::Hexproof => {
+                hexproof_present && !source_ignores_hexproof && source_controller != player_id
+            }
+            _ => false,
+        };
+        if !blocks_targeting {
+            return false;
+        }
+        let Some(ref affected) = def.affected else {
+            return false;
+        };
+        if !static_filter_matches(state, &context, affected, source_obj.id) {
+            return false;
+        }
+        static_condition_matches_context(state, source_obj.id, source_obj.controller, def, &context)
+    })
+}
+
 /// Allocation-free equivalent of `check_static_ability` for
 /// `StaticMode::Other(String)` variants. Scans battlefield + command zone
 /// for a static whose mode is `Other(s)` with `s == name`, whose `affected`

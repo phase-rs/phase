@@ -170,11 +170,11 @@ fn find_legal_targets_with_context(
 
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) || is_any_other_target {
-        add_players(state, &mut targets, source_id);
+        add_players(state, &mut targets, source_controller, source_id);
     }
 
     if let TargetFilter::SpecificPlayer { id } = filter {
-        add_specific_player(state, &mut targets, *id, source_id);
+        add_specific_player(state, &mut targets, *id, source_controller, source_id);
         return targets;
     }
 
@@ -201,12 +201,14 @@ fn find_legal_targets_with_context(
                 if player.is_eliminated {
                     continue;
                 }
-                // CR 702.16b + CR 702.16j: A player with protection from the
-                // spell/ability's source can't be targeted by it.
-                if super::static_abilities::player_protection_from(
+                // CR 702.11c + CR 702.16b + CR 702.18a: A player with
+                // hexproof/protection/shroud from the spell/ability's source
+                // can't be targeted by it.
+                if super::static_abilities::player_cant_be_targeted_by_source(
                     state,
                     player.id,
-                    Some(source_id),
+                    source_controller,
+                    source_id,
                 ) {
                     continue;
                 }
@@ -1852,7 +1854,12 @@ fn filter_targets_stack_abilities(filter: &TargetFilter) -> bool {
     }
 }
 
-fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: ObjectId) {
+fn add_players(
+    state: &GameState,
+    targets: &mut Vec<TargetRef>,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) {
     // Player-phasing exclusion: a phased-out player is treated as though they
     // don't exist for targeting purposes (mirrors CR 702.26b for permanents,
     // applied to players via card Oracle text like "you phase out").
@@ -1867,9 +1874,15 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: Objec
         if player.is_eliminated {
             continue;
         }
-        // CR 702.16b: A player with protection from the spell/ability's source
-        // can't be targeted by it.
-        if super::static_abilities::player_protection_from(state, player.id, Some(source_id)) {
+        // CR 702.11c + CR 702.16b + CR 702.18a: A player with
+        // hexproof/protection/shroud from the spell/ability's source can't be
+        // targeted by it.
+        if super::static_abilities::player_cant_be_targeted_by_source(
+            state,
+            player.id,
+            source_controller,
+            source_id,
+        ) {
             continue;
         }
         targets.push(TargetRef::Player(player.id));
@@ -1880,6 +1893,7 @@ fn add_specific_player(
     state: &GameState,
     targets: &mut Vec<TargetRef>,
     player_id: PlayerId,
+    source_controller: PlayerId,
     source_id: ObjectId,
 ) {
     let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
@@ -1888,7 +1902,12 @@ fn add_specific_player(
     if player.is_phased_out() || player.is_eliminated {
         return;
     }
-    if super::static_abilities::player_protection_from(state, player.id, Some(source_id)) {
+    if super::static_abilities::player_cant_be_targeted_by_source(
+        state,
+        player.id,
+        source_controller,
+        source_id,
+    ) {
         return;
     }
     targets.push(TargetRef::Player(player.id));
@@ -2256,6 +2275,31 @@ mod tests {
 
     fn creature_filter() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature())
+    }
+
+    fn grant_player_static(
+        state: &mut GameState,
+        controller: PlayerId,
+        mode: StaticMode,
+    ) -> ObjectId {
+        use crate::types::ability::StaticDefinition;
+
+        let grantor = create_object(
+            state,
+            CardId(9000 + u64::from(controller.0)),
+            controller,
+            format!("Player Static Grant {}", controller.0),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(mode).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )));
+        grantor
     }
 
     #[test]
@@ -4223,6 +4267,98 @@ mod tests {
             !targets.contains(&TargetRef::Player(PlayerId(1))),
             "protected opponent must not be a legal target, got {:?}",
             targets
+        );
+    }
+
+    /// CR 702.11c: Player hexproof stops opponents from targeting the player,
+    /// but not that player's own spells or abilities.
+    #[test]
+    fn find_legal_targets_typed_player_hexproof_blocks_opponent_not_controller() {
+        let mut state = GameState::new_two_player(42);
+        grant_player_static(&mut state, PlayerId(0), StaticMode::Hexproof);
+        let opponent_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Source".to_string(),
+            Zone::Battlefield,
+        );
+        let own_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Own Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let opponent_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let opponent_targets =
+            find_legal_targets(&state, &opponent_filter, PlayerId(1), opponent_source);
+        assert!(
+            !opponent_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "player hexproof must block opponents' sources, got {:?}",
+            opponent_targets
+        );
+
+        let controller_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+        let controller_targets =
+            find_legal_targets(&state, &controller_filter, PlayerId(0), own_source);
+        assert!(
+            controller_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "player hexproof must not block its controller's own source, got {:?}",
+            controller_targets
+        );
+    }
+
+    /// CR 702.18a: Player shroud stops every spell or ability from targeting
+    /// that player, including sources controlled by the same player.
+    #[test]
+    fn find_legal_targets_player_shroud_blocks_all_sources() {
+        let mut state = GameState::new_two_player(42);
+        grant_player_static(&mut state, PlayerId(0), StaticMode::Shroud);
+        let own_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Own Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let own_targets =
+            find_legal_targets(&state, &TargetFilter::Player, PlayerId(0), own_source);
+        assert!(
+            !own_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "player shroud must block that player's own sources, got {:?}",
+            own_targets
+        );
+
+        let opponent_targets =
+            find_legal_targets(&state, &TargetFilter::Player, PlayerId(1), opponent_source);
+        assert!(
+            !opponent_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "player shroud must block opponents' sources, got {:?}",
+            opponent_targets
+        );
+
+        let specific_targets = find_legal_targets(
+            &state,
+            &TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            PlayerId(0),
+            own_source,
+        );
+        assert!(
+            specific_targets.is_empty(),
+            "specific-player targeting must also honor shroud, got {:?}",
+            specific_targets
         );
     }
 

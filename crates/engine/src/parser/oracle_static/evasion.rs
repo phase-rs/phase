@@ -354,19 +354,22 @@ pub(crate) fn parse_compound_subject_rule_static(
 
 fn parse_compound_player_keyword_predicate(input: &str) -> OracleResult<'_, ()> {
     let (after_verb, _) = alt((
-        tag::<_, _, OracleError<'_>>("have "),
-        tag("has "),
-        tag("gain "),
-        tag("gains "),
+        nom::bytes::complete::tag_no_case::<_, _, OracleError<'_>>("have "),
+        nom::bytes::complete::tag_no_case("has "),
+        nom::bytes::complete::tag_no_case("gain "),
+        nom::bytes::complete::tag_no_case("gains "),
     ))
     .parse(input)?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("hexproof"),
-        tag("shroud"),
-        recognize((tag("protection from "), rest)),
+    let (remaining, _) = alt((
+        nom::bytes::complete::tag_no_case::<_, _, OracleError<'_>>("hexproof"),
+        nom::bytes::complete::tag_no_case("shroud"),
+        recognize((
+            nom::bytes::complete::tag_no_case("protection from "),
+            nom::combinator::rest,
+        )),
     ))
     .parse(after_verb)?;
-    Ok((rest, ()))
+    Ok((remaining, ()))
 }
 
 fn player_static_mode_for_granted_keyword(keyword: &Keyword) -> Option<StaticMode> {
@@ -383,15 +386,18 @@ fn compound_keyword_body_with_condition<'a>(
     lower: &'a str,
 ) -> Option<(&'a str, &'a str, StaticCondition)> {
     type VE<'a> = OracleError<'a>;
+    const DURING_YOUR_TURN_PREFIX: &str = "during your turn, ";
+    const DURING_TURNS_OTHER_THAN_YOURS_PREFIX: &str = "during turns other than yours, ";
 
-    if let Ok((body_lower, _)) = tag::<_, _, VE<'_>>("during your turn, ").parse(lower) {
-        let body = &text[text.len() - body_lower.len()..];
+    if let Ok((body_lower, _)) = tag::<_, _, VE<'_>>(DURING_YOUR_TURN_PREFIX).parse(lower) {
+        let body = &text[DURING_YOUR_TURN_PREFIX.len()..];
         return Some((body, body_lower, StaticCondition::DuringYourTurn));
     }
 
-    if let Ok((body_lower, _)) = tag::<_, _, VE<'_>>("during turns other than yours, ").parse(lower)
+    if let Ok((body_lower, _)) =
+        tag::<_, _, VE<'_>>(DURING_TURNS_OTHER_THAN_YOURS_PREFIX).parse(lower)
     {
-        let body = &text[text.len() - body_lower.len()..];
+        let body = &text[DURING_TURNS_OTHER_THAN_YOURS_PREFIX.len()..];
         return Some((
             body,
             body_lower,
@@ -404,10 +410,11 @@ fn compound_keyword_body_with_condition<'a>(
     None
 }
 
+/// CR 611.3a + CR 702.11c + CR 702.16b + CR 702.18a:
 /// Compound-subject keyword-grant statics of the form `"You and <object
-/// subject> have <player-applicable keyword>"` — a single keyword grant bound to
-/// a player plus an object subset. A single `StaticDefinition` cannot carry both
-/// a player scope and an object scope, so decompose into two:
+/// subject> have <player-applicable keyword>"` — a single static effect bound
+/// to a player plus an object subset. A single `StaticDefinition` cannot carry
+/// both a player scope and an object scope, so decompose into two:
 ///   - an object-half `Continuous` def whose `affected` is the object subset;
 ///   - a player-half def whose `affected` is the controller.
 ///
@@ -430,16 +437,14 @@ pub(crate) fn parse_compound_subject_keyword_static(
     }
 
     // Subject: "you and <object subject phrase> ".
-    let (after_you, _) = tag::<_, _, VE<'_>>("you and ").parse(lower).ok()?;
-    let (object_subject_lower, (), _) =
+    let (after_you, _) = nom::bytes::complete::tag_no_case::<_, _, VE<'_>>("you and ")
+        .parse(text)
+        .ok()?;
+    let (object_subject, (), _) =
         nom_primitives::scan_preceded(after_you, parse_compound_player_keyword_predicate)?;
 
-    // Map the matched lowercase spans back onto the original-case text so the
-    // object-subject filter and predicate retain their original casing.
-    let object_subject_start = text.len() - after_you.len();
-    let predicate_start = object_subject_start + object_subject_lower.len();
-    let object_subject = text[object_subject_start..predicate_start].trim();
-    let predicate = text[predicate_start..].trim();
+    let object_subject = object_subject.trim();
+    let predicate = after_you[object_subject.len()..].trim();
 
     let affected = parse_rule_static_subject_filter(object_subject)?;
 
