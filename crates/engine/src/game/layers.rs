@@ -3111,25 +3111,30 @@ fn active_continuous_effects_from_static_definitions(
     static_definitions: &[StaticDefinition],
 ) -> Vec<ActiveContinuousEffect> {
     let mut effects = Vec::new();
-    // CR 113.6 + CR 113.6b: A static's functional zone is the battlefield by
-    // default (empty `active_zones`). A non-empty `active_zones` lists the
-    // non-battlefield zones in which the static functions (e.g., Incarnation
-    // cycle: "as long as this card is in your graveyard, ..."). If the source
-    // is currently outside every declared zone, the static contributes no
-    // effects.
-    let source_zone = state.objects.get(&source_id).map(|o| o.zone);
+    // CR 113.6 + CR 113.6b + CR 113.6p: A static's functional zone is the
+    // battlefield by default (empty `active_zones`), with command-zone emblems
+    // admitted by CR 114.4. A non-empty `active_zones` lists the zones in which
+    // the static functions (e.g., Incarnation cycle: "as long as this card is
+    // in your graveyard, ..."). If the source is currently outside every
+    // declared zone, the static contributes no effects.
+    let Some(source) = state.objects.get(&source_id) else {
+        return effects;
+    };
+    let source_zone = source.zone;
+    let source_is_emblem = source.is_emblem;
     for (def_idx, def) in static_definitions.iter().enumerate() {
         if def.mode != StaticMode::Continuous {
             continue;
         }
 
         // CR 113.6 + CR 113.6b: Zone-of-function gate.
-        let Some(zone) = source_zone else { continue };
         if def.active_zones.is_empty() {
-            if zone != Zone::Battlefield {
+            let default_zone_applies = source_zone == Zone::Battlefield
+                || (source_zone == Zone::Command && source_is_emblem);
+            if !default_zone_applies {
                 continue;
             }
-        } else if !def.active_zones.contains(&zone) {
+        } else if !def.active_zones.contains(&source_zone) {
             continue;
         }
 
