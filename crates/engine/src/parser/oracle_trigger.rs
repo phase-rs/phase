@@ -12409,7 +12409,9 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 ) && nom_primitives::scan_contains(consumed, ", ");
                 let remainder_ok = remainder.trim().is_empty();
                 let comma_list = is_comma_type_list.then_some(filter);
-                if let Some(filter) = comma_list.filter(|_| post_spell_ok && origin_rest_ok) {
+                if let Some(filter) =
+                    comma_list.filter(|_| remainder_ok && post_spell_ok && origin_rest_ok)
+                {
                     let filter = if is_another {
                         add_another_prop(filter)
                     } else {
