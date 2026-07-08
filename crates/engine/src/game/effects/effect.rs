@@ -510,7 +510,7 @@ fn transient_bound_filters(
         .collect()
 }
 
-fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
+pub(super) fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
     matches!(
         filter,
         TargetFilter::TriggeringSource | TargetFilter::ParentTarget | TargetFilter::CostPaidObject
@@ -523,7 +523,7 @@ fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool
 /// Inherited-reference `affected` values (`ParentTarget`, …) win over the
 /// targeting descriptor so a `target: Typed(Creature)` + `affected:
 /// ParentTarget` pair binds to the chosen creature, not every creature.
-fn generic_effect_application_filter<'a>(
+pub(super) fn generic_effect_application_filter<'a>(
     target_filter: Option<&'a TargetFilter>,
     static_affected: Option<&'a TargetFilter>,
 ) -> Option<&'a TargetFilter> {

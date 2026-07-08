@@ -35,6 +35,11 @@
     "off": "Off"
   },
   "gameMenu": {
+    "sections": {
+      "view": "View",
+      "tools": "Tools",
+      "game": "Game"
+    },
     "reportCard": "Report a card",
     "menu": "Game menu",
     "sandboxTools": "Sandbox Tools",

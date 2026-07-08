@@ -4,6 +4,17 @@
     "collapse": "Collapse resolving progress",
     "expand": "Expand resolving progress"
   },
+  "debugCreate": {
+    "tokenPower": "Power",
+    "tokenToughness": "Toughness",
+    "tokenPowerPlaceholder": "Power",
+    "tokenToughnessPlaceholder": "Toughness",
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
+  "nextUp": {
+    "label": "Next Up",
+    "tooltip": "This player's turn is next."
+  },
   "card": {
     "faceDownName": "Face-down card",
     "loading": "Loading {{name}}",

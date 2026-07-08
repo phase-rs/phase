@@ -35,16 +35,23 @@ use serde_json::{Map, Value};
 /// snapshots a real client produces.
 pub const MAX_P2P_SNAPSHOT_LEN: usize = 1024 * 1024;
 
+/// Validate a `host_peer_id` on any P2P draft-backup HTTP surface (POST store,
+/// DELETE cleanup). Reuses the same [`validate_token`] bound the WebSocket lobby
+/// path applies to the host peer id.
+pub fn validate_p2p_backup_host_peer_id(host_peer_id: &str) -> Result<(), String> {
+    if host_peer_id.trim().is_empty() {
+        return Err("host_peer_id must not be empty".to_string());
+    }
+    validate_token("host_peer_id", host_peer_id, MAX_TOKEN_LEN)
+}
+
 /// Validate the free-form body fields of a `POST /p2p-draft-backup` request
 /// before persistence. `host_peer_id` reuses the same [`validate_token`] bound
 /// (`MAX_TOKEN_LEN`, plus control-character rejection) the WebSocket lobby path
 /// applies to the host peer id; `snapshot_json` is an opaque serialized blob, so
 /// it is required and bounded by byte length only.
 pub fn guard_p2p_backup(host_peer_id: &str, snapshot_json: &str) -> Result<(), String> {
-    if host_peer_id.trim().is_empty() {
-        return Err("host_peer_id must not be empty".to_string());
-    }
-    validate_token("host_peer_id", host_peer_id, MAX_TOKEN_LEN)?;
+    validate_p2p_backup_host_peer_id(host_peer_id)?;
     if snapshot_json.trim().is_empty() {
         return Err("snapshot_json must not be empty".to_string());
     }
@@ -132,7 +139,7 @@ pub fn guard_p2p_backup_overwrite(
 mod tests {
     use super::{
         guard_p2p_backup, guard_p2p_backup_overwrite, redact_p2p_backup_snapshot_secrets,
-        MAX_P2P_SNAPSHOT_LEN,
+        validate_p2p_backup_host_peer_id, MAX_P2P_SNAPSHOT_LEN,
     };
     use lobby_broker::validation::MAX_TOKEN_LEN;
     use serde_json::Value;
@@ -237,5 +244,11 @@ mod tests {
     fn guard_p2p_backup_overwrite_rejects_peer_mismatch() {
         assert!(guard_p2p_backup_overwrite("peer-a", "peer-b").is_err());
         assert!(guard_p2p_backup_overwrite("peer-a", "peer-a").is_ok());
+    }
+
+    #[test]
+    fn validate_p2p_backup_host_peer_id_rejects_blank() {
+        let err = validate_p2p_backup_host_peer_id("  ").unwrap_err();
+        assert!(err.contains("host_peer_id"));
     }
 }

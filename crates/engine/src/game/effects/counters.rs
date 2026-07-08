@@ -3541,6 +3541,7 @@ mod tests {
             source_id,
             LKISnapshot {
                 name: "Essence Channeler".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(4),
                 base_power: Some(5),

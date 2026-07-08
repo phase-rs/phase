@@ -274,7 +274,7 @@ export function GameSetupPage() {
                     ? t("gameSetup.formatChip.ariaLabel", { label: meta.label, group: meta.group })
                     : t("gameSetup.formatChip.ariaLabelEmpty")
                 }
-                className="group flex min-h-[48px] items-center gap-3 rounded-[16px] bg-black/18 px-4 py-2.5 ring-1 ring-white/10 transition-colors hover:ring-white/20"
+                className="group flex min-h-[48px] items-center gap-3 rounded-[8px] border border-white/10 bg-slate-950/72 px-4 py-2.5 transition-colors hover:border-white/20 hover:bg-slate-900/88"
               >
                 <span className="text-[0.62rem] font-medium uppercase tracking-[0.22em] text-slate-500">
                   {t("gameSetup.formatChip.kicker")}
@@ -504,11 +504,11 @@ export function GameSetupPage() {
                     </label>
                   )}
 
-                  <div className="flex overflow-hidden rounded-lg border border-gray-700">
+                  <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
                     <button
                       type="button"
                       onClick={() => { setMatchType("Bo1"); setLastMatchType("Bo1"); }}
-                      className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                      className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
                         matchType === "Bo1"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
@@ -520,7 +520,7 @@ export function GameSetupPage() {
                       type="button"
                       onClick={() => { setMatchType("Bo3"); setLastMatchType("Bo3"); }}
                       disabled={playerCount !== 2}
-                      className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                      className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
                         matchType === "Bo3"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
@@ -536,11 +536,11 @@ export function GameSetupPage() {
                     <span className="text-xs text-slate-400" title={t("common:comboDetector.title")}>
                       {t("common:comboDetector.label")}
                     </span>
-                    <div className="flex overflow-hidden rounded-lg border border-gray-700">
+                    <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
                       <button
                         type="button"
                         onClick={() => setLoopDetection({ type: "Off" })}
-                        className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                        className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
                           loopDetection.type === "Off"
                             ? "bg-indigo-600 text-white"
                             : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
@@ -551,7 +551,7 @@ export function GameSetupPage() {
                       <button
                         type="button"
                         onClick={() => setLoopDetection({ type: "On" })}
-                        className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                        className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
                           loopDetection.type === "On"
                             ? "bg-indigo-600 text-white"
                             : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
@@ -564,13 +564,13 @@ export function GameSetupPage() {
 
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-slate-400">{t("gameSetup.config.whoGoesFirst")}</span>
-                    <div className="flex overflow-hidden rounded-lg border border-gray-700">
+                    <div className="grid grid-cols-3 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
                       {(["random", "play", "draw"] as const).map((opt) => (
                         <button
                           key={opt}
                           type="button"
                           onClick={() => setFirstPlayer(opt)}
-                          className={`flex-1 px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
+                          className={`rounded-[7px] px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
                             firstPlayer === opt
                               ? "bg-indigo-600 text-white"
                               : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"

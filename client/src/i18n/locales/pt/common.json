@@ -35,6 +35,11 @@
     "off": "Desligado"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Visualização",
+      "tools": "Ferramentas",
+      "game": "Jogo"
+    },
     "reportCard": "Relatar uma carta",
     "menu": "Menu do jogo",
     "sandboxTools": "Ferramentas de Sandbox",

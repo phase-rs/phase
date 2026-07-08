@@ -157,10 +157,10 @@ export function AttackTargetPicker({
     mutate((next) => spreadStackEvenly(next, stack, sortedTargets));
   }
 
-  /** Spread every stack evenly across every target. */
+  /** Spread every selected attacker evenly across every target. */
   function spreadAll() {
     mutate((next) => {
-      for (const stack of stacks) spreadStackEvenly(next, stack, sortedTargets);
+      spreadAttackersEvenly(next, stacks.flatMap((stack) => stack.ids), sortedTargets);
     });
   }
 
@@ -608,12 +608,21 @@ function highestOnTarget(stack: AttackerStack, target: AttackTarget, map: Assign
  * in display order, with the remainder front-loaded by {@link evenSplit}.
  */
 function spreadStackEvenly(map: AssignmentMap, stack: AttackerStack, targets: AttackTarget[]): void {
+  spreadAttackersEvenly(map, stack.ids, targets);
+}
+
+/**
+ * Redistribute attackers evenly across `targets` (overrides prior assignments).
+ * Attackers are walked in stable UI order and handed to targets in display
+ * order, with the remainder front-loaded by {@link evenSplit}.
+ */
+function spreadAttackersEvenly(map: AssignmentMap, attackerIds: ObjectId[], targets: AttackTarget[]): void {
   if (targets.length === 0) return;
-  const counts = evenSplit(stack.count, targets.length);
+  const counts = evenSplit(attackerIds.length, targets.length);
   let member = 0;
   targets.forEach((target, ti) => {
     for (let k = 0; k < counts[ti]; k++) {
-      map.set(stack.ids[member], target);
+      map.set(attackerIds[member], target);
       member += 1;
     }
   });

@@ -12,7 +12,7 @@
 //! that composes those helpers into a client-ready shape.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
@@ -22,6 +22,7 @@ use crate::types::ability::{
     GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
     TargetRef,
 };
+use crate::types::card::TokenImageRef;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -74,6 +75,8 @@ pub struct TriggerContextDisplay {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackEntryDisplay {
     pub source_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
     pub kind_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_description: Option<String>,
@@ -169,6 +172,17 @@ pub struct ArchenemyView {
     pub hero_player_ids: Vec<PlayerId>,
 }
 
+/// Display-only turn-order chip row. `turns_from_now == 0` is the current
+/// turn; `1` is the next actual turn that would begin; larger values count
+/// future turn starts after that. Duplicate players are intentional when an
+/// extra turn causes the same player to appear in adjacent slots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnOrderSlotView {
+    pub player: PlayerId,
+    pub slot_index: u8,
+    pub turns_from_now: u8,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -247,6 +261,14 @@ pub struct DerivedViews {
     /// zone objects or recomputing side membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy: Option<ArchenemyView>,
+
+    /// CR 101.4 + CR 103.1 + CR 500.7 + CR 614.10 + CR 805.4: Compact
+    /// multiplayer turn-order slots. Empty for one-on-one games because the
+    /// existing active-player ring is sufficient; populated by engine-owned
+    /// projection so the frontend never computes extra/skipped/controlled turn
+    /// order from raw state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turn_order: Vec<TurnOrderSlotView>,
 
     /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
     /// every unbounded-resource loop in `GameState::unbounded_resources`. The
@@ -466,6 +488,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // Commander short-circuit below).
     views.player_status = player_status_views(state);
 
+    views.turn_order = turn_order_views(state);
+
     // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
     // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
     // short-circuit below) and stays empty (field omitted) when no loop is
@@ -501,6 +525,38 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
+    let mut seen = BTreeSet::new();
+    let representatives: Vec<PlayerId> = state
+        .seat_order
+        .iter()
+        .copied()
+        .filter(|&player| crate::game::players::is_alive(state, player))
+        .filter_map(|player| {
+            let representative =
+                crate::game::topology::normalize_shared_turn_recipient(state, player);
+            seen.insert(representative).then_some(representative)
+        })
+        .collect();
+
+    if representatives.len() <= 2 {
+        return Vec::new();
+    }
+
+    crate::game::turns::projected_turn_order(state, representatives.len())
+        .into_iter()
+        .enumerate()
+        .map(|(index, player)| {
+            let slot_index = index as u8;
+            TurnOrderSlotView {
+                player,
+                slot_index,
+                turns_from_now: slot_index,
+            }
+        })
+        .collect()
 }
 
 /// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
@@ -741,12 +797,26 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
 
     StackEntryDisplay {
         source_name,
+        token_image_ref: stack_source_token_image_ref(state, entry),
         kind_label,
         ability_description,
         targets: stack_entry_targets(state, entry),
         paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
         trigger_context: stack_trigger_context(state, entry),
     }
+}
+
+fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option<TokenImageRef> {
+    state
+        .objects
+        .get(&entry.source_id)
+        .and_then(|obj| obj.token_image_ref.clone())
+        .or_else(|| {
+            state
+                .lki_cache
+                .get(&entry.source_id)
+                .and_then(|lki| lki.token_image_ref.clone())
+        })
 }
 
 fn stack_source_name(state: &GameState, entry: &StackEntry) -> String {
@@ -1052,6 +1122,66 @@ mod tests {
         assert!(
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
+        );
+    }
+
+    #[test]
+    fn turn_order_hidden_for_two_or_fewer_live_representatives() {
+        let state = GameState::new(FormatConfig::standard(), 2, 42);
+
+        let views = derive_views(&state, None);
+
+        assert!(
+            views.turn_order.is_empty(),
+            "one-on-one games should not emit redundant turn-order chips"
+        );
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            !json.contains("turn_order"),
+            "empty turn order must be omitted from the wire payload"
+        );
+    }
+
+    #[test]
+    fn turn_order_duplicates_survive_wire_round_trip() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.extra_turns.push(PlayerId(2));
+        state.extra_turns.push(PlayerId(0));
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.turn_order[..2],
+            [
+                TurnOrderSlotView {
+                    player: PlayerId(0),
+                    slot_index: 0,
+                    turns_from_now: 0,
+                },
+                TurnOrderSlotView {
+                    player: PlayerId(0),
+                    slot_index: 1,
+                    turns_from_now: 1,
+                },
+            ],
+            "same player can be both NOW and NEXT when an extra turn is queued"
+        );
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("turn_order"),
+            "multiplayer turn-order rows must serialize"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            round.derived.turn_order[..2],
+            views.turn_order[..2],
+            "duplicate same-player rows must survive the JSON round-trip"
         );
     }
 

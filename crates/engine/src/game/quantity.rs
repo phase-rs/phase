@@ -1516,6 +1516,25 @@ pub(crate) fn object_count_matching_ids(
     ids
 }
 
+fn filter_binds_owned_you(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }
+            )
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_binds_owned_you)
+        }
+        TargetFilter::Not { filter } => filter_binds_owned_you(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_binds_owned_you(filter),
+        _ => false,
+    }
+}
+
 fn resolve_ref(
     state: &GameState,
     qty: &QuantityRef,
@@ -1917,7 +1936,27 @@ fn resolve_ref(
             // selection + the `OtherThanTriggerObject` exclusion); per-object
             // aggregation delegated to `aggregate_property_over` (single
             // summation authority, live-then-LKI per property).
-            let ids = object_count_matching_ids(state, filter, &filter_ctx, source_id);
+            let mut scoped_exile_filter_ctx;
+            let aggregate_filter_ctx = if filter.references_exiled_by_source()
+                && filter_binds_owned_you(filter)
+                && ability.is_some_and(|a| {
+                    a.scoped_player.is_some()
+                        || a.original_controller
+                            .is_some_and(|orig| orig != a.controller)
+                }) {
+                let scoped = ability
+                    .and_then(|a| a.scoped_player.or(Some(a.controller)))
+                    .unwrap_or(controller);
+                scoped_exile_filter_ctx = match ability {
+                    Some(a) => FilterContext::from_ability_with_controller(a, scoped),
+                    None => FilterContext::from_source_with_controller(source_id, scoped),
+                };
+                scoped_exile_filter_ctx.recipient_id = ctx.recipient;
+                &scoped_exile_filter_ctx
+            } else {
+                &filter_ctx
+            };
+            let ids = object_count_matching_ids(state, filter, aggregate_filter_ctx, source_id);
             aggregate_property_over(state, &ids, *function, *property)
         }
         // CR 107.1 + CR 700.1: min/max across players of the count of
@@ -3161,6 +3200,8 @@ fn resolve_ref(
                             )
                             .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 102.1: attachment controlled by the active player.
+                        Some(ControllerRef::ActivePlayer) => snap.controller == state.active_player,
                     })
                     .count(),
             )
@@ -3233,6 +3274,8 @@ fn damage_source_controller_matches(
             &ControllerRef::EnchantedPlayer,
         )
         .is_some_and(|player| actual == player),
+        // CR 102.1: damage source controlled by the active player (read live).
+        ControllerRef::ActivePlayer => actual == state.active_player,
     }
 }
 
@@ -5300,6 +5343,7 @@ mod tests {
 
         let creature_lki = |name: &str, controller: PlayerId| LKISnapshot {
             name: name.to_string(),
+            token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
             base_power: Some(2),
@@ -6981,6 +7025,71 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
+    #[test]
+    fn resolve_descend_count_uses_owned_nontoken_permanent_graveyard_changes() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "The Mycotyrant".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_owned = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            owner: PlayerId(0),
+            controller: PlayerId(0),
+            ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Hand), Zone::Graveyard)
+        };
+        let p0_owned_stolen = ZoneChangeRecord {
+            core_types: vec![CoreType::Artifact],
+            owner: PlayerId(0),
+            controller: PlayerId(1),
+            ..ZoneChangeRecord::test_minimal(ObjectId(11), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let p1_owned_stolen_by_p0 = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            owner: PlayerId(1),
+            controller: PlayerId(0),
+            ..ZoneChangeRecord::test_minimal(ObjectId(12), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let token = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            owner: PlayerId(0),
+            controller: PlayerId(0),
+            is_token: true,
+            ..ZoneChangeRecord::test_minimal(ObjectId(13), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let nonpermanent = ZoneChangeRecord {
+            core_types: vec![CoreType::Instant],
+            owner: PlayerId(0),
+            controller: PlayerId(0),
+            ..ZoneChangeRecord::test_minimal(ObjectId(14), Some(Zone::Hand), Zone::Graveyard)
+        };
+        state.zone_changes_this_turn.extend([
+            p0_owned,
+            p0_owned_stolen,
+            p1_owned_stolen_by_p0,
+            token,
+            nonpermanent,
+        ]);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeCountThisTurn {
+                from: None,
+                to: Some(Zone::Graveyard),
+                filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                    FilterProp::NonToken,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ])),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), source), 1);
     }
 
     /// CR 400.7 + CR 700.4 + CR 208.1: aggregate the death-time power snapshot
@@ -11080,6 +11189,7 @@ mod tests {
             dead_id,
             LKISnapshot {
                 name: String::new(),
+                token_image_ref: None,
                 power: Some(6),
                 toughness: Some(5),
                 base_power: Some(6),
@@ -11142,6 +11252,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Regal Force".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
                 base_power: Some(5),
@@ -11289,6 +11400,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrificed Hulk".to_string(),
+                token_image_ref: None,
                 power: Some(99),
                 toughness: Some(99),
                 base_power: Some(99),
@@ -11367,6 +11479,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Effect-Sacrificed Creature".to_string(),
+                token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
                 base_power: Some(5),
@@ -11444,6 +11557,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Sacrificed Creature".to_string(),
+                token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
                 base_power: Some(2),
@@ -11507,6 +11621,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -11567,6 +11682,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Revealed Card".to_string(),
+                token_image_ref: None,
                 power: Some(0),
                 toughness: Some(0),
                 base_power: Some(0),
@@ -11620,6 +11736,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
                 base_power: Some(1),
@@ -11684,6 +11801,7 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
+                token_image_ref: None,
                 power: Some(power),
                 toughness: Some(power),
                 base_power: Some(power),
@@ -11725,6 +11843,7 @@ mod tests {
             ObjectId(1),
             LKISnapshot {
                 name: String::new(),
+                token_image_ref: None,
                 power: Some(3),
                 toughness: Some(3),
                 base_power: Some(3),
@@ -12345,6 +12464,7 @@ mod tests {
                 exiled,
                 crate::types::game_state::LKISnapshot {
                     name: format!("Exiled {card_id}"),
+                    token_image_ref: None,
                     power: Some(power),
                     toughness: Some(toughness),
                     base_power: Some(power),

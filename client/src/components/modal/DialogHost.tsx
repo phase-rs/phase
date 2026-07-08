@@ -26,7 +26,6 @@ const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<Wa
   "DeclareAttackers",
   "DeclareBlockers",
   "MulliganDecision",
-  "MulliganBottomCards",
   "OpeningHandBottomCards",
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",

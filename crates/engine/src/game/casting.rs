@@ -75,6 +75,68 @@ fn runtime_granted_cycling_abilities(
         .collect()
 }
 
+/// CR 702.6: An `Equip` keyword granted at runtime by a static ability (Bram,
+/// Bludgeon Brawl's "… is an Equipment with equip {N} …") does not pass through
+/// card-load synthesis, so its equip activated ability must be synthesized live
+/// from the object's post-layer keyword set. `obj.keywords` is battlefield-
+/// authoritative (AddKeyword grants land there); printed equip keywords are
+/// excluded because card-load synthesis already turned them into an
+/// `obj.abilities` entry, so re-synthesizing them would double-offer equip.
+fn runtime_granted_equip_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    // CR 702.6: Equip functions only while its source is on the battlefield.
+    if obj.zone != Zone::Battlefield {
+        return Vec::new();
+    }
+    // CR 702.6a: a permanent may have more than one equip ability, and each is
+    // independently activatable. Card-load synthesis already turned every PRINTED
+    // Equip keyword into an `obj.abilities` entry, so subtract printed equips by
+    // OCCURRENCE (not value-wide membership): consume one printed instance per
+    // matching live keyword, and synthesize the rest. This keeps a granted
+    // Equip {1} offered even when the object also prints an identical Equip {1}.
+    let mut unconsumed_printed: Vec<&Keyword> = obj
+        .base_keywords
+        .iter()
+        .filter(|keyword| matches!(keyword, Keyword::Equip(_)))
+        .collect();
+    obj.keywords
+        .iter()
+        .filter_map(|keyword| {
+            if !matches!(keyword, Keyword::Equip(_)) {
+                return None;
+            }
+            if let Some(index) = unconsumed_printed
+                .iter()
+                .position(|printed| *printed == keyword)
+            {
+                // A printed equip already lives in `obj.abilities`; consume it so
+                // any additionally granted copies are still synthesized below.
+                unconsumed_printed.remove(index);
+                return None;
+            }
+            crate::database::synthesis::equip_ability_for_keyword(keyword).map(|mut ability| {
+                // CR 202.3 + CR 118.9: Bludgeon Brawl grants `equip {X}` where X
+                // is the artifact's mana value, so the keyword carries the
+                // `ManaCost::SelfManaValue` placeholder. Concretize it to the
+                // source's actual mana value HERE — otherwise the payment path
+                // treats `SelfManaValue` as `{0}` and the equip is effectively
+                // free.
+                if let Some(cost) = ability.cost.take() {
+                    ability.cost = Some(super::keywords::resolve_self_mana_in_ability_cost(
+                        state, source_id, &cost,
+                    ));
+                }
+                ability
+            })
+        })
+        .collect()
+}
+
 /// CR 604.1 (seam 4: activated-ability-on-grant): synthesize graveyard activated
 /// abilities (Encore, Scavenge) for keywords granted to a graveyard card by a
 /// static. The `AddKeyword` layer seam installs only the keyword + triggers, so a
@@ -191,6 +253,10 @@ pub fn activated_ability_definitions(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            // CR 702.6: statically granted equip (Bram, Bludgeon Brawl) chained
+            // LAST — the identical append order is REQUIRED in
+            // `activation_ability_definition` so `ability_index` stays consistent.
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .enumerate()
             .map(|(offset, ability)| (printed_len + offset, ability)),
     );
@@ -220,6 +286,7 @@ fn activation_ability_definition(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            .chain(runtime_granted_equip_abilities(state, source_id))
             .nth(offset)?
     };
     if let Some(ref cost) = ability.cost {
@@ -14299,6 +14366,53 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
     }
 }
 
+/// CR 107.4f + GH #600: Pause for K'rrik/Phyrexian per-shard consent when an
+/// activated ability's mana leg would otherwise be paid inline (e.g. `{B},{T}: …`)
+/// without routing through `enter_payment_step`. Removal-first and `{X}` detours
+/// already hoist mana through `finalize_mana_payment`, which shares this pause
+/// helper — this path covers bare mana + non-removal residual tails only.
+pub(super) fn try_pause_activation_phyrexian_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    resolved: &ResolvedAbility,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    if find_non_self_battlefield_removal_cost(cost).is_some() {
+        return None;
+    }
+    let (mana_cost, remaining) = casting_costs::extract_mana_leg(cost)?;
+    let excluded_sources = remaining
+        .as_ref()
+        .map(|tail| ability_mana_payment_excluded_sources(tail, source_id))
+        .unwrap_or_default();
+    let (source_types, source_subtypes) = activation_source_types(state, source_id);
+    let activation_ctx = PaymentContext::Activation {
+        source_types: &source_types,
+        source_subtypes: &source_subtypes,
+        ability_tag: activation_ability_tag(state, source_id, ability_index),
+    };
+    let waiting = casting_costs::maybe_pause_for_phyrexian_choice(
+        state,
+        player,
+        source_id,
+        &mana_cost,
+        events,
+        Some(&activation_ctx),
+        &excluded_sources,
+    )?;
+    let mut pending = PendingCast::new(source_id, CardId(0), resolved.clone(), mana_cost);
+    pending.activation_cost = remaining;
+    pending.activation_ability_index = Some(ability_index);
+    if pending.activation_cost.is_some() {
+        pending.activation_residual = ActivationResidual::ManaLeg;
+    }
+    state.pending_cast = Some(Box::new(pending));
+    Some(waiting)
+}
+
 /// CR 602.2: To activate an ability is to put it onto the stack and pay its costs.
 /// CR 602.2a: Only an object's controller can activate its activated ability unless
 /// the object specifically says otherwise.
@@ -14991,6 +15105,17 @@ pub fn handle_activate_ability(
                     ));
                 }
                 stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
+                if let Some(waiting) = try_pause_activation_phyrexian_payment(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    &resolved,
+                    cost,
+                    events,
+                ) {
+                    return Ok(waiting);
+                }
                 if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
                     state,
                     player,
@@ -15097,6 +15222,17 @@ pub fn handle_activate_ability(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
+        if let Some(waiting) = try_pause_activation_phyrexian_payment(
+            state,
+            player,
+            source_id,
+            ability_index,
+            &resolved,
+            cost,
+            events,
+        ) {
+            return Ok(waiting);
+        }
         if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
             state,
             player,

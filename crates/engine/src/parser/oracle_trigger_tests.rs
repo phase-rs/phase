@@ -1777,7 +1777,16 @@ fn trigger_first_combat_phase_followup_condition() {
             "Whenever a Samurai or Warrior you control attacks alone, untap it. If it's the first combat phase of the turn, there is an additional combat phase after this phase.",
             "A-Raiyuu, Storm's Edge",
         );
-    assert!(def.condition.is_none());
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
+        }),
+        "attacks alone gates the main trigger; first-combat-phase is on the follow-up"
+    );
     let followup = def
         .execute
         .as_ref()
@@ -12310,10 +12319,9 @@ fn trigger_you_discard_a_card() {
     assert_eq!(def.mode, TriggerMode::Discarded);
     assert_eq!(
         def.valid_card,
-        Some(TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Card).controller(ControllerRef::You)
-        ))
+        Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Card)))
     );
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
 
 #[test]
@@ -12325,8 +12333,12 @@ fn trigger_opponent_discards_a_card() {
     assert_eq!(def.mode, TriggerMode::Discarded);
     assert_eq!(
         def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Card)))
+    );
+    assert_eq!(
+        def.valid_target,
         Some(TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
+            TypedFilter::default().controller(ControllerRef::Opponent)
         ))
     );
 }
@@ -12374,10 +12386,11 @@ fn trigger_necropotence_you_discard_exile_from_graveyard() {
     assert_eq!(def.mode, TriggerMode::Discarded);
     match def.valid_card.as_ref().expect("valid_card must be set") {
         TargetFilter::Typed(tf) => {
-            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.controller, None);
         }
         other => panic!("expected Typed filter, got {other:?}"),
     }
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     let execute = def
         .execute
         .as_deref()
@@ -12417,10 +12430,16 @@ fn trigger_opponent_discards_a_land_card() {
                 "expected Land in type_filters, got {:?}",
                 tf.type_filters
             );
-            assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            assert_eq!(tf.controller, None);
         }
         other => panic!("expected Typed filter, got {other:?}"),
     }
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
 }
 
 #[test]
@@ -12760,9 +12779,17 @@ fn trigger_samurai_or_warrior_attacks_alone() {
         "Whenever a Samurai or Warrior you control attacks alone, draw a card.",
         "Raiyuu, Storm's Edge",
     );
-    // Now that parse_type_phrase recognizes subtypes ("Samurai", "Warrior"),
-    // the trigger parser correctly identifies this as an Attacks trigger.
     assert!(matches!(def.mode, TriggerMode::Attacks));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
+        }),
+        "attacks alone must gate on zero co-attackers (CR 506.5)"
+    );
 }
 
 #[test]
@@ -13534,6 +13561,138 @@ fn trigger_you_discard_one_or_more_cards() {
     assert_eq!(def.mode, TriggerMode::DiscardedAll);
     assert!(def.batched);
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+}
+
+#[test]
+fn trigger_you_discard_one_or_more_land_cards() {
+    let def = parse_trigger_line(
+        "Whenever you discard one or more land cards, each opponent loses 2 life.",
+        "Doctor Doom, King of Latveria",
+    );
+    assert_eq!(def.mode, TriggerMode::DiscardedAll);
+    assert!(def.batched);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    match def.valid_card.as_ref().expect("valid_card must be set") {
+        TargetFilter::Typed(tf) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Land),
+                "expected Land in type_filters, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(tf.controller, None);
+        }
+        other => panic!("expected Typed filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn discard_trigger_rejects_unconsumed_type_qualifier_tail() {
+    let def = parse_trigger_line(
+        "Whenever you discard one or more land cards that were foretold, each opponent loses 2 life.",
+        "Discard Tail Guard",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "unsupported qualifier tail must not parse as a broad land-discard trigger: {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn discard_trigger_accepts_or_tail_event_branch() {
+    let def = parse_trigger_line(
+        "Whenever an opponent discards a card or mills one or more cards, put a +1/+1 counter on each Advisor you control.",
+        "Lo and Li, Royal Advisors",
+    );
+    assert_eq!(def.mode, TriggerMode::Discarded);
+    assert!(matches!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter { ref type_filters, .. }))
+            if type_filters == &[TypeFilter::Card]
+    ));
+}
+
+#[test]
+fn discard_trigger_accepts_or_tail_card_filter_branch() {
+    let def = parse_trigger_line(
+        "Whenever you discard a Spirit card or a card with disturb, put a +1/+1 counter on this creature.",
+        "Shipwreck Sifters",
+    );
+    assert_eq!(def.mode, TriggerMode::Discarded);
+    let tf = match def.valid_card {
+        Some(TargetFilter::Typed(tf)) => tf,
+        other => panic!("expected typed valid_card, got {other:?}"),
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Subtype("Spirit".to_string())),
+        "expected Spirit subtype filter, got {:?}",
+        tf.type_filters
+    );
+}
+
+#[test]
+fn doctor_doom_full_card_discard_trigger_splits_actor_and_card_filter() {
+    let parsed = parse_oracle_text(
+        "Whenever you discard one or more land cards, each opponent loses 2 life.\nAt the beginning of combat on your turn, target Villain you control gains menace until end of turn. It connives.",
+        "Doctor Doom, King of Latveria",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Noble".to_string(), "Villain".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DiscardedAll)
+        .expect("Doctor Doom discard trigger should parse");
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+    let TargetFilter::Typed(tf) = trigger.valid_card.as_ref().expect("land card filter") else {
+        panic!("expected typed valid_card, got {:?}", trigger.valid_card);
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Land));
+    assert_eq!(tf.controller, None);
+}
+
+#[test]
+fn mycotyrant_full_card_descend_count_uses_zone_change_quantity() {
+    let parsed = parse_oracle_text(
+        "Trample\nThe Mycotyrant's power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.\nAt the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)",
+        "The Mycotyrant",
+        &["Trample".to_string()],
+        &["Creature".to_string()],
+        &["Elder".to_string(), "Fungus".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger
+                .execute
+                .as_ref()
+                .is_some_and(|execute| matches!(&*execute.effect, Effect::Token { .. }))
+        })
+        .expect("Mycotyrant end-step token trigger should parse");
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let Effect::Token { count, .. } = execute.effect.as_ref() else {
+        panic!("expected token effect, got {:?}", execute.effect);
+    };
+    let QuantityExpr::Ref {
+        qty: QuantityRef::ZoneChangeCountThisTurn { from, to, filter },
+    } = count
+    else {
+        panic!("expected ZoneChangeCountThisTurn count, got {count:?}");
+    };
+    assert_eq!(*from, None);
+    assert_eq!(*to, Some(Zone::Graveyard));
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed descend filter, got {filter:?}");
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+    assert_eq!(tf.controller, None);
+    assert!(tf.properties.contains(&FilterProp::NonToken));
+    assert!(tf.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You,
+    }));
 }
 
 #[test]

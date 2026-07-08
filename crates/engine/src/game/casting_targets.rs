@@ -525,6 +525,21 @@ fn pay_activation_costs_after_target_selection(
     }
 
     if let Some(ref activation_cost) = pending.activation_cost {
+        // CR 107.4f + GH #600: Target-first activations store the full cost in
+        // `activation_cost` with `pending.cost = NoCost`; route through the same
+        // Phyrexian pause helper as the no-target activation path.
+        if let Some(waiting) = super::casting::try_pause_activation_phyrexian_payment(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            &assigned_ability,
+            activation_cost,
+            events,
+        ) {
+            return Ok(Some(waiting));
+        }
+
         if let Some((count, zone, filter)) = super::casting::find_non_self_exile(activation_cost) {
             let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
                 .expect("find_non_self_exile restricts zone to Hand or Graveyard");

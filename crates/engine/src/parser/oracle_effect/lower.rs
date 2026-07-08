@@ -8158,7 +8158,6 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::Token { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
@@ -8166,6 +8165,16 @@ pub(super) fn apply_where_x_effect_expression(
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+            *power = apply_where_x_expression(power.clone(), where_x_expression);
+            *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
         }
         // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
         // is …" binds the search count (Oreskos Explorer). Eldritch Evolution
@@ -9902,7 +9911,7 @@ mod where_x_tests {
     use super::parse_where_x_quantity_expression;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
-        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, QuantityExpr,
+        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::triggers::TriggerMode;
@@ -10214,6 +10223,58 @@ mod where_x_tests {
         assert!(
             exprs.iter().all(has_event_context_amount),
             "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    #[test]
+    fn apply_where_x_effect_expression_rewrites_token_count_and_pt() {
+        let mut effect = Effect::Token {
+            name: "Ooze".to_string(),
+            power: PtValue::Variable("X".to_string()),
+            toughness: PtValue::Variable("X".to_string()),
+            types: vec!["Creature".to_string(), "Ooze".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+
+        super::apply_where_x_effect_expression(&mut effect, Some("that spell's mana value"));
+
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::EventSource,
+            },
+        };
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = effect
+        else {
+            panic!("expected Token");
+        };
+        assert_eq!(count, expected.clone(), "token count must bind where-X");
+        assert_eq!(
+            power,
+            PtValue::Quantity(expected.clone()),
+            "token power must bind where-X"
+        );
+        assert_eq!(
+            toughness,
+            PtValue::Quantity(expected),
+            "token toughness must bind where-X"
         );
     }
 

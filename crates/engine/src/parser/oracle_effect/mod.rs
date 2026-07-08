@@ -146,7 +146,7 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
-pub(crate) use crate::parser::oracle_ir::context::ParseContext;
+pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::mana::ManaExpiry;
 
@@ -4311,6 +4311,21 @@ fn try_parse_create_token_sequence(
     Some(clause)
 }
 
+fn token_source_pt_followup_can_apply_to_chunk(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let Some(((), after_create_original)) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("create ")).parse(i)
+    }) else {
+        return false;
+    };
+    let consumed = tp.original.len() - after_create_original.len();
+    let after_create = TextPair::new(after_create_original, &tp.lower[consumed..]);
+    split_create_token_sequence(after_create).is_none()
+        && !split_choice_list_items(after_create.original.trim().trim_end_matches('.'))
+            .is_some_and(|items| items.len() >= 2)
+}
+
 /// Split a conjunctive create-ALL token list into its item slices `(orig, lower)`.
 ///
 /// CR 608.2c: "create A, B, and C" is a do-ALL instruction in written order. The
@@ -5673,9 +5688,15 @@ fn unless_rider_defers_to_body_parser(text: &str) -> bool {
     let after_trimmed = after_unless.trim_end_matches('.').trim();
 
     // CR 605.1a: activation prohibition mana-ability exemption (restriction.rs).
-    if tag::<_, _, OracleError<'_>>("they're mana abilities")
-        .parse(after_trimmed)
-        .is_ok()
+    // Dual-apostrophe: MTGJSON oracle text uses the U+2019 glyph, and this guard
+    // must recognize it so the restriction parser (not the unsupported-unless
+    // fallback) handles "…can't be activated unless they're mana abilities".
+    if alt((
+        tag::<_, _, OracleError<'_>>("they're mana abilities"),
+        tag("they\u{2019}re mana abilities"),
+    ))
+    .parse(after_trimmed)
+    .is_ok()
     {
         return true;
     }
@@ -6647,7 +6668,9 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
         // emits one) from `ScopedPlayer` to `ChosenPlayer { index }` so the
         // chosen opponent's graveyard is enumerated at resolution time
         // (CR 608.2d — the chosen opponent announces which card returns).
-        Effect::Bounce { target, .. } => rebind_owned_scope(target, index),
+        Effect::Bounce { target, .. } => {
+            rebind_owned_scope(target, ControllerRef::ChosenPlayer { index })
+        }
         _ => {}
     }
 }
@@ -6660,27 +6683,27 @@ fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
 /// `parse_subject_application`'s caller, because graveyard ownership lives
 /// in a filter property, not a top-level player slot (cards in non-stack /
 /// non-battlefield zones are owned, not controlled).
-fn rebind_owned_scope(filter: &mut TargetFilter, index: u8) {
+fn rebind_owned_scope(filter: &mut TargetFilter, to: ControllerRef) {
     use crate::types::ability::FilterProp;
     match filter {
         TargetFilter::Typed(tf) => {
             if matches!(tf.controller, Some(ControllerRef::ScopedPlayer)) {
-                tf.controller = Some(ControllerRef::ChosenPlayer { index });
+                tf.controller = Some(to.clone());
             }
             for prop in tf.properties.iter_mut() {
                 if let FilterProp::Owned { controller } = prop {
                     if matches!(controller, ControllerRef::ScopedPlayer) {
-                        *controller = ControllerRef::ChosenPlayer { index };
+                        *controller = to.clone();
                     }
                 }
             }
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             for f in filters.iter_mut() {
-                rebind_owned_scope(f, index);
+                rebind_owned_scope(f, to.clone());
             }
         }
-        TargetFilter::Not { filter } => rebind_owned_scope(filter, index),
+        TargetFilter::Not { filter } => rebind_owned_scope(filter, to),
         _ => {}
     }
 }
@@ -16657,6 +16680,26 @@ fn lower_subject_predicate_ast(
                     clause.effect,
                     Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
                 ) {
+                    // CR 109.4 (issue #1077): "target player exiles a card
+                    // from their graveyard" (Relic of Progenitus, Scrabbling
+                    // Claws, Merrow Bonegnawer, Graveyard Shovel, Grave
+                    // Birthing, Gravestorm) and "target player[s] ... their
+                    // [zone]" (Memory's Journey, above). The moved-object
+                    // filter's possessive "their" parses as
+                    // `Owned { controller: ScopedPlayer }` because the
+                    // zone-suffix parser is scope-agnostic — but this branch
+                    // only runs for an explicit "target player" (not an
+                    // anaphoric "that player"), so the filter must be rebound
+                    // to the real declared target before it's cloned into the
+                    // sub-ability, or it stays scoped to the acting player
+                    // (the activator) instead of the player just targeted.
+                    match &mut clause.effect {
+                        Effect::ChangeZone { target, .. }
+                        | Effect::ChangeZoneAll { target, .. } => {
+                            rebind_owned_scope(target, ControllerRef::TargetPlayer);
+                        }
+                        _ => {}
+                    }
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
                     sub_ability.sub_ability = clause.sub_ability;
@@ -16744,7 +16787,7 @@ fn lower_subject_predicate_ast(
             if let TargetFilter::Typed(tf) = &subject.affected {
                 if let Some(ControllerRef::ChosenPlayer { index }) = tf.controller {
                     if let Effect::Bounce { target, .. } = &mut clause.effect {
-                        rebind_owned_scope(target, index);
+                        rebind_owned_scope(target, ControllerRef::ChosenPlayer { index });
                     }
                 }
             }
@@ -16977,6 +17020,42 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
     }
 }
 
+fn apply_anchor_subject_to_clause(
+    clause: &mut ParsedEffectClause,
+    anchor: &TargetFilter,
+    text_lower: &str,
+) {
+    apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
+    apply_anchor_subject(&mut clause.effect, anchor);
+    let mut sub = clause.sub_ability.as_deref_mut();
+    while let Some(def) = sub {
+        apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
+        apply_anchor_subject(def.effect.as_mut(), anchor);
+        sub = def.sub_ability.as_deref_mut();
+    }
+}
+
+/// CR 608.2c: A subjectless reveal continuation that explicitly says
+/// "their library" inherits the prior non-caster player anchor. Do not apply
+/// this to "your library": `RevealTop { Controller }` cannot otherwise
+/// distinguish an explicit caster possessive from an implicit default.
+fn apply_their_library_reveal_anchor(effect: &mut Effect, anchor: &TargetFilter, text_lower: &str) {
+    if !scan_contains_phrase(text_lower, "their library")
+        || !target_filter_can_target_player(anchor)
+    {
+        return;
+    }
+    let Effect::RevealTop { player, .. } = effect else {
+        return;
+    };
+    if matches!(
+        *player,
+        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ParentTargetController
+    ) {
+        *player = anchor.clone();
+    }
+}
+
 /// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
 /// variant a typed object filter should adopt to match "permanents that player
 /// controls". `TriggeringPlayer` is event-contextual and must not create a
@@ -17014,7 +17093,7 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
     }
 }
 
-fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
+pub(crate) fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
     match filter {
         TargetFilter::Typed(tf) => tf.controller.clone(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -17022,6 +17101,27 @@ fn target_filter_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> 
         }
         TargetFilter::Not { filter } => target_filter_controller_ref(filter),
         _ => None,
+    }
+}
+
+/// Mutating sibling of [`target_filter_controller_ref`]: recursively rewrite the
+/// `controller` of every `Typed` node reachable through `And`/`Or`/`Not` to
+/// `controller`. Used by the Siren's Call card-assembly pass to bind the delayed
+/// punisher's "that player controls" anaphor to the active player named by the
+/// sibling coerce clause.
+pub(crate) fn set_target_filter_controller_ref(
+    filter: &mut TargetFilter,
+    controller: ControllerRef,
+) {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller = Some(controller),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                set_target_filter_controller_ref(inner, controller.clone());
+            }
+        }
+        TargetFilter::Not { filter } => set_target_filter_controller_ref(filter, controller),
+        _ => {}
     }
 }
 
@@ -17756,6 +17856,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // mis-routed to the controller. Stamp the subject's controller onto the
         // filter (mirroring the `Sacrifice` arm) so the card is taken from, and
         // the choice presented to, the acting (per-iteration) player.
+        //
+        // CR 109.4 + CR 608.2c (issue #1077): "target player exiles a card
+        // from their graveyard" (Relic of Progenitus, Scrabbling Claws, Merrow
+        // Bonegnawer, Graveyard Shovel, Grave Birthing, Gravestorm). The
+        // possessive "their" in the predicate parses as `FilterProp::Owned {
+        // controller: ScopedPlayer }` because the zone-suffix parser is
+        // scope-agnostic (see `rebind_owned_scope`'s doc comment above). For a
+        // genuinely *targeted* subject that stale `ScopedPlayer` property
+        // survives `force_controller` untouched (it only rewrites
+        // `tf.controller`, not nested `properties`), leaving two contradictory
+        // ownership constraints — `controller: TargetPlayer` vs. `Owned:
+        // ScopedPlayer` (which falls back to the activator) — so the filter is
+        // only ever satisfiable when the activator targets themself. Rebind
+        // the nested `ScopedPlayer` refs the same way the `Bounce`/Skullwinder
+        // call site already does; this is a no-op when `effective_ctrl` is
+        // itself `ScopedPlayer` (the untargeted "each player"/Braids case),
+        // so that already-correct path is unaffected.
         Effect::ChangeZone { target, .. }
             if player_filter_as_controller_ref(&subject_filter).is_some() =>
         {
@@ -17765,7 +17882,8 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                 } else {
                     ctrl
                 };
-                force_controller(target, effective_ctrl);
+                force_controller(target, effective_ctrl.clone());
+                rebind_owned_scope(target, effective_ctrl);
             }
         }
         // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "<player> gains
@@ -20563,6 +20681,7 @@ fn is_exile_effect(effect: &Effect) -> bool {
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
     is_exile_effect(effect)
         || is_token_creating_effect(effect)
+        || is_mass_coerce_static(effect)
         || matches!(
             effect,
             Effect::PutCounter { .. }
@@ -20570,6 +20689,49 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
                 | Effect::MultiplyCounter { .. }
                 | Effect::MoveCounters { .. }
         )
+}
+
+/// CR 508.1a + CR 508.1d + CR 608.2c: A mass "attack this turn if able" coercion —
+/// a `GenericEffect` carrying a `MustAttack` (CR 508.1a, attack-if-able) or
+/// `MustAttackPlayer` (CR 508.1d, directed attack) static over a BROADCAST
+/// population (not `SelfRef` and not an inherited-target reference) — identifies
+/// "those creatures" at resolution. When a following "those creatures" clause
+/// reads that frozen population (Maddening Imp), the coerce is the producer that
+/// snapshots it (CR 608.2c: "those creatures" is a frozen reference to the objects
+/// identified when the ability resolved). A `SelfRef`/inherited-target coerce
+/// names a single specific object, not a population, so it does not publish a set.
+fn is_mass_coerce_static(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|static_def| {
+        matches!(
+            static_def.mode,
+            StaticMode::MustAttack | StaticMode::MustAttackPlayer { .. }
+        ) && target
+            .as_ref()
+            .or(static_def.affected.as_ref())
+            .is_some_and(is_broadcast_population_filter)
+    })
+}
+
+/// CR 608.2c: A "broadcast" filter names a population to enumerate at resolution,
+/// as opposed to an inherited-reference filter (`TriggeringSource` / `ParentTarget`
+/// / `CostPaidObject`) or a self-reference (`SelfRef`), which name a single
+/// specific object. Only a broadcast population is snapshotted as "those creatures".
+fn is_broadcast_population_filter(filter: &TargetFilter) -> bool {
+    !matches!(
+        filter,
+        TargetFilter::TriggeringSource
+            | TargetFilter::ParentTarget
+            | TargetFilter::CostPaidObject
+            | TargetFilter::SelfRef
+    )
 }
 
 /// CR 603.7: Detect explicit cross-clause pronouns ("those cards", "the exiled card").
@@ -21765,6 +21927,19 @@ fn inject_chosen_color_choice_grant(def: &mut AbilityDefinition, parent_is_color
         return;
     }
 
+    // CR 608.2d + CR 702.16: a chosen-color grant can be nested inside a modal
+    // (`ChooseOneOf`) branch — e.g. "gains protection from colorless or from the
+    // color of your choice" lowers to a ChooseOneOf whose ChosenColor branch must
+    // get its own `Choose(Color)` wrapper. Each branch must be visited: the
+    // ChosenColor branch matches the wrap condition, while the colorless/artifacts
+    // branch does not and is left untouched (no double-wrap). Visited alongside —
+    // not instead of — the sub_ability recursion below.
+    if let Effect::ChooseOneOf { branches, .. } = &mut *def.effect {
+        for branch in branches.iter_mut() {
+            inject_chosen_color_choice_grant(branch, false);
+        }
+    }
+
     let child_under_color_choice = matches!(
         &*def.effect,
         Effect::Choose {
@@ -22540,6 +22715,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     finalize_effect_chain(&mut def);
+    apply_owner_library_reveal_anchor_from_text(&mut def, text);
     def
 }
 
@@ -22581,6 +22757,7 @@ pub(crate) fn parse_effect_chain_with_context(
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
     finalize_effect_chain(&mut def);
+    apply_owner_library_reveal_anchor_from_text(&mut def, text);
     def
 }
 
@@ -22677,6 +22854,44 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
     fold_additional_combat_attacker_restriction(def);
+}
+
+fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {
+    let lower = text.to_lowercase();
+    if !scan_contains_phrase(&lower, "shuffles it into their library")
+        || !scan_contains_phrase(&lower, "reveals the top card of their library")
+        || scan_contains_phrase(&lower, "reveals the top card of your library")
+    {
+        return;
+    }
+
+    // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
+    // a following "their library" reveal refers to that same owner. The
+    // generic reveal parser defaults subjectless reveals to the controller, so
+    // repair only the owner-shuffle chain and leave explicit "your library"
+    // reveals untouched.
+    let mut saw_owner_shuffle = false;
+    let mut current = Some(def);
+    while let Some(node) = current {
+        match node.effect.as_mut() {
+            Effect::Shuffle { target } if *target == TargetFilter::ParentTargetOwner => {
+                saw_owner_shuffle = true;
+            }
+            Effect::RevealTop { player, .. }
+                if saw_owner_shuffle
+                    && matches!(
+                        *player,
+                        TargetFilter::Controller
+                            | TargetFilter::Player
+                            | TargetFilter::ParentTargetController
+                    ) =>
+            {
+                *player = TargetFilter::ParentTargetOwner;
+            }
+            _ => {}
+        }
+        current = node.sub_ability.as_deref_mut();
+    }
 }
 
 /// CR 509.1g + CR 506.3e + CR 707.2 + CR 603.7: Mirror Match's whole-card idiom
@@ -25054,6 +25269,14 @@ pub(crate) fn parse_effect_chain_ir(
                 Some(ControllerRef::ParentTargetController)
             )
             && chain_parent_target_controller_scope.is_some();
+        let token_pt_followup = chunks
+            .get(chunk_idx + 1)
+            .filter(|_| token_source_pt_followup_can_apply_to_chunk(normalized_text))
+            .and_then(|next| {
+                let next_text = strip_leading_sequence_connector(&next.text).trim();
+                sequence::parse_token_source_power_toughness_followup(next_text)
+            })
+            .map(|(power, toughness)| TokenPtFollowup::PowerToughness { power, toughness });
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -25129,6 +25352,7 @@ pub(crate) fn parse_effect_chain_ir(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            token_pt_followup,
             // CR 603.1 + CR 608.2c: trigger-body chunk parsing must preserve
             // trigger context so non-target event anaphors ("that permanent or
             // player" on Ghyrson) bind to the triggering event instead of being
@@ -25608,7 +25832,8 @@ pub(crate) fn parse_effect_chain_ir(
             anchor_subject = None;
         }
         if let Some(ref anchor) = anchor_subject {
-            apply_anchor_subject(&mut clause.effect, anchor);
+            let text_lower_for_anchor = text.to_lowercase();
+            apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor);
         }
 
         // Update anchor from this clause's subject (e.g., SearchLibrary.target_player
@@ -25618,6 +25843,10 @@ pub(crate) fn parse_effect_chain_ir(
         // ParentTargetOwner anchor for a following villainous-choice clause.
         if let Some(extracted) = extract_player_anchor_in_chain(&clause) {
             anchor_subject = Some(extracted);
+            if let Some(ref anchor) = anchor_subject {
+                let text_lower_for_anchor = text.to_lowercase();
+                apply_anchor_subject_to_clause(&mut clause, anchor, &text_lower_for_anchor);
+            }
         }
 
         // Anaphoric resolution: parse-time pronoun→parent-target rewrites.
@@ -28038,7 +28267,7 @@ fn issue_2403_sin_spira_tracked_set_copy_after_random_exile() {
 #[test]
 fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
     let def = parse_effect_chain(
-        "The owner of target permanent shuffles it into their library, then reveals the top card of that library. If it's a permanent card, they put it onto the battlefield.",
+        "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
         AbilityKind::Spell,
     );
     let Effect::ChangeZone {
@@ -28063,6 +28292,25 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
         panic!("expected RevealTop of owner's library, got {reveal:?}");
     };
     assert_eq!(*player, TargetFilter::ParentTargetOwner);
+}
+
+#[test]
+fn owner_anchor_does_not_rewrite_explicit_your_library_reveal() {
+    let def = parse_effect_chain(
+        "The owner of target permanent shuffles it into their library, then reveals the top card of your library.",
+        AbilityKind::Spell,
+    );
+    let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
+    let reveal = shuffle
+        .sub_ability
+        .as_ref()
+        .expect("reveal sub")
+        .effect
+        .as_ref();
+    let Effect::RevealTop { player, count: 1 } = reveal else {
+        panic!("expected RevealTop of your library, got {reveal:?}");
+    };
+    assert_eq!(*player, TargetFilter::Controller);
 }
 
 #[test]

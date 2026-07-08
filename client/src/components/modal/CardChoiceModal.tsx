@@ -2667,9 +2667,9 @@ function CommanderZoneChoiceModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+      <div className="absolute inset-0 bg-black/68" />
       <motion.div
-        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[22px] border border-white/10 bg-[#0b1020]/94 shadow-[0_28px_70px_rgba(0,0,0,0.5)] backdrop-blur-md"
+        className="card-scale-reset relative w-full max-w-[34rem] overflow-hidden rounded-[12px] border border-white/10 bg-[#0b1020] shadow-[0_18px_48px_rgba(0,0,0,0.48)]"
         data-testid="commander-zone-choice-dialog"
         initial={{ opacity: 0, y: 18, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}

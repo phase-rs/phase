@@ -53,8 +53,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
  *   4 — Archenemy derived view and scheme deck payloads
  *   5 — CardPredicateGuessMade game event shape
+ *   6 — Mulligan bottoming folded into a MulliganDecisionPhase::BottomCards
+ *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
+ *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 5 as const;
+export const WIRE_PROTOCOL_VERSION = 6 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

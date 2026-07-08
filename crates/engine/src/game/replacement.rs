@@ -4064,6 +4064,10 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TriggeringPlayer) => false,
                 // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
                 Some(ControllerRef::EnchantedPlayer) => false,
+                // CR 102.1: the `active_player_req` gate expects a
+                // controller-relative role (You/Opponent); `ActivePlayer` is not
+                // one, and the parser does not emit it here. Fail closed.
+                Some(ControllerRef::ActivePlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -4102,6 +4106,10 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TriggeringPlayer) => false,
                 // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
                 Some(ControllerRef::EnchantedPlayer) => false,
+                // CR 102.1: the `active_player_req` gate expects a
+                // controller-relative role (You/Opponent); `ActivePlayer` is not
+                // one, and the parser does not emit it here. Fail closed.
+                Some(ControllerRef::ActivePlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -4263,7 +4271,10 @@ fn evaluate_replacement_condition(
                 | ControllerRef::ChosenPlayer { .. }
                 | ControllerRef::TriggeringPlayer
                 // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
-                | ControllerRef::EnchantedPlayer => false,
+                | ControllerRef::EnchantedPlayer
+                // CR 102.1: no replacement condition scopes its event source to the
+                // active player here. Fail closed (mirrors the siblings above).
+                | ControllerRef::ActivePlayer => false,
             }
         }
         ReplacementCondition::EffectCausedDiscard => matches!(
@@ -4761,7 +4772,10 @@ fn object_replacement_candidate_applies(
                 | crate::types::ability::ControllerRef::SourceChosenPlayer
                 | crate::types::ability::ControllerRef::ChosenPlayer { .. }
                 | crate::types::ability::ControllerRef::TriggeringPlayer
-                | crate::types::ability::ControllerRef::EnchantedPlayer => false,
+                | crate::types::ability::ControllerRef::EnchantedPlayer
+                // CR 102.1: token-owner scope is not scoped to the active player
+                // here; fail closed (mirrors the siblings above).
+                | crate::types::ability::ControllerRef::ActivePlayer => false,
             };
             if !matches {
                 return false;
@@ -5340,6 +5354,21 @@ pub fn find_applicable_replacements(
     }
 
     candidates
+}
+
+/// CR 614.1b + CR 614.10: Read-only probe for whether a turn-start skip
+/// replacement would replace the proposed turn with nothing. This deliberately
+/// does not call `replace_event`, so projection code can answer display-only
+/// questions without marking replacements applied, rebuilding indexes, or
+/// emitting events.
+pub(crate) fn begin_turn_would_be_prevented(
+    state: &GameState,
+    player: PlayerId,
+    is_extra_turn: bool,
+) -> bool {
+    let proposed = ProposedEvent::begin_turn(player, is_extra_turn);
+    let registry = replacement_registry();
+    !find_applicable_replacements(state, &proposed, registry).is_empty()
 }
 
 const MAX_REPLACEMENT_DEPTH: u16 = 16;

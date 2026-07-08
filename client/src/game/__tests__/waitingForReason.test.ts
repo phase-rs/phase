@@ -30,7 +30,7 @@ function wf(type: WaitingFor["type"]): WaitingFor {
     case "ManaPayment":
       return buildManaPaymentWaitingFor();
     case "MulliganDecision":
-      return { type, data: { pending: [{ player: 0, mulligan_count: 0 }], free_first_mulligan: false } };
+      return { type, data: { pending: [{ player: 0, mulligan_count: 0, phase: { type: "Declare" } }], free_first_mulligan: false } };
     case "OrderTriggers":
       return { type, data: { player: 0, triggers: [] } };
     case "Priority":

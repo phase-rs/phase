@@ -4,6 +4,17 @@
     "collapse": "Zwiń postęp rozwiązywania",
     "expand": "Rozwiń postęp rozwiązywania"
   },
+  "debugCreate": {
+    "tokenPower": "Power",
+    "tokenToughness": "Toughness",
+    "tokenPowerPlaceholder": "Power",
+    "tokenToughnessPlaceholder": "Toughness",
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+  },
+  "nextUp": {
+    "label": "Następny",
+    "tooltip": "Tura tego gracza jest następna."
+  },
   "card": {
     "faceDownName": "Karta zakryta",
     "loading": "Wczytywanie {{name}}",

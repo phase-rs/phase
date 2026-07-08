@@ -104,6 +104,8 @@ Do not modify any mtgish path. Do not mirror new engine variants, struct-variant
 
 Both tracks share steps 2–7. Only Step 5 (Verify) differs.
 
+**Prefer Developer track even if the toolchain isn't installed yet.** If your runtime has shell access and can install software (e.g. `rustup`/`winget`/`apt`/`homebrew` are reachable), attempt to install the Rust toolchain and default to Developer track rather than silently falling back to Non-developer. If installation fails, requires unavailable permissions, or needs interactive input you cannot provide, use Non-developer track and say why. A session that opens a PR on the Non-developer track's word alone can push a change that fails CI on things a two-minute local `cargo test` would have caught — that costs a maintainer's review cycle and looks worse than the extra setup time. Only use Non-developer track when installing a toolchain is genuinely not possible in your environment (no shell/package-manager access at all), and say so explicitly rather than defaulting to it out of convenience.
+
 ---
 
 ## 2. Clone the repo

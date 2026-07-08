@@ -1530,12 +1530,16 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.add_priority_yield(
             PlayerId(0),
-            crate::types::game_state::YieldTarget::AllCopies { card_id: CardId(9) },
+            crate::types::game_state::YieldTarget::AllCopies {
+                card_id: CardId(9),
+                trigger_description: None,
+            },
         );
         state.add_priority_yield(
             PlayerId(1),
             crate::types::game_state::YieldTarget::AllCopies {
                 card_id: CardId(10),
+                trigger_description: None,
             },
         );
 

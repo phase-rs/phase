@@ -965,6 +965,20 @@ pub(super) fn handle_resolution_choice(
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
+                // CR 608.2c + CR 107.1c (issue #1032): reset to `Priority`
+                // BEFORE re-entering the chain, mirroring the `decline`
+                // branch's `finish_with_continuation` reset below and
+                // `handle_optional_effect_choice`'s `set_active_priority`
+                // reset (engine_payment_choices.rs). Without this,
+                // `state.waiting_for` is still the just-answered
+                // `RepeatDecision`, which `waits_for_resolution_choice`
+                // (effects/mod.rs) matches — the ChangeZone/LoseLife
+                // sub-chain following this iteration's RevealTop is then
+                // wrongly deferred into `pending_continuation` (accumulating
+                // there via `append_to_sub_chain`) instead of resolving
+                // immediately, and only drains in one batch when the
+                // controller eventually declines.
+                set_priority(state, player);
                 // Re-resolve one more process pass. `ability` retains
                 // `repeat_until: Some(ControllerChoice)`, so this hits the
                 // `repeat_until` dispatch, runs `resolve_chain_body` once, and
