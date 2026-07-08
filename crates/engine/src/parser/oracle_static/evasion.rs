@@ -378,51 +378,30 @@ pub(crate) fn parse_compound_subject_keyword_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {
-    type VE<'a> = OracleError<'a>;
+    let input = TextPair::new(text, lower);
 
     // Optional leading turn window (Gruul Spellbreaker class).
-    let (body_lower, turn_condition) =
-        if let Ok((rest, _)) = tag::<_, _, VE<'_>>("during your turn, ").parse(lower) {
-            (rest, Some(StaticCondition::DuringYourTurn))
-        } else {
-            (lower, None)
-        };
+    let (body, turn_condition) = if let Some(rest) = nom_tag_tp(&input, "during your turn, ") {
+        (rest, Some(StaticCondition::DuringYourTurn))
+    } else {
+        (input, None)
+    };
 
     // Subject: "you and <object subject phrase>".
-    let (after_you, _) = tag::<_, _, VE<'_>>("you and ").parse(body_lower).ok()?;
+    let after_you = nom_tag_tp(&body, "you and ")?;
 
     // Locate the continuous predicate verb ("have"/"has"/"gain"/"gains"/…) so
     // the object subject can be any phrase `parse_rule_static_subject_filter`
     // understands — not a hard-coded controller-phrase alt list.
-    let subject_end = find_continuous_predicate_start(after_you)?;
-    let object_subject_lower = after_you[..subject_end].trim();
-    let predicate_lower = after_you[subject_end..].trim();
-    if object_subject_lower.is_empty() || predicate_lower.is_empty() {
+    let subject_end = find_continuous_predicate_start(after_you.lower)?;
+    let (object_subject, predicate) = after_you.split_at(subject_end);
+    let object_subject = object_subject.trim_start().trim_end();
+    let predicate = predicate.trim_start().trim_end();
+    if object_subject.is_empty() || predicate.is_empty() {
         return None;
     }
 
-    // Map the matched lowercase spans back onto the original-case text. When a
-    // leading turn window was peeled, recover its original-case body slice first.
-    // Do NOT trim body_original — its byte length must stay aligned with
-    // `body_lower` / `after_you` for the offset arithmetic below.
-    let body_original = if turn_condition.is_some() {
-        let prefix_len = lower.len() - body_lower.len();
-        text.get(prefix_len..)?
-    } else {
-        text
-    };
-    debug_assert_eq!(body_original.len(), body_lower.len());
-    let after_you_len = after_you.len();
-    let body_after_you_start = body_original.len().checked_sub(after_you_len)?;
-    let object_subject = body_original
-        .get(body_after_you_start..body_after_you_start + subject_end)?
-        .trim()
-        .trim_end_matches(' ');
-    let predicate = body_original
-        .get(body_after_you_start + subject_end..)?
-        .trim();
-
-    let affected = parse_rule_static_subject_filter(object_subject)?;
+    let affected = parse_rule_static_subject_filter(object_subject.original)?;
     // Player half is reserved for the controller; refuse a second player scope
     // ("you and each player have …") so we never emit two player defs.
     if rule_static_affected_is_player_scope(&affected) {
@@ -431,7 +410,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
 
     // Object-half: delegate the predicate to the shared keyword-grant builder
     // (also peels trailing " as long as <cond>" onto `object_def.condition`).
-    let mut object_def = parse_continuous_gets_has(predicate, affected, text)?;
+    let mut object_def = parse_continuous_gets_has(predicate.original, affected, text)?;
 
     // Derive the player-half mode from the granted keyword. Only player-
     // applicable keyword modes claim this pattern.
