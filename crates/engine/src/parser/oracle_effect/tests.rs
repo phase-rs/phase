@@ -36625,6 +36625,46 @@ fn play_exiled_card_this_turn_regression_unchanged() {
     assert_eq!(mana_spend_permission, None);
 }
 
+/// CR 607.2a + CR 611.2a: Furious Rise / Superior Foes / Unstable Amulet
+/// grant permission to play the just-exiled card only until the same source
+/// exiles another card.
+#[test]
+fn play_from_exile_until_source_exiles_another_card_has_source_invalidation() {
+    for text in [
+        "you may play that card until you exile another card with ~",
+        "you may play it until you exile another card with ~",
+        "you may play that card until you exile another card with this ability",
+    ] {
+        let e = parse_effect(text);
+        let Effect::GrantCastingPermission {
+            permission, target, ..
+        } = e
+        else {
+            panic!("expected GrantCastingPermission for {text:?}, got {e:?}");
+        };
+        let CastingPermission::PlayFromExile {
+            duration,
+            invalidation,
+            ..
+        } = permission
+        else {
+            panic!("expected PlayFromExile permission for {text:?}");
+        };
+        assert_eq!(duration, Duration::Permanent);
+        assert_eq!(
+            invalidation,
+            Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource)
+        );
+        assert_eq!(
+            target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+            "source-exile duration must still bind the grant to the tracked exile set"
+        );
+    }
+}
+
 #[test]
 fn play_that_card_until_next_same_source_exile_has_source_invalidation() {
     let ability = parse_effect_chain(

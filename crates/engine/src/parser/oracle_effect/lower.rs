@@ -6,7 +6,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
-use super::super::oracle_nom::duration::{parse_duration, parse_for_as_long_as_condition};
+use super::super::oracle_nom::duration::{
+    parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
+};
 use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -939,15 +941,8 @@ pub(super) fn scan_until_next_same_source_exile_invalidation(lower: &str) -> boo
 }
 
 fn parse_until_next_same_source_exile_invalidation(input: &str) -> OracleResult<'_, ()> {
-    let (input, _) = tag("until you exile another card with ").parse(input)?;
-    let (input, _) = alt((
-        tag::<_, _, OracleError<'_>>("~"),
-        tag("this enchantment"),
-        tag("this artifact"),
-        tag("this creature"),
-        tag("this permanent"),
-    ))
-    .parse(input)?;
+    let (input, _) = tag("until ").parse(input)?;
+    let (input, _) = parse_until_source_exiles_another_card_body(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     Ok((input, ()))
 }

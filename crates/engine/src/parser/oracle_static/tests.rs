@@ -20924,18 +20924,31 @@ fn inverted_end_to_end_watchdog_no_effect_bleed() {
 }
 
 #[test]
-fn inverted_falls_through_when_no_effect_subject_found() {
-    // With no recognized effect-subject prefix after any comma, behavior must equal
-    // today's generic fallback: a Continuous static with Unrecognized condition text
-    // (the old bleed-through behavior is preserved as a strict non-regression baseline).
+fn inverted_liu_bei_condition_lowers_to_named_or_condition() {
     let def = parse_static_line(
-            "As long as you control a permanent named Guan Yu, Sainted Warrior or a permanent named Zhang Fei, Fierce Warrior.",
+            "~ gets +2/+2 as long as you control a permanent named Guan Yu, Sainted Warrior or a permanent named Zhang Fei, Fierce Warrior.",
         )
-        .expect("fallback must still match");
+        .expect("static line must parse");
     assert_eq!(def.mode, StaticMode::Continuous);
     match def.condition {
-        Some(StaticCondition::Unrecognized { .. }) => {}
-        other => panic!("expected Unrecognized condition via fallback, got {other:?}"),
+        Some(StaticCondition::Or { conditions }) => {
+            assert_eq!(conditions.len(), 2);
+            let expected = ["guan yu, sainted warrior", "zhang fei, fierce warrior"];
+            for (condition, expected_name) in conditions.iter().zip(expected) {
+                let StaticCondition::IsPresent {
+                    filter: Some(TargetFilter::Typed(tf)),
+                } = condition
+                else {
+                    panic!("expected typed IsPresent, got {condition:?}");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+                assert!(tf.properties.iter().any(
+                    |prop| matches!(prop, FilterProp::Named { name } if name == expected_name)
+                ));
+            }
+        }
+        other => panic!("expected named permanent Or condition, got {other:?}"),
     }
 }
 

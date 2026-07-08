@@ -3530,6 +3530,52 @@ fn eldritch_evolution_parses_sacrifice_cost_and_dynamic_search_filter() {
     );
 }
 
+#[test]
+fn sift_through_sands_condition_requires_both_named_spells() {
+    let r = parse(
+        "Draw two cards, then discard a card.\n\
+         If you've cast a spell named Peer Through Depths and a spell named Reach Through Mists this turn, you may search your library for a card named The Unspeakable, put it onto the battlefield, then shuffle.",
+        "Sift Through Sands",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1);
+
+    let mut cursor = Some(&r.abilities[0]);
+    let mut search_condition = None;
+    while let Some(ability) = cursor {
+        if matches!(&*ability.effect, Effect::SearchLibrary { .. }) {
+            assert!(ability.optional, "Sift search clause must remain optional");
+            search_condition = ability.condition.as_ref();
+            break;
+        }
+        cursor = ability.sub_ability.as_deref();
+    }
+    let Some(AbilityCondition::And { conditions }) = search_condition else {
+        panic!("expected SearchLibrary gated by both named spells, got {search_condition:?}");
+    };
+
+    for expected_name in ["peer through depths", "reach through mists"] {
+        assert!(
+            conditions.iter().any(|condition| matches!(
+                condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                } if properties.iter().any(|prop| matches!(prop, FilterProp::Named { name } if name == expected_name))
+            )),
+            "missing Sift named-spell gate for {expected_name}: {conditions:?}"
+        );
+    }
+}
+
 /// Issue #1997 — Embiggen: +1/+1 per typeline component on the targeted creature.
 #[test]
 fn embiggen_parses_non_brushwagg_pump_scaled_by_typeline_components() {

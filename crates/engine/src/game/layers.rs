@@ -181,7 +181,10 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                 ..
             } => false,
             CastingPermission::PlayFromExile {
-                duration: Duration::UntilNextTurnOf { .. } | Duration::Permanent,
+                duration:
+                    Duration::UntilNextTurnOf { .. }
+                    | Duration::UntilSourceExilesAnotherCard
+                    | Duration::Permanent,
                 ..
             } => true,
             // CR 513.1: `UntilNextStepOf { step: End }` is expired by

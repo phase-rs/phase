@@ -2858,6 +2858,7 @@ fn scan_duration(x: &Duration) -> Axes {
             acc
         }
         Duration::UntilHostLeavesPlay => Axes::NONE,
+        Duration::UntilSourceExilesAnotherCard => Axes::NONE,
         Duration::UntilNextStepOf { player, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_scope(player));
