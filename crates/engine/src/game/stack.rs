@@ -733,10 +733,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 Zone::Battlefield,
                 None,
             );
-            // CR 601.2a + CR 110.2/110.2a (GitHub #696): A cast permanent's
+            // CR 601.2a + CR 110.2 + CR 110.2a (GitHub #696): A cast permanent's
             // controller defaults to whoever cast it, not the card's owner —
-            // "that player becomes its controller" (601.2a) when the spell is
-            // put on the stack, and per 110.2a "that object enters the
+            // "that player becomes its controller" (CR 601.2a) when the spell is
+            // put on the stack, and per CR 110.2a "that object enters the
             // battlefield under that player's control unless the effect
             // states otherwise." `entry.controller` is the actual caster
             // (stamped at announce_spell_on_stack from the real
