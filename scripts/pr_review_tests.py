@@ -56,6 +56,24 @@ class PrReviewTests(unittest.TestCase):
             [".claude/skills/pr-review-loop/SKILL.md"],
         )
 
+    def test_packet_exposes_quality_label_from_policy(self) -> None:
+        policy = pr_review.Policy({"labels": {"quality": "quality"}})
+        packet = pr_review.make_packet(
+            {
+                "number": 5200,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author": {"login": "contributor"},
+                "files": [],
+            },
+            policy,
+            "maintainer",
+            "full",
+            {},
+        )
+
+        self.assertEqual(packet["policy"]["labels"]["quality"], "quality")
+
     def test_stale_approval_recommends_dequeue_when_queued(self) -> None:
         packet = {
             "pr": {
@@ -101,6 +119,354 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "request_changes")
         self.assertEqual(recommendation["reason"], "proof_required_missing")
         self.assertEqual(recommendation["proof"]["risk_flags"], ["verification-skipped-or-delegated"])
+
+    def test_conflicting_pr_routes_to_update_branch_handler(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5098,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "mergeStateStatus": "DIRTY",
+                "reviewDecision": None,
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "policy_trace": [],
+            "proof": {
+                "proof_required": True,
+                "proof_satisfied": False,
+                "proof_gap": True,
+                "risk_flags": ["missing-ai-contributor-template"],
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "update_branch_for_handler")
+        self.assertEqual(recommendation["reason"], "conflicting")
+
+    def test_requested_changes_recent_current_head_stays_blocked(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5099,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(1),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
+        self.assertEqual(recommendation["reason"], "changes_requested_current_head")
+
+    def test_requested_changes_warns_after_configured_age(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5100,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "changes_requested",
+                "outcome": "changes_requested",
+                "head_sha": "head",
+                "timestamp": self._days_ago(8),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
+        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
+        self.assertEqual(
+            recommendation["requested_changes_expiry"]["warning_marker"],
+            pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+        )
+
+    def test_requested_changes_warning_expires_to_close_handler(self) -> None:
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 5101,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "createdAt": self._days_ago(8),
+                        "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                    }
+                ],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(20),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
+        self.assertEqual(recommendation["reason"], "requested_changes_expired")
+
+    def test_requested_changes_warning_marker_survives_comment_excerpt(self) -> None:
+        pr = {
+            "number": 5103,
+            "state": "OPEN",
+            "headRefOid": "head",
+            "author": {"login": "contributor"},
+            "reviewDecision": "CHANGES_REQUESTED",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": self._days_ago(8),
+                    "body": ("x" * 350) + pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            ],
+            "reviews": [
+                {
+                    "author": {"login": "maintainer"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": self._days_ago(20),
+                    "commit": {"oid": "head"},
+                }
+            ],
+        }
+        packet = {
+            "acting_login": "maintainer",
+            "pr": pr_review.compact_pr_view(pr, "maintainer"),
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertNotIn(
+            pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+            packet["pr"]["comments"][0]["body_excerpt"],
+        )
+        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
+        self.assertEqual(recommendation["reason"], "requested_changes_expired")
+
+    def test_author_followup_after_expiry_warning_resurfaces_review(self) -> None:
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 5102,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "createdAt": self._days_ago(8),
+                        "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                    },
+                    {
+                        "author": "contributor",
+                        "createdAt": self._days_ago(1),
+                        "body_excerpt": "Addressed the requested changes.",
+                    },
+                ],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(20),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_requested_changes_warning"
+        )
+
+    def test_author_review_after_expiry_warning_resurfaces_review(self) -> None:
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 5104,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "createdAt": self._days_ago(8),
+                        "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                    }
+                ],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(20),
+                        "commit": "head",
+                    },
+                    {
+                        "author": "contributor",
+                        "state": "COMMENTED",
+                        "submittedAt": self._days_ago(1),
+                        "commit": "head",
+                    },
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_requested_changes_warning"
+        )
+
+    def test_warning_followup_with_conflict_routes_to_update_branch(self) -> None:
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 5105,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "mergeStateStatus": "DIRTY",
+                "isInMergeQueue": False,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "createdAt": self._days_ago(8),
+                        "body_excerpt": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                    },
+                    {
+                        "author": "contributor",
+                        "createdAt": self._days_ago(1),
+                        "body_excerpt": "Updated, but now there is a conflict.",
+                    },
+                ],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(20),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "update_branch_for_handler")
+        self.assertEqual(recommendation["reason"], "conflicting_after_author_followup")
 
     def test_proof_profile_flags_agent_coauthored_incomplete_template(self) -> None:
         profile = pr_review.proof_profile(
@@ -769,6 +1135,14 @@ class PrReviewTests(unittest.TestCase):
             lines = (state_dir / "review-events.jsonl").read_text().strip().splitlines()
             self.assertEqual(len(lines), 1)
 
+    def test_event_skeleton_lists_expiry_event_types(self) -> None:
+        skeleton = pr_review.event_skeleton(
+            5103, {"headRefOid": "head", "author_login": "contributor"}
+        )
+
+        self.assertIn("requested_changes_warning", skeleton["event_type"])
+        self.assertIn("stale_changes_closed", skeleton["event_type"])
+
     def test_candidate_sort_orders_by_action_priority(self) -> None:
         candidates = [
             {"advisory_action": "skip", "pr": 10},
@@ -808,6 +1182,38 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(
             packet["recommendation"]["reason"], "files_truncated_needs_manual_classification"
         )
+
+    def test_files_truncated_honors_current_head_local_block(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5155,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {
+                "files_truncated": True,
+                "hard_stop_paths": [],
+                "surface": "files_truncated",
+            },
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "blocked",
+                "outcome": "changes_requested",
+                "head_sha": "head",
+                "timestamp": "2026-07-05T20:26:49Z",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
+        self.assertEqual(recommendation["reason"], "local_block_current_head")
 
     def test_normalize_graphql_pr_maps_status_contexts(self) -> None:
         node = {

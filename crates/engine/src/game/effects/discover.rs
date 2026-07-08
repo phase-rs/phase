@@ -67,7 +67,9 @@ pub fn resolve(
         // Check if this is a nonland card with MV ≤ limit
         let is_hit = state.objects.get(&card_id).is_some_and(|obj| {
             let is_land = obj.card_types.core_types.contains(&CoreType::Land);
-            let mv = obj.mana_cost.mana_value();
+            // CR 202.3d + CR 709.4b: the exiled card is off the stack; a split
+            // card's mana value is its combined halves for the ≤ limit hit test.
+            let mv = obj.effective_mana_value();
             !is_land && mv <= limit
         });
 

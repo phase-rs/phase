@@ -12,6 +12,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
@@ -637,11 +638,20 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     {
         let rest = rest.trim();
         let rest_lower = rest.to_lowercase();
-        let is_self = nom_on_lower(rest, &rest_lower, |i| {
-            value((), alt((tag("~"), tag("cardname"), tag("this ")))).parse(i)
+        // CR 201.5 / CR 201.5a / CR 701.21a: "Sacrifice <self>". The shared cost
+        // self-ref combinator distinguishes the host (`~`/"cardname"/"this X" →
+        // SelfRef) from a granted body's by-name reference to its granting object
+        // (GRANTING_SELF_PLACEHOLDER → GrantingObject, e.g. Deconstruction
+        // Hammer's "Sacrifice Deconstruction Hammer").
+        let self_filter = nom_on_lower(rest, &rest_lower, |i| {
+            alt((
+                parse_cost_self_reference,
+                value(TargetFilter::SelfRef, tag("this ")),
+            ))
+            .parse(i)
         });
-        if is_self.is_some() {
-            return AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        if let Some((filter, _)) = self_filter {
+            return AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
         }
         // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
         // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
@@ -845,13 +855,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("exile ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        // CR 112.3: Self-exile costs — "Exile this card from your graveyard/hand"
-        // or "Exile this artifact/creature/enchantment/land"
-        if let Some(zone) = try_parse_self_exile_cost(&rest_lower) {
+        // CR 701.13a: Self-exile costs — "Exile this card from your
+        // graveyard/hand", "Exile this artifact/creature/enchantment/land", or a
+        // granted body naming its granting object ("Exile The Dominion Bracelet"
+        // → GrantingObject).
+        if let Some((filter, zone)) = try_parse_self_exile_cost(&rest_lower) {
             return AbilityCost::Exile {
                 count: 1,
                 zone,
-                filter: Some(TargetFilter::SelfRef),
+                filter: Some(filter),
             };
         }
         // "Exile the top card of your library" / "Exile the top N cards of your library"
@@ -1532,25 +1544,31 @@ fn try_parse_exile_with_aggregate_cost(lower: &str) -> Option<AbilityCost> {
     })
 }
 
-/// CR 112.3: Parse self-exile cost patterns like "this card from your graveyard",
-/// "this artifact", "this creature from your hand". Returns the zone (if specified).
-/// Also handles `~` (normalized card name) variants.
-fn try_parse_self_exile_cost(rest: &str) -> Option<Option<Zone>> {
+/// CR 701.13a: Parse self-exile cost patterns like "this card from
+/// your graveyard", "this artifact", "this creature from your hand". Returns the
+/// self-reference filter (`SelfRef` for the host; `GrantingObject` when a
+/// granted body names its granting object — The Dominion Bracelet's "Exile The
+/// Dominion Bracelet") and the zone (if specified). Also handles `~`
+/// (normalized card name) variants.
+fn try_parse_self_exile_cost(rest: &str) -> Option<(TargetFilter, Option<Zone>)> {
     let rest = rest.trim().trim_end_matches('.');
+    // Bare "~" / "cardname" / granter placeholder means exile the referenced
+    // object itself (from the battlefield, implicit zone).
+    if let Some((filter, tail)) = nom_on_lower(rest, rest, parse_cost_self_reference) {
+        if tail.trim().is_empty() {
+            return Some((filter, None));
+        }
+    }
     let is_self = nom_on_lower(rest, rest, |i| {
         value((), alt((tag("this "), tag("~ ")))).parse(i)
     })
     .is_some();
-    // Bare "~" means exile self (normalized card name)
-    if rest == "~" {
-        return Some(None);
-    }
     // "<self> from your <zone>" / "<self> in your <zone>" — delegate the trailing zone
     // phrase to the shared scanner so hand/graveyard/library/exile are all supported
     // via one combinator with word-boundary safety (rejects "from your graveyardkeeper").
     if is_self {
         if let Some((zone, _ctrl, _props)) = super::oracle_target::scan_zone_phrase(rest) {
-            return Some(Some(zone));
+            return Some((TargetFilter::SelfRef, Some(zone)));
         }
     }
     // "this artifact" / "this creature" / "this enchantment" / "this land" / "this permanent"
@@ -1560,7 +1578,7 @@ fn try_parse_self_exile_cost(rest: &str) -> Option<Option<Zone>> {
             after_this,
             "artifact" | "creature" | "enchantment" | "land" | "permanent" | "card" | "vehicle"
         ) {
-            return Some(None); // battlefield (implicit)
+            return Some((TargetFilter::SelfRef, None)); // battlefield (implicit)
         }
     }
     None
@@ -1631,32 +1649,35 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
-    // "~" is the self-reference placeholder. Preserve it as an explicit
-    // SelfRef so the runtime does not treat an unconstrained filter as "any
-    // permanent you control".
-    if nom_on_lower(filter_text, filter_text, |i| {
-        value(
-            (),
-            alt((
-                tag("~"),
-                tag("this card"),
-                tag("this creature"),
-                tag("this artifact"),
-                tag("this equipment"),
-                tag("this land"),
-                tag("this permanent"),
-                tag("this enchantment"),
-            )),
-        )
+    // CR 201.5 / CR 201.5a: "~" / "this X" is the host self-reference; the
+    // granter placeholder is a granted body's by-name reference to its granting
+    // object. Preserve the explicit filter so the runtime does not treat an
+    // unconstrained filter as "any permanent you control".
+    if let Some((filter, rest)) = nom_on_lower(filter_text, filter_text, |i| {
+        alt((
+            parse_cost_self_reference,
+            value(
+                TargetFilter::SelfRef,
+                alt((
+                    tag("this card"),
+                    tag("this creature"),
+                    tag("this artifact"),
+                    tag("this equipment"),
+                    tag("this land"),
+                    tag("this permanent"),
+                    tag("this enchantment"),
+                )),
+            ),
+        ))
         .parse(i)
-    })
-    .is_some_and(|((), rest)| rest.trim().is_empty())
-    {
-        return Some(AbilityCost::ReturnToHand {
-            count: 1,
-            filter: Some(TargetFilter::SelfRef),
-            from_zone: None,
-        });
+    }) {
+        if rest.trim().is_empty() {
+            return Some(AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(filter),
+                from_zone: None,
+            });
+        }
     }
     let target_text = format!("target {filter_text}");
     let (filter, rem) = parse_target(&target_text);

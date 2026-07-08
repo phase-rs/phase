@@ -137,6 +137,7 @@ function installGameEndTracking(): void {
         winner_kind: winnerKind,
         game_mode: gameMode,
         unimplemented_oracle_ids: (gameState?.unimplemented_oracle_ids ?? []).slice(0, 20),
+        pending_trigger_abandons: (gameState?.pending_trigger_abandons ?? []).slice(0, 20),
       });
       // Flush promptly so a game_end isn't stranded if the user leaves the
       // results screen before the batch timer fires.

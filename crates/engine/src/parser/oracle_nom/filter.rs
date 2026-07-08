@@ -108,6 +108,14 @@ pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
         // (see `collect_target_slots` in `game/ability_utils.rs`) so the player
         // is selected as part of target declaration.
         value(ControllerRef::TargetPlayer, tag("target player controls")),
+        // CR 109.4 + CR 102.2 / CR 102.3: "target opponent controls" — filter
+        // controller is the opponent chosen as a target. Consumer surfaces an
+        // opponent-only companion slot (see `companion_target_player_legal_targets`
+        // in `game/ability_utils.rs`). Runtime read identical to TargetPlayer.
+        value(
+            ControllerRef::TargetOpponent,
+            tag("target opponent controls"),
+        ),
         // CR 508.5 / CR 508.5a: "defending player controls" — the controller
         // scope is the defending player (or that player's planeswalker
         // controller / battle protector) the attacking creature is attacking.
@@ -125,6 +133,12 @@ pub fn parse_zone_controller(input: &str) -> OracleResult<'_, ControllerRef> {
         value(
             ControllerRef::EnchantedPlayer,
             tag("enchanted player controls"),
+        ),
+        // CR 102.1: "the active player controls" — the turn player. Shares no
+        // prefix with the arms above, so dispatch order is not load-bearing.
+        value(
+            ControllerRef::ActivePlayer,
+            tag("the active player controls"),
         ),
     ))
     .parse(input)

@@ -32,9 +32,9 @@ pub fn resolve(
     let object_ids = gain_control_object_targets(state, ability, target);
 
     for obj_id in object_ids {
-        if !state.objects.contains_key(&obj_id) {
+        let Some(old_controller) = state.objects.get(&obj_id).map(|obj| obj.controller) else {
             return Err(EffectError::ObjectNotFound(obj_id));
-        }
+        };
 
         // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
         state.add_transient_continuous_effect(
@@ -46,6 +46,17 @@ pub fn resolve(
             None,
         );
         mark_echo_due_for_new_controller(state, obj_id);
+
+        // CR 613.1b: emit the control-change event so "when you lose control"
+        // triggers on the *previous* controller observe the loss (mirrors
+        // `GainControlAll` and `GiveControl`). Skip no-op self-handoffs.
+        if old_controller != new_controller {
+            events.push(GameEvent::ControllerChanged {
+                object_id: obj_id,
+                old_controller,
+                new_controller,
+            });
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -177,6 +188,19 @@ fn gain_control_object_targets(
     // propagation has populated `ability.targets`.
     if matches!(filter, TargetFilter::SelfRef) {
         return vec![ability.source_id];
+    }
+
+    // CR 608.2c: a precise slot anaphor ("gain control of that Equipment" →
+    // slot 1) indexes the whole resolving chain's declared targets. The
+    // per-clause `ability.targets` may carry only the nearest propagated target,
+    // so route through the root-chain authority; `effect_object_targets` would
+    // fall through to "all inherited targets" when the index is out of range.
+    if let TargetFilter::ParentTargetSlot { index } = filter {
+        if let Some(TargetRef::Object(id)) =
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+        {
+            return vec![id];
+        }
     }
 
     let chosen_objects = super::effect_object_targets(filter, &ability.targets);

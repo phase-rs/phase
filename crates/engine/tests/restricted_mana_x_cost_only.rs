@@ -5,7 +5,7 @@
 //! CR 202.3e (X contributes 0 to mana value off the stack).
 //!
 //! These cards previously surfaced as honest coverage red because
-//! `ManaSpendRestriction::XCostOnly` was dead in `has_payable_branch()` and
+//! `ManaSpendRestriction::XCostOnly` was dead in `is_coverage_supported()` and
 //! `ManaRestriction::OnlyForXCosts` always rejected spell spends. The PR wires
 //! the direct restriction to `SpellMeta.has_x_in_cost` (derived from the cast
 //! cost via `ManaCost::has_x`, same as `build_spell_meta`).
@@ -57,11 +57,11 @@ fn x_cost(generic: u32) -> ManaCost {
 }
 
 #[test]
-fn x_cost_only_has_payable_branch() {
+fn x_cost_only_is_coverage_supported() {
     // Rosheen Meanderer, Elementalist's Palette, Nexos, Rosheen, Roaring Prophet
     // parse to XCostOnly (see oracle.rs mana_spend_restriction_x_cost_only).
     assert!(
-        ManaSpendRestriction::XCostOnly.has_payable_branch(),
+        ManaSpendRestriction::XCostOnly.is_coverage_supported(),
         "XCostOnly must be live once OnlyForXCosts gates on has_x_in_cost"
     );
 }

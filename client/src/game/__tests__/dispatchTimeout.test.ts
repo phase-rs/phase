@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EngineAdapter, GameAction, SubmitResult } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useGameStore } from "../../stores/gameStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
@@ -46,11 +47,13 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     notifyEngineLost.mockClear();
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
   });
 
   beforeEach(() => {
     vi.restoreAllMocks();
     notifyEngineLost.mockClear();
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
   });
 
   it("surfaces recovery and releases the dispatch mutex so a later dispatch is not silently dropped", async () => {
@@ -79,6 +82,7 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     // and the error is merely rethrown — this assertion then fails even though
     // the mutex still resets.
     expect(notifyEngineLost).toHaveBeenCalledWith("submitAction-timeout");
+    expect(useAppNotificationStore.getState().notification).toBeNull();
 
     // The mutex must be free: a second, distinct dispatch reaches submitAction
     // again rather than being queued behind a stuck `isAnimating`. (A held
@@ -88,6 +92,27 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     });
 
     expect(submitAction).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a clear toast when a normal game action fails", async () => {
+    const submitAction = vi
+      .fn<EngineAdapter["submitAction"]>()
+      .mockRejectedValue(new Error("Engine error: Action not allowed: Cannot pay mana cost"));
+
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(emptyState, { submitAction }),
+      gameState: emptyState,
+      gameMode: "ai",
+    });
+
+    await expect(dispatchAction({ type: "ChooseTarget", data: { target: null } }, 0)).rejects.toThrow(
+      "Cannot pay mana cost",
+    );
+
+    expect(useAppNotificationStore.getState().notification).toEqual({
+      title: "Skip target failed",
+      description: "Engine error: Action not allowed: Cannot pay mana cost",
+    });
   });
 
   it("does not fire recovery on a normal successful dispatch", async () => {

@@ -106,14 +106,18 @@ export function useKeyboardShortcuts(): void {
 
         case "Enter": {
           e.preventDefault();
-          // Toggle auto-pass: if any auto-pass is active, cancel it; otherwise set UntilEndOfTurn.
+          // Toggle auto-pass: if any auto-pass is active, cancel it; otherwise
+          // set an UntilTurnBoundary session ending at the current turn's end.
           // Read the LOCAL seat's entry — auto_pass is keyed by the player who
           // armed it, and in multiplayer the local seat is rarely the active player.
           const currentAutoPass = gameState?.auto_pass?.[getPlayerId()];
           if (currentAutoPass) {
             dispatchAction({ type: "CancelAutoPass" });
           } else {
-            dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } });
+            dispatchAction({
+              type: "SetAutoPass",
+              data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+            });
           }
           break;
         }

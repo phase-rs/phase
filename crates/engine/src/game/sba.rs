@@ -485,7 +485,8 @@ fn static_affects_player(
             // CR 109.4: TargetPlayer has no meaning for static-ability scoping
             // against a player. Fail closed.
             Some(ControllerRef::ScopedPlayer) => false,
-            Some(ControllerRef::TargetPlayer) => false,
+            // CR 109.4: TargetOpponent fails closed identically to TargetPlayer here.
+            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
@@ -499,6 +500,9 @@ fn static_affects_player(
             Some(ControllerRef::TriggeringPlayer) => false,
             // CR 303.4b: Enchanted-player scope has no SBA context. Fail closed.
             Some(ControllerRef::EnchantedPlayer) => false,
+            // CR 102.1: this matcher has no `GameState` to read
+            // `active_player` from. Fail closed (mirrors the siblings above).
+            Some(ControllerRef::ActivePlayer) => false,
             None => true,
         },
         Some(TargetFilter::Player) => true,

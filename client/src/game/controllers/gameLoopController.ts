@@ -105,9 +105,14 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     // batch path never engages and the human seat pays a full 200ms beat per
     // cycle — the dominant artificial wait in that case. Rate-driven pressure
     // collapses the beat (Rapid → ~30ms) once the loop is churning.
+    // The user's animation-speed preference composes multiplicatively on top of
+    // the pressure scaling (re-read here, like scheduleDiceAdvance, so a live
+    // slider change applies to the next beat); 0 = immediate pass (0ms beat) but
+    // the pass still dispatches — we never skip it, only its wait.
     const stackLen = useGameStore.getState().gameState?.stack?.length ?? 0;
+    const speed = usePreferencesStore.getState().animationSpeedMultiplier;
     const beat = Math.round(
-      AUTO_PASS_BEAT_MS * pressureMultiplier(effectiveStackPressure(stackLen)),
+      AUTO_PASS_BEAT_MS * pressureMultiplier(effectiveStackPressure(stackLen)) * speed,
     );
     autoPassTimeout = setTimeout(() => {
       autoPassTimeout = null;

@@ -161,13 +161,18 @@ pub(crate) fn apply_zone_exit_cleanup(
         if let Some(obj) = state.objects.get(&object_id) {
             let lki = crate::types::game_state::LKISnapshot {
                 name: obj.name.clone(),
+                token_image_ref: obj.token_image_ref.clone(),
                 power: obj.power,
                 toughness: obj.toughness,
                 // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
                 // base-scope P/T look-back filters read the base, not current.
                 base_power: obj.base_power,
                 base_toughness: obj.base_toughness,
-                mana_value: obj.mana_cost.mana_value(),
+                // CR 202.3d + CR 709.4b: this LKI is captured on leaving the
+                // battlefield or exile (off the stack), so a split card records
+                // its combined mana value and colors (no-op for single-face and
+                // battlefield Rooms, which gate out).
+                mana_value: obj.effective_mana_value(),
                 controller: obj.controller,
                 owner: obj.owner,
                 // CR 400.7: Capture core types for "if it was a creature" patterns.
@@ -175,7 +180,7 @@ pub(crate) fn apply_zone_exit_cleanup(
                 subtypes: obj.card_types.subtypes.clone(),
                 supertypes: obj.card_types.supertypes.clone(),
                 keywords: obj.keywords.clone(),
-                colors: obj.color.clone(),
+                colors: obj.effective_colors(),
                 chosen_attributes: obj.chosen_attributes.clone(),
                 // CR 400.7: Capture counters for "if it had counters on it" patterns.
                 counters: obj.counters.clone(),
@@ -902,7 +907,9 @@ fn capture_linked_exile_snapshot(
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {
                     exiled_id: link.exiled_id,
                     owner: obj.owner,
-                    mana_value: obj.mana_cost.mana_value(),
+                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                    // a split card records its combined mana value.
+                    mana_value: obj.effective_mana_value(),
                 })
             })
         })
@@ -1236,6 +1243,29 @@ fn is_blocked_from_entering_battlefield(state: &GameState, obj: &GameObject) -> 
                 object_id,
                 filter,
                 &super::filter::FilterContext::from_source(state, bf_obj.id),
+            ) {
+                return true;
+            }
+        }
+    }
+
+    // CR 611.2a + CR 614.1d: floating turn-scoped "cards can't enter the
+    // battlefield from <zone>" restrictions (Bad Wolf Bay's chaos ability) block
+    // entry the same way as the permanent CantEnterBattlefieldFrom static. The
+    // object is still in its origin zone here, so the filter's `InAnyZone` prop
+    // matches `obj.zone`.
+    for restriction in &state.restrictions {
+        if let crate::types::ability::GameRestriction::CantEnterBattlefieldFrom {
+            filter,
+            source,
+            ..
+        } = restriction
+        {
+            if super::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &super::filter::FilterContext::from_source(state, *source),
             ) {
                 return true;
             }
@@ -2498,6 +2528,81 @@ mod tests {
             state.objects[&dead].zone,
             Zone::Battlefield,
             "Phased-out Cage must not block ETB from graveyard"
+        );
+    }
+
+    #[test]
+    fn floating_cant_enter_from_exile_blocks_then_expires_at_cleanup() {
+        // CR 611.2a + CR 614.1d + CR 514.2 runtime proof for Bad Wolf Bay's
+        // chaos ability: a floating `GameRestriction::CantEnterBattlefieldFrom`
+        // (origin = exile) blocks an object from entering the battlefield from
+        // exile via the SAME `move_to_zone` -> `is_blocked_from_entering_
+        // battlefield` gate as the Grafdigger's Cage static, and the "this turn"
+        // restriction is pruned at cleanup so a later move succeeds.
+        use crate::types::ability::{
+            FilterProp, GameRestriction, RestrictionExpiry, TargetFilter, TypedFilter,
+        };
+
+        let mut state = setup();
+
+        // A creature card sitting in exile (Bad Wolf Bay exiled it at combat and
+        // wants it back at the next end step — but chaos ensued this turn).
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exiled Bear".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // "cards can't enter from exile this turn" — empty type_filters = any
+        // card; origin zone = exile.
+        state
+            .restrictions
+            .push(GameRestriction::CantEnterBattlefieldFrom {
+                source: crate::types::identifiers::ObjectId(0),
+                expiry: RestrictionExpiry::EndOfTurn,
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Exile],
+                    },
+                ])),
+            });
+
+        // With the restriction active the return is blocked — the object stays
+        // in exile. CR 614.1d: the "[objects] can't enter the battlefield"
+        // continuous effect is a replacement effect; CR 101.2: the "can't"
+        // effect takes precedence over the attempt to enter, so the creature
+        // remains in exile.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, exiled, Zone::Battlefield, &mut events);
+        assert_eq!(
+            state.objects[&exiled].zone,
+            Zone::Exile,
+            "floating CantEnterBattlefieldFrom must block ETB from exile"
+        );
+
+        // CR 514.2: the "this turn" restriction ends at cleanup.
+        let mut cleanup_events = Vec::new();
+        crate::game::turns::execute_cleanup(&mut state, &mut cleanup_events);
+        assert!(
+            state.restrictions.is_empty(),
+            "EndOfTurn restriction must be pruned at cleanup, got {:?}",
+            state.restrictions
+        );
+
+        // Now the same move succeeds — the gate no longer fires.
+        let mut events2 = Vec::new();
+        move_to_zone(&mut state, exiled, Zone::Battlefield, &mut events2);
+        assert_eq!(
+            state.objects[&exiled].zone,
+            Zone::Battlefield,
+            "after the restriction expires, ETB from exile must succeed"
         );
     }
 

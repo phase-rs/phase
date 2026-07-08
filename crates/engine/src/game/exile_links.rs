@@ -315,6 +315,7 @@ mod tests {
             single_use: false,
             cast_cost_raise: None,
             land_enter_tapped: EtbTapState::Unspecified,
+            invalidation: None,
         }
     }
 

@@ -40,6 +40,17 @@ function makeState() {
   });
 }
 
+function makeMixedState() {
+  return buildGameState({
+    seat_order: [0, 1, 2],
+    objects: buildObjectMap(
+      makeCreature(101, "Goblin"),
+      makeCreature(102, "Elf"),
+      makeCreature(103, "Dragon"),
+    ),
+  });
+}
+
 function renderPicker() {
   const onConfirm = vi.fn();
   const onCancel = vi.fn();
@@ -93,6 +104,21 @@ describe("AttackTargetPicker", () => {
     fireEvent.click(confirm);
 
     expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm).toHaveBeenCalledWith([
+      [101, P1],
+      [102, P1],
+      [103, P2],
+    ]);
+  });
+
+  it("even-splits all attackers globally instead of front-loading each singleton stack", () => {
+    useGameStore.setState({ gameState: makeMixedState() });
+    const { onConfirm } = renderPicker();
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: "Even Split All" }));
+    fireEvent.click(screen.getByRole("button", { name: /Declare 3 Attackers/ }));
+
     expect(onConfirm).toHaveBeenCalledWith([
       [101, P1],
       [102, P1],

@@ -183,7 +183,11 @@ fn top_card_of_library(state: &GameState, player: PlayerId) -> Option<ObjectId> 
 }
 
 /// Get the mana value of a card by its object ID.
+///
+/// CR 202.3d + CR 709.4b: A clashed card is on top of a library (off the stack),
+/// so a split card reports its combined mana value; `effective_mana_value`
+/// no-ops for single-face cards.
 fn card_mana_value(state: &GameState, object_id: ObjectId) -> Option<u32> {
     let obj = state.objects.get(&object_id)?;
-    Some(obj.mana_cost.mana_value())
+    Some(obj.effective_mana_value())
 }

@@ -1,6 +1,7 @@
 import { strToU8, zipSync } from "fflate";
 import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameState } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
@@ -57,6 +58,7 @@ function patchConsole(): void {
 patchConsole();
 
 export function DebugPanel() {
+  const { t } = useTranslation();
   const open = useUiStore((s) => s.debugPanelOpen);
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
   const gameState = useGameStore((s) => s.gameState);
@@ -160,6 +162,14 @@ export function DebugPanel() {
         setStatus({ type: "error", message: "Failed to export game state" });
       });
   }, [gameState]);
+
+  // Same destination as the top-left report flag. Close this panel first — it
+  // renders at z-[9999], above the report dialog's z-50 overlay, so leaving it
+  // open would hide the dialog behind it.
+  const handleReportCard = useCallback(() => {
+    useUiStore.getState().toggleDebugPanel();
+    useUiStore.getState().openCardReportDialog();
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -296,6 +306,35 @@ export function DebugPanel() {
           </button>
         ))}
       </div>
+
+      {/* Report a card — always visible regardless of tab; mirrors the
+          top-left report flag so players can flag a mis-rendered/misbehaving
+          card from here too. */}
+      <section className="border-b border-gray-700 px-3 py-2">
+        <p className="mb-1 text-xs text-gray-500">
+          {t("help.reportCardNudge.debugPrompt")}
+        </p>
+        <button
+          onClick={handleReportCard}
+          disabled={!gameState}
+          className="flex w-full items-center justify-center gap-1.5 rounded bg-red-600/90 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 20 20"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="h-3.5 w-3.5"
+          >
+            <path d="M4 2.5v15" />
+            <path d="M4 3.5h9.5l-1.6 3 1.6 3H4" />
+          </svg>
+          {t("help.reportCardNudge.open")}
+        </button>
+      </section>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {activeTab === "actions" ? (
