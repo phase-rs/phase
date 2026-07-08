@@ -1222,6 +1222,29 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         if !defs.is_empty() {
             return defs;
         }
+        // CR 702.11 + CR 702.18 + CR 611.3a: Inverted player+object compound
+        // keyword grants ("As long as <cond>, you and <objects> have hexproof")
+        // must decompose into TWO defs (object Continuous + player Hexproof/
+        // Shroud/PlayerProtection). The single-return inverted rewrite can only
+        // keep one def, so rewrite to the canonical trailing-gate form and
+        // re-enter through the multi compound-keyword splitter here.
+        let canon_lower = split.canonical.to_lowercase();
+        if let Some(mut defs) =
+            parse_compound_subject_keyword_static(&split.canonical, &canon_lower)
+        {
+            let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
+                    text: split.condition_text.clone(),
+                },
+            );
+            for def in &mut defs {
+                if def.condition.is_none() {
+                    def.condition = Some(condition.clone());
+                }
+                def.description = Some(stripped.to_string());
+            }
+            return defs;
+        }
     }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
@@ -1241,6 +1264,11 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: "You and <objects> have
+    // <player-applicable keyword>" (Sigarda / Serra's Emissary / Gruul Spellbreaker).
+    // Must claim before the single-return fallback, which otherwise emits one
+    // bogus Continuous Or{empty-typed You, objects} that grants the keyword to
+    // every permanent you control.
     if let Some(defs) = parse_compound_subject_keyword_static(&stripped, &lower) {
         return defs;
     }
