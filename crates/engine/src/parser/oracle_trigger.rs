@@ -12374,48 +12374,50 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             // cast origin only when the text before it is exactly the type-list
             // spell (see the emptiness guard below) — else the "from" belongs to
             // the effect clause and this split is ignored.
-            let (type_part, cast_origin, origin_split) =
+            let (type_part, cast_origin, origin_rest_ok) =
                 match nom_primitives::split_once_on(trimmed, " from ") {
                     Ok((_, (before, from_tail))) => {
                         let tail = format!("from {from_tail}");
                         match parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone) {
                             // A concrete zone is a genuine cast origin; `Any`
                             // (unrecognized zone) means the "from" wasn't one.
-                            Ok((_, origin)) if origin != OriginConstraint::Any => {
-                                (before, origin, true)
+                            Ok((rest, origin)) if origin != OriginConstraint::Any => {
+                                let rest = rest.trim_start();
+                                let rest_ok = rest.is_empty()
+                                    || tag::<_, _, OracleError<'_>>(",").parse(rest).is_ok();
+                                (before, origin, rest_ok)
                             }
-                            _ => (trimmed, OriginConstraint::Any, false),
+                            _ => (trimmed, OriginConstraint::Any, true),
                         }
                     }
-                    Err(_) => (trimmed, OriginConstraint::Any, false),
+                    Err(_) => (trimmed, OriginConstraint::Any, true),
                 };
             let type_part = type_part.trim();
-            let (filter, remainder) = parse_type_phrase(type_part);
-            let consumed = &type_part[..type_part.len() - remainder.len()];
-            let is_comma_type_list = matches!(
-                &filter,
-                TargetFilter::Or { filters } if filters.len() >= 2
-            ) && nom_primitives::scan_contains(consumed, ", ");
-            let remainder_ok = if origin_split {
-                // A cast origin was peeled, so the type phrase must be JUST the
-                // list (fully consumed); a non-empty remainder means the "from"
-                // was part of the effect, not a cast origin — decline.
-                remainder.trim().is_empty()
-            } else {
-                let rest = remainder.trim_start();
-                rest.is_empty() || tag::<_, _, OracleError<'_>>(",").parse(rest).is_ok()
-            };
-            if is_comma_type_list && remainder_ok {
-                let filter = if is_another {
-                    add_another_prop(filter)
-                } else {
-                    filter
-                };
-                def.valid_card = Some(filter);
-                if origin_split {
-                    def.spell_cast_origin = cast_origin;
+            if let Ok((_, (type_phrase, post_spell))) =
+                nom_primitives::split_once_on(type_part, " spell")
+            {
+                let post_spell = post_spell.trim_start();
+                let post_spell_ok = post_spell.is_empty()
+                    || tag::<_, _, OracleError<'_>>(",").parse(post_spell).is_ok();
+                let (filter, remainder) = parse_type_phrase(type_phrase.trim());
+                let consumed = &type_phrase[..type_phrase.len() - remainder.len()];
+                let is_comma_type_list = matches!(
+                    &filter,
+                    TargetFilter::Or { filters } if filters.len() >= 2
+                ) && nom_primitives::scan_contains(consumed, ", ");
+                let remainder_ok = remainder.trim().is_empty();
+                if is_comma_type_list && remainder_ok && post_spell_ok && origin_rest_ok {
+                    let filter = if is_another {
+                        add_another_prop(filter)
+                    } else {
+                        filter
+                    };
+                    def.valid_card = Some(filter);
+                    if cast_origin != OriginConstraint::Any {
+                        def.spell_cast_origin = cast_origin;
+                    }
+                    return Some((TriggerMode::SpellCast, def));
                 }
-                return Some((TriggerMode::SpellCast, def));
             }
         }
 
