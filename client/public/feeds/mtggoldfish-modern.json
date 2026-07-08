@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-07-07T00:00:00Z",
+  "updated": "2026-07-08T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1174,6 +1174,121 @@
       ]
     },
     {
+      "name": "Boros Ponza",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Cori Mountain Monastery"
+        },
+        {
+          "count": 4,
+          "name": "Demolition Field"
+        },
+        {
+          "count": 4,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 3,
+          "name": "Sunken Citadel"
+        },
+        {
+          "count": 4,
+          "name": "Field of Ruin"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Galvanic Discharge"
+        },
+        {
+          "count": 1,
+          "name": "The Mind Stone"
+        },
+        {
+          "count": 4,
+          "name": "White Orchid Phantom"
+        },
+        {
+          "count": 2,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 4,
+          "name": "Cleansing Wildfire"
+        },
+        {
+          "count": 3,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 5,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Solitude"
+        },
+        {
+          "count": 4,
+          "name": "Wrath of the Skies"
+        },
+        {
+          "count": 1,
+          "name": "Wrath of God"
+        },
+        {
+          "count": 4,
+          "name": "Path to Exile"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Kataki, War's Wage"
+        },
+        {
+          "count": 4,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Vexing Bauble"
+        },
+        {
+          "count": 1,
+          "name": "Avengers Disassembled"
+        },
+        {
+          "count": 3,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 3,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Celestial Purge"
+        }
+      ]
+    },
+    {
       "name": "Living End",
       "author": "MTGGoldfish",
       "colors": [
@@ -1322,170 +1437,6 @@
         {
           "count": 2,
           "name": "Brotherhood's End"
-        }
-      ]
-    },
-    {
-      "name": "Esper GenericBlink",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 1,
-          "name": "March of Otherworldly Light"
-        },
-        {
-          "count": 2,
-          "name": "Psychic Frog"
-        },
-        {
-          "count": 4,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 3,
-          "name": "Witch Enchanter"
-        },
-        {
-          "count": 1,
-          "name": "Flickerwisp"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 3,
-          "name": "Ephemerate"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 2,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 4,
-          "name": "Overlord of the Balemurk"
-        },
-        {
-          "count": 1,
-          "name": "Boggart Trawler"
-        },
-        {
-          "count": 1,
-          "name": "Emperor of Bones"
-        },
-        {
-          "count": 3,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 3,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 2,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 4,
-          "name": "Marsh Flats"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 2,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 3,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 1,
-          "name": "Shadowy Backstreet"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
-        },
-        {
-          "count": 2,
-          "name": "White Orchid Phantom"
-        },
-        {
-          "count": 3,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 1,
-          "name": "High Noon"
-        },
-        {
-          "count": 1,
-          "name": "Drannith Magistrate"
-        },
-        {
-          "count": 2,
-          "name": "Nihil Spellbomb"
-        },
-        {
-          "count": 2,
-          "name": "Clarion Conqueror"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 1,
-          "name": "Celestial Purge"
         }
       ]
     }
