@@ -13,6 +13,7 @@
 //! graveyard (destroyed) and the graveyard Zombie is in hand (returned).
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::counter::CounterType;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -20,6 +21,8 @@ use engine::types::ObjectId;
 
 const ORACLE: &str = "Destroy target non-Zombie creature. It can't be regenerated. \
      Return up to one target Zombie card from your graveyard to your hand.";
+const SAME_FILTER_OPTIONAL_SLOT_ORACLE: &str =
+    "Tap target creature. Put a +1/+1 counter on up to one target creature.";
 
 #[test]
 fn cruel_revival_destroys_creature_and_returns_graveyard_zombie() {
@@ -91,4 +94,27 @@ fn cruel_revival_destroys_creature_when_bounce_declined() {
     outcome.assert_zone(&[victim], Zone::Graveyard);
     // The Zombie was not targeted, so it stays in the graveyard.
     outcome.assert_zone(&[zombie], Zone::Graveyard);
+}
+
+#[test]
+fn independent_optional_sub_target_does_not_inherit_same_filter_parent_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let creature = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Same Filter Optional Slot Probe",
+            true,
+            SAME_FILTER_OPTIONAL_SLOT_ORACLE,
+        )
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_objects(&[creature]).resolve();
+
+    outcome.assert_tapped(creature, true);
+    outcome.assert_counters(creature, CounterType::Plus1Plus1, 0);
 }

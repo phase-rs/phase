@@ -2188,6 +2188,17 @@ fn sub_ability_is_reflexive(sub: &ResolvedAbility) -> bool {
     }
 }
 
+fn sub_ability_target_belongs_to_reflexive_context(sub: &ResolvedAbility) -> bool {
+    match &sub.condition {
+        Some(AbilityCondition::WhenYouDo) => true,
+        Some(condition) => {
+            condition_depends_on_effect_performed(condition)
+                || condition_depends_on_zone_change_this_way(condition)
+        }
+        None => false,
+    }
+}
+
 fn condition_contains_city_blessing(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::HasCityBlessing => true,
@@ -7815,27 +7826,25 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
             // CR 115.6 + CR 608.2c (issue #5281): Inherit the parent instruction's
-            // targets, but NEVER hand a parent OBJECT target to a sub-effect that
-            // carries its OWN independent object-target slot. Player targets are
+            // targets, but NEVER hand a parent OBJECT target to an independent
+            // object-target slot whose empty `sub.targets` means the slot was
+            // legally declined (Cruel Revival's "Return up to one target Zombie
+            // card from your graveyard ..." per CR 115.6). Player targets are
             // shared across the chain (Paradigm's "that player" draw + lose-life;
-            // relative-controller change-zone) and are always inherited. A sub with
-            // an INDEPENDENT target filter (Cruel Revival's "Return up to one target
-            // Zombie card from your graveyard ...") was given its own slot; an empty
-            // `sub.targets` therefore means its optional target was legally declined
-            // (CR 115.6), so it must resolve as a no-op — it must not steal the
-            // parent's destroy target even if that object happens to satisfy the
-            // sub's filter. Only an anaphoric sub (no own filter — "It can't be
-            // regenerated" — or a `ParentTarget`/relative-controller ref) inherits
-            // the parent's object targets.
-            let has_independent_filter =
+            // relative-controller change-zone) and are always inherited. Reflexive
+            // gated subs ("When you discard a card this way, put a counter on target
+            // Faerie") keep inheriting their selected target through the parent
+            // chain; their condition decides whether the sub fires.
+            let has_independent_target_slot =
                 crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
-                    && !effect_refs_parent_target(&sub.effect);
+                    && !effect_refs_parent_target(&sub.effect)
+                    && !sub_ability_target_belongs_to_reflexive_context(sub);
             sub_with_targets.targets = ability
                 .targets
                 .iter()
                 .filter(|target_ref| match target_ref {
                     TargetRef::Player(_) => true,
-                    TargetRef::Object(_) => !has_independent_filter,
+                    TargetRef::Object(_) => !has_independent_target_slot,
                 })
                 .cloned()
                 .collect();
