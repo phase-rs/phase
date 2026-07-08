@@ -106,7 +106,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_you_have_conditions,
         parse_that_player_has_conditions,
         parse_there_are_conditions,
-        // CR 201.2 + CR 608.2c: Named-pair MUST precede the generic compound
+        // CR 201.2: Named-pair MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
         parse_repeated_named_control_presence,
@@ -564,7 +564,7 @@ enum NamedControlConnector {
     Or,
 }
 
-/// CR 201.2 + CR 608.2c: Parse repeated named-control items where each item
+/// CR 201.2: Parse repeated named-control items where each item
 /// carries its own type phrase:
 ///
 /// - "you control an enchantment named A and a land named B"
