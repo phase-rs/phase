@@ -1887,6 +1887,12 @@ pub(super) fn parse_targeted_action_ast(
                         enter_tapped: false,
                         enter_with_counters: vec![],
                     })
+                } else if origin.is_some() {
+                    Some(TargetedImperativeAst::ReturnToZone {
+                        target,
+                        origin,
+                        destination: Zone::Hand,
+                    })
                 } else {
                     Some(TargetedImperativeAst::Return { target, selection })
                 }

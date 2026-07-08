@@ -8736,15 +8736,14 @@ fn call_damage_control_distributes_shared_return_effect_across_modes() {
     assert_eq!(r.abilities.len(), 4);
     for (ability, expected) in r.abilities.iter().zip(expected_types) {
         match ability.effect.as_ref() {
-            Effect::Bounce {
-                target,
+            Effect::ChangeZone {
+                origin,
                 destination,
+                target,
                 ..
             } => {
-                assert_eq!(
-                    *destination, None,
-                    "no explicit destination => return to hand"
-                );
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Hand);
                 match target {
                     TargetFilter::Typed(TypedFilter {
                         type_filters,
@@ -8766,7 +8765,7 @@ fn call_damage_control_distributes_shared_return_effect_across_modes() {
                     other => panic!("expected Typed graveyard target, got {other:?}"),
                 }
             }
-            other => panic!("each mode must lower to Bounce, got {other:?}"),
+            other => panic!("each mode must lower to ChangeZone, got {other:?}"),
         }
     }
     assert!(r.parse_warnings.is_empty());

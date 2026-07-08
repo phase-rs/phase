@@ -16596,6 +16596,60 @@ fn instead_condition_recognizes_sacrificed_creature_was_a_subtype() {
     }
 }
 
+/// CR 117.1 + CR 400.7j + CR 608.2k + CR 614.1a: Witch's Oven class —
+/// the "sacrificed creature" cost-paid object is checked against its LKI
+/// toughness to replace the token quantity. This is a property predicate on
+/// the paid object, not a target/anaphor lookup.
+#[test]
+fn instead_condition_recognizes_sacrificed_creature_possessive_toughness() {
+    let ability = parse_effect_chain(
+        "Create a Food token. If the sacrificed creature's toughness was 4 or greater, create two Food tokens instead.",
+        AbilityKind::Spell,
+    );
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("expected instead sub_ability");
+    let cond = sub
+        .condition
+        .as_ref()
+        .expect("instead sub_ability must carry a condition");
+    let AbilityCondition::ConditionInstead { inner } = cond else {
+        panic!("expected ConditionInstead, got {cond:?}");
+    };
+    let AbilityCondition::CostPaidObjectMatchesFilter { filter } = inner.as_ref() else {
+        panic!("expected CostPaidObjectMatchesFilter, got {inner:?}");
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected Typed filter, got {filter:?}");
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "type_filters must include Creature noun, got {:?}",
+        typed.type_filters
+    );
+    assert!(
+        typed.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }
+        )),
+        "properties must include toughness >= 4, got {:?}",
+        typed.properties
+    );
+    match &*sub.effect {
+        Effect::Token { name, count, .. } => {
+            assert_eq!(name, "Food");
+            assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+        }
+        other => panic!("override should create two Food tokens, got {other:?}"),
+    }
+}
+
 /// Regression guard: pre-existing "it's <color>" anaphoric form must
 /// still produce a TargetMatchesFilter condition. The refactor split
 /// subject and verb into independent combinators; this test verifies
@@ -21940,8 +21994,17 @@ fn chained_return_up_to_one_target_creature_card_preserves_multi_target() {
         sub.multi_target,
         Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
     );
-    let Effect::Bounce { target, .. } = sub.effect.as_ref() else {
-        panic!("expected Bounce sub-effect, got {:?}", sub.effect);
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!(
+            "expected graveyard-to-hand sub-effect, got {:?}",
+            sub.effect
+        );
     };
     let TargetFilter::Typed(filter) = target else {
         panic!("expected typed return target, got {target:?}");
@@ -23410,7 +23473,12 @@ fn deadly_brew_sacrifice_planeswalker_return_condition() {
         }) if type_filters.contains(&TypeFilter::Permanent)
     ));
     match &*return_sub.effect {
-        Effect::Bounce { target, .. } => {
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target,
+            ..
+        } => {
             let TargetFilter::Typed(typed) = target else {
                 panic!(
                     "expected typed graveyard permanent target, got {0:?}",
@@ -23431,7 +23499,7 @@ fn deadly_brew_sacrifice_planeswalker_return_condition() {
                 .iter()
                 .any(|p| matches!(p, FilterProp::Another)));
         }
-        other => panic!("expected graveyard-to-hand Bounce, got {other:?}"),
+        other => panic!("expected graveyard-to-hand ChangeZone, got {other:?}"),
     }
 }
 
@@ -36550,6 +36618,34 @@ fn play_exiled_card_this_turn_regression_unchanged() {
     assert_eq!(mana_spend_permission, None);
 }
 
+#[test]
+fn play_that_card_until_next_same_source_exile_has_source_invalidation() {
+    let ability = parse_effect_chain(
+        "Exile the top card of your library. You may play that card until you exile another card with this enchantment.",
+        AbilityKind::Spell,
+    );
+    let grant = ability
+        .sub_ability
+        .as_ref()
+        .expect("expected PlayFromExile grant after ExileTop");
+    let Effect::GrantCastingPermission { permission, .. } = grant.effect.as_ref() else {
+        panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+    };
+    let CastingPermission::PlayFromExile {
+        duration,
+        invalidation,
+        ..
+    } = permission
+    else {
+        panic!("expected PlayFromExile permission, got {permission:?}");
+    };
+    assert_eq!(*duration, Duration::Permanent);
+    assert_eq!(
+        *invalidation,
+        Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource)
+    );
+}
+
 /// Discriminating: the "for as long as it remains exiled, and mana of any
 /// type..." form (Blightwing Bandit class) must keep dispatching to
 /// `try_parse_exile_play_grant_with_any_mana` (duration `Permanent`), NOT be
@@ -41991,5 +42087,168 @@ fn slimefoot_reanimate_self_and_up_to_one_creature_shape() {
     assert!(
         !reanimate_subtree_has_unimplemented(ability),
         "the reanimation ability must have no Unimplemented node: {ability:#?}"
+    );
+}
+
+fn type_filter_tree_contains(filter: &TypeFilter, needle: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::AnyOf(filters) => filters
+            .iter()
+            .any(|filter| type_filter_tree_contains(filter, needle)),
+        TypeFilter::Non(inner) => type_filter_tree_contains(inner, needle),
+        other => other == needle,
+    }
+}
+
+fn target_filter_tree_contains_type(filter: &TargetFilter, needle: &TypeFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .type_filters
+            .iter()
+            .any(|filter| type_filter_tree_contains(filter, needle)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_tree_contains_type(filter, needle)),
+        TargetFilter::Not { filter } => target_filter_tree_contains_type(filter, needle),
+        _ => false,
+    }
+}
+
+fn target_filter_tree_has_property(
+    filter: &TargetFilter,
+    predicate: fn(&FilterProp) -> bool,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(predicate),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_tree_has_property(filter, predicate)),
+        TargetFilter::Not { filter } => target_filter_tree_has_property(filter, predicate),
+        _ => false,
+    }
+}
+
+fn find_change_zone_to(
+    ability: &AbilityDefinition,
+    destination: Zone,
+) -> Option<&AbilityDefinition> {
+    if matches!(
+        ability.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: d,
+            ..
+        } if *d == destination
+    ) {
+        return Some(ability);
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| find_change_zone_to(sub, destination))
+        .or_else(|| {
+            ability
+                .else_ability
+                .as_deref()
+                .and_then(|else_ability| find_change_zone_to(else_ability, destination))
+        })
+}
+
+#[test]
+fn return_from_graveyard_to_hand_lowers_to_change_zone() {
+    let ability = parse_effect_chain(
+        "return up to one target non-Avatar creature or planeswalker card from your graveyard to your hand",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = ability.effect.as_ref()
+    else {
+        panic!(
+            "expected graveyard-to-hand ChangeZone, got {:?}",
+            ability.effect
+        );
+    };
+    assert!(
+        target_filter_tree_contains_type(target, &TypeFilter::Creature),
+        "target must include creature cards, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_contains_type(target, &TypeFilter::Planeswalker),
+        "target must include planeswalker cards, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_has_property(target, |prop| matches!(
+            prop,
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            }
+        )),
+        "target must be constrained to graveyard, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_has_property(target, |prop| matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        )),
+        "target must be constrained to your graveyard, got {target:?}"
+    );
+}
+
+#[test]
+fn optional_sacrifice_if_you_do_return_keeps_graveyard_filter() {
+    let ability = parse_effect_chain(
+        "You may sacrifice three other nonland permanents. If you do, return a creature card from your graveyard to the battlefield with a finality counter on it.",
+        AbilityKind::Spell,
+    );
+    let returned = find_change_zone_to(&ability, Zone::Battlefield)
+        .expect("expected graveyard-to-battlefield return");
+    assert!(
+        matches!(
+            returned.condition,
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed
+            })
+        ),
+        "return must be gated on the optional sacrifice, got {:?}",
+        returned.condition
+    );
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        target,
+        enter_with_counters,
+        ..
+    } = returned.effect.as_ref()
+    else {
+        panic!("expected graveyard ChangeZone, got {:?}", returned.effect);
+    };
+    assert_ne!(
+        target,
+        &TargetFilter::ParentTarget,
+        "return must keep a selectable graveyard filter, not ParentTarget"
+    );
+    assert!(
+        target_filter_tree_contains_type(target, &TypeFilter::Creature),
+        "target must include creature cards, got {target:?}"
+    );
+    assert!(
+        target_filter_tree_has_property(target, |prop| matches!(
+            prop,
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            }
+        )),
+        "target must be constrained to graveyard, got {target:?}"
+    );
+    assert!(
+        enter_with_counters.iter().any(|(counter, count)| {
+            matches!(counter, CounterType::Generic(name) if name == "finality")
+                && matches!(count, QuantityExpr::Fixed { value: 1 })
+        }),
+        "return must carry a finality counter, got {enter_with_counters:?}"
     );
 }

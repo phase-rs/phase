@@ -5602,6 +5602,9 @@ fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<Abilit
     if let Some(condition) = parse_cost_paid_object_subject_verb_form(lower) {
         return Some(condition);
     }
+    if let Some(condition) = parse_cost_paid_object_possessive_pt_comparison(lower) {
+        return Some(condition);
+    }
     parse_cost_paid_object_definite_noun_form(lower)
 }
 
@@ -5704,6 +5707,38 @@ fn parse_cost_paid_object_definite_noun_form(lower: &str) -> Option<AbilityCondi
         }
     } else {
         condition
+    })
+}
+
+fn parse_cost_paid_object_possessive_pt_comparison(lower: &str) -> Option<AbilityCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the ").parse(lower).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("discarded "),
+        tag("sacrificed "),
+        tag("exiled "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, noun_filter) = parse_cost_paid_object_noun_prefix(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("'s ").parse(rest).ok()?;
+    let (rest, stat) = parse_reflexive_pt_stat(rest).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>(" was "), tag(" is ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, (comparator, value)) = parse_threshold_with_exactly(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(noun_filter).properties(vec![
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            },
+        ])),
     })
 }
 

@@ -2535,6 +2535,12 @@ pub enum CastingPermission {
         /// "enters tapped" is a CR 614.1c "[permanent] enters ..." replacement.
         #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
         land_enter_tapped: EtbTapState,
+        /// CR 611.2a: Additional non-time invalidation printed on the same
+        /// play-from-exile permission. `None` preserves ordinary impulse grants;
+        /// source-bound forms are pruned by the grant resolver when their
+        /// printed invalidation event occurs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invalidation: Option<PlayPermissionInvalidation>,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -2582,6 +2588,16 @@ pub enum CastingPermission {
     /// when the special action resolves; the permission is scoped to the exile
     /// zone and cleared when the object leaves exile.
     Foretold { cost: ManaCost, turn_foretold: u32 },
+}
+
+/// CR 611.2a: Non-time condition that invalidates a per-card play permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PlayPermissionInvalidation {
+    /// "Until you exile another card with [this source]" — the next grant from
+    /// the same source to the same player replaces earlier grants from that
+    /// source without touching unrelated impulse permissions.
+    UntilNextGrantFromSameSource,
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.

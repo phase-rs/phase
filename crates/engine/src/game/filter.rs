@@ -5018,12 +5018,26 @@ fn object_shares_quality_with_reference_filter(
         return event_context_references
             .into_iter()
             .filter_map(|target| match target {
-                TargetRef::Object(reference_id) => state.objects.get(&reference_id),
+                TargetRef::Object(reference_id) => Some(reference_id),
                 TargetRef::Player(_) => None,
             })
-            .any(|reference_obj| {
-                let values =
-                    object_shared_quality_values(reference_obj, quality, &state.all_creature_types);
+            .any(|reference_id| {
+                let values = state
+                    .objects
+                    .get(&reference_id)
+                    .map(|reference_obj| {
+                        object_shared_quality_values(
+                            reference_obj,
+                            quality,
+                            &state.all_creature_types,
+                        )
+                    })
+                    .or_else(|| {
+                        state.lki_cache.get(&reference_id).map(|lki| {
+                            lki_shared_quality_values(lki, quality, &state.all_creature_types)
+                        })
+                    })
+                    .unwrap_or_default();
                 object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
             });
     }
