@@ -154,21 +154,24 @@ jobs:
         run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Cache MTGJSON data
-        # Scoped to AtomicCards.json under its own `mtgjson-atomic-` namespace —
-        # this job needs nothing else from data/mtgjson. The per-content
-        # namespace stops draft-pools (which populates only SetList + sets/,
-        # never AtomicCards) from clobbering this job's key with a partial dir.
+        # Scoped to the cardgen inputs this job needs. AtomicCards carries Oracle
+        # text; CardTypes keeps oracle-gen's subtype table aligned with the
+        # committed engine parser data. The per-content namespace stops
+        # draft-pools (which populates only SetList + sets/, never AtomicCards)
+        # from clobbering this job's key with a partial dir.
         #
         # Exact weekly key, NO restore-keys: a new week misses, so the download
         # step re-fetches fresh MTGJSON data (the weekly refresh we want); a
-        # restore-keys fallback would pin us to last week's AtomicCards forever
+        # restore-keys fallback would pin us to last week's inputs forever
         # because the download is file-existence-gated. Same-week runs reuse the
         # exact-key hit.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
-          path: data/mtgjson/AtomicCards.json
-          key: mtgjson-atomic-${{ steps.cache-keys.outputs.week }}
+          path: |
+            data/mtgjson/AtomicCards.json
+            data/mtgjson/CardTypes.json
+          key: mtgjson-cardgen-inputs-${{ steps.cache-keys.outputs.week }}
 
       - name: Download MTGJSON data
         # Gate on file existence, not cache-hit: actions/cache restore-keys can
@@ -182,6 +185,11 @@ jobs:
             mkdir -p data/mtgjson
             source scripts/lib/mtgjson-fetch.sh
             mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          fi
+          if [ ! -f data/mtgjson/CardTypes.json ]; then
+            mkdir -p data/mtgjson
+            source scripts/lib/mtgjson-fetch.sh
+            mtgjson_download CardTypes.json data/mtgjson/CardTypes.json
           fi
 
       - name: Cache generated card data
@@ -197,7 +205,7 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-with-cardtypes-${{ hashFiles('data/mtgjson/AtomicCards.json', 'data/mtgjson/CardTypes.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         # All engine-backed tools in this job use the SAME (profile, features)

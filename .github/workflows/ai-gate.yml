@@ -36,7 +36,7 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-with-cardtypes-${{ hashFiles('data/mtgjson/AtomicCards.json', 'data/mtgjson/CardTypes.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
@@ -44,6 +44,7 @@ jobs:
           mkdir -p data/mtgjson
           source scripts/lib/mtgjson-fetch.sh
           mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          mtgjson_download CardTypes.json data/mtgjson/CardTypes.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Run quick AI gate
@@ -73,7 +74,7 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-with-cardtypes-${{ hashFiles('data/mtgjson/AtomicCards.json', 'data/mtgjson/CardTypes.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
@@ -81,6 +82,7 @@ jobs:
           mkdir -p data/mtgjson
           source scripts/lib/mtgjson-fetch.sh
           mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          mtgjson_download CardTypes.json data/mtgjson/CardTypes.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Run full AI gate
@@ -126,7 +128,7 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-with-cardtypes-${{ hashFiles('data/mtgjson/AtomicCards.json', 'data/mtgjson/CardTypes.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
@@ -134,6 +136,7 @@ jobs:
           mkdir -p data/mtgjson
           source scripts/lib/mtgjson-fetch.sh
           mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          mtgjson_download CardTypes.json data/mtgjson/CardTypes.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       # debug profile (authoritative): counter VALUES are profile-independent and the
@@ -161,7 +164,7 @@ jobs:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-with-cardtypes-${{ hashFiles('data/mtgjson/AtomicCards.json', 'data/mtgjson/CardTypes.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
@@ -169,6 +172,7 @@ jobs:
           mkdir -p data/mtgjson
           source scripts/lib/mtgjson-fetch.sh
           mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          mtgjson_download CardTypes.json data/mtgjson/CardTypes.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       # debug profile (authoritative): counter VALUES are profile-independent and the
