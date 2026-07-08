@@ -215,6 +215,78 @@ fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, (
     .parse(input)
 }
 
+/// CR 502.3 + CR 611.3a: Single authority for the Seedborn-class untap static —
+/// "untap <subject> during each other player's untap step". Handles both the
+/// typed "untap all <type> you control" form (Seedborn Muse) and the
+/// self-referential "untap this <permanent>" form (Bender's Waterskin). Both
+/// lower to `StaticMode::UntapsDuringEachOtherPlayersUntapStep`; the `affected`
+/// filter distinguishes the class untapped ("permanents/creatures you control")
+/// from the source itself (`SelfRef`). The subject filter for the "all" form
+/// must be controlled by "you" — rules variations outside this ("each player's
+/// permanents") aren't Seedborn semantics and fall through. Runtime integration
+/// lives in `turns::execute_seedborn_statics`, which scans the battlefield for
+/// this variant after the active player's normal untap step.
+///
+/// `description` is applied verbatim so callers own the human-readable text:
+/// standalone consumers pass the whole line; the inverted-as-long-as wiring
+/// passes the original pre-split line, not the isolated effect slice.
+fn parse_untaps_during_each_other_players_untap_step(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    // "Untap all <type> you control during each other player's untap step."
+    // Delegate the subject to `parse_type_phrase`, which handles the full range
+    // of type + controller phrases.
+    if let Some(rest) = nom_tag_tp(tp, "untap all ") {
+        let (filter, remainder) = parse_type_phrase(rest.original);
+        let remainder_lower = remainder.to_lowercase();
+        let during_ok = nom_on_lower(
+            remainder,
+            &remainder_lower,
+            parse_each_other_players_untap_step_suffix,
+        )
+        .is_some();
+        let controller_is_you = matches!(
+            &filter,
+            TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You)
+        );
+        if during_ok && controller_is_you {
+            return Some(
+                StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+                    .affected(filter)
+                    .description(description.to_string()),
+            );
+        }
+    }
+
+    // "Untap this <permanent> during each other player's untap step." (Bender's
+    // Waterskin). Ordered after the "untap all" arm — the typed "you control"
+    // subject and these self-reference subjects are disjoint, so neither shadows
+    // the other.
+    if let Some(rest) = nom_tag_tp(tp, "untap ") {
+        let self_subject =
+            nom_on_lower(rest.original, rest.lower, nom_target::parse_self_reference);
+        if let Some((TargetFilter::SelfRef, remainder)) = self_subject {
+            let remainder_lower = remainder.to_lowercase();
+            let during_ok = nom_on_lower(
+                remainder,
+                &remainder_lower,
+                parse_each_other_players_untap_step_suffix,
+            )
+            .is_some();
+            if during_ok {
+                return Some(
+                    StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+                        .affected(TargetFilter::SelfRef)
+                        .description(description.to_string()),
+                );
+            }
+        }
+    }
+
+    None
+}
+
 #[derive(Clone, Copy)]
 enum AllPlayerStepSkipSubject {
     Players,
@@ -724,6 +796,30 @@ pub(crate) fn parse_static_line_inner(
                     return Some(def);
                 }
             }
+            // CR 502.3 + CR 611.3a: Inverted Seedborn-class conditional:
+            // "As long as <condition>, untap all creatures you control during
+            // each other player's untap step." (Quest for Renewal). The recursed
+            // call below fails because `parse_each_other_players_untap_step_suffix`
+            // is `all_consuming` (EOF-anchored) and the canonical rewrite carries
+            // a trailing condition clause. Try the untap detector against the
+            // isolated effect slice; on success, attach the split condition and
+            // keep the full original line as the description.
+            {
+                let effect_lower = split.effect_text.to_lowercase();
+                let tp_effect = TextPair::new(&split.effect_text, &effect_lower);
+                if let Some(mut def) =
+                    parse_untaps_during_each_other_players_untap_step(&tp_effect, &text)
+                {
+                    let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                        StaticCondition::Unrecognized {
+                            text: split.condition_text.clone(),
+                        },
+                    );
+                    def.condition = Some(condition);
+                    def.description = Some(text.to_string());
+                    return Some(def);
+                }
+            }
             if let Some(mut def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip)
             {
                 // CR 611.3a: the split stripped the "as long as <condition>" gate
@@ -998,70 +1094,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "Untap all <type> you control during each other player's untap step." ---
-    // CR 502.3 + CR 113.6: Seedborn Muse class — continuous static granting a
-    // second untap pass during each OTHER player's untap step. The parser lowers
-    // this to `StaticMode::UntapsDuringEachOtherPlayersUntapStep` with the
-    // `affected` filter carrying the permanent class to untap (typically
-    // "permanents you control"). Runtime integration lives in
-    // `turns::execute_untap`, which scans the battlefield for this variant
-    // after the active player's normal untap step.
-    if let Some(rest) = nom_tag_tp(&tp, "untap all ") {
-        // The subject is the thing being untapped (e.g. "permanents you
-        // control", "creatures you control"). Delegate to `parse_type_phrase`
-        // which handles the full range of type + controller phrases.
-        let (filter, remainder) = parse_type_phrase(rest.original);
-        let remainder_lower = remainder.to_lowercase();
-        let during_ok = nom_on_lower(
-            remainder,
-            &remainder_lower,
-            parse_each_other_players_untap_step_suffix,
-        )
-        .is_some();
-        // Require the subject filter to be controlled by "you" — rules text
-        // variations outside this ("each player's permanents") would not be
-        // Seedborn semantics and fall through.
-        let controller_is_you = matches!(
-            &filter,
-            TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You)
-        );
-        if during_ok && controller_is_you {
-            return Some(
-                StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
-                    .affected(filter)
-                    .description(text.to_string()),
-            );
-        }
-    }
-
-    // --- "Untap this <permanent> during each other player's untap step." ---
-    // CR 502.3 + CR 113.6: the self-referential Seedborn-class variant (Bender's
-    // Waterskin: "Untap this artifact during each other player's untap step").
-    // Shares the runtime of the "untap all" form
-    // (`StaticMode::UntapsDuringEachOtherPlayersUntapStep`), but the affected
-    // filter is the source itself (`SelfRef`) so its controller untaps only it
-    // during every other player's untap step. Ordered after the "untap all" arm
-    // — the typed "you control" subject and these self-reference subjects are
-    // disjoint, so neither shadows the other.
-    if let Some(rest) = nom_tag_tp(&tp, "untap ") {
-        let self_subject =
-            nom_on_lower(rest.original, rest.lower, nom_target::parse_self_reference);
-        if let Some((TargetFilter::SelfRef, remainder)) = self_subject {
-            let remainder_lower = remainder.to_lowercase();
-            let during_ok = nom_on_lower(
-                remainder,
-                &remainder_lower,
-                parse_each_other_players_untap_step_suffix,
-            )
-            .is_some();
-            if during_ok {
-                return Some(
-                    StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
-                        .affected(TargetFilter::SelfRef)
-                        .description(text.to_string()),
-                );
-            }
-        }
+    // --- Seedborn-class untap statics ---
+    // CR 502.3 + CR 611.3a: "untap <subject> during each other player's untap
+    // step" — Seedborn Muse ("untap all <type> you control ...") and Bender's
+    // Waterskin ("untap this <permanent> ..."). Both forms are detected by the
+    // single authority `parse_untaps_during_each_other_players_untap_step`.
+    // Runtime integration lives in `turns::execute_seedborn_statics`.
+    if let Some(def) = parse_untaps_during_each_other_players_untap_step(&tp, &text) {
+        return Some(def);
     }
 
     // --- "Play with the top card of your library revealed" ---

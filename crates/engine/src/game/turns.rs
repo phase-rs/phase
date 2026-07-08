@@ -5349,6 +5349,87 @@ mod tests {
         assert!(!state.objects[&seedborn].tapped);
     }
 
+    /// CR 502.3 + CR 611.3a + CR 604.1: Quest for Renewal — the untap-during-
+    /// each-other-player's-untap-step static is gated by a live counter-threshold
+    /// condition ("as long as there are four or more quest counters on this
+    /// enchantment"). The runtime already honors `def.condition` via
+    /// `active_static_definitions`/`evaluate_condition`; this proves the parsed
+    /// `HasCounters` condition drives the Seedborn untap pass. PAIRED, non-
+    /// vacuous: 2 counters keeps creatures tapped (negative), 4 counters untaps
+    /// them (positive reach guard).
+    #[test]
+    fn quest_for_renewal_counter_gated_seedborn_untap() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = setup();
+        state.active_player = PlayerId(1); // Opponent's untap step.
+
+        let quest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quest for Renewal".to_string(),
+            Zone::Battlefield,
+        );
+        // Install the Seedborn untap static gated on the quest-counter threshold,
+        // exactly as the parser lowers Quest for Renewal's static line.
+        let def = StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ))
+            .condition(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("quest".to_string())),
+                minimum: 4,
+                maximum: None,
+            });
+        {
+            let obj = state.objects.get_mut(&quest).unwrap();
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        let mine = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        mark_as_creature(&mut state, mine);
+        state.objects.get_mut(&mine).unwrap().tapped = true;
+
+        // Negative: only 2 quest counters — condition fails, creature stays tapped.
+        state
+            .objects
+            .get_mut(&quest)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("quest".to_string()), 2);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            state.objects[&mine].tapped,
+            "below threshold (2 < 4): the untap static must not fire"
+        );
+
+        // Positive reach guard: 4 quest counters — condition holds, creature untaps.
+        state
+            .objects
+            .get_mut(&quest)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("quest".to_string()), 4);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            !state.objects[&mine].tapped,
+            "at threshold (4 >= 4): the untap static must untap the controller's creature"
+        );
+    }
+
     #[test]
     fn seedborn_does_not_fire_on_controllers_own_untap_step() {
         let mut state = setup();

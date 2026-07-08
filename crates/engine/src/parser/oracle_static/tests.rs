@@ -1696,6 +1696,44 @@ fn self_untap_during_each_other_untap_step_bender_waterskin() {
     }
 }
 
+/// CR 502.3 + CR 611.3a: Quest for Renewal — the inverted "As long as
+/// <condition>, untap all creatures you control during each other player's
+/// untap step" static. The comma-split rewrite formerly fell through to an
+/// empty `Continuous` fallback (a runtime no-op); the inverted-block wiring now
+/// routes the isolated effect slice through the shared Seedborn detector and
+/// re-attaches the counter-threshold condition. REVERT GUARD: without the fix
+/// `def.mode` is `StaticMode::Continuous`, not
+/// `UntapsDuringEachOtherPlayersUntapStep`.
+#[test]
+fn quest_for_renewal_inverted_conditional_seedborn_untap() {
+    let def = parse_static_line(
+        "As long as there are four or more quest counters on this enchantment, untap all creatures you control during each other player's untap step.",
+    )
+    .expect("static def for Quest for Renewal");
+    assert_eq!(def.mode, StaticMode::UntapsDuringEachOtherPlayersUntapStep);
+    // Affected: creatures you control.
+    match def.affected {
+        Some(TargetFilter::Typed(ref tf)) => {
+            assert_eq!(
+                tf.controller,
+                Some(crate::types::ability::ControllerRef::You)
+            );
+        }
+        ref other => panic!("expected Typed(you-control) affected filter, got {other:?}"),
+    }
+    // Condition: four or more quest counters on the source enchantment.
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::HasCounters {
+            counters: crate::types::counter::CounterMatch::OfType(CounterType::Generic(
+                "quest".to_string()
+            )),
+            minimum: 4,
+            maximum: None,
+        })
+    );
+}
+
 /// CR 509.1b: Copper Carapace — "Equipped creature gets +2/+2 and can't block."
 /// must decompose into BOTH the P/T grant AND a `CantBlock` static affecting the
 /// equipped creature. Previously the "can't block" drawback was dropped, making
