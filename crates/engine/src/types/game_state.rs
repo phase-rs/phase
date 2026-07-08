@@ -1889,6 +1889,18 @@ pub struct PendingCounterAdditionQueue {
     pub completion: Option<PendingEffectResolved>,
 }
 
+/// CR 701.12c + CR 119.7 + CR 119.8 + CR 616.1: Remaining deltas from a
+/// simultaneous life-total assignment that paused on a replacement choice. The
+/// current gain/loss event is owned by `pending_replacement`; this record holds
+/// only the tail plus the completion work that runs after the full assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLifeTotalAssignment {
+    pub completion_player: PlayerId,
+    pub remaining: Vec<(PlayerId, i32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<PendingEffectResolved>,
+}
+
 /// CR 701.34a + CR 614.1a: Remaining proliferate actions after a replacement
 /// effect (Tekuthal class) doubles the count. Each completed `ProliferateChoice`
 /// drains one action; when `remaining` reaches zero the originating effect
@@ -3162,7 +3174,7 @@ pub enum TimeTravelPhase {
     Add,
 }
 
-/// CR 119.7-8: One legal outcome of a "redistribute any number of players' life
+/// CR 119.7 + CR 119.8: One legal outcome of a "redistribute any number of players' life
 /// totals" instruction — a complete assignment of a resulting life total to each
 /// participating player. Enumerated by the engine resolver (which filters
 /// CR 119.7 can't-gain / CR 119.8 can't-lose per receiver and dedupes
@@ -3484,7 +3496,7 @@ pub enum WaitingFor {
         player: PlayerId,
         cards: Vec<ObjectId>,
     },
-    /// CR 119.7-8: The controlling player redistributes participating players'
+    /// CR 119.7 + CR 119.8: The controlling player redistributes participating players'
     /// life totals (Reverse the Sands, The Doctor's Tomb). `options` is the
     /// engine-enumerated set of legal assignments (identity always present); the
     /// player submits `GameAction::SubmitLifeRedistribution { option_index }`.
@@ -6484,6 +6496,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_connive_reentry: Option<PendingConniveReentry>,
 
+    /// CR 701.12c + CR 616.1: Tail of a life-total assignment that paused on a
+    /// gain/loss replacement choice. Drained by `handle_replacement_choice` after
+    /// the chosen replacement finishes, preserving the simultaneous snapshot's
+    /// remaining deltas across the prompt boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_life_total_assignment: Option<PendingLifeTotalAssignment>,
+
     /// Transient: post-resolution context for a permanent spell whose ETB replacement
     /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
     /// after the zone change completes.
@@ -8586,6 +8605,7 @@ impl GameState {
             post_replacement_event_target: None,
             post_replacement_token_choice_applied: None,
             pending_connive_reentry: None,
+            pending_life_total_assignment: None,
             pending_spell_resolution: None,
             pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
@@ -9252,6 +9272,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.pending_connive_reentry == other.pending_connive_reentry
+            && self.pending_life_total_assignment == other.pending_life_total_assignment
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty

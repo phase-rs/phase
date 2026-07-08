@@ -3,7 +3,7 @@ use crate::game::static_abilities::{player_has_cant_gain_life, player_has_cant_l
 use crate::game::targeting::resolve_effect_player_ref;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingEffectResolved};
 use crate::types::player::PlayerId;
 
 /// CR 701.12a: Two players exchange life totals (Soul Conduit, Axis of
@@ -106,8 +106,14 @@ pub fn resolve(
     // gain/loss, not a set), applied simultaneously from the pre-swap snapshot.
     // Delegated to the shared N-slot permutation helper — the 2-player exchange is
     // its special case.
-    match apply_life_totals_assignment(state, &[(pid_a, life_b), (pid_b, life_a)], events)? {
-        // CR 614.7: a competing replacement required a player choice; the helper
+    match apply_life_totals_assignment(
+        state,
+        &[(pid_a, life_b), (pid_b, life_a)],
+        ability.controller,
+        Some(PendingEffectResolved::new(resolved_kind, ability.source_id)),
+        events,
+    )? {
+        // CR 616.1: a competing replacement required a player choice; the helper
         // installed the WaitingFor and the resume path completes resolution.
         LifeAssignmentOutcome::Deferred => Ok(()),
         LifeAssignmentOutcome::Applied => {

@@ -336,7 +336,7 @@ pub enum GameAction {
     ChooseBranch {
         index: usize,
     },
-    /// CR 119.7-8: Submit one of the engine-enumerated life-total redistribution
+    /// CR 119.7 + CR 119.8: Submit one of the engine-enumerated life-total redistribution
     /// options. `option_index` indexes `WaitingFor::RedistributeLifeTotals.options`.
     SubmitLifeRedistribution {
         option_index: usize,

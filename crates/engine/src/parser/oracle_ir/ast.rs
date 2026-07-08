@@ -544,7 +544,7 @@ pub(crate) enum ImperativeFamilyAst {
         player_a: TargetFilter,
         player_b: TargetFilter,
     },
-    /// CR 119.7-8: The controller redistributes any number of players' life
+    /// CR 119.7 + CR 119.8: The controller redistributes any number of players' life
     /// totals (Reverse the Sands, The Doctor's Tomb). Field-less: "any number of
     /// players" is self-gathered at resolution, so there are no target slots.
     RedistributeLifeTotals,

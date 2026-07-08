@@ -9309,7 +9309,7 @@ fn reverse_turn_order_parses_as_reverse_turn_order_effect() {
     ));
 }
 
-/// CR 119.7-8: "redistribute any number of players' life totals" (Reverse the
+/// CR 119.7 + CR 119.8: "redistribute any number of players' life totals" (Reverse the
 /// Sands, The Doctor's Tomb) parses to the field-less redistribution effect —
 /// with the reminder stripped, the trailing period trimmed, and both the ASCII
 /// and typographic apostrophe accepted. The possessive subject ("players'") is

@@ -349,7 +349,7 @@ fn chaos_ensues_fires_plane_chaos_trigger() {
     );
 }
 
-/// CR 311.7 + CR 119.7-8: The Doctor's Tomb — "whenever chaos ensues,
+/// CR 311.7 + CR 119.7 + CR 119.8: The Doctor's Tomb — "whenever chaos ensues,
 /// redistribute any number of players' life totals". Synthesizes the plane's
 /// chaos trigger with the parsed `RedistributeLifeTotals` effect, forces chaos,
 /// and asserts the trigger reaches the stack carrying that effect (the runtime

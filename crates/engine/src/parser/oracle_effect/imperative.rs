@@ -8470,7 +8470,7 @@ pub(super) fn parse_imperative_family_ast(
         });
     }
 
-    // CR 119.7-8: "redistribute any number of players' life totals" (Reverse the
+    // CR 119.7 + CR 119.8: "redistribute any number of players' life totals" (Reverse the
     // Sands, The Doctor's Tomb) and the bare "redistribute any number of life
     // totals" (You Live Only Because I Will It — Archenemy scheme). Verb-initial,
     // but handled here as an anchored whole-phrase production (alongside the
@@ -10909,7 +10909,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b } => {
             Effect::ExchangeLifeTotals { player_a, player_b }
         }
-        // CR 119.7-8: field-less interactive life-total redistribution. The
+        // CR 119.7 + CR 119.8: field-less interactive life-total redistribution. The
         // resolver self-gathers participants, so no target wiring is needed.
         ImperativeFamilyAst::RedistributeLifeTotals => Effect::RedistributeLifeTotals,
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.

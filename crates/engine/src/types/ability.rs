@@ -11121,7 +11121,7 @@ pub enum Effect {
     /// physical seating is unchanged. Payload-less resolving keyword action
     /// (mirrors `Effect::ChaosEnsues`). RUNTIME: reverse_turn_order::resolve.
     ReverseTurnOrder,
-    /// CR 119.7-8: The controller redistributes any number of players' life
+    /// CR 119.7 + CR 119.8: The controller redistributes any number of players' life
     /// totals — a controller-chosen permutation of the chosen players' life
     /// totals (Reverse the Sands, The Doctor's Tomb). Field-less: "any number of
     /// players" is self-gathered at resolution (no target slot). The resolver

@@ -1,4 +1,4 @@
-//! CR 119.7-8: Resolver for `Effect::RedistributeLifeTotals`.
+//! CR 119.7 + CR 119.8: Resolver for `Effect::RedistributeLifeTotals`.
 //!
 //! "Redistribute any number of players' life totals. (Each of those players gets
 //! one life total back.)" (Reverse the Sands, The Doctor's Tomb). The controlling
@@ -25,7 +25,7 @@ use crate::types::game_state::{GameState, LifeRedistributionOption, WaitingFor};
 use crate::types::player::PlayerId;
 
 /// Factorial-blowup guard: above this many participating players the resolver
-/// offers only the identity assignment. CR 119.7-8 places no bound on player
+/// offers only the identity assignment. CR 119.7 + CR 119.8 places no bound on player
 /// count, so the cap is an engine implementation limit; at the engine's fixed
 /// two-player size the enumeration is exactly `{keep, swap}`.
 const MAX_REDISTRIBUTE_CANDIDATES: usize = 6;
@@ -35,7 +35,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 119.7-8: participants are the players still in the game (each keeps or
+    // CR 119.7 + CR 119.8: participants are the players still in the game (each keeps or
     // receives exactly one life total). Snapshot current totals in seat order.
     let candidates: Vec<(PlayerId, i32)> = state
         .players
@@ -48,7 +48,7 @@ pub fn resolve(
 
     let resolved_kind = EffectKind::from(&ability.effect);
 
-    // CR 119.7-8: when the identity assignment is the only legal outcome (one
+    // CR 119.7 + CR 119.8: when the identity assignment is the only legal outcome (one
     // participant, all totals equal, or every non-identity swap is blocked by
     // can't-gain/can't-lose), the effect is a no-op — resolve without a prompt.
     if options.len() > 1 {
@@ -67,7 +67,7 @@ pub fn resolve(
 
 /// Enumerate the legal, deduplicated life-total assignments for `candidates`.
 /// The identity assignment is always first; non-identity permutations that are
-/// legal per CR 119.7-8 and behaviorally distinct follow.
+/// legal per CR 119.7 + CR 119.8 and behaviorally distinct follow.
 fn enumerate_options(
     state: &GameState,
     candidates: &[(PlayerId, i32)],
@@ -89,7 +89,7 @@ fn enumerate_options(
 
     for perm in permutations(n) {
         // Player at seat i receives the current life total of the player at seat
-        // perm[i] — a permutation of the life-total pool (CR 119.7-8).
+        // perm[i] — a permutation of the life-total pool (CR 119.7 + CR 119.8).
         let resulting: Vec<i32> = (0..n).map(|i| candidates[perm[i]].1).collect();
         if seen.contains(&resulting) {
             continue;
@@ -179,7 +179,7 @@ mod tests {
             );
     }
 
-    /// CR 119.7-8: two-player 20/5 enumerates exactly {keep, swap}, and the
+    /// CR 119.7 + CR 119.8: two-player 20/5 enumerates exactly {keep, swap}, and the
     /// resolver prompts the controller.
     #[test]
     fn two_player_offers_keep_and_swap() {
@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(state.players[1].life, 5);
     }
 
-    /// CR 119.7-8: equal totals dedupe to the identity assignment only → no prompt.
+    /// CR 119.7 + CR 119.8: equal totals dedupe to the identity assignment only → no prompt.
     #[test]
     fn equal_totals_dedupe_to_identity_auto_noop() {
         let mut state = GameState::new_two_player(3);

@@ -7,7 +7,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 /**
- * CR 119.7-8: Renders the engine-enumerated life-total redistribution options
+ * CR 119.7 + CR 119.8: Renders the engine-enumerated life-total redistribution options
  * (Reverse the Sands, The Doctor's Tomb) and submits the chosen index. Pure
  * display: the engine computes which assignments are legal and their ordering
  * (index 0 is always the "keep current totals" identity); this component only

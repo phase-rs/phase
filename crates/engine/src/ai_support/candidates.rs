@@ -985,7 +985,7 @@ pub fn candidate_actions_broad_with_probe(
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
-        // CR 119.7-8: every enumerated redistribution option is legal by
+        // CR 119.7 + CR 119.8: every enumerated redistribution option is legal by
         // construction (the resolver filtered CR 119.7/119.8), so each is a
         // candidate submission.
         WaitingFor::RedistributeLifeTotals { player, options } => (0..options.len())

@@ -6,7 +6,10 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{
+    GameState, PendingEffectResolutionEvent, PendingEffectResolved, PendingLifeTotalAssignment,
+    WaitingFor,
+};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 
@@ -153,7 +156,7 @@ pub fn apply_life_gain(
             Ok(0)
         }
         ReplacementResult::NeedsChoice(player) => {
-            // CR 614.7: Multiple competing replacements — player must choose.
+            // CR 616.1: Multiple competing replacements — player must choose.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             Err(ReplacementDeferred)
@@ -247,7 +250,7 @@ pub fn apply_damage_life_loss(
             Ok(0)
         }
         ReplacementResult::NeedsChoice(player) => {
-            // CR 614.7: Multiple competing replacements — player must choose.
+            // CR 616.1: Multiple competing replacements — player must choose.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             Err(ReplacementDeferred)
@@ -293,7 +296,7 @@ pub fn apply_life_loss_after_replacement(
 ///
 /// Typed (not a bare bool) so the control-flow signal is self-documenting at
 /// call sites: `Applied` means the caller should emit its `EffectResolved`;
-/// `Deferred` means a competing replacement (CR 614.7) installed a choice
+/// `Deferred` means a competing replacement (CR 616.1) installed a choice
 /// `WaitingFor` and the caller must return without emitting — the resume path
 /// completes resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +305,7 @@ pub enum LifeAssignmentOutcome {
     Deferred,
 }
 
-/// CR 701.12c / CR 119.7-8: Apply a simultaneous life-total permutation.
+/// CR 701.12c / CR 119.7 + CR 119.8: Apply a simultaneous life-total permutation.
 ///
 /// `assignment[i] = (receiver, resulting_life)` — each named player's life total
 /// becomes `resulting_life` by *gaining or losing the difference* from a snapshot
@@ -320,6 +323,8 @@ pub enum LifeAssignmentOutcome {
 pub fn apply_life_totals_assignment(
     state: &mut GameState,
     assignment: &[(PlayerId, i32)],
+    completion_player: PlayerId,
+    completion: Option<PendingEffectResolved>,
     events: &mut Vec<GameEvent>,
 ) -> Result<LifeAssignmentOutcome, EffectError> {
     // CR 701.12c: snapshot every receiver's current life BEFORE any mutation so
@@ -337,20 +342,94 @@ pub fn apply_life_totals_assignment(
         })
         .collect::<Result<Vec<_>, EffectError>>()?;
 
-    for (pid, diff) in deltas {
+    for (index, (pid, diff)) in deltas.iter().copied().enumerate() {
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, pid, diff as u32, events).err(),
             -1 => apply_damage_life_loss(state, pid, (-diff) as u32, events).err(),
             _ => None,
         };
         if deferred.is_some() {
-            // CR 614.7: a competing replacement required a player choice; the
+            // CR 616.1: a competing replacement required a player choice; the
             // helper installed the WaitingFor and the resume path completes the
             // remaining assignments.
+            state.pending_life_total_assignment = Some(PendingLifeTotalAssignment {
+                completion_player,
+                remaining: deltas[index + 1..].to_vec(),
+                completion: completion.clone(),
+            });
             return Ok(LifeAssignmentOutcome::Deferred);
         }
     }
     Ok(LifeAssignmentOutcome::Applied)
+}
+
+pub(crate) fn drain_pending_life_total_assignment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    while let Some(mut pending) = state.pending_life_total_assignment.take() {
+        state.waiting_for = WaitingFor::Priority {
+            player: pending.completion_player,
+        };
+
+        let Some((pid, diff)) = pending.remaining.first().copied() else {
+            complete_pending_life_total_assignment(state, pending, events);
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return;
+            }
+            continue;
+        };
+
+        pending.remaining.remove(0);
+        state.pending_life_total_assignment = Some(pending);
+
+        let deferred = match diff.signum() {
+            1 => apply_life_gain(state, pid, diff as u32, events).err(),
+            -1 => apply_damage_life_loss(state, pid, (-diff) as u32, events).err(),
+            _ => None,
+        };
+        if deferred.is_some() || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return;
+        }
+    }
+}
+
+fn complete_pending_life_total_assignment(
+    state: &mut GameState,
+    pending: PendingLifeTotalAssignment,
+    events: &mut Vec<GameEvent>,
+) {
+    state.waiting_for = WaitingFor::Priority {
+        player: pending.completion_player,
+    };
+
+    if let Some(PendingEffectResolved {
+        kind,
+        source_id,
+        resolution_event,
+        post_actions,
+        player_action,
+    }) = pending.completion
+    {
+        debug_assert!(
+            post_actions.is_empty(),
+            "life-total assignment completion does not support counter post-actions"
+        );
+        match resolution_event {
+            PendingEffectResolutionEvent::Emit => {
+                events.push(GameEvent::EffectResolved { kind, source_id });
+            }
+            PendingEffectResolutionEvent::Suppress => {}
+        }
+        if let Some(action) = player_action {
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: action.player_id,
+                action: action.action,
+            });
+        }
+    }
+
+    super::drain_pending_continuation(state, events);
 }
 
 /// CR 119.3: If an effect causes a player to lose life, adjust their life total.
@@ -535,7 +614,7 @@ pub fn resolve_set_life_total(
             _ => None,
         };
         if deferred.is_some() {
-            // CR 614.7: A competing replacement required a player choice; the
+            // CR 616.1: A competing replacement required a player choice; the
             // helper already installed the WaitingFor state. Return without
             // emitting EffectResolved — the resume path completes resolution.
             // (A multi-player set that hits a replacement mid-list defers from
@@ -954,6 +1033,81 @@ mod tests {
 
         assert_eq!(lost, 0);
         assert_eq!(state.players[0].life, 20);
+    }
+
+    /// CR 701.12c + CR 616.1: If a life-total assignment pauses on a replacement
+    /// choice, the resume path must apply the remaining snapshot deltas.
+    #[test]
+    fn life_total_assignment_resumes_tail_after_replacement_choice() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        state.players[1].life = 5;
+
+        let shield = create_object(
+            &mut state,
+            CardId(950),
+            PlayerId(0),
+            "Life Shield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&shield)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::LifeReduced)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Life Shield".to_string()),
+            );
+
+        let mut events = Vec::new();
+        let outcome = apply_life_totals_assignment(
+            &mut state,
+            &[(PlayerId(0), 5), (PlayerId(1), 20)],
+            PlayerId(0),
+            Some(PendingEffectResolved::new(
+                EffectKind::ExchangeLifeTotals,
+                ObjectId(100),
+            )),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, LifeAssignmentOutcome::Deferred);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 5);
+
+        let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
+            panic!("expected replacement choice");
+        };
+        state.active_player = player;
+        state.priority_player = player;
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept life-loss replacement");
+
+        assert_eq!(state.players[0].life, 5);
+        assert_eq!(state.players[1].life, 20);
+        assert!(state.pending_life_total_assignment.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ExchangeLifeTotals,
+                source_id: ObjectId(100),
+            }
+        )));
     }
 
     /// CR 119.8: `resolve_lose` suppresses life loss for CantLoseLife player.
