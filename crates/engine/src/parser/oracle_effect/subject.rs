@@ -631,7 +631,7 @@ fn try_parse_compound_all_subjects_become_clause(
             format!("become {}", predicate_tp.original.trim())
         };
         let predicate_lower = predicate_with_verb.to_lowercase();
-        tag::<_, _, OracleError<'_>>("become ")
+        alt((tag::<_, _, OracleError<'_>>("become "), tag("becomes ")))
             .parse(predicate_lower.as_str())
             .ok()?;
         let affected = parse_continuous_subject_filter(subject_tp.original.trim())?;

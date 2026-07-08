@@ -2285,6 +2285,51 @@ fn compound_all_subjects_become_nightcreep_dual_predicate() {
     );
 }
 
+/// The compound splitter accepts both `become` and `becomes` conjuncts; the
+/// validation gate must not reject the third-person form after split.
+#[test]
+fn compound_all_subjects_become_accepts_becomes_conjunct() {
+    use crate::types::ability::BasicLandType;
+    use crate::types::mana::ManaColor;
+
+    let clause = parse_effect_clause(
+        "all creatures becomes black and all lands become Swamps",
+        &mut ParseContext::default(),
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = clause.effect
+    else {
+        panic!("expected GenericEffect, got {:?}", clause.effect);
+    };
+    assert_eq!(
+        static_abilities.len(),
+        2,
+        "becomes/become mix must still emit two statics: {static_abilities:?}"
+    );
+    assert!(static_abilities.iter().any(|def| {
+        matches!(
+            &def.affected,
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters.contains(&TypeFilter::Creature)
+        ) && def
+            .modifications
+            .contains(&ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black],
+            })
+    }));
+    assert!(static_abilities.iter().any(|def| {
+        matches!(
+            &def.affected,
+            Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Land)
+        ) && def
+            .modifications
+            .contains(&ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Swamp,
+            })
+    }));
+}
+
 /// Single-subject become must still route through the ordinary become path.
 #[test]
 fn compound_all_subjects_become_single_subject_falls_through() {
