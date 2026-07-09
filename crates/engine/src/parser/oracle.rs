@@ -86,11 +86,11 @@ use super::oracle_special::{
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
     parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
-    parse_collect_evidence_alt_cost, parse_every_creature_type_static_prefix,
-    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
-    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
-    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
-    GrantedCastKeywordKind,
+    parse_collect_evidence_alt_cost, parse_compound_you_control_chosen_type_static_prefix,
+    parse_every_creature_type_static_prefix, parse_flashback_trailing_self_spell_cost_reduction,
+    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
+    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
+    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -3085,6 +3085,20 @@ pub(crate) fn parse_oracle_ir(
             &static_line,
             &static_line_lower,
             parse_every_creature_type_static_prefix,
+        ) {
+            i += 1;
+            continue;
+        }
+        // CR 611.3 + CR 607.2d: compound-subject chosen-type static with a
+        // "The same is true for ..." tail (Rukarumel, Biologist). Models the
+        // "X you control and Y you control are the chosen type ..." sentence and
+        // leaves the non-battlefield-zone tail as an `Unimplemented` residual,
+        // mirroring Arcane Adaptation / Maskwood Nexus.
+        if push_same_is_true_static_tail(
+            &mut result,
+            &static_line,
+            &static_line_lower,
+            parse_compound_you_control_chosen_type_static_prefix,
         ) {
             i += 1;
             continue;

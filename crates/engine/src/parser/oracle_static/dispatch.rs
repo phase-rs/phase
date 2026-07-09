@@ -685,6 +685,14 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 611.3 + CR 607.2d + CR 205.1b: compound-subject sibling — "X you control
+    // and Y you control are the chosen type in addition to their other creature
+    // types" (Rukarumel, Biologist). Runs after the single-subject handler above
+    // (which declines Rukarumel's compound subject) and only claims a genuine `Or`
+    // of 2+ subjects, so single-subject lines are unaffected.
+    if let Some(def) = parse_compound_you_control_chosen_type_static(&tp, &text) {
+        return Some(def);
+    }
     // CR 305.6 + CR 607.2d: land-axis counterpart — "Lands you control are the
     // chosen type in addition to their other types" (Realmwright).
     if let Some(def) = parse_chosen_land_type_static(&tp, &text) {
