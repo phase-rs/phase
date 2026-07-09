@@ -4940,18 +4940,32 @@ fn parse_graveyard_exile_replacement(
 
     // Scope of the subject's destination graveyard. Valid-card filter is keyed
     // off this: "opponent's graveyard" ⇒ `Owned { controller: Opponent }`.
+    // Scope of the subject's destination graveyard, keying the valid-card owner
+    // filter. "your graveyard" ⇒ `Owned { You }` (Forbidden Crypt — the redirect
+    // must NOT exile opponents' cards); "opponent's graveyard" ⇒ `Owned { Opponent }`
+    // (Leyline of the Void); any other graveyard phrase ⇒ no owner constraint.
+    // CR 400.3 + CR 108.3: cards go to their owner's graveyard, so ownership is
+    // the stable discriminant for whose-graveyard scoping.
     #[derive(Clone)]
     enum Scope {
         Any,
+        You,
         Opponent,
     }
 
     // The outcome clause ("exile it instead" or the shuffle-back phrasing)
-    // determines what ChangeZone + sub_ability chain we emit.
+    // determines what ChangeZone + sub_ability chain we emit. The exile variant
+    // carries any `with N <type> counter(s) on it` rider (CR 122.1) lifted by the
+    // shared anaphor recognizer — Dauthi Voidwalker's "instead exile it with a
+    // void counter on it" is the exemplar.
     #[derive(Clone)]
     enum Outcome {
-        Exile,
-        ShuffleBack { reveal: bool },
+        Exile {
+            enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        },
+        ShuffleBack {
+            reveal: bool,
+        },
     }
 
     // CR 730.3e + CR 111.1: the subject's token axis. "a card or token" is
@@ -5011,6 +5025,11 @@ fn parse_graveyard_exile_replacement(
                 value(Scope::Opponent, tag("an opponent's graveyard")),
                 value(Scope::Opponent, tag("an opponents graveyard")),
                 value(Scope::Opponent, tag("opponent's graveyard")),
+                // CR 400.3: "your graveyard" (Forbidden Crypt) scopes to You-owned
+                // cards — the redirect must not exile opponents' cards. Tried
+                // before the generic ` graveyard` fallthrough so the possessive
+                // owner is captured rather than swallowed as unscoped.
+                value(Scope::You, tag("your graveyard")),
                 value(
                     Scope::Any,
                     preceded(take_until(" graveyard"), tag(" graveyard")),
@@ -5020,20 +5039,33 @@ fn parse_graveyard_exile_replacement(
             let (i, _) = opt(tag(" from anywhere")).parse(i)?;
             let (i, _) = tag(", ").parse(i)?;
 
-            // Outcome dispatch. The shuffle-back variant optionally prefixes
-            // "reveal ~ and " (CR 701.20); the exile variant has no such prefix.
-            let (i, outcome) = alt((
-                value(Outcome::Exile, tag("exile it instead")),
-                value(
-                    Outcome::ShuffleBack { reveal: true },
-                    tag("reveal ~ and shuffle it into its owner's library instead"),
-                ),
-                value(
-                    Outcome::ShuffleBack { reveal: false },
-                    tag("shuffle it into its owner's library instead"),
-                ),
-            ))
-            .parse(i)?;
+            // Outcome dispatch. The exile variant delegates to the shared
+            // `parse_exile_anaphor_clause` so it accepts both word orders
+            // ("exile it instead" / "instead exile it") AND lifts an inline
+            // `with N <type> counter(s) on it` rider (CR 122.1) — Dauthi
+            // Voidwalker's "instead exile it with a void counter on it". The
+            // shuffle-back variant optionally prefixes "reveal ~ and " (CR 701.20).
+            let exile_anaphor = parse_exile_anaphor_clause(TextPair::new(i, i));
+            let (i, outcome) = if exile_anaphor.matched {
+                (
+                    exile_anaphor.continuation.lower,
+                    Outcome::Exile {
+                        enter_with_counters: exile_anaphor.enter_with_counters,
+                    },
+                )
+            } else {
+                alt((
+                    value(
+                        Outcome::ShuffleBack { reveal: true },
+                        tag("reveal ~ and shuffle it into its owner's library instead"),
+                    ),
+                    value(
+                        Outcome::ShuffleBack { reveal: false },
+                        tag("shuffle it into its owner's library instead"),
+                    ),
+                ))
+                .parse(i)?
+            };
 
             Ok((i, (scope, token_scope, outcome, subject.to_string())))
         })?;
@@ -5042,7 +5074,7 @@ fn parse_graveyard_exile_replacement(
 
     // Destination routing is determined by the outcome branch.
     let destination = match &outcome {
-        Outcome::Exile => Zone::Exile,
+        Outcome::Exile { .. } => Zone::Exile,
         Outcome::ShuffleBack { .. } => Zone::Library,
     };
 
@@ -5053,10 +5085,15 @@ fn parse_graveyard_exile_replacement(
     // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
     // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
     let mut props = Vec::new();
-    if let Scope::Opponent = scope {
-        props.push(FilterProp::Owned {
+    match scope {
+        // CR 400.3: "your graveyard" ⇒ You-owned cards only (Forbidden Crypt).
+        Scope::You => props.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        }),
+        Scope::Opponent => props.push(FilterProp::Owned {
             controller: ControllerRef::Opponent,
-        });
+        }),
+        Scope::Any => {}
     }
     if let TokenScope::NonToken = token_scope {
         props.push(FilterProp::NonToken);
@@ -5071,9 +5108,21 @@ fn parse_graveyard_exile_replacement(
         None
     };
 
-    // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts only
-    // the `destination` field from this top-level ChangeZone — other fields here
-    // (owner_library, etc.) are inert metadata along the redirect path.
+    // CR 122.1: A `with N <type> counter(s) on it` rider on the exile outcome
+    // (Dauthi Voidwalker's void counter) is lifted onto the redirect's
+    // `enter_with_counters`, which `event_modifiers_for_ability` →
+    // `extract_etb_counters` reads and applies as the object enters exile.
+    let redirect_counters = match &outcome {
+        Outcome::Exile {
+            enter_with_counters,
+        } => enter_with_counters.clone(),
+        Outcome::ShuffleBack { .. } => vec![],
+    };
+
+    // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts the
+    // `destination` field (and `enter_with_counters`, when present) from this
+    // top-level ChangeZone — other fields here (owner_library, etc.) are inert
+    // metadata along the redirect path.
     let redirect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
@@ -5086,7 +5135,7 @@ fn parse_graveyard_exile_replacement(
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
-            enter_with_counters: vec![],
+            enter_with_counters: redirect_counters,
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
             enters_modified_if: None,
@@ -5097,7 +5146,7 @@ fn parse_graveyard_exile_replacement(
     // The mandatory post-effect extractor at `replacement.rs` sees a top-level
     // ChangeZone and stashes `sub_ability` to run after the redirected move lands.
     let execute = match outcome {
-        Outcome::Exile => redirect,
+        Outcome::Exile { .. } => redirect,
         Outcome::ShuffleBack { reveal } => {
             // CR 701.24: shuffle into owner's library. CR 400.3 is the owner-routing
             // authority — TargetFilter::Owner resolves to state.objects[source_id].owner,
@@ -13144,6 +13193,107 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 614.1a + CR 122.1: Dauthi Voidwalker (#5245) — "If a card would be put
+    /// into an opponent's graveyard from anywhere, instead exile it with a void
+    /// counter on it." The graveyard-exile replacement must accept BOTH the
+    /// "instead exile it" prefix word order AND the "with a void counter on it"
+    /// rider, lifting the counter onto the exile redirect's `enter_with_counters`
+    /// (which `extract_etb_counters` applies as the card enters exile).
+    #[test]
+    fn dauthi_voidwalker_exile_with_void_counter() {
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.",
+            "Dauthi Voidwalker",
+        )
+        .expect("Dauthi's graveyard-exile-with-counter replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        // Opponent-owned, token-excluding (CR 730.3e) — same subject scope as Leyline.
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }));
+                assert!(properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("Expected Typed(Owned Opponent + NonToken), got {other:?}"),
+        }
+        // Exile redirect carries the void counter.
+        match def.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                enter_with_counters,
+                ..
+            }) => {
+                assert_eq!(
+                    enter_with_counters.len(),
+                    1,
+                    "expected one counter rider, got {enter_with_counters:?}"
+                );
+                let (ct, qty) = &enter_with_counters[0];
+                assert_eq!(&*ct.as_str(), "void", "expected a void counter, got {ct:?}");
+                assert_eq!(qty, &QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("Expected ChangeZone→Exile with counters, got {other:?}"),
+        }
+    }
+
+    /// CR 400.3: Forbidden Crypt — "If a card would be put into your graveyard
+    /// from anywhere, exile that card instead." The "your graveyard" scope must
+    /// bind the redirect to YOU-owned cards; without it the anaphor recognizer
+    /// (which now makes this card parse) would exile opponents' cards too. Review
+    /// finding on #5443 (matthewevans).
+    #[test]
+    fn forbidden_crypt_your_graveyard_scopes_to_you() {
+        let def = parse_replacement_line(
+            "If a card would be put into your graveyard from anywhere, exile that card instead.",
+            "Forbidden Crypt",
+        )
+        .expect("Forbidden Crypt graveyard-exile replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(
+                    properties.contains(&FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    }),
+                    "'your graveyard' must scope to You-owned cards, got {properties:?}"
+                );
+                // Must NOT be scoped to an opponent.
+                assert!(!properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }));
+                // "a card" is still token-excluding (CR 730.3e).
+                assert!(properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("Expected Typed(Owned You + NonToken), got {other:?}"),
+        }
+    }
+
+    /// Regression guard: the plain "exile it instead" suffix word order (Leyline /
+    /// Rest in Peace) must stay counter-free after the anaphor-recognizer refactor.
+    #[test]
+    fn graveyard_exile_no_counter_suffix_word_order_unchanged() {
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .unwrap();
+        match def.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                enter_with_counters,
+                ..
+            }) => assert!(
+                enter_with_counters.is_empty(),
+                "plain exile must carry no counters, got {enter_with_counters:?}"
+            ),
+            other => panic!("Expected ChangeZone→Exile, got {other:?}"),
+        }
     }
 
     /// CR 730.3e + CR 111.1: a card-only subject targeting ANY graveyard ("a

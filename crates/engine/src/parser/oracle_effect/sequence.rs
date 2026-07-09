@@ -2531,6 +2531,37 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("players can't ")),
         value((), tag("players cannot ")),
     )))
+    // CR 109.3 + CR 201.4b + CR 608.2k: gendered pronouns ("he"/"she") used as an
+    // Oracle-text subject refer to the card itself (Machine Man, Model X-51:
+    // "... put a +1/+1 counter on ~ and he gains flying until end of turn";
+    // Themberchaud: "... and he gains flying ..."). A bare gendered pronoun
+    // followed by a conjugated continuous/restriction verb is unambiguously a
+    // subject-predicate clause start — the same guarantee as the "it <verb>" arms
+    // above — so split it here. Without the split the conjunct is fed to the
+    // imperative-only `parse_imperative_effect`, which has no subject-predicate
+    // path and fails it closed to an unimplemented effect named for the pronoun.
+    // Splitting routes it through `parse_clause_ast`, where
+    // `parse_subject_application` maps "he"/"she" to `SelfRef`
+    // (subject.rs `matches!(lower, "he" | "she")`). The pronoun axis is composed
+    // with the verb axis rather than enumerated per permutation (CLAUDE.md
+    // "compose, don't enumerate permutations"); the verb set mirrors the "it "
+    // continuous ("gains"/"gets"/"has"/"loses") and restriction ("doesn't"/"can't"/
+    // "cannot") arms above.
+    .or(preceded(
+        alt((tag::<_, _, OracleError<'_>>("he "), tag("she "))),
+        value(
+            (),
+            alt((
+                tag("gains "),
+                tag("gets "),
+                tag("has "),
+                tag("loses "),
+                tag("doesn't "),
+                tag("can't "),
+                tag("cannot "),
+            )),
+        ),
+    ))
     // CR 701.63: "<self-ref subject> endures N" as a conjunct ("you lose 1
     // life and this creature endures 1" — Sinkhole Surveyor). The self-ref
     // subject axis (it / this creature / ~) is composed with the "endures "
@@ -10689,6 +10720,35 @@ mod tests {
         assert!(!starts_bare_and_clause("they attack this turn"));
         assert!(!starts_bare_and_clause("they get +1/+1 until end of turn"));
         assert!(!starts_bare_and_clause("they lose 6 life"));
+    }
+
+    /// CR 109.3 + CR 201.4b + CR 608.2k: a bare gendered pronoun ("he"/"she"),
+    /// which in Oracle text refers to the card itself, followed by a conjugated
+    /// continuous / restriction verb is a subject-predicate clause start — the
+    /// same guarantee as the singular "it <verb>" arms. Machine Man, Model X-51:
+    /// "put a +1/+1 counter on ~ and he gains flying until end of turn". Without
+    /// the split the conjunct falls to the imperative-only path and fails closed
+    /// to an unimplemented effect named for the pronoun. The verb set mirrors the
+    /// singular "it" arms (continuous gains/gets/has/loses + restriction
+    /// doesn't/can't/cannot), NOT the plural "they" arm (which excludes P/T
+    /// "get" for its conditional-rider path).
+    #[test]
+    fn bare_and_clause_starts_on_gendered_pronoun_subjects() {
+        assert!(starts_bare_and_clause("he gains flying until end of turn"));
+        assert!(starts_bare_and_clause("she gains flying until end of turn"));
+        assert!(starts_bare_and_clause("he gets +1/+1 until end of turn"));
+        assert!(starts_bare_and_clause("she has lifelink"));
+        assert!(starts_bare_and_clause(
+            "he loses all abilities until end of turn"
+        ));
+        assert!(starts_bare_and_clause("he can't be blocked this turn"));
+        assert!(starts_bare_and_clause(
+            "she doesn't untap during her next untap step"
+        ));
+        // Guard: a gendered pronoun WITHOUT a recognized continuous/restriction
+        // verb must NOT split (no false clause boundary).
+        assert!(!starts_bare_and_clause("he attacks this turn"));
+        assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
     }
 
     /// CR 601.2c + CR 611.2c: A second `"target <noun>"` conjunct joined by a

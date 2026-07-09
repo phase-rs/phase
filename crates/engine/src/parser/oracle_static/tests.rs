@@ -13741,6 +13741,39 @@ fn dynamic_pt_in_text_minus_x_over_0_without_where_clause_defaults_to_cost_x_pai
 }
 
 #[test]
+fn dynamic_pt_in_text_mixed_dynamic_power_fixed_toughness() {
+    // CR 613.4c layer 7c: a MIXED "+X/+1" grant (Cranial Ram, "Equipped
+    // creature gets +X/+1, where X is the number of artifacts you control")
+    // must emit BOTH an X-valued power modification and a CONSTANT +1
+    // toughness modification. Before `parse_variable_pt_pattern` accepted a
+    // fixed magnitude per axis, the `+1` failed the pattern and the entire
+    // equip static was dropped.
+    let mods = parse_dynamic_pt_in_text(
+        "equipped creature gets +x/+1",
+        Some("the number of artifacts you control"),
+    )
+    .expect("mixed +X/+1 grant must emit modifications");
+
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+        "expected AddDynamicPower for the X power axis, got {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })),
+        "expected fixed AddToughness {{ value: 1 }} for the +1 toughness axis, got {mods:?}"
+    );
+    // The fixed +1 toughness must be a constant, never a dynamic modification.
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+        "fixed +1 toughness must not be dynamic, got {mods:?}"
+    );
+}
+
+#[test]
 fn dynamic_pt_in_text_minus_x_over_minus_x_without_where_clause_defaults_both_to_cost_x_paid() {
     // CR 107.3i: Symmetric -X/-X with no binding clause must default both
     // legs to `QuantityRef::CostXPaid` wrapped in
@@ -15574,6 +15607,84 @@ fn lands_you_control_are_creatures_scope_and_pt() {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
         _ => panic!("Expected Typed land filter scoped to you"),
+    }
+}
+
+/// CR 305.6 + CR 109.5 + CR 613.1d + CR 613.4b: a controller-scoped *basic-land-type*
+/// subject ("<basic land type> you control") resolves like its `All <type>` and
+/// `Lands you control` siblings. Ambush Commander — "Forests you control are 1/1
+/// green Elf creatures that are still lands." — previously strict-failed because the
+/// subject parser's basic-land-type arm did not peel the optional " you control"
+/// controller scope (only the generic "lands you control" and bare/`all ` forms
+/// were handled). The peel is a shared subject-parser parameterization, so it also
+/// covers the controller-scoped type-change form, not just this one card.
+#[test]
+fn controller_scoped_basic_land_type_subject_animates() {
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaColor;
+
+    let def =
+        parse_static_line("Forests you control are 1/1 green Elf creatures that are still lands.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype("Forest".to_string())));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "\"you control\" must scope the Forest subject to the controller"
+            );
+        }
+        other => panic!("Expected Typed Forest+You land filter, got {other:?}"),
+    }
+    use ContinuousModification as CM;
+    assert_eq!(
+        def.modifications,
+        vec![
+            CM::SetPower { value: 1 },
+            CM::SetToughness { value: 1 },
+            CM::SetColor {
+                colors: vec![ManaColor::Green],
+            },
+            CM::AddType {
+                core_type: CoreType::Creature,
+            },
+            CM::AddSubtype {
+                subtype: "Elf".to_string(),
+            },
+        ],
+    );
+
+    // Same " you control" peel generalizes across the land-static class: a
+    // controller-scoped basic-land-type *type-change* resolves too, proving the fix
+    // is a shared subject-parser parameterization rather than a one-card special case.
+    let type_change = parse_static_line("Mountains you control are Islands.").unwrap();
+    match &type_change.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype("Mountain".to_string())));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        other => panic!("Expected Typed Mountain+You land filter, got {other:?}"),
+    }
+    assert!(type_change.modifications.iter().any(|m| matches!(
+        m,
+        ContinuousModification::SetBasicLandType { land_type } if *land_type == BasicLandType::Island
+    )));
+
+    // Regression: the unscoped "All Forests" form stays controller-agnostic.
+    let all_forests =
+        parse_static_line("All Forests are 1/1 green Elf creatures that are still lands.").unwrap();
+    match &all_forests.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.controller.is_none(), "all Forests — no controller scope")
+        }
+        other => panic!("Expected Typed Forest filter (all Forests), got {other:?}"),
     }
 }
 
