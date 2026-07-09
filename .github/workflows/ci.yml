@@ -190,13 +190,57 @@ jobs:
         # Exact-match only (no restore-keys) — a stale hit would feed wrong
         # card-data into the validate/coverage gates downstream. Cargo.lock is
         # included so dep bumps that affect parsing (e.g. nom) invalidate.
+        #
+        # `crates/engine/data/**` and `build.rs` are hashed because the engine
+        # lib compiles those files IN: oracle-subtypes.json via `include_str!`,
+        # known-tokens.toml via build.rs → OUT_DIR embed. A PR touching only
+        # those changes parser behaviour, so omitting them would serve stale
+        # card-data from this cache and (via gates-cache below) skip the
+        # validate/coverage gates that would have caught it. hashFiles evaluates
+        # at step start against the clean checkout, so oracle-gen's later
+        # write-if-changed rewrite of oracle-subtypes.json cannot feed back in.
+        #
+        # ai-gate.yml carries a `cardgen-` cache whose key EXPRESSION looks
+        # identical, but the two have never shared an entry and cannot: ai-gate
+        # restores its cache before it downloads AtomicCards.json (the download
+        # sits inside its miss-gated Generate step) and that file is gitignored,
+        # so `hashFiles` silently omits it there and the digests always differ.
+        # This expression intentionally supersets ai-gate's; they are independent.
         id: cardgen-cache
         uses: actions/cache@v4
         with:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Cache card-data gate results
+        # Proof-of-passage cache for the two expensive steps that are pure
+        # functions of the same hashed inputs: `card-data-validate` and
+        # `coverage-report`. `actions/cache` writes its entry only when the job
+        # succeeds (`post-if: success()` on the action's post step), so an entry
+        # under this key is evidence that validate AND coverage passed for this
+        # exact input set — which is what licenses skipping them on a hit.
+        # Key expression must stay identical to `cardgen-cache`'s above.
+        #
+        # Deliberately a SEPARATE key from `cardgen-cache`, not a reuse of it.
+        # A cardgen entry proves only that generation succeeded; it is not
+        # evidence that anything validated it. ai-gate.yml generates card-data
+        # and never validates it, and while its `cardgen-` key is de-facto
+        # disjoint from this workflow's today (see the note above), that is an
+        # accident of its step order, not a guarantee. Were ai-gate ever fixed to
+        # genuinely share the key, an engine change whose output fails
+        # `card-data-validate` would red card-data-gate while ai-gate still
+        # succeeded and saved the shared entry — and gating validate on that
+        # entry would skip validation on the next push: a false green. This cache
+        # is written by card-data-gate alone, so a hit cannot lie about a gate.
+        id: gates-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/coverage-data.json
+            data/coverage-summary.json
+          key: cardgen-gates-v1-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         # All engine-backed tools in this job use the SAME (profile, features)
@@ -212,11 +256,31 @@ jobs:
         # PR-time gate — the same parse the WASM does at runtime, run against
         # the freshly produced card-data. If a parser/schema change makes the
         # engine unable to read its own output, fail the build before merge.
-        # Same [tool, cli] fingerprint as card-gen above → engine cache hit.
+        # Skipped on a gates-cache hit (NOT a cardgen hit — see that step): a
+        # gates entry for this input hash is proof this exact check already
+        # passed. card-data.json is byte-identical either way, restored from
+        # cardgen or regenerated above.
+        # Same [tool, cli] fingerprint as card-gen above → engine cache hit. That
+        # hit is only real because `oracle-gen` rewrites
+        # crates/engine/data/oracle-subtypes.json solely when its bytes change:
+        # the engine lib pulls that file in via `include_str!`, so an
+        # unconditional write would bump its mtime, dirty the crate's dep-info
+        # fingerprint, and force a full engine recompile right here.
+        if: steps.gates-cache.outputs.cache-hit != 'true'
         run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
 
       - name: Card support coverage report
-        # Same [tool, cli] fingerprint as card-gen above → engine cache hit.
+        # Skipped on a gates-cache hit — coverage-data.json and
+        # coverage-summary.json are restored from it, and both are deterministic
+        # in the same hashed inputs. Nothing downstream mutates either file, so
+        # the cached bytes are exactly this step's output regardless of which ref
+        # populated the entry (the main-only stamp writes a separate .stamped.json
+        # copy). The regression/parse-diff steps below still run unconditionally
+        # and consume the restored files (their R2 baselines move independently
+        # of this cache).
+        # Same [tool, cli] fingerprint as card-gen above → engine cache hit (see
+        # the oracle-subtypes note on the validate step).
+        if: steps.gates-cache.outputs.cache-hit != 'true'
         run: |
           cargo run --profile tool --features cli --bin coverage-report -- data/ --all > data/coverage-data.json
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
@@ -340,13 +404,21 @@ jobs:
         # Embed the same card-data hash in both files so downstream consumers
         # can verify they're reading a consistent R2 snapshot. Gated to main
         # because the only consumer is the R2 upload below.
+        #
+        # coverage-data.json is stamped into a SEPARATE .stamped.json copy, not
+        # rewritten in place: it is a `gates-cache` path, and this step runs
+        # before that cache's post-save. Stamping in place would make the cached
+        # bytes depend on github.ref (main-push entries jq-reserialized and
+        # stamped, PR entries raw), coupling a content-addressed cache to the ref
+        # that happened to populate it. semantic-audit.json is not cached, so it
+        # is still stamped in place. The uploads below publish the stamped copy,
+        # so R2 artifacts keep exactly their current shape.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           HASH=$(sha256sum data/card-data.json | awk '{print substr($1, 1, 16)}')
           jq --arg h "$HASH" '. + {card_data_hash: $h}' data/semantic-audit.json > data/semantic-audit.json.tmp
           mv data/semantic-audit.json.tmp data/semantic-audit.json
-          jq --arg h "$HASH" '. + {card_data_hash: $h}' data/coverage-data.json > data/coverage-data.json.tmp
-          mv data/coverage-data.json.tmp data/coverage-data.json
+          jq --arg h "$HASH" '. + {card_data_hash: $h}' data/coverage-data.json > data/coverage-data.stamped.json
 
       - name: Upload data to R2 (preview)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -356,7 +428,7 @@ jobs:
         run: |
           npx wrangler r2 object put phase-rs-data/preview/card-data.json --file data/card-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/card-names.json --file data/card-names.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.stamped.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           # changelog{,-meta}.json are committed to client/public/ (not generated
@@ -386,7 +458,7 @@ jobs:
           set -euo pipefail
           HASH="$(./scripts/engine-source-hash.sh HEAD)"
           npx wrangler r2 object put "phase-rs-data/parse-baselines/coverage-data-${HASH}.json" \
-            --file data/coverage-data.json --remote --content-type application/json \
+            --file data/coverage-data.stamped.json --remote --content-type application/json \
             --cache-control "public, max-age=31536000, immutable"
 
   draft-pools:

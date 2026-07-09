@@ -33,6 +33,7 @@ import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { fanGeometry } from "../card/fanGeometry.ts";
+import { CompanionFanCard } from "./CompanionFanCard.tsx";
 
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
@@ -119,6 +120,17 @@ export function PlayerHand() {
   // only drag gesture is flick-up-to-cast.
   const exileCards = useCastableZoneObjects("exile", playerId);
   const graveyardCards = useCastableZoneObjects("graveyard", playerId);
+
+  // The perspective player's companion trails the fan as its far-right card
+  // (see CompanionFanCard). Like the wings it carries no `data-card-hover`, so
+  // it stays out of the reorder DOM sweep. Shown only until used: on
+  // `CompanionToHand` the engine flips `used` AND creates the real hand
+  // GameObject, so a still-shown ghost would duplicate the real card.
+  const companion = player?.companion;
+  const companionCount = companion && !companion.used ? 1 : 0;
+  const canActivateCompanion = useGameStore((s) =>
+    s.legalActions.some((a) => a.type === "CompanionToHand"),
+  );
 
   const playCard = useCallback(
     (objectId: number) => {
@@ -211,7 +223,7 @@ export function PlayerHand() {
       let angle = 0;
       if (slot != null) {
         const { left, right } = flankingHandIndices(slot, fromIdx, rects.length);
-        const fan = fanGeometry(exileCards.length + rects.length + graveyardCards.length);
+        const fan = fanGeometry(exileCards.length + rects.length + graveyardCards.length + companionCount);
         const rotations = [left, right]
           .filter((idx): idx is number => idx != null)
           .map((idx) => fan.rotation(exileCards.length + idx));
@@ -266,7 +278,7 @@ export function PlayerHand() {
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, organizeActive, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length],
+    [isMobile, pendingObjectId, organizeActive, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length, companionCount],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -422,7 +434,7 @@ export function PlayerHand() {
   // visually groups the colored wings apart from the white hand cards.
   const handSize = handObjects.length;
   const exileCount = exileCards.length;
-  const fan = fanGeometry(exileCount + handSize + graveyardCards.length);
+  const fan = fanGeometry(exileCount + handSize + graveyardCards.length + companionCount);
 
   return (
     <div
@@ -571,6 +583,22 @@ export function PlayerHand() {
               />
             );
           })}
+          {/* Companion (far-right trailing card): absolute fan position N-1,
+              after the graveyard wing. Not a zone object — activates the global
+              CompanionToHand special action, not an object cast. Hidden once
+              used (the real hand card then exists). Synthetic key: no obj.id. */}
+          {companion && !companion.used && (
+            <CompanionFanCard
+              key="companion"
+              companion={companion}
+              canActivate={canActivateCompanion}
+              theme={ZONE_THEME.companion}
+              rotation={fan.rotation(exileCount + handSize + graveyardCards.length)}
+              arcOffset={fan.arc(exileCount + handSize + graveyardCards.length)}
+              marginLeft={0}
+              zIndex={handSize + graveyardCards.length}
+            />
+          )}
         </AnimatePresence>
       </motion.div>
       {/* Drop-position arrow: a single glowing arrow that bounces over the slot

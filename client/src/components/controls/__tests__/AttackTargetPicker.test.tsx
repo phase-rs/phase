@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AttackTarget, ObjectId } from "../../../adapter/types.ts";
+import type { AttackTarget, CombatRequirement, ObjectId } from "../../../adapter/types.ts";
 import { AttackTargetPicker } from "../AttackTargetPicker.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -171,5 +171,89 @@ describe("AttackTargetPicker", () => {
       [102, P1],
       [103, P1],
     ]);
+  });
+});
+
+// Engine parity for the MustAttackPlayer lure (CR 508.1d): a constrained
+// creature must be aimed *directly* at a required player, and the picker must
+// gate Confirm exactly the way the engine's declare-attackers validator does.
+// `P1` = player id 1 (labeled "Opp 2"); `P2` = player id 2 (labeled "Opp 3").
+describe("AttackTargetPicker — MustAttackPlayer gating", () => {
+  // Single constrained attacker so the per-target stepper/button labels are
+  // unambiguous (identical labels repeat once per stack otherwise).
+  const LURED: ObjectId[] = [101];
+
+  function renderLured(constraints: Record<string, CombatRequirement>) {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <AttackTargetPicker
+        validTargets={TARGETS}
+        selectedAttackers={LURED}
+        attackerConstraints={constraints}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    return { onConfirm, onCancel };
+  }
+
+  beforeEach(() => {
+    useMultiplayerStore.setState({ activePlayerId: 0, playerNames: new Map() });
+    // 101 is "Goblin" — the message names it.
+    useGameStore.setState({ gameState: makeMixedState() });
+  });
+
+  afterEach(() => cleanup());
+
+  it("distribute: a lured creature on the wrong player blocks Confirm, and the right player enables it", () => {
+    // Must attack player 2 ("Opp 3").
+    const { onConfirm } = renderLured({ "101": { kind: "MustAttack", players: [2] } });
+    enterDistribute();
+
+    // Aim it at Opp 2 (player 1) — fully assigned but the WRONG player.
+    fireEvent.click(screen.getByRole("button", { name: "Send all to Opp 2" }));
+
+    // Discriminating: without the gate this would be enabled (nothing is
+    // unassigned). The engine would reject the P1 target, so Confirm must block.
+    const confirm = screen.getByRole("button", { name: /Declare 1 Attacker/ });
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText("Goblin must attack Opp 3")).toBeInTheDocument();
+
+    // Re-aim at the required player (Opp 3) — now legal.
+    fireEvent.click(screen.getByRole("button", { name: "Send all to Opp 3" }));
+    const enabled = screen.getByRole("button", { name: /Declare 1 Attacker/ });
+    expect(enabled).not.toBeDisabled();
+
+    fireEvent.click(enabled);
+    expect(onConfirm).toHaveBeenCalledWith([[101, P2]]);
+  });
+
+  it("distribute: MustAttack with an empty players list imposes no target restriction", () => {
+    // Generic must-attack / goad — any target is legal.
+    const { onConfirm } = renderLured({ "101": { kind: "MustAttack", players: [] } });
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: "Send all to Opp 2" }));
+    const confirm = screen.getByRole("button", { name: /Declare 1 Attacker/ });
+    expect(confirm).not.toBeDisabled();
+
+    fireEvent.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith([[101, P1]]);
+  });
+
+  it("attack-all: the disallowed target is disabled while the required player stays clickable", () => {
+    const { onConfirm } = renderLured({ "101": { kind: "MustAttack", players: [2] } });
+
+    // "Attack All" would send 101 to a single target; the required-player check
+    // disables the Opp 2 button (engine would reject) but not Opp 3.
+    const wrong = screen.getByRole("button", { name: /Attack Opp 2 with 1 creature/ });
+    expect(wrong).toBeDisabled();
+
+    const right = screen.getByRole("button", { name: /Attack Opp 3 with 1 creature/ });
+    expect(right).not.toBeDisabled();
+
+    fireEvent.click(right);
+    expect(onConfirm).toHaveBeenCalledWith([[101, P2]]);
   });
 });

@@ -3307,6 +3307,12 @@ pub enum WaitingFor {
         valid_attacker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_attack_targets: Vec<crate::game::combat::AttackTarget>,
+        /// CR 508.1c / CR 508.1d: per-creature combat requirement/restriction
+        /// (must-attack / can't-attack) for display badges and Confirm gating.
+        /// Display-only — computed by `combat::attacker_constraints_for_active_player`,
+        /// the same predicates that enforce legality in `validate_attackers`.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        attacker_constraints: HashMap<ObjectId, crate::game::combat::CombatRequirement>,
     },
     DeclareBlockers {
         player: PlayerId,
@@ -3321,6 +3327,12 @@ pub enum WaitingFor {
         /// enforces the requirement in `validate_blocks`.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         block_requirements: HashMap<ObjectId, u32>,
+        /// CR 509.1b / CR 509.1c: per-creature combat requirement/restriction
+        /// (must-block / can't-block) for display badges and Confirm gating.
+        /// Display-only — computed by `combat::blocker_constraints_for_player`,
+        /// the same predicate that enforces legality in `validate_blockers_for_player`.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        blocker_constraints: HashMap<ObjectId, crate::game::combat::CombatRequirement>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -4543,6 +4555,26 @@ pub enum WaitingFor {
         #[serde(default)]
         visibility: super::ability::VoteVisibility,
     },
+    /// CR 608.2d + CR 700.3: "An opponent separates" — in multiplayer the
+    /// controller chooses which opponent will perform the partition. With a
+    /// single opponent this state is skipped (no decision). The chosen
+    /// opponent feeds into [`Self::SeparatePilesPartition`].
+    SeparatePilesChooseOpponent {
+        /// The controller making the choice.
+        player: PlayerId,
+        /// Non-eliminated opponents eligible to be chosen.
+        candidates: Vec<PlayerId>,
+        /// The revealed card pool to be partitioned.
+        eligible: im::Vector<ObjectId>,
+        /// Who will choose a pile after partitioning.
+        chooser: PlayerId,
+        /// Sub-effect for the chosen pile.
+        chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// Optional sub-effect for the unchosen pile.
+        unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
+        /// Source ability's object ID.
+        source_id: ObjectId,
+    },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
     /// is submitted by `player` via `GameAction::SubmitPilePartition`; pile B
@@ -4572,6 +4604,8 @@ pub enum WaitingFor {
         /// CR 608.2c: Sub-effect applied to each chosen pile, once per
         /// object, with the subject rebound as controller.
         chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// CR 608.2c: Optional sub-effect applied to each unchosen pile object.
+        unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
     },
@@ -4592,6 +4626,8 @@ pub enum WaitingFor {
         /// CR 608.2c: Sub-effect applied to each chosen pile, once per
         /// object, with the subject rebound as controller.
         chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// CR 608.2c: Optional sub-effect applied to each unchosen pile object.
+        unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
     },
@@ -5103,6 +5139,7 @@ impl WaitingFor {
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
+            WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
@@ -5260,6 +5297,7 @@ impl WaitingFor {
             | WaitingFor::DiscardChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
+            | WaitingFor::SeparatePilesChooseOpponent { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
             | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
@@ -8920,6 +8958,21 @@ impl GameState {
         }
     }
 
+    /// CR 603.5: Revoke a single stored "don't ask again" auto-choice for an
+    /// optional ("may") trigger. The key already scopes to one player, source,
+    /// and origin.
+    pub fn remove_may_trigger_auto_choice(&mut self, key: &MayTriggerAutoChoiceKey) {
+        self.may_trigger_auto_choices
+            .retain(|record| record.key != *key);
+    }
+
+    /// CR 603.5: Revoke all stored "don't ask again" auto-choices belonging to
+    /// `player` for optional ("may") triggers.
+    pub fn clear_may_trigger_auto_choices(&mut self, player: PlayerId) {
+        self.may_trigger_auto_choices
+            .retain(|record| record.key.player != player);
+    }
+
     /// CR 117.3d: True when `player` has a standing yield matching the top stack
     /// entry, meaning they have pre-committed to pass priority while it resolves.
     /// Only triggered abilities can be yielded — spells, activated abilities, and
@@ -10273,12 +10326,14 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::DeclareBlockers {
             player: PlayerId(0),
             valid_blocker_ids: vec![],
             valid_block_targets: HashMap::new(),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),

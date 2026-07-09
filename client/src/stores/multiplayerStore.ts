@@ -26,7 +26,6 @@ import {
   type LookupJoinTargetResult,
   type RegisterHostRequest,
   type ResolveResult,
-  type ResolveGuestOptions,
 } from "../services/brokerClient";
 import {
   HandshakeError,
@@ -320,6 +319,7 @@ interface MultiplayerActions {
   setLatency: (ms: number | null) => void;
   // Hosting session actions
   startHosting: (settings: HostingSettings, deck: HostingDeck) => void;
+  resumeServerHosting: () => boolean;
   cancelHosting: () => void;
   clearPendingGameRoute: () => void;
   setServerInfo: (info: ServerInfo | null) => void;
@@ -352,11 +352,7 @@ interface MultiplayerActions {
    * alive. Does NOT navigate — the caller inspects the result and handles
    * password retry, build mismatch, etc. before navigation.
    */
-  resolveGuest: (
-    code: string,
-    password?: string,
-    opts?: Pick<ResolveGuestOptions, "reservationToken">,
-  ) => Promise<ResolveResult>;
+  resolveGuest: (code: string, password?: string) => Promise<ResolveResult>;
   /**
    * Read-only typed-code lookup. Returns format/routing metadata without
    * consuming a seat.
@@ -526,6 +522,194 @@ export function migratePersistedMultiplayerState(
   return migrated;
 }
 
+type MultiplayerSet = (
+  partial:
+    | Partial<MultiplayerState>
+    | ((state: MultiplayerState) => Partial<MultiplayerState>),
+) => void;
+type MultiplayerGet = () => MultiplayerState & MultiplayerActions;
+
+function resetServerHostSession(set: MultiplayerSet): void {
+  clearWsSession();
+  set({
+    hostGameCode: null,
+    hostIsPublic: false,
+    hostingStatus: "idle",
+    hostSession: null,
+    playerSlots: [],
+  });
+}
+
+function savePregameHostSession(
+  get: MultiplayerGet,
+  data: { game_code: string; player_token: string },
+): void {
+  const existing = loadWsSession();
+  const hostSession = get().hostSession ?? existing?.hostSession;
+  saveWsSession({
+    gameCode: data.game_code,
+    playerToken: data.player_token,
+    serverUrl: get().serverAddress,
+    timestamp: Date.now(),
+    ...(hostSession ? { hostSession } : {}),
+    ...(hostSession ? { hostIsPublic: get().hostIsPublic } : {}),
+  });
+}
+
+function clearPregameHostMetadataFromWsSession(): void {
+  const session = loadWsSession();
+  if (!session) return;
+  saveWsSession({
+    gameCode: session.gameCode,
+    playerToken: session.playerToken,
+    serverUrl: session.serverUrl,
+    timestamp: Date.now(),
+  });
+}
+
+function handleServerHostMessage(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  ws: WebSocket,
+  msg: { type: string; data?: unknown },
+): void {
+  if (msg.type === "GameCreated") {
+    const data = msg.data as { game_code: string; player_token: string };
+    savePregameHostSession(get, data);
+    // Reset reconnect counter on successful (re)connection.
+    hostReconnectAttempt = 0;
+    set({ hostGameCode: data.game_code, hostingStatus: "waiting" });
+  } else if (msg.type === "GameStarted") {
+    gameStartedFired = true;
+    clearPregameHostMetadataFromWsSession();
+    ws.close();
+    hostWs = null;
+    const gameId = crypto.randomUUID();
+    saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
+    useGameStore.setState({ gameId });
+    const names = new Map<number, string>();
+    for (const slot of get().playerSlots) {
+      if (slot.name) names.set(slot.playerId, slot.name);
+    }
+    set({
+      hostGameCode: null,
+      hostingStatus: "idle",
+      hostSession: null,
+      playerNames: names,
+      playerSlots: [],
+      pendingGameRoute: `/game/${gameId}?mode=host`,
+    });
+  } else if (msg.type === "PlayerSlotsUpdate") {
+    const data = msg.data as { slots: PlayerSlot[] };
+    const prior = get().playerSlots;
+    const newJoiners = data.slots.filter((slot) => {
+      if (slot.kind.type !== "JoinedHuman") return false;
+      const before = prior.find((p) => p.playerId === slot.playerId);
+      return !before || before.kind.type !== "JoinedHuman";
+    });
+    set({ playerSlots: data.slots });
+    for (const joiner of newJoiners) {
+      get().showToast(`${joiner.name} joined the game.`);
+    }
+  } else if (msg.type === "Error") {
+    const data = msg.data as { message: string };
+    console.error("Host error:", data.message);
+    get().showToast(data.message || "Failed to create game.");
+    if (get().hostingStatus !== "waiting") {
+      get().cancelHosting();
+    }
+  }
+}
+
+async function openServerHostSocket(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  setupFrame: () => unknown,
+  onReopen: () => void,
+): Promise<void> {
+  if (!isValidWebSocketUrl(get().serverAddress)) {
+    resetServerHostSession(set);
+    get().showToast("Invalid server address. Update it in Settings.");
+    return;
+  }
+
+  let socket;
+  try {
+    socket = await openPhaseSocket(get().serverAddress);
+  } catch (err) {
+    if (
+      err instanceof HandshakeError &&
+      err.kind === "protocol_mismatch"
+    ) {
+      get().showToast(err.message);
+      get().cancelHosting();
+      return;
+    }
+    if (!gameStartedFired) {
+      hostWs = null;
+      onReopen();
+    }
+    return;
+  }
+
+  set({ serverInfo: socket.serverInfo });
+  hostWs = socket.ws;
+
+  socket.ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data as string) as {
+      type: string;
+      data?: unknown;
+    };
+    handleServerHostMessage(set, get, socket.ws, msg);
+  };
+  socket.ws.onerror = () => {
+    if (!gameStartedFired) {
+      hostWs = null;
+      onReopen();
+    }
+  };
+  socket.ws.onclose = () => {
+    if (!gameStartedFired && hostWs === socket.ws) {
+      hostWs = null;
+      onReopen();
+    }
+  };
+
+  socket.ws.send(JSON.stringify(setupFrame()));
+}
+
+function attemptServerHostReconnect(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+): void {
+  if (gameStartedFired) return;
+  const session = loadWsSession();
+  if (!session || hostReconnectAttempt >= HOST_MAX_RECONNECT_ATTEMPTS) {
+    resetServerHostSession(set);
+    get().showToast("Connection to server lost.");
+    return;
+  }
+
+  hostReconnectAttempt++;
+  const delay = Math.pow(2, hostReconnectAttempt - 1) * 1000;
+  hostReconnectTimer = setTimeout(() => {
+    hostReconnectTimer = null;
+    if (gameStartedFired) return;
+    void openServerHostSocket(
+      set,
+      get,
+      () => ({
+        type: "Reconnect",
+        data: {
+          game_code: session.gameCode,
+          player_token: session.playerToken,
+        },
+      }),
+      () => attemptServerHostReconnect(set, get),
+    );
+  }, delay);
+}
+
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(
   persist(
     (set, get) => ({
@@ -670,176 +854,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           pendingGameRoute: null,
         });
 
-        // Shared post-handshake message handler. ServerHello is handled
-        // upstream by `openPhaseSocket`, so by the time we get here the
-        // server's identity is already known and compatible.
-        const handleHostMessage = (ws: WebSocket, msg: { type: string; data?: unknown }) => {
-          if (msg.type === "GameCreated") {
-            const data = msg.data as { game_code: string; player_token: string };
-            saveWsSession({
-              gameCode: data.game_code,
-              playerToken: data.player_token,
-              serverUrl: get().serverAddress,
-              timestamp: Date.now(),
-            });
-            // Reset reconnect counter on successful (re)connection
-            hostReconnectAttempt = 0;
-            set({ hostGameCode: data.game_code, hostingStatus: "waiting" });
-          } else if (msg.type === "GameStarted") {
-            gameStartedFired = true;
-            ws.close();
-            hostWs = null;
-            const gameId = crypto.randomUUID();
-            saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
-            useGameStore.setState({ gameId });
-            const names = new Map<number, string>();
-            for (const slot of get().playerSlots) {
-              if (slot.name) names.set(slot.playerId, slot.name);
-            }
-            // Reset hosting state FIRST so tile hides, then set route
-            set({
-              hostGameCode: null,
-              hostingStatus: "idle",
-              hostSession: null,
-              playerNames: names,
-              playerSlots: [],
-              pendingGameRoute: `/game/${gameId}?mode=host`,
-            });
-          } else if (msg.type === "PlayerSlotsUpdate") {
-            const data = msg.data as { slots: PlayerSlot[] };
-            // Toast newly-arrived human guests so the host gets per-joiner
-            // feedback in 3+ player lobbies. Without this, only the first
-            // joiner is signaled (via the `gameCreated` → `GameStarted`
-            // boundary in ws-adapter); subsequent guests appear silently in
-            // the slot list. Diff against the prior `playerSlots` snapshot:
-            // any slot whose seat transitioned from non-human-occupied to
-            // `JoinedHuman` is a fresh guest.
-            const prior = get().playerSlots;
-            const newJoiners = data.slots.filter((slot) => {
-              if (slot.kind.type !== "JoinedHuman") return false;
-              const before = prior.find((p) => p.playerId === slot.playerId);
-              return !before || before.kind.type !== "JoinedHuman";
-            });
-            set({ playerSlots: data.slots });
-            for (const joiner of newJoiners) {
-              get().showToast(`${joiner.name} joined the game.`);
-            }
-          } else if (msg.type === "Error") {
-            const data = msg.data as { message: string };
-            console.error("Host error:", data.message);
-            get().showToast(data.message || "Failed to create game.");
-            // Keep the pregame lobby open for recoverable errors (failed
-            // Start, seat edits, bracket checks). Only tear down when we
-            // never reached a lobby or the connection itself failed.
-            if (get().hostingStatus !== "waiting") {
-              get().cancelHosting();
-            }
-          }
-        };
-
-        // Open a phase socket (handshake + version gate) then attach our
-        // post-handshake message/close handlers and send `setupFrame`. All
-        // callers (initial connect + reconnect) funnel through here so the
-        // handshake policy lives in one place.
-        const openHostSocket = async (
-          setupFrame: () => unknown,
-          onReopen: () => void,
-        ): Promise<void> => {
-          if (!isValidWebSocketUrl(get().serverAddress)) {
-            clearWsSession();
-            set({
-              hostGameCode: null,
-              hostIsPublic: false,
-              hostingStatus: "idle",
-              hostSession: null,
-              playerSlots: [],
-            });
-            get().showToast("Invalid server address. Update it in Settings.");
-            return;
-          }
-
-          let socket;
-          try {
-            socket = await openPhaseSocket(get().serverAddress);
-          } catch (err) {
-            if (
-              err instanceof HandshakeError &&
-              err.kind === "protocol_mismatch"
-            ) {
-              get().showToast(err.message);
-              get().cancelHosting();
-              return;
-            }
-            if (!gameStartedFired) {
-              hostWs = null;
-              onReopen();
-            }
-            return;
-          }
-
-          set({ serverInfo: socket.serverInfo });
-          hostWs = socket.ws;
-
-          socket.ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data as string) as {
-              type: string;
-              data?: unknown;
-            };
-            handleHostMessage(socket.ws, msg);
-          };
-          socket.ws.onerror = () => {
-            if (!gameStartedFired) {
-              hostWs = null;
-              onReopen();
-            }
-          };
-          socket.ws.onclose = () => {
-            if (!gameStartedFired && hostWs === socket.ws) {
-              hostWs = null;
-              onReopen();
-            }
-          };
-
-          socket.ws.send(JSON.stringify(setupFrame()));
-        };
-
-        // Attempt to reconnect the hosting WS using stored session token
-        const attemptHostReconnect = () => {
-          if (gameStartedFired) return;
-          const session = loadWsSession();
-          if (!session || hostReconnectAttempt >= HOST_MAX_RECONNECT_ATTEMPTS) {
-            // No session to reconnect or exhausted attempts — give up
-            clearWsSession();
-            set({
-              hostGameCode: null,
-              hostIsPublic: false,
-              hostingStatus: "idle",
-              hostSession: null,
-              playerSlots: [],
-            });
-            get().showToast("Connection to server lost.");
-            return;
-          }
-
-          hostReconnectAttempt++;
-          const delay = Math.pow(2, hostReconnectAttempt - 1) * 1000;
-          hostReconnectTimer = setTimeout(() => {
-            hostReconnectTimer = null;
-            if (gameStartedFired) return;
-            void openHostSocket(
-              () => ({
-                type: "Reconnect",
-                data: {
-                  game_code: session.gameCode,
-                  player_token: session.playerToken,
-                },
-              }),
-              attemptHostReconnect,
-            );
-          }, delay);
-        };
-
-        void openHostSocket(
+        void openServerHostSocket(
+          set,
+          get,
           () => ({
             type: "CreateGameWithSettings",
             data: {
@@ -860,8 +877,45 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               ranked: settings.ranked,
             },
           }),
-          attemptHostReconnect,
+          () => attemptServerHostReconnect(set, get),
         );
+      },
+
+      resumeServerHosting: () => {
+        if (hostWs || get().hostingStatus !== "idle") {
+          return get().hostingStatus !== "idle";
+        }
+
+        const session = loadWsSession();
+        if (!session?.hostSession || session.serverUrl !== get().serverAddress) {
+          return false;
+        }
+
+        gameStartedFired = false;
+        hostReconnectAttempt = 0;
+        set({
+          hostIsPublic: session.hostIsPublic ?? false,
+          hostingStatus: "connecting",
+          hostGameCode: null,
+          hostSession: session.hostSession,
+          pendingGameRoute: null,
+          playerSlots: [],
+        });
+
+        void openServerHostSocket(
+          set,
+          get,
+          () => ({
+            type: "Reconnect",
+            data: {
+              game_code: session.gameCode,
+              player_token: session.playerToken,
+            },
+          }),
+          () => attemptServerHostReconnect(set, get),
+        );
+
+        return true;
       },
 
       cancelHosting: () => {
@@ -1243,7 +1297,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         subscriptionReconnect = null;
       },
 
-      resolveGuest: async (code, password, opts) => {
+      resolveGuest: async (code, password) => {
         const socket = await get().ensureSubscriptionSocket();
         if (!socket) {
           return {
@@ -1260,7 +1314,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         try {
           return await resolveGuestOver(socket, code, password, {
             signal: ac.signal,
-            reservationToken: opts?.reservationToken,
             // The broker rejects a blank display_name on the resolve frame
             // (required-label rule) and the worker shell drops it without a
             // reply — the guest then times out at deck-select. Always carry

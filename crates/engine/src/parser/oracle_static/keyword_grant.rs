@@ -224,6 +224,39 @@ pub(crate) fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDef
     parse_spells_have_keyword(&tp, text)
 }
 
+/// CR 702.152a + CR 118.9 + CR 601.2f: A static grant of an alternative-cost
+/// keyword whose cost is the affected spell's own mana cost — Henzie "Toolbox"
+/// Torre: "Each creature spell you cast with mana value 4 or greater has blitz.
+/// The blitz cost is equal to its mana cost." The two-sentence form (keyword +
+/// "The <kw> cost is equal to its mana cost" continuation) lowers to a single
+/// `CastWithKeyword` whose keyword carries `ManaCost::SelfManaCost`, resolved
+/// per-spell at cast time — the same self-referential cost the granted flashback
+/// path uses (Dream Devourer). Table-driven so further cast-variant alt-cost
+/// keywords that use this exact template slot in without new control flow. Only
+/// keywords the casting flow already surfaces from `effective_spell_keywords`
+/// (granted `CastingVariant::Blitz`) belong here, so the grant actually functions.
+fn parse_granted_self_cost_keyword(keyword_str: &str) -> Option<Keyword> {
+    [("blitz", Keyword::Blitz as fn(ManaCost) -> Keyword)]
+        .into_iter()
+        .find_map(|(name, ctor)| {
+            let parsed: OracleResult<'_, ()> = (|| {
+                let (i, _) = tag::<_, _, OracleError<'_>>(name).parse(keyword_str)?;
+                let (i, _) = tag(". the ").parse(i)?;
+                let (i, _) = tag(name).parse(i)?;
+                let (i, _) = tag(" cost is equal to ").parse(i)?;
+                let (i, _) = alt((tag("its"), tag("that card's"), tag("the card's"))).parse(i)?;
+                let (i, _) = tag(" mana cost").parse(i)?;
+                Ok((i, ()))
+            })();
+            let (rest, ()) = parsed.ok()?;
+            rest.trim()
+                .trim_end_matches('.')
+                .trim()
+                .is_empty()
+                .then(|| ctor(ManaCost::SelfManaCost))
+        })
+}
+
 /// Parse "[Type] spells you cast [from zone] have [keyword]" patterns.
 /// CR 702.51a: Grants a keyword (typically convoke) to spells matching a filter during casting.
 /// Also handles "Creature cards you own that aren't on the battlefield have flash."
@@ -283,7 +316,13 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
 
     // Parse the keyword — must be a valid keyword. A trailing "where X is …"
     // clause binds an earlier variable-X mana-value qualifier on the subject.
-    let (keyword, where_x) = parse_keyword_with_where_x(keyword_str)?;
+    // CR 702.152a: an alternative-cost keyword granted with "The <kw> cost is
+    // equal to its mana cost" (Henzie "Toolbox" Torre) carries the self-cost and
+    // consumes its continuation sentence here, ahead of the plain keyword parse.
+    let (keyword, where_x) = match parse_granted_self_cost_keyword(keyword_str) {
+        Some(kw) => (kw, None),
+        None => parse_keyword_with_where_x(keyword_str)?,
+    };
 
     // CR 611.2f: "The first <qualifier> spell you cast [from <zone>] <timing> has
     // [keyword]" — a once-per-turn keyword grant gated on the first qualifying
@@ -1575,6 +1614,39 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     modifications
 }
 
+/// CR 613.4c + CR 702: In a granted-keyword "where X is its `<P/T/mana value>`"
+/// clause, "its" refers to the RECIPIENT of the grant — the creature that has the
+/// keyword — not the grant's source object. `parse_quantity_ref_complete` maps a
+/// bare "its power" / "its toughness" / "its mana value" to `Source` scope (the
+/// correct default in a self-referential context); rebind those to `Recipient` so
+/// the continuous layer resolves the value against each affected creature
+/// (Infantry Shield: "Equipped creature has … mobilize X, where X is its power" →
+/// the equipped creature's power). Self-grants (subject `~`) are unaffected — for
+/// them the recipient IS the source, so both scopes resolve identically.
+fn rebind_source_scope_to_recipient(
+    qty: crate::types::ability::QuantityRef,
+) -> crate::types::ability::QuantityRef {
+    use crate::types::ability::{ObjectScope, QuantityRef};
+    match qty {
+        QuantityRef::Power {
+            scope: ObjectScope::Source,
+        } => QuantityRef::Power {
+            scope: ObjectScope::Recipient,
+        },
+        QuantityRef::Toughness {
+            scope: ObjectScope::Source,
+        } => QuantityRef::Toughness {
+            scope: ObjectScope::Recipient,
+        },
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Source,
+        } => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Recipient,
+        },
+        other => other,
+    }
+}
+
 pub(crate) fn push_grant_clause_modifications(
     modifications: &mut Vec<ContinuousModification>,
     part: &str,
@@ -1627,7 +1699,9 @@ pub(crate) fn push_grant_clause_modifications(
                 {
                     modifications.push(ContinuousModification::AddDynamicKeyword {
                         kind,
-                        value: QuantityExpr::Ref { qty: qty_ref },
+                        value: QuantityExpr::Ref {
+                            qty: rebind_source_scope_to_recipient(qty_ref),
+                        },
                     });
                     return;
                 }

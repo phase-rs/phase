@@ -13,12 +13,9 @@
 //! CR 506.5 + CR 702.83b: a creature attacks alone iff it is the only creature
 //! declared as an attacker.
 
-use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+
+use super::rules::{run_combat, GameRunner, GameScenario, P0};
 
 const ORACLE: &str = "Whenever a creature you control attacks alone, investigate.";
 
@@ -37,43 +34,6 @@ fn count_clues(runner: &GameRunner) -> usize {
         .count()
 }
 
-/// Drive DeclareAttackers → end of combat with `attackers` (all at P1), no
-/// blockers, resolving any triggered abilities that land on the stack.
-fn drive_combat(runner: &mut GameRunner, attackers: Vec<ObjectId>) {
-    runner.pass_both_players();
-    let attacks: Vec<_> = attackers
-        .iter()
-        .map(|&id| (id, AttackTarget::Player(P1)))
-        .collect();
-    runner
-        .act(GameAction::DeclareAttackers {
-            attacks,
-            bands: vec![],
-        })
-        .expect("declare attackers");
-    for _ in 0..8 {
-        match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty()
-                    && !matches!(runner.state().phase, Phase::CombatDamage)
-                {
-                    runner.pass_both_players();
-                } else {
-                    break;
-                }
-            }
-            WaitingFor::DeclareBlockers { .. } => {
-                runner
-                    .act(GameAction::DeclareBlockers {
-                        assignments: vec![],
-                    })
-                    .expect("declare blockers");
-            }
-            _ => break,
-        }
-    }
-}
-
 /// Clues produced with the observer on the battlefield and `num_others`
 /// non-observer attackers (the observer never attacks).
 fn clues_when_others_attack(num_others: usize) -> usize {
@@ -81,12 +41,12 @@ fn clues_when_others_attack(num_others: usize) -> usize {
     scenario.at_phase(Phase::PreCombatMain);
     // The observer stays home; only the "other" creatures attack.
     scenario.add_creature_from_oracle(P0, "Agent 13, Sharon Carter", 2, 2, ORACLE);
-    let attackers: Vec<ObjectId> = (0..num_others)
+    let attackers: Vec<_> = (0..num_others)
         .map(|i| scenario.add_creature(P0, &format!("Bear{i}"), 2, 2).id())
         .collect();
     let mut runner = scenario.build();
 
-    drive_combat(&mut runner, attackers);
+    run_combat(&mut runner, attackers, vec![]);
     runner.advance_until_stack_empty();
     count_clues(&runner)
 }

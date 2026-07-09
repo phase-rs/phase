@@ -1,3 +1,12 @@
+# Local default profile (Tilt test-engine/test-ai and manual `cargo nextest run`).
+#
+# fail-fast = false: with concurrent agents working in the tree, one in-progress
+# failure must not cancel the rest of the run — a red resource should report
+# "N failed, here's which" over the full suite, not abandon thousands of tests
+# after the first failure.
+[profile.default]
+fail-fast = false
+
 # CI test profile (activated with `cargo nextest run --profile ci`).
 #
 # nextest already defaults test-threads to the number of logical CPUs, so this

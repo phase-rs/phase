@@ -581,6 +581,19 @@ fn restriction_scope_matches_player(
             debug_assert!(false, "ScopedPlayer should be resolved by add_restriction");
             false
         }
+        RestrictionPlayerScope::ParentObjectTargetController => {
+            // CR 109.4: normally resolved to `SpecificPlayer` by `add_restriction`
+            // (via `parent_target_controller`) when the restriction is created.
+            // Unlike the always-resolved sibling scopes (`TargetedPlayer`,
+            // `ScopedPlayer`), this one can legitimately remain unresolved when
+            // there is no object referent — a malformed or hostile state, proven
+            // reachable by `add_restriction`'s
+            // `parent_object_target_controller_unresolved_without_object_target`.
+            // That is a genuine fail-closed outcome (restrict no one), NOT a bug,
+            // so this arm must return `false` rather than `debug_assert!(false)` —
+            // a debug/test panic here would break the documented fail-closed path.
+            false
+        }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }
@@ -3012,38 +3025,34 @@ fn graveyard_permission_sources(
             if !source_belongs_to_player {
                 return None;
             }
-            active_static_definitions(state, obj)
-                .filter(|definition| graveyard_permission_functions_in_zone(definition, obj.zone))
-                .find_map(|definition| match definition.mode {
-                    StaticMode::GraveyardCastPermission {
-                        frequency,
-                        play_mode,
-                        graveyard_destination_replacement,
-                        ref extra_cost,
-                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
-                        definition
-                            .affected
-                            .as_ref()
-                            .map(|filter| GraveyardPermissionSource {
-                                source_id,
-                                filter,
-                                frequency,
-                                graveyard_destination_replacement,
-                                extra_cost,
-                            })
-                    }
-                    _ => None,
-                })
+            // The zone-of-function gate is now fully owned by
+            // `active_static_definitions` (CR 113.6 / CR 113.6b), which also
+            // correctly admits emblem-sourced graveyard-cast permissions —
+            // the previously-inlined gate never exempted `is_emblem` unlike
+            // every other command-zone consumer, an independent latent bug
+            // now fixed as a side effect.
+            active_static_definitions(state, obj).find_map(|definition| match definition.mode {
+                StaticMode::GraveyardCastPermission {
+                    frequency,
+                    play_mode,
+                    graveyard_destination_replacement,
+                    ref extra_cost,
+                } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
+                    definition
+                        .affected
+                        .as_ref()
+                        .map(|filter| GraveyardPermissionSource {
+                            source_id,
+                            filter,
+                            frequency,
+                            graveyard_destination_replacement,
+                            extra_cost,
+                        })
+                }
+                _ => None,
+            })
         })
         .collect()
-}
-
-fn graveyard_permission_functions_in_zone(definition: &StaticDefinition, zone: Zone) -> bool {
-    if zone == Zone::Battlefield {
-        definition.active_zones.is_empty() || definition.active_zones.contains(&Zone::Battlefield)
-    } else {
-        definition.active_zones.contains(&zone)
-    }
 }
 
 fn graveyard_permission_play_mode_matches(

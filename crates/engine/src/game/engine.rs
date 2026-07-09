@@ -5,12 +5,12 @@ use thiserror::Error;
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
-use crate::types::actions::{GameAction, PriorityYieldOp};
+use crate::types::actions::{GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp};
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
-    CostResume, GameState, LandPlayRecord, PayCostKind, RetargetScope, StackEntry, StackEntryKind,
-    WaitingFor,
+    CostResume, GameState, LandPlayRecord, MayTriggerAutoChoiceKey, PayCostKind, RetargetScope,
+    StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -453,6 +453,7 @@ fn check_actor_authorization(
         action,
         GameAction::SetPhaseStops { .. }
             | GameAction::SetPriorityYield { .. }
+            | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
@@ -649,6 +650,7 @@ fn pass_priority_once_with_pipeline(
         events,
         &state.waiting_for.clone(),
         skip_triggers,
+        false,
     )?;
     sync_waiting_for(state, &wf);
 
@@ -1094,6 +1096,12 @@ fn apply_action(
         WaitingFor::RevealChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
+            // both the opponent's partition step and the controller's pile
+            // choice — the cards remain public while both players interact.
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
+            | WaitingFor::SeparatePilesPartition { .. }
+            | WaitingFor::SeparatePilesChoice { .. }
     ) {
         state.revealed_cards.clear();
     }
@@ -1114,6 +1122,7 @@ fn apply_action(
 
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
+    let mut skip_deferred_trigger_drain = false;
 
     // CancelAutoPass works from any WaitingFor state (player may cancel during
     // interactive choices). Routed by `actor` — previously used
@@ -1165,6 +1174,32 @@ fn apply_action(
             }
             PriorityYieldOp::ClearAll => {
                 state.clear_priority_yields(actor);
+            }
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // CR 603.5: SetMayTriggerAutoChoice propagates the actor's stored "don't ask
+    // again" auto-choices for optional ("may") triggers. Pure preference state,
+    // routed by `actor`, and — like SetPriorityYield — handled before the
+    // loop-ring / auto-pass teardown so it is a legal any-state mutation. Actor
+    // scoping is enforced by overriding the key's player with `actor`, so a
+    // player can only mutate their own preferences regardless of the payload.
+    if let GameAction::SetMayTriggerAutoChoice { op } = &action {
+        match op {
+            MayTriggerAutoChoiceOp::Remove { key } => {
+                let actor_key = MayTriggerAutoChoiceKey {
+                    player: actor,
+                    ..*key
+                };
+                state.remove_may_trigger_auto_choice(&actor_key);
+            }
+            MayTriggerAutoChoiceOp::ClearAll => {
+                state.clear_may_trigger_auto_choices(actor);
             }
         }
         return Ok(ActionResult {
@@ -4014,6 +4049,7 @@ fn apply_action(
                 &mut events,
                 &WaitingFor::Priority { player: p },
                 true,
+                false,
             )?
         }
         // CR 702.94a: Miracle reveal — decline path. Reuses the generic
@@ -4033,6 +4069,7 @@ fn apply_action(
                 &mut events,
                 &WaitingFor::Priority { player: p },
                 true,
+                false,
             )?
         }
         // CR 702.94a + CR 608.2g: Miracle cast offer — the miracle triggered
@@ -4086,6 +4123,7 @@ fn apply_action(
                 &mut events,
                 &WaitingFor::Priority { player: p },
                 true,
+                false,
             )?
         }
         // CR 702.35a: Madness cast offer — the madness triggered ability has
@@ -4149,6 +4187,7 @@ fn apply_action(
                         &mut events,
                         &WaitingFor::Priority { player: p },
                         true,
+                        false,
                     )?
                 }
                 // The graveyard move paused on a CR 616.1 ordering choice; the
@@ -4177,6 +4216,13 @@ fn apply_action(
                     waiting_for,
                 ) => {
                     triggers_processed_inline = true;
+                    waiting_for
+                }
+                engine_resolution_choices::ResolutionChoiceOutcome::WaitingForWithParkedObservers(
+                    waiting_for,
+                ) => {
+                    triggers_processed_inline = true;
+                    skip_deferred_trigger_drain = true;
                     waiting_for
                 }
                 engine_resolution_choices::ResolutionChoiceOutcome::ActionResult(result) => {
@@ -4970,6 +5016,7 @@ fn apply_action(
             &mut events,
             &waiting_for,
             triggers_processed_inline,
+            skip_deferred_trigger_drain,
         )?;
         state.waiting_for = wf.clone();
         return Ok(ActionResult {

@@ -413,6 +413,18 @@ fn luminarch_aspirant() {
     insta::assert_json_snapshot!("luminarch_aspirant_lowered", &lowered);
 }
 
+#[test]
+fn mishra_eminent_one() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is Mishra's Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.",
+        "Mishra, Eminent One",
+        &["Legendary", "Artifact", "Creature"],
+        &["Human", "Artificer"],
+    );
+    insta::assert_json_snapshot!("mishra_eminent_one_ir", &ir);
+    insta::assert_json_snapshot!("mishra_eminent_one_lowered", &lowered);
+}
+
 // ---------------------------------------------------------------------------
 // Ability words (Landfall, Prowess, Evolve)
 // ---------------------------------------------------------------------------

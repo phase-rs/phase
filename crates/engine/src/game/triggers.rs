@@ -853,6 +853,17 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if matches!(trig_def.mode, TriggerMode::BlocksOrBecomesBlocked) {
+                // CR 509.1h + CR 509.3d: narrow each firing to its own single
+                // (attacker, blocker) event so "the other creature"/"that
+                // creature" resolves per-firing, matching the atomic
+                // `Blocks`/`BecomesBlocked` arms above.
+                super::trigger_matchers::matching_blocks_or_becomes_blocked_events(
+                    event, trig_def, obj_id, state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
                 // CR 603.2c: One aggregate combat-damage event may satisfy this
                 // trigger once, while CR 608.2c makes the filtered source set
@@ -888,15 +899,22 @@ fn collect_matching_triggers_inner(
                     .first()
                     .cloned()
                     .expect("trigger event batch is never empty");
-                if let Some(ref condition) = trig_def.condition {
-                    if !check_trigger_condition(
-                        state,
-                        condition,
-                        controller,
-                        Some(obj_id),
-                        Some(&trigger_event),
-                    ) {
-                        continue;
+                // Batched triggers already check their fire-time condition in
+                // `matching_batched_trigger_events` against the full candidate
+                // event before it is reduced to the resolution context. Rechecking
+                // here would make event-count qualifiers read the narrowed context
+                // instead of the declaration that caused the trigger.
+                if !trig_def.batched {
+                    if let Some(ref condition) = trig_def.condition {
+                        if !check_trigger_condition(
+                            state,
+                            condition,
+                            controller,
+                            Some(obj_id),
+                            Some(&trigger_event),
+                        ) {
+                            continue;
+                        }
                     }
                 }
                 // CR 603.2c: For batched triggers, stash the filtered subject
@@ -931,7 +949,10 @@ fn collect_matching_triggers_inner(
                     pending: PendingTrigger {
                         source_id: obj_id,
                         controller,
-                        condition: trig_def.condition.clone(),
+                        condition: trig_def
+                            .condition
+                            .as_ref()
+                            .and_then(|condition| stack_condition_for_trigger(trig_def, condition)),
                         ability: pending_ability,
                         timestamp,
                         target_constraints: trig_def
@@ -3506,6 +3527,7 @@ fn trigger_events_match_for_ordering(
     same_event_conflict: bool,
     batch_conflict: bool,
     c2_order_independent: bool,
+    disjoint_per_attacker_fanout: bool,
 ) -> bool {
     // C1 (CR 603.3b): same firing event auto-orders only when the identical
     // siblings' resolution functions provably COMMUTE — the `ability_rw` kind/
@@ -3548,6 +3570,13 @@ fn trigger_events_match_for_ordering(
                 return true;
             }
         }
+        // C0-distinct (CR 603.3b + CR 508.3): per-attacker fan-out whose event
+        // objects are proven disjoint can auto-order without the coarse C2
+        // walker. Other distinct-event groups still fall through to C2 so the
+        // sibling-mutable axis remains load-bearing.
+        if disjoint_per_attacker_fanout {
+            return true;
+        }
     }
 
     // C2 (adopted from #5084 + a series soundness conjunct, CR 603.3b): distinct
@@ -3563,6 +3592,40 @@ fn trigger_events_match_for_ordering(
     // Precision dominates coarseness: C2 may auto-order only when the batch profiler
     // ALSO agrees the group is conflict-clean.
     c2_order_independent && !batch_conflict
+}
+
+/// CR 508.3 + CR 603.3b: per-attacker attack fan-out (Stonehoof Chieftain #5335)
+/// where each sibling carries a single-attacker `AttackersDeclared` event whose
+/// object is disjoint from every member's trigger source.
+fn attack_triggers_have_disjoint_event_objects(group: &[PendingTriggerContext]) -> bool {
+    let group_sources: std::collections::HashSet<ObjectId> =
+        group.iter().map(|ctx| ctx.pending.source_id).collect();
+    let mut seen_attackers = std::collections::HashSet::new();
+    for ctx in group {
+        let Some(GameEvent::AttackersDeclared {
+            attacker_ids,
+            attacks,
+            ..
+        }) = ctx.pending.trigger_event.as_ref()
+        else {
+            return false;
+        };
+        if attacker_ids.len() != 1 || attacks.len() != 1 {
+            return false;
+        }
+        let attacker = attacker_ids[0];
+        // Every event object must be absent from the whole group's source set —
+        // not only from its own trigger source. Otherwise a mixed batch where
+        // one sibling's attacker is another member's source can wrongly suppress
+        // `legacy_batch_prompt` via the first-event-only conjunct.
+        if group_sources.contains(&attacker) {
+            return false;
+        }
+        if !seen_attackers.insert(attacker) {
+            return false;
+        }
+    }
+    true
 }
 
 /// CR 603.3c/603.3d + CR 601.2c/601.2d: A trigger requires ordering-relevant
@@ -3751,10 +3814,19 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
     };
     let same_event_conflict =
         crate::game::ability_rw::profiles_conflict(&profile, &same_event_structure);
+    // CR 508.3 + CR 603.3b (#5335): per-attacker attack fan-out with disjoint
+    // event objects commutes — the D3 `legacy_batch_prompt` parity gate applies
+    // to co-departure batches with frozen look-back reads, not to distinct
+    // single-attacker events that only write their own event object. The
+    // all-sources disjointness proof lives entirely in
+    // `attack_triggers_have_disjoint_event_objects` (per-trigger event object vs
+    // the whole group source set); do not reuse the first-event-only
+    // `event_object_excludes_sources` witness here.
+    let disjoint_per_attacker_fanout = attack_triggers_have_disjoint_event_objects(group);
     // D3 / D5: the batch branch keeps prompting the 12 retained event-context
     // refs (`legacy_batch_prompt`) for strict parity, plus the freeze-invalidation
     // / live-read/write feed rows from `profiles_conflict`.
-    let batch_conflict = profile.legacy_batch_prompt()
+    let batch_conflict = (!disjoint_per_attacker_fanout && profile.legacy_batch_prompt())
         || crate::game::ability_rw::profiles_conflict(&profile, &batch_structure);
 
     // C2 (fail-closed AST walker): two distinct soundness axes (event context,
@@ -3772,6 +3844,7 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
                 same_event_conflict,
                 batch_conflict,
                 c2_order_independent,
+                disjoint_per_attacker_fanout,
             )
             && t.subject_match_count == first.pending.subject_match_count
             && t.may_trigger_origin == first.pending.may_trigger_origin
@@ -5180,6 +5253,41 @@ fn trigger_cause_matches(
             // additional time when a dungeon room is entered.
             matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
+        TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
+            // CR 601.2 + CR 707.10: Veyran-class doublers fire only for
+            // triggers caused by the doubler's controller casting or copying
+            // a spell. Both event kinds qualify ("you casting or copying");
+            // a copy is not cast (CR 707.10), so `SpellCopied` is a distinct
+            // event and must be matched explicitly.
+            let (controller, object_id) = match event {
+                Some(GameEvent::SpellCast {
+                    controller,
+                    object_id,
+                    ..
+                })
+                | Some(GameEvent::SpellCopied {
+                    controller,
+                    object_id,
+                    ..
+                }) => (*controller, *object_id),
+                _ => return false,
+            };
+            if controller != doubler_controller {
+                return false;
+            }
+            if core_types.is_empty() {
+                return true;
+            }
+            // CR 603.2d: The spell's type is named in the qualifier ("an
+            // instant or sorcery spell") — the stack object's core types must
+            // intersect the predicate's list.
+            state.objects.get(&object_id).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .iter()
+                    .any(|ct| core_types.contains(ct))
+            })
+        }
     }
 }
 
@@ -6099,36 +6207,33 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
-        // CR 506.5 + CR 508.1a + CR 603.2c: Count co-attackers excluding the
-        // creature that fired this trigger instance. "Attacks alone" (CR 702.83b,
-        // Exalted) and "attacks with another" (CR 702.149a, Training) are both
-        // evaluated relative to the ATTACKING creature named by the trigger
-        // event, not the ability's source: an observer (Exalted / Agent 13,
-        // Sharon Carter) that stays back while another creature attacks alone is
-        // not itself in combat, so excluding `source_id` would leave the lone
-        // attacker counted as a co-attacker and wrongly report co-attackers >= 1.
-        // The per-attacker `AttackersDeclared` event (produced by
-        // `matching_attack_events` and re-checked at resolution, CR 603.4) names
-        // exactly the triggering attacker. `source_id` still resolves the
-        // filter's source object so Training's power-relative comparison reads
-        // the source creature. Falls back to `source_id` when the event does not
-        // name a single attacker (e.g. a self-referential trigger where the
-        // source is itself the attacker).
+        // CR 506.5 + CR 508.1m + CR 603.2c: Count co-attackers excluding the
+        // matched attacking creature. Attack matchers narrow ordinary Attacks
+        // trigger events to one attacker; observer triggers (HYDRA
+        // Infiltration) use that event attacker, while source-creature triggers
+        // (Training) fall back to the trigger source.
+        // CR 702.149a: when `filter` is present, only co-attackers matching it
+        // count (e.g. Training's "another creature with power greater than this
+        // creature's power"); the filter is resolved with the trigger source as
+        // its source object so source-relative comparisons read the source, not
+        // the excluded attacker.
         TriggerCondition::MinCoAttackers { minimum, filter } => {
-            let triggering_attacker = match trigger_event {
-                Some(GameEvent::AttackersDeclared { attacker_ids, .. })
-                    if attacker_ids.len() == 1 =>
-                {
-                    Some(attacker_ids[0])
-                }
-                _ => source_id,
-            };
             state.combat.as_ref().is_some_and(|combat| {
+                let excluded_attacker = match trigger_event {
+                    Some(GameEvent::AttackersDeclared { attacker_ids, .. })
+                        if attacker_ids.len() == 1 =>
+                    {
+                        attacker_ids.first().copied()
+                    }
+                    _ => source_id,
+                }
+                .unwrap_or(ObjectId(0));
+                let filter_source_id = source_id.unwrap_or(ObjectId(0));
                 let co_attacker_count = combat
                     .attackers
                     .iter()
                     .filter(|a| {
-                        Some(a.object_id) != triggering_attacker
+                        a.object_id != excluded_attacker
                             && state
                                 .objects
                                 .get(&a.object_id)
@@ -6138,7 +6243,7 @@ pub(crate) fn check_trigger_condition(
                                     state,
                                     a.object_id,
                                     f,
-                                    source_id.unwrap_or(ObjectId(0)),
+                                    filter_source_id,
                                 )
                             })
                     })
@@ -7011,8 +7116,24 @@ fn attackers_declared_count(
             let triggering_player = attacker_ids
                 .iter()
                 .find_map(|id| state.objects.get(id).map(|o| o.controller));
+            let declared_attacker_ids: Vec<ObjectId> = state
+                .combat
+                .as_ref()
+                .filter(|combat| !combat.attackers.is_empty())
+                .map(|combat| {
+                    combat
+                        .attackers
+                        .iter()
+                        .map(|attacker| attacker.object_id)
+                        .collect()
+                })
+                .unwrap_or_else(|| attacker_ids.to_vec());
 
-            attacker_ids
+            // CR 508.1 + CR 603.2c: The trigger event may be narrowed to a
+            // representative attacker so the ability gets the right defending
+            // player/source context, but "attacks with N creatures" counts the
+            // attack declaration as a whole.
+            declared_attacker_ids
                 .iter()
                 .filter(|id| {
                     let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
@@ -7113,6 +7234,95 @@ fn attack_target_matches_controller_scope(
             .and_then(|object| object.protector())
             .is_some_and(player_matches),
         _ => false,
+    }
+}
+
+fn attack_target_filters_compatible(
+    trigger_filter: &AttackTargetFilter,
+    condition_filter: &AttackTargetFilter,
+) -> bool {
+    matches!(
+        (trigger_filter, condition_filter),
+        (AttackTargetFilter::Player, AttackTargetFilter::Player)
+            | (
+                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker
+            )
+            | (AttackTargetFilter::Battle, AttackTargetFilter::Battle)
+            | (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker
+                    | AttackTargetFilter::Player
+                    | AttackTargetFilter::Planeswalker
+            )
+            | (
+                AttackTargetFilter::Player | AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker
+            )
+    )
+}
+
+fn trigger_mode_uses_attack_declaration_count(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::YouAttack
+            | TriggerMode::Attacks
+            | TriggerMode::AttackersDeclared
+            | TriggerMode::AttackersDeclaredOneTarget
+    )
+}
+
+fn condition_is_attack_event_only(
+    trigger: &TriggerDefinition,
+    condition: &TriggerCondition,
+) -> bool {
+    match condition {
+        TriggerCondition::MinCoAttackers { .. } => matches!(trigger.mode, TriggerMode::Attacks),
+        TriggerCondition::Not { condition } => {
+            matches!(condition.as_ref(), TriggerCondition::MinCoAttackers { .. })
+                && matches!(trigger.mode, TriggerMode::Attacks)
+        }
+        TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            crate::types::ability::AttackersDeclaredCountSubject::Controller { .. } => {
+                trigger_mode_uses_attack_declaration_count(&trigger.mode)
+            }
+            crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
+                attacked, ..
+            } => trigger
+                .attack_target_filter
+                .as_ref()
+                .is_some_and(|trigger_filter| {
+                    attack_target_filters_compatible(trigger_filter, attacked)
+                }),
+        },
+        _ => false,
+    }
+}
+
+fn stack_condition_for_trigger(
+    trigger: &TriggerDefinition,
+    condition: &TriggerCondition,
+) -> Option<TriggerCondition> {
+    if condition_is_attack_event_only(trigger, condition) {
+        return None;
+    }
+
+    match condition {
+        TriggerCondition::And { conditions } => {
+            let mut remaining: Vec<TriggerCondition> = conditions
+                .iter()
+                .filter_map(|child| stack_condition_for_trigger(trigger, child))
+                .collect();
+            match remaining.len() {
+                0 => None,
+                1 => remaining.pop(),
+                _ => Some(TriggerCondition::And {
+                    conditions: remaining,
+                }),
+            }
+        }
+        TriggerCondition::Or { .. } => Some(condition.clone()),
+        _ => Some(condition.clone()),
     }
 }
 
@@ -8325,6 +8535,301 @@ pub mod tests {
         );
     }
 
+    fn min_co_attackers_condition() -> TriggerCondition {
+        TriggerCondition::MinCoAttackers {
+            minimum: 1,
+            filter: None,
+        }
+    }
+
+    fn controller_attack_count_condition(
+        comparator: Comparator,
+        count: u32,
+        filter: Option<TargetFilter>,
+    ) -> TriggerCondition {
+        TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::TriggeringPlayer,
+                filter,
+            },
+            comparator,
+            count,
+        }
+    }
+
+    fn attack_target_count_condition(attacked: AttackTargetFilter) -> TriggerCondition {
+        TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 2,
+        }
+    }
+
+    #[test]
+    fn stack_condition_strips_min_co_attackers_only_for_attacks() {
+        let attacks = make_trigger(TriggerMode::Attacks);
+        let non_attacks = make_trigger(TriggerMode::SpellCast);
+        let condition = min_co_attackers_condition();
+        let negated = TriggerCondition::Not {
+            condition: Box::new(condition.clone()),
+        };
+
+        assert_eq!(stack_condition_for_trigger(&attacks, &condition), None);
+        assert_eq!(stack_condition_for_trigger(&attacks, &negated), None);
+        assert_eq!(
+            stack_condition_for_trigger(&non_attacks, &condition),
+            Some(condition.clone())
+        );
+        assert_eq!(
+            stack_condition_for_trigger(&non_attacks, &negated),
+            Some(negated)
+        );
+    }
+
+    #[test]
+    fn stack_condition_strips_controller_attack_counts_for_attack_declaration_modes() {
+        let typed_creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        let conditions = [
+            controller_attack_count_condition(Comparator::GE, 2, None),
+            controller_attack_count_condition(Comparator::EQ, 3, None),
+            controller_attack_count_condition(Comparator::EQ, 1, Some(typed_creature_filter)),
+        ];
+
+        for mode in [
+            TriggerMode::YouAttack,
+            TriggerMode::Attacks,
+            TriggerMode::AttackersDeclared,
+            TriggerMode::AttackersDeclaredOneTarget,
+        ] {
+            let trigger = make_trigger(mode.clone());
+            for condition in &conditions {
+                assert_eq!(
+                    stack_condition_for_trigger(&trigger, condition),
+                    None,
+                    "{mode:?} controller attack-count qualifier must be event-only: {condition:?}"
+                );
+            }
+        }
+
+        let non_attack_trigger = make_trigger(TriggerMode::SpellCast);
+        let condition = controller_attack_count_condition(Comparator::GE, 2, None);
+        assert_eq!(
+            stack_condition_for_trigger(&non_attack_trigger, &condition),
+            Some(condition)
+        );
+    }
+
+    #[test]
+    fn stack_condition_strips_attack_target_counts_only_for_compatible_attack_target_filters() {
+        for (trigger_filter, condition_filter) in [
+            (AttackTargetFilter::Player, AttackTargetFilter::Player),
+            (
+                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker,
+            ),
+            (AttackTargetFilter::Battle, AttackTargetFilter::Battle),
+            (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::Player,
+            ),
+            (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::Planeswalker,
+            ),
+            (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker,
+            ),
+            (
+                AttackTargetFilter::Player,
+                AttackTargetFilter::PlayerOrPlaneswalker,
+            ),
+            (
+                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker,
+            ),
+        ] {
+            let mut trigger = make_trigger(TriggerMode::YouAttack);
+            trigger.attack_target_filter = Some(trigger_filter.clone());
+            let condition = attack_target_count_condition(condition_filter.clone());
+            assert_eq!(
+                stack_condition_for_trigger(&trigger, &condition),
+                None,
+                "{trigger_filter:?} must be compatible with {condition_filter:?}"
+            );
+        }
+
+        let mut mismatched = make_trigger(TriggerMode::YouAttack);
+        mismatched.attack_target_filter = Some(AttackTargetFilter::Player);
+        let battle_condition = attack_target_count_condition(AttackTargetFilter::Battle);
+        assert_eq!(
+            stack_condition_for_trigger(&mismatched, &battle_condition),
+            Some(battle_condition)
+        );
+
+        let no_filter = make_trigger(TriggerMode::YouAttack);
+        let player_condition = attack_target_count_condition(AttackTargetFilter::Player);
+        assert_eq!(
+            stack_condition_for_trigger(&no_filter, &player_condition),
+            Some(player_condition)
+        );
+    }
+
+    #[test]
+    fn stack_condition_reduces_and_conditions_but_preserves_or_conditions() {
+        let trigger = make_trigger(TriggerMode::Attacks);
+        let event_only = min_co_attackers_condition();
+        let persistent = TriggerCondition::SourceIsTapped;
+        let and_condition = TriggerCondition::And {
+            conditions: vec![event_only.clone(), persistent.clone()],
+        };
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &and_condition),
+            Some(persistent)
+        );
+
+        let all_event_only = TriggerCondition::And {
+            conditions: vec![
+                event_only.clone(),
+                TriggerCondition::Not {
+                    condition: Box::new(event_only.clone()),
+                },
+            ],
+        };
+        assert_eq!(stack_condition_for_trigger(&trigger, &all_event_only), None);
+
+        let or_condition = TriggerCondition::Or {
+            conditions: vec![event_only, TriggerCondition::SourceIsTapped],
+        };
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &or_condition),
+            Some(or_condition)
+        );
+    }
+
+    #[test]
+    fn min_co_attackers_observer_excludes_matched_attacker_not_source() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let observer = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "HYDRA Infiltration".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = make_creature(&mut state, PlayerId(0), "Solo Attacker", 2, 2);
+        let condition = min_co_attackers_condition();
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+        };
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..CombatState::default()
+        });
+
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(observer),
+                Some(&event),
+            ),
+            "lone matched attacker must count zero co-attackers even when the trigger source is an observer"
+        );
+
+        let other = make_creature(&mut state, PlayerId(0), "Second Attacker", 2, 2);
+        if let Some(combat) = &mut state.combat {
+            combat.attackers.push(AttackerInfo::new(
+                other,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+        }
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(observer),
+                Some(&event),
+            ),
+            "the second same-controller attacker must count as one co-attacker"
+        );
+    }
+
+    #[test]
+    fn min_co_attackers_filter_uses_source_while_excluding_matched_attacker() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Source Creature", 4, 4);
+        let matched_attacker = make_creature(&mut state, PlayerId(0), "Matched Attacker", 2, 2);
+        let weaker_than_source = make_creature(&mut state, PlayerId(0), "3 Power Ally", 3, 3);
+        let stronger_than_source = make_creature(&mut state, PlayerId(0), "5 Power Ally", 5, 5);
+        let condition = TriggerCondition::MinCoAttackers {
+            minimum: 1,
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::PowerGTSource]),
+            )),
+        };
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![matched_attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(matched_attacker, AttackTarget::Player(PlayerId(1)))],
+        };
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(
+                    matched_attacker,
+                    AttackTarget::Player(PlayerId(1)),
+                    PlayerId(1),
+                ),
+                AttackerInfo::new(
+                    weaker_than_source,
+                    AttackTarget::Player(PlayerId(1)),
+                    PlayerId(1),
+                ),
+            ],
+            ..CombatState::default()
+        });
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "3-power co-attacker is greater than the matched attacker but not greater than the 4-power source"
+        );
+
+        if let Some(combat) = &mut state.combat {
+            combat.attackers[1] = AttackerInfo::new(
+                stronger_than_source,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            );
+        }
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event),),
+            "5-power co-attacker must satisfy PowerGTSource against the 4-power source"
+        );
+    }
+
     #[test]
     fn afflict_fires_once_when_attacker_has_multiple_blockers() {
         let mut state = setup();
@@ -8449,14 +8954,19 @@ pub mod tests {
             .collect();
 
         assert_eq!(trigger_events.len(), 2);
+        // CR 509.3d: the per-blocker "becomes blocked by a creature" form now
+        // emits the disambiguated `AttackerBecameBlockedByFilteredBlocker` event
+        // (carrying both ids) rather than a re-wrapped per-pair `BlockersDeclared`.
         assert_eq!(
             trigger_events,
             vec![
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(first_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: first_blocker,
                 },
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(second_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: second_blocker,
                 },
             ]
         );
@@ -8488,14 +8998,16 @@ pub mod tests {
         assert_eq!(
             stack_trigger_events,
             vec![
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(first_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: first_blocker,
                 },
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(second_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: second_blocker,
                 },
             ],
-            "CR 702.25a creates one stack trigger per qualifying blocker"
+            "CR 509.3d creates one stack trigger per qualifying blocker"
         );
     }
 
@@ -12958,6 +13470,92 @@ pub mod tests {
         }
         // Silence unused-var warnings for the graveyard object IDs.
         let _ = (gy1, gy2, gy3);
+    }
+
+    /// CR 115.1d: Armory Automaton — "you may attach any number of target
+    /// Equipment" must surface one optional slot per eligible Equipment so the
+    /// controller can choose zero at stack time (issue #5339).
+    #[test]
+    fn attach_any_number_multi_target_surfaces_optional_equipment_slots() {
+        use crate::types::ability::TypeFilter;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let equipment_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        let equipment_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Skullclamp".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [equipment_a, equipment_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Armory Automaton".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Attach {
+                    attachment: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .subtype("Equipment".to_string())
+                            .controller(ControllerRef::You),
+                    ),
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            execute.optional = true;
+            execute.multi_target = Some(MultiTargetSpec::unlimited(0));
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::EntersOrAttacks)
+                    .execute(execute)
+                    .valid_card(TargetFilter::SelfRef),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Artifact, CoreType::Creature],
+            vec!["Construct"],
+        )];
+        process_triggers(&mut state, &events);
+
+        let pending = state.pending_trigger.as_ref().expect("pending_trigger set");
+        let slots = super::super::ability_utils::build_target_slots(&state, &pending.ability)
+            .expect("slot build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "two eligible Equipment must surface two target slots, got {}",
+            slots.len()
+        );
+        for slot in &slots {
+            assert!(slot.optional, "any-number attach slots must be optional");
+            assert_eq!(slot.legal_targets.len(), 2);
+        }
     }
 
     #[test]
@@ -21651,6 +22249,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // Boggart Prankster trigger: Whenever you attack, target attacking
@@ -22129,6 +22728,144 @@ pub mod tests {
         }
     }
 
+    fn single_attacker_declared(attacker: ObjectId) -> GameEvent {
+        GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        }
+    }
+
+    fn stonehoof_grant_ability(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GenericEffect {
+                target: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::TriggeringSource)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    }])],
+            },
+            Vec::new(),
+            source,
+            controller,
+        )
+    }
+
+    fn attack_pending_from_source(
+        source_id: ObjectId,
+        controller: PlayerId,
+        ability: ResolvedAbility,
+        trigger_event: GameEvent,
+    ) -> PendingTriggerContext {
+        PendingTriggerContext::single(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability,
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(trigger_event),
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        })
+    }
+
+    /// #5335 soundness: an event object that is another member's source must not
+    /// qualify for the per-attacker fan-out fast path.
+    #[test]
+    fn attack_triggers_disjoint_fanout_rejects_event_object_in_group_sources() {
+        let mut state = setup();
+        let stonehoof_card = CardId(state.next_object_id);
+        let stonehoof = create_object(
+            &mut state,
+            stonehoof_card,
+            PlayerId(0),
+            "Stonehoof Chieftain".to_string(),
+            Zone::Battlefield,
+        );
+        let raider_card = CardId(state.next_object_id);
+        let raider = create_object(
+            &mut state,
+            raider_card,
+            PlayerId(0),
+            "Raider".to_string(),
+            Zone::Battlefield,
+        );
+        let group = vec![
+            attack_pending_from_source(
+                stonehoof,
+                PlayerId(0),
+                stonehoof_grant_ability(stonehoof, PlayerId(0)),
+                single_attacker_declared(raider),
+            ),
+            attack_pending_from_source(
+                raider,
+                PlayerId(0),
+                stonehoof_grant_ability(raider, PlayerId(0)),
+                single_attacker_declared(stonehoof),
+            ),
+        ];
+        assert!(
+            !attack_triggers_have_disjoint_event_objects(&group),
+            "an attacker that is another member's source must fail the disjoint fan-out gate"
+        );
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "mixed fan-out with a member-source event object must not auto-order"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("mixed fan-out with member-source event object must prompt")
+            }
+        }
+    }
+
+    /// #5335: homogeneous Stonehoof fan-out — each raider is not any group source.
+    #[test]
+    fn attack_triggers_disjoint_fanout_accepts_stonehoof_ten_raider_pattern() {
+        let mut state = setup();
+        let stonehoof_card = CardId(state.next_object_id);
+        let stonehoof = create_object(
+            &mut state,
+            stonehoof_card,
+            PlayerId(0),
+            "Stonehoof Chieftain".to_string(),
+            Zone::Battlefield,
+        );
+        let mut group = Vec::new();
+        for i in 0..10 {
+            let raider_card = CardId(state.next_object_id);
+            let raider = create_object(
+                &mut state,
+                raider_card,
+                PlayerId(0),
+                format!("Raider {i}"),
+                Zone::Battlefield,
+            );
+            group.push(attack_pending_from_source(
+                stonehoof,
+                PlayerId(0),
+                stonehoof_grant_ability(stonehoof, PlayerId(0)),
+                single_attacker_declared(raider),
+            ));
+        }
+        assert!(
+            attack_triggers_have_disjoint_event_objects(&group),
+            "ten single-attacker events whose objects are not group sources must pass"
+        );
+    }
+
     /// C0 axis-2 load-bearing at C2: the Rubblebelt Rioters / Orcish Siegemaster
     /// class (self-pump reading a board aggregate a sibling mutates) off DISTINCT
     /// events must be EXCLUDED from C2 auto-resolve even when `loop_detection` is
@@ -22219,6 +22956,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                attacker_constraints: Default::default(),
             };
 
             // The Kratos-like commander carries the trigger but does not attack.
@@ -22306,6 +23044,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                attacker_constraints: Default::default(),
             };
 
             let source = make_creature(&mut state, PlayerId(0), "Subject Source", 1, 1);
@@ -22592,6 +23331,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // The Tenth Doctor — attacking creature carrying the Allons-y! trigger.
@@ -22837,6 +23577,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // Raph & Mikey on P0's battlefield, carrying its real Attacks trigger.
@@ -22990,6 +23731,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // CR 104.3c: stock both libraries so neither player decks out while the

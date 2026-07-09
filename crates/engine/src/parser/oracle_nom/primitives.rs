@@ -15,6 +15,7 @@ use crate::types::ability::PtValue;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::player::PlayerCounterKind;
 
 /// Parse a number from Oracle text: digit string OR English words (one through twenty).
 ///
@@ -336,6 +337,30 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
         value(ManaColor::Black, tag("black")),
         value(ManaColor::Red, tag("red")),
         value(ManaColor::Green, tag("green")),
+    ))
+    .parse(input)
+}
+
+/// CR 122.1: Combinator mapping a player-counter kind word to its typed
+/// [`PlayerCounterKind`].
+///
+/// Poison, experience, rad, and ticket are the counters a *player* accumulates
+/// (CR 122.1 — a counter is a marker placed on an object or player). Energy is
+/// deliberately EXCLUDED: energy is spent/gained through the dedicated
+/// `Effect::GainEnergy` path, not `GivePlayerCounter`. Any object-counter word
+/// (`+1/+1`, `charge`, …) fails the `alt`, so callers reject it as a player
+/// counter.
+///
+/// Single authority shared by the imperative "get N <kind> counters" parser
+/// (`oracle_effect::imperative::try_parse_player_counter`) and the oracle_nom
+/// threshold rider (`oracle_nom::player_counter_difference`). Operates on
+/// already-lowercased text.
+pub fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
+    alt((
+        value(PlayerCounterKind::Poison, tag("poison")),
+        value(PlayerCounterKind::Experience, tag("experience")),
+        value(PlayerCounterKind::Rad, tag("rad")),
+        value(PlayerCounterKind::Ticket, tag("ticket")),
     ))
     .parse(input)
 }

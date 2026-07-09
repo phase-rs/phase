@@ -98,6 +98,9 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
         is_bare_object_pronoun(pronoun),
         "resolve_pronoun_target called with non-pronoun token: {pronoun}"
     );
+    if let Some(target) = ctx.object_pronoun_ref.clone() {
+        return target;
+    }
     match &ctx.subject {
         Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
             resolve_it_pronoun(ctx)
@@ -914,6 +917,27 @@ pub fn parse_target_with_syntax<'a>(
             rest,
             syntax,
         );
+    }
+
+    // CR 608.2k + CR 509.3d: "the other creature"/"the other permanent" — the
+    // single object opposite the trigger's own source in a compound
+    // blocks-or-becomes-blocked pairing (Venom's "destroy the other creature",
+    // Mammoth Harness). This is a per-firing anaphor resolved at runtime via
+    // `blocked_attacker_from_event`, NOT the split-pile "the other" tracked-set
+    // reference in TRACKED_SET_PHRASES below — so it MUST be matched first, or
+    // the bare "the other" prefix would consume it and bind it to an
+    // (unpopulated) tracked set.
+    if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(
+                TargetFilter::ParentTarget,
+                tag::<_, _, OracleError<'_>>("the other creature"),
+            ),
+            value(TargetFilter::ParentTarget, tag("the other permanent")),
+        ))
+        .parse(input)
+    }) {
+        return (filter, rest, syntax);
     }
 
     // CR 603.7: Anaphoric tracked-set pronouns
@@ -2922,8 +2946,16 @@ pub fn parse_type_phrase_with_ctx<'a>(
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
-    } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("exiled with ~").parse(remaining_exiled)
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("exiled with ~"),
+        // CR 607.2 + CR 406.6: "exiled with it" — the anaphoric "it" names the
+        // source object, identical linked-exile semantics to "exiled with ~"
+        // (Sothera, the Supervoid: "a creature card exiled with it"). The
+        // "exiled with this <type>" arm above already claimed the demonstrative
+        // form, so "it" is the disjoint pronoun variant.
+        tag("exiled with it"),
+    ))
+    .parse(remaining_exiled)
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
@@ -3383,6 +3415,25 @@ fn starts_with_type_phrase_lead(text: &str) -> bool {
 /// Guard for comma/and/or type-list continuations where core-type segments may
 /// carry their own article — e.g. "an artifact, a creature, or a land" (Braids,
 /// Cabal Minion / issue #847).
+/// Guard for a post-comma continuation of an Oxford-comma type list — the
+/// segment may carry a leading list conjunction ("or " / "and " / "and/or ")
+/// before its type word or article + type word (CR 205.3a: "an Aura,
+/// Equipment, or Vehicle spell"). Used by payload truncation logic that must
+/// distinguish a ", " continuing a type list from the ", " that begins a
+/// trailing clause (issue #5324, Sram, Senior Edificer).
+pub(crate) fn starts_with_type_list_continuation(text: &str) -> bool {
+    let text = text.trim_start();
+    let text = opt(alt((
+        tag::<_, _, OracleError<'_>>("and/or "),
+        tag("or "),
+        tag("and "),
+    )))
+    .parse(text)
+    .map(|(rest, _)| rest)
+    .unwrap_or(text);
+    starts_with_or_article_type_segment(text)
+}
+
 fn starts_with_or_article_type_segment(text: &str) -> bool {
     let text = text.trim_start();
     if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(text) {
@@ -3797,11 +3848,21 @@ pub(crate) fn distribute_core_type_to_or(filter: TargetFilter) -> TargetFilter {
     TargetFilter::Or { filters }
 }
 
-/// CR 205.4b: When a leading `non-` negation scopes a type disjunction
-/// ("non-Lesson instant and sorcery card"), the negated type must bind to
-/// every disjunct — not only the first leg parsed before the `and`/`or`
-/// connector. Without this, "non-Lesson instant and sorcery" would match
-/// any sorcery, including Lessons (issue #1163, Iroh, Grand Lotus).
+/// CR 109.2 + CR 205.2a + CR 205.3: When a leading `non-` negation scopes a
+/// type/subtype disjunction ("non-Lesson instant and sorcery card"), the
+/// negated type must bind to every disjunct — not only the first leg parsed
+/// before the `and`/`or` connector. Without this, "non-Lesson instant and
+/// sorcery" would match any sorcery, including Lessons (issue #1163, Iroh,
+/// Grand Lotus).
+///
+/// Guarded to a single shared negation: if any OTHER leg already carries its
+/// own `Non(_)` type filter, the legs are independently negated ("non-Equipment
+/// artifact and non-Aura enchantment" — Bello, Bard of the Brambles) and must
+/// NOT be cross-contaminated with the first leg's negation. Distributing
+/// unconditionally would leak the artifact leg's `Non(Equipment)` onto the
+/// enchantment leg (which only wants `Non(Aura)`), silently narrowing Bello's
+/// enchantment conjunct to exclude non-Aura-non-Equipment enchantments the
+/// Oracle text never excludes.
 pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetFilter {
     let TargetFilter::Or { mut filters } = filter else {
         return filter;
@@ -3825,6 +3886,14 @@ pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetF
         .unwrap_or_default();
 
     if neg_filters.is_empty() {
+        return TargetFilter::Or { filters };
+    }
+
+    let other_legs_already_negated = filters.iter().skip(1).any(|f| {
+        matches!(f, TargetFilter::Typed(TypedFilter { type_filters, .. })
+            if type_filters.iter().any(|tf| matches!(tf, TypeFilter::Non(_))))
+    });
+    if other_legs_already_negated {
         return TargetFilter::Or { filters };
     }
 
@@ -4142,6 +4211,10 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::IsSaddled
                 | FilterProp::ProtectorMatches { .. }
                 | FilterProp::FaceDown
+                // CR 701.27g: "transformed" is a battlefield designation that appears
+                // as an adjective prefix in type phrases ("transformed permanent",
+                // Mutagen Connoisseur).
+                | FilterProp::Transformed
                 // CR 701.60b: "suspected" is a battlefield designation that appears
                 // as an adjective prefix in type phrases ("suspected creatures").
                 | FilterProp::Suspected
@@ -6859,6 +6932,12 @@ enum ZoneQual {
     /// "its owner's ", "that player's ", "defending player's ", "each player's ".
     /// No ownership constraint emitted; referent is resolved by context upstream.
     OtherPoss,
+    /// "the chosen player's " — the player persisted on the source via an earlier
+    /// "choose a player" (Haunting Apparition: "green creature cards in the chosen
+    /// player's graveyard"). Sets `ControllerRef::SourceChosenPlayer`, mirroring
+    /// how `You` sets `ControllerRef::You`; CR 613.1 resolves it against the
+    /// source's persisted choice.
+    ChosenPlayer,
     /// "a ", "the ", or nothing (e.g., "from exile").
     Plain,
 }
@@ -7028,6 +7107,10 @@ fn parse_zone_suffix_nom(
                 vec![FilterProp::InAnyZone { zones }],
                 Some(ControllerRef::You),
             ),
+            ZoneQual::ChosenPlayer => (
+                vec![FilterProp::InAnyZone { zones }],
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
             ZoneQual::TargetPlayer => (
                 vec![
                     FilterProp::Owned {
@@ -7062,6 +7145,10 @@ fn parse_zone_suffix_nom(
                 None,
             ),
             ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+            ZoneQual::ChosenPlayer => (
+                vec![FilterProp::InZone { zone }],
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
             ZoneQual::TargetPlayer => (
                 vec![
                     FilterProp::Owned {
@@ -7094,6 +7181,9 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
+        // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
+        // isn't consumed as a bare "the " article.
+        value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
         value(ZoneQual::TargetPlayer, tag("target player's ")),
         value(ZoneQual::Their, tag("their ")),
         value(
@@ -10527,6 +10617,40 @@ mod tests {
     }
 
     #[test]
+    fn creature_card_exiled_with_it_produces_and_filter() {
+        // CR 607.2 + CR 406.6: Sothera, the Supervoid's descriptor form (no
+        // "target" keyword, anaphoric "it") — "put a creature card exiled with
+        // it onto the battlefield". Must compose the typed filter with the
+        // exile-link constraint identically to the "exiled with ~" form; without
+        // the "exiled with it" arm the suffix is dropped and the target degrades
+        // to a bare battlefield "creature card".
+        let (f, rest) = parse_target("a creature card exiled with it");
+        assert_eq!(
+            f,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+            "expected And{{Typed(creature), ExiledBySource}}, got {f:?} — the \
+             ExiledBySource leg (the revert-failing assertion) restricts \
+             reanimation to the source's OWN linked-exile pool"
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn bare_card_exiled_with_it_unaffected_by_typed_arm() {
+        // Sibling guard: the untyped "card exiled with it" form (handled by the
+        // top-of-function plural/each-card block) still yields bare
+        // ExiledBySource — the new typed arm must not perturb it.
+        let (f, rest) = parse_target("card exiled with it");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
     fn target_creature_card_exiled_with_this_creature_produces_and_filter() {
         let (f, rest) = parse_target("target creature card exiled with this creature");
         assert_eq!(
@@ -10999,6 +11123,43 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer))
         );
+        assert_eq!(rest.trim(), "");
+    }
+
+    /// Building-block regression guard: the general compound-core-type-Or
+    /// splitter (the `TYPE_SEPARATORS` recursion plus
+    /// `distribute_controller_to_or`) handles the "target player/opponent
+    /// controls" controller-suffix family the same way it already handles
+    /// "your opponents control" (see `artifacts_and_creatures_your_opponents_control`
+    /// below). This is what makes compound-subject "don't/doesn't untap"
+    /// restrictions like Exhaustion ("Creatures and lands target opponent
+    /// controls don't untap during their next untap step.") and Icebreaker
+    /// Kraken resolve correctly through the single generic
+    /// `parse_subject_application` call in `try_parse_subject_restriction_clause`
+    /// — no dedicated compound-subject dispatcher needed for this predicate
+    /// class (confirmed via the PR parse-diff baseline: both cards are
+    /// already `supported: true` on main).
+    #[test]
+    fn compound_creatures_and_lands_target_opponent_controls() {
+        let (f, rest) = parse_type_phrase("creatures and lands target opponent controls");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "expected 2 disjuncts, got {filters:?}");
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+            }
+            other => panic!("expected Or filter, got {other:?}"),
+        }
         assert_eq!(rest.trim(), "");
     }
 

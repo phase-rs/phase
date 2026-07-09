@@ -12,9 +12,9 @@ use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
     Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
-    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope,
-    PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
+    ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PileSource, PlayerFilter,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypedFilter, VoterScope,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -5081,6 +5081,65 @@ fn convert_reveal_top_dig(
                 reveal: true,
                 enter_tapped: false,
                 source: DigSource::Library,
+            })
+        }
+        // CR 700.3 + Fact or Fiction family: "An opponent separates those
+        // cards into two piles. Put one pile into your hand and the rest into
+        // your graveyard." Emits `Effect::SeparateIntoPiles` with
+        // `PileSource::RevealedFromLibraryTop`.
+        [RevealTheTopNumberCardsOfLibraryAction::APlayerSeparatesThoseCardsIntoTwoPiles(_), RevealTheTopNumberCardsOfLibraryAction::PutAPileIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] =>
+        {
+            let count_val = match count {
+                QuantityExpr::Fixed { value } if value >= 0 => value as u32,
+                _ => {
+                    return Err(prereq(format!(
+                        "SeparateIntoPiles/RevealedFromLibraryTop needs fixed count, got {count:?}"
+                    )));
+                }
+            };
+            let chosen_sub = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            let unchosen_sub = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Graveyard,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            Ok(Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::AnOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(chosen_sub),
+                pile_source: PileSource::RevealedFromLibraryTop { count: count_val },
+                unchosen_pile_effect: Some(Box::new(unchosen_sub)),
             })
         }
         _ => Err(prereq(format!(

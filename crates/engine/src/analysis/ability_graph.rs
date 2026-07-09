@@ -1216,6 +1216,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::Always
         | TriggerMode::EntersOrAttacks
         | TriggerMode::AttacksOrBlocks
+        | TriggerMode::BlocksOrBecomesBlocked
         | TriggerMode::StateCondition
         | TriggerMode::Airbend
         | TriggerMode::Earthbend
@@ -1275,8 +1276,15 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
             }
         }
         Effect::SeparateIntoPiles {
-            chosen_pile_effect, ..
-        } => collect_effects(chosen_pile_effect, out),
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            collect_effects(chosen_pile_effect, out);
+            if let Some(unchosen) = unchosen_pile_effect {
+                collect_effects(unchosen, out);
+            }
+        }
         Effect::RevealFromHand {
             on_decline: Some(d),
             ..

@@ -3223,6 +3223,95 @@ mod tests {
         );
     }
 
+    /// CR 704.5j + CR 707.9b: A token-copy exception that renames the copy
+    /// avoids the legend rule through the generic `SetName` modification path,
+    /// without any SBA special-case for Mishra, Eminent One.
+    #[test]
+    fn legend_rule_does_not_fire_when_copy_token_is_renamed() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mishra, Eminent One".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_card_types = CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let oracle = "create a token that's a copy of target noncreature artifact you control, except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types";
+        let mut ctx = crate::parser::oracle_ir::context::ParseContext {
+            card_name: Some("Mishra, Eminent One".to_string()),
+            ..Default::default()
+        };
+        let effect =
+            crate::parser::oracle_effect::try_parse_token(&oracle.to_lowercase(), oracle, &mut ctx)
+                .expect("Mishra token-copy text should parse");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = &effect
+        else {
+            panic!("expected parser-produced CopyTokenOf, got {effect:?}");
+        };
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetName { name } if name == "Mishra's Warform"
+            )),
+            "runtime regression must be driven by the parser-produced Mishra's Warform rename; got {additional_modifications:?}"
+        );
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            effect,
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = state.last_created_token_ids[0];
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "legend rule must not present a choice when the copy token has a distinct name; \
+             got waiting_for={:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&source_id].zone, Zone::Battlefield);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.zone, Zone::Battlefield);
+        assert_eq!(token.name, "Mishra's Warform");
+        assert_eq!(token.base_name, "Mishra's Warform");
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(4));
+        assert!(
+            token.card_types.core_types.contains(&CoreType::Artifact),
+            "renamed copy token must be an artifact; got {:?}",
+            token.card_types.core_types
+        );
+        assert!(
+            token.card_types.core_types.contains(&CoreType::Creature),
+            "renamed copy token must be a creature; got {:?}",
+            token.card_types.core_types
+        );
+        assert!(
+            token.card_types.subtypes.contains(&"Construct".to_string()),
+            "renamed copy token must be a Construct; got {:?}",
+            token.card_types.subtypes
+        );
+    }
+
     /// CR 122.1 + CR 614.1c: AddCounterOnEnter with matching `if_type` places
     /// the counter on the synthesized token. Spark Double's planeswalker copy
     /// branch is exercised at the BecomeCopy resolver site; this test pins

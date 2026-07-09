@@ -186,12 +186,26 @@ pub fn resolve(
 /// tail clause carries only its own local slot, so an inner delayed
 /// `ParentTargetSlot { index }` anaphor pointing at an earlier slot would index
 /// out of range and degrade to `Any`. Flattening the root chain exposes every
-/// declared slot in order so the indexed anaphor resolves. Only when the root
-/// chain is empty do we fall back to the triggering source (unchanged).
+/// declared slot in order so the indexed anaphor resolves.
+///
+/// CR 608.2c (phase#4767): When the root chain exposes NO concrete slot — because
+/// the parent target was injected at runtime by a `forward_result` zone-change
+/// rather than declared as an explicit chain slot (Animate Dead / Dance of the
+/// Dead: the reanimated creature is the moved object, bound into the sub-chain's
+/// `targets` by `effects/mod.rs`'s forward_result block, never a declared slot) —
+/// the node's OWN propagated `targets` are the resolved parent target. Prefer them
+/// over the triggering-source fallback, which would otherwise snapshot the
+/// triggering object (the Aura) instead of "that creature". Only when BOTH the
+/// root chain and the node's own targets are empty do we fall back to the
+/// triggering source (unchanged).
 fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     let root_chain = crate::game::targeting::parent_chain_targets_from_root(state, ability);
     if !root_chain.is_empty() {
         return root_chain;
+    }
+
+    if !ability.targets.is_empty() {
+        return ability.targets.clone();
     }
 
     crate::game::targeting::resolve_event_context_target(

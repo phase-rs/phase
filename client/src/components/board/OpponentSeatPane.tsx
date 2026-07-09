@@ -91,7 +91,15 @@ export function OpponentSeatPane({
           header, clear of the global menu cluster that overlays the first
           pane's header corner) and the track ends at the fan's left edge, so
           a long label truncates instead of colliding with the hand. */}
-      <div className="pointer-events-none absolute inset-x-0 top-[calc(0.25rem+var(--game-seat-header-height,2.25rem))] z-20 grid h-[var(--game-seat-hand-peek,2rem)] grid-cols-[1fr_auto_1fr] overflow-hidden">
+      {/* z-40 (matching the header's wrapper, but later in DOM order) lifts the
+          peeking hand fan above the z-30 zone-pile rail and the header so its
+          cards are the topmost hit-test target where they're visible — without
+          it, `elementFromPoint` returns the header/piles and both the card
+          `onMouseEnter` and usePreviewDismiss's poll see no `[data-card-hover]`,
+          so the preview never opens. The container stays pointer-events-none and
+          only the card <img>s re-enable pointer events, so gaps between cards
+          still fall through to the header (click-to-target, life, kick). */}
+      <div className="pointer-events-none absolute inset-x-0 top-[calc(0.25rem+var(--game-seat-header-height,2.25rem))] z-40 grid h-[var(--game-seat-hand-peek,2rem)] grid-cols-[1fr_auto_1fr] overflow-hidden">
         <div className="flex min-w-0 items-center justify-start pl-1.5">
           {waitingReasonText && (
             <span
@@ -104,7 +112,7 @@ export function OpponentSeatPane({
             </span>
           )}
         </div>
-        <div className="pointer-events-auto -translate-y-[52%]">
+        <div className="pointer-events-none -translate-y-[52%]">
           <OpponentHand playerId={playerId} showCards={showCards} layout="split" />
         </div>
       </div>
