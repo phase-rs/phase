@@ -169,6 +169,11 @@ pub enum GameAction {
     ChooseClashOpponent {
         opponent: PlayerId,
     },
+    /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
+    /// to `WaitingFor::SeparatePilesChooseOpponent`.
+    ChoosePileOpponent {
+        opponent: PlayerId,
+    },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
     /// `Some(p)` chooses player `p` (one of the prompt's `candidates`) to help pay
     /// the generic mana; `None` declines and proceeds to normal payment.
@@ -1431,6 +1436,7 @@ impl GameAction {
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChoosePileOpponent { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }

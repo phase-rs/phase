@@ -27371,6 +27371,68 @@ fn cant_cast_spells_this_turn_defending_player() {
 }
 
 #[test]
+fn render_silent_its_controller_cant_cast_spells() {
+    // CR 109.4 + CR 608.2c + CR 701.6: Render Silent (DGM) — "Counter target
+    // spell. Its controller can't cast spells this turn." The head is a counter;
+    // the chained sub-ability restricts the countered spell's CONTROLLER (an
+    // object-target-derived player anaphor), not a reused player target.
+    let def = parse_effect_chain(
+        "Counter target spell. Its controller can't cast spells this turn.",
+        AbilityKind::Spell,
+    );
+    // Head: Effect::Counter with a stack-spell target.
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                ..
+            }
+        ),
+        "head got {:?}",
+        def.effect
+    );
+    // Sub-ability: "its controller can't cast spells this turn" lowers to an
+    // AddRestriction scoped to ParentObjectTargetController. If Step 2 (the parser
+    // scope arm) is reverted, try_parse_cant_cast_spells_effect returns None, the
+    // clause is swallowed into an Effect::Unimplemented, and this assertion fails.
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("counter must chain a restriction sub-ability");
+    assert!(
+        matches!(
+            &*sub.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            }
+        ),
+        "sub got {:?}",
+        sub.effect
+    );
+    // Discriminating guard: no Effect::Unimplemented anywhere in the parsed chain.
+    // A swallowed "this turn" tail or an unrecognized "its controller" subject
+    // would surface here as an Unimplemented sub-ability — the exact blind spot a
+    // `matches!(.., ..)` shape assertion would hide.
+    fn assert_no_unimplemented(def: &crate::types::ability::AbilityDefinition) {
+        assert!(
+            !matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "unexpected Unimplemented effect: {:?}",
+            def.effect
+        );
+        if let Some(sub) = def.sub_ability.as_deref() {
+            assert_no_unimplemented(sub);
+        }
+    }
+    assert_no_unimplemented(&def);
+}
+
+#[test]
 fn cant_cast_spells_during_that_players_next_turn() {
     // CR 514.2 + CR 500.7: Sphinx's Decree / Azor — "Each opponent can't cast
     // instant or sorcery spells during that player's next turn." The trailing

@@ -750,8 +750,11 @@ fn restriction_affected_players(
         // CR 109.5: `add_restriction` resolves the scoped player to
         // `SpecificPlayer` when the restriction is created, so a stored
         // restriction never carries an unresolved placeholder scope here.
+        // CR 109.4: `ParentObjectTargetController` is likewise resolved to
+        // `SpecificPlayer` by `add_restriction` at creation time.
         RestrictionPlayerScope::TargetedPlayer
         | RestrictionPlayerScope::ParentTargetedPlayer
+        | RestrictionPlayerScope::ParentObjectTargetController
         | RestrictionPlayerScope::ScopedPlayer => Vec::new(),
         // CR 508.5a: `add_restriction` resolves the defending player to
         // `SpecificPlayer` when the restriction is created, so a stored

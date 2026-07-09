@@ -1672,6 +1672,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
         }
+        GameAction::ChoosePileOpponent { .. } => {
+            AvailableActionConversion::Unsupported("local.pile-opponent-unsupported")
+        }
         GameAction::ChooseAssistPlayer { .. } | GameAction::CommitAssistPayment { .. } => {
             AvailableActionConversion::Unsupported("local.assist-unsupported")
         }

@@ -1560,6 +1560,12 @@ export type WaitingFor =
   | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } }
   // CR 700.3 + CR 700.3a: Subject is partitioning their own eligible objects
   // into two piles for an `Effect::SeparateIntoPiles`. `player` is the
+  // CR 608.2d + CR 700.3: Controller chooses which opponent separates piles (multiplayer).
+  | { type: "SeparatePilesChooseOpponent"; data: {
+      player: PlayerId;
+      candidates: PlayerId[];
+      source_id: ObjectId;
+    } }
   // partitioner (subject); pile B is derived engine-side as
   // `eligible \ pile_a`. `chosen_pile_effect` is opaque to the frontend.
   | { type: "SeparatePilesPartition"; data: {
@@ -1871,6 +1877,7 @@ export type GameAction =
   // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
+  | { type: "ChoosePileOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
   | {

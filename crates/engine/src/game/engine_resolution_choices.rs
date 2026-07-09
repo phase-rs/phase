@@ -139,6 +139,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ClashChooseOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
             | WaitingFor::DigChoice { .. }
@@ -1667,6 +1668,37 @@ pub(super) fn handle_resolution_choice(
                 },
             )
         }
+        // CR 608.2d + CR 700.3: Controller chose which opponent performs the
+        // partition. Validate the choice and transition to SeparatePilesPartition.
+        (
+            WaitingFor::SeparatePilesChooseOpponent {
+                player: _,
+                candidates,
+                eligible,
+                chooser,
+                chosen_pile_effect,
+                unchosen_pile_effect,
+                source_id,
+            },
+            GameAction::ChoosePileOpponent { opponent },
+        ) => {
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Chosen pile opponent {opponent:?} is not a legal opponent"
+                )));
+            }
+            state.waiting_for = WaitingFor::SeparatePilesPartition {
+                player: opponent,
+                eligible,
+                remaining_subjects: crate::im::Vector::new(),
+                completed: crate::im::Vector::new(),
+                chooser,
+                chosen_pile_effect,
+                unchosen_pile_effect,
+                source_id,
+            };
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         // CR 700.3 + CR 700.3a + CR 101.4: Subject submits their partition;
         // pile B is derived as `eligible \ pile_a`. Advance the subject queue
         // (CR 800.4g — eliminated players were filtered out at resolver
@@ -1682,6 +1714,7 @@ pub(super) fn handle_resolution_choice(
                 mut completed,
                 chooser,
                 chosen_pile_effect,
+                unchosen_pile_effect,
                 source_id,
             },
             GameAction::SubmitPilePartition { pile_a },
@@ -1723,6 +1756,7 @@ pub(super) fn handle_resolution_choice(
                     completed,
                     chooser,
                     chosen_pile_effect,
+                    unchosen_pile_effect: unchosen_pile_effect.clone(),
                     source_id,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -1734,6 +1768,7 @@ pub(super) fn handle_resolution_choice(
                     pending,
                     current,
                     chosen_pile_effect,
+                    unchosen_pile_effect,
                     source_id,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -1751,6 +1786,7 @@ pub(super) fn handle_resolution_choice(
                 mut pending,
                 current,
                 chosen_pile_effect,
+                unchosen_pile_effect,
                 source_id,
             },
             GameAction::ChoosePile { pile },
@@ -1760,19 +1796,34 @@ pub(super) fn handle_resolution_choice(
             // subject's choice or finish. Per-decision resolution matches
             // CR 101.4c ("in any order they choose") — the chooser's
             // submission order IS that order.
-            let _ = effects::separate_piles::apply_pile_effect(
+            effects::separate_piles::apply_pile_effect(
                 state,
                 source_id,
                 &chosen_pile_effect,
-                &[(current, pile)],
+                &[(current.clone(), pile)],
                 events,
-            );
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("pile sub-effect: {e:?}")))?;
+            // CR 608.2c: Apply unchosen pile sub-effect if present.
+            if let Some(ref unchosen_def) = unchosen_pile_effect {
+                effects::separate_piles::apply_unchosen_pile_effect(
+                    state,
+                    source_id,
+                    unchosen_def,
+                    &[(current, pile)],
+                    events,
+                )
+                .map_err(|e| {
+                    EngineError::InvalidAction(format!("unchosen pile sub-effect: {e:?}"))
+                })?;
+            }
             if let Some(next) = pending.pop_front() {
                 state.waiting_for = WaitingFor::SeparatePilesChoice {
                     player,
                     pending,
                     current: next,
                     chosen_pile_effect,
+                    unchosen_pile_effect,
                     source_id,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())

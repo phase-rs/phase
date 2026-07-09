@@ -234,6 +234,11 @@ impl KeywordTriggerInstaller {
             // one trigger is emitted per `Keyword::Soulshift(_)` on the face.
             Keyword::Soulshift(n) => vec![build_soulshift_trigger(*n)],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            // CR 702.181a: Mobilize N — attacks trigger creating N tapped/attacking
+            // Warrior tokens. Enables runtime keyword grants (`AddDynamicKeyword`
+            // — Infantry Shield's "mobilize X, where X is its power") to install
+            // the trigger; the printed path uses `synthesize_mobilize` directly.
+            Keyword::Mobilize(qty) => vec![build_mobilize_trigger(qty)],
             // CR 702.39a: Provoke — attacks trigger that may untap a creature the
             // defending player controls and force it to block this attacker.
             Keyword::Provoke => vec![build_provoke_trigger()],
@@ -740,11 +745,61 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
 // - `prepare_spell_cast` overrides the mana cost when cast from hand
 // - `stack.rs::resolve_top` creates a delayed exile trigger on resolution
 
+/// CR 702.181a: Build the Mobilize attack trigger — "Whenever this creature
+/// attacks, create N 1/1 red Warrior creature tokens. Those tokens enter tapped
+/// and attacking. Sacrifice them at the beginning of the next end step." Shared
+/// by the printed path ([`synthesize_mobilize`]) and the runtime keyword-grant
+/// path ([`KeywordTriggerInstaller::triggers_for`], used by `AddDynamicKeyword`
+/// when a static grants "mobilize X, where X is …" — Infantry Shield).
+fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
+    use crate::types::ability::PtValue;
+    use crate::types::triggers::TriggerMode;
+
+    let token_effect = Effect::Token {
+        name: "Warrior".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string(), "Warrior".to_string()],
+        colors: vec![ManaColor::Red],
+        keywords: vec![],
+        tapped: true,
+        count: qty.clone(),
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: true,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    };
+
+    let sacrifice_at_end_step = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    count: qty.clone(),
+                    min_count: 0,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+    );
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .execute(
+            AbilityDefinition::new(AbilityKind::Spell, token_effect)
+                .sub_ability(sacrifice_at_end_step),
+        )
+        .description("Mobilize — create Warrior tokens tapped and attacking".to_string())
+}
+
 /// Synthesize Mobilize N trigger: when this creature attacks, create N 1/1 red
 /// Warrior creature tokens tapped and attacking. Sacrifice them at the beginning
 /// of the next end step (CR 702.181a).
 pub fn synthesize_mobilize(face: &mut CardFace) {
-    use crate::types::ability::PtValue;
     use crate::types::triggers::TriggerMode;
 
     // Idempotency: skip if a Mobilize attack trigger already exists.
@@ -759,53 +814,15 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
         return;
     }
 
-    for kw in &face.keywords {
-        if let Keyword::Mobilize(qty) = kw {
-            let token_effect = Effect::Token {
-                name: "Warrior".to_string(),
-                power: PtValue::Fixed(1),
-                toughness: PtValue::Fixed(1),
-                types: vec!["Creature".to_string(), "Warrior".to_string()],
-                colors: vec![ManaColor::Red],
-                keywords: vec![],
-                tapped: true,
-                count: qty.clone(),
-                owner: TargetFilter::Controller,
-                attach_to: None,
-                enters_attacking: true,
-                supertypes: vec![],
-                static_abilities: vec![],
-                enter_with_counters: vec![],
-            };
-
-            let sacrifice_at_end_step = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::CreateDelayedTrigger {
-                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-                    effect: Box::new(AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::Sacrifice {
-                            target: TargetFilter::LastCreated,
-                            count: qty.clone(),
-                            min_count: 0,
-                        },
-                    )),
-                    uses_tracked_set: false,
-                },
-            );
-
-            face.triggers.push(
-                TriggerDefinition::new(TriggerMode::Attacks)
-                    .execute(
-                        AbilityDefinition::new(AbilityKind::Spell, token_effect)
-                            .sub_ability(sacrifice_at_end_step),
-                    )
-                    .description(
-                        "Mobilize — create Warrior tokens tapped and attacking".to_string(),
-                    ),
-            );
-        }
-    }
+    let new_triggers: Vec<TriggerDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Mobilize(qty) => Some(build_mobilize_trigger(qty)),
+            _ => None,
+        })
+        .collect();
+    face.triggers.extend(new_triggers);
 }
 
 /// CR 702.134a: Mentor — "Whenever this creature attacks, put a +1/+1 counter on

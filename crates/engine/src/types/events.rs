@@ -545,6 +545,14 @@ pub enum GameEvent {
     AttackerBecameBlockedByEffect {
         attacker: ObjectId,
     },
+    /// CR 509.3d: A per-blocker `Blocks`/`BecomesBlocked`/`BlocksOrBecomesBlocked`
+    /// firing with an explicit blocker/attacker qualifier — carries both ids so
+    /// "that creature"/"the other creature" resolution never has to infer
+    /// orientation from event shape.
+    AttackerBecameBlockedByFilteredBlocker {
+        attacker: ObjectId,
+        blocker: ObjectId,
+    },
     /// CR 508.1h + CR 509.1d: The aggregate combat tax was paid; the declaration
     /// proceeds with every declared creature intact.
     CombatTaxPaid {

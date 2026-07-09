@@ -84,6 +84,7 @@ import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
+import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -1694,6 +1695,7 @@ function GamePageContent({
         <BattleProtectorModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
+        <PileOpponentModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />

@@ -4555,6 +4555,26 @@ pub enum WaitingFor {
         #[serde(default)]
         visibility: super::ability::VoteVisibility,
     },
+    /// CR 608.2d + CR 700.3: "An opponent separates" — in multiplayer the
+    /// controller chooses which opponent will perform the partition. With a
+    /// single opponent this state is skipped (no decision). The chosen
+    /// opponent feeds into [`Self::SeparatePilesPartition`].
+    SeparatePilesChooseOpponent {
+        /// The controller making the choice.
+        player: PlayerId,
+        /// Non-eliminated opponents eligible to be chosen.
+        candidates: Vec<PlayerId>,
+        /// The revealed card pool to be partitioned.
+        eligible: im::Vector<ObjectId>,
+        /// Who will choose a pile after partitioning.
+        chooser: PlayerId,
+        /// Sub-effect for the chosen pile.
+        chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// Optional sub-effect for the unchosen pile.
+        unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
+        /// Source ability's object ID.
+        source_id: ObjectId,
+    },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
     /// is submitted by `player` via `GameAction::SubmitPilePartition`; pile B
@@ -4584,6 +4604,8 @@ pub enum WaitingFor {
         /// CR 608.2c: Sub-effect applied to each chosen pile, once per
         /// object, with the subject rebound as controller.
         chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// CR 608.2c: Optional sub-effect applied to each unchosen pile object.
+        unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
     },
@@ -4604,6 +4626,8 @@ pub enum WaitingFor {
         /// CR 608.2c: Sub-effect applied to each chosen pile, once per
         /// object, with the subject rebound as controller.
         chosen_pile_effect: Box<super::ability::AbilityDefinition>,
+        /// CR 608.2c: Optional sub-effect applied to each unchosen pile object.
+        unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
     },
@@ -5115,6 +5139,7 @@ impl WaitingFor {
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
+            WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
@@ -5272,6 +5297,7 @@ impl WaitingFor {
             | WaitingFor::DiscardChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
+            | WaitingFor::SeparatePilesChooseOpponent { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
             | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe

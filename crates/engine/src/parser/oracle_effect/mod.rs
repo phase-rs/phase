@@ -216,6 +216,9 @@ pub(crate) fn replace_first_object_pronoun(body: &str, replacement: &str) -> Opt
 /// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
 /// because the triggering event's source IS the attached-to creature.
 pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
+    if let Some(target) = ctx.object_pronoun_ref.clone() {
+        return target;
+    }
     match &ctx.subject {
         Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
             TargetFilter::TriggeringSource
@@ -3358,6 +3361,14 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             value(
                 RestrictionPlayerScope::ParentTargetedPlayer,
                 tag("that player"),
+            ),
+            // CR 109.4 + CR 608.2c: "its controller" — the controller of the
+            // parent object target (the countered spell). Bound at resolution via
+            // add_restriction + parent_target_controller. The sub-ability inherits
+            // the counter's target at effects/mod.rs:7441-7450.
+            value(
+                RestrictionPlayerScope::ParentObjectTargetController,
+                tag("its controller"),
             ),
             // CR 508.5: "defending player" — the player being attacked by the
             // source ("Whenever ~ attacks, defending player can't cast spells
@@ -12703,7 +12714,12 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                     // (covers "target X" / "it" / "that card" — count stays 1).
                     let (count_expr, after_count) =
                         peel_put_at_library_count(before).unwrap_or((None, before));
-                    let (filter, _) = parse_target(after_count);
+                    // CR 608.2k: thread the real trigger context so a bare object
+                    // pronoun ("put it on the bottom …") binds to the trigger's
+                    // `object_pronoun_ref` (the cast spell for spell-cast triggers)
+                    // rather than defaulting to `ParentTarget`. `parse_target`
+                    // spins up a fresh empty context, which loses that antecedent.
+                    let (filter, _) = parse_target_with_ctx(after_count, ctx);
                     let new_target = if matches!(filter, TargetFilter::Any) {
                         None
                     } else {

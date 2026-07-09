@@ -853,6 +853,17 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if matches!(trig_def.mode, TriggerMode::BlocksOrBecomesBlocked) {
+                // CR 509.1h + CR 509.3d: narrow each firing to its own single
+                // (attacker, blocker) event so "the other creature"/"that
+                // creature" resolves per-firing, matching the atomic
+                // `Blocks`/`BecomesBlocked` arms above.
+                super::trigger_matchers::matching_blocks_or_becomes_blocked_events(
+                    event, trig_def, obj_id, state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
                 // CR 603.2c: One aggregate combat-damage event may satisfy this
                 // trigger once, while CR 608.2c makes the filtered source set
@@ -8518,14 +8529,19 @@ pub mod tests {
             .collect();
 
         assert_eq!(trigger_events.len(), 2);
+        // CR 509.3d: the per-blocker "becomes blocked by a creature" form now
+        // emits the disambiguated `AttackerBecameBlockedByFilteredBlocker` event
+        // (carrying both ids) rather than a re-wrapped per-pair `BlockersDeclared`.
         assert_eq!(
             trigger_events,
             vec![
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(first_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: first_blocker,
                 },
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(second_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: second_blocker,
                 },
             ]
         );
@@ -8557,14 +8573,16 @@ pub mod tests {
         assert_eq!(
             stack_trigger_events,
             vec![
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(first_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: first_blocker,
                 },
-                &GameEvent::BlockersDeclared {
-                    assignments: vec![(second_blocker, attacker)]
+                &GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: second_blocker,
                 },
             ],
-            "CR 702.25a creates one stack trigger per qualifying blocker"
+            "CR 509.3d creates one stack trigger per qualifying blocker"
         );
     }
 

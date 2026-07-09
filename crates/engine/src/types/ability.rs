@@ -2320,6 +2320,19 @@ pub enum RestrictionPlayerScope {
     /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
     /// propagation, without declaring a second target slot.
     ParentTargetedPlayer,
+    /// CR 109.4 + CR 608.2c + CR 608.2h: The controller of the parent effect's
+    /// object target — "its controller" where "it" is the object countered/
+    /// destroyed/tapped by the parent instruction (Render Silent: "Counter target
+    /// spell. Its controller can't cast spells this turn."). Resolved to
+    /// `SpecificPlayer` by `add_restriction::fill_runtime_fields` at restriction-
+    /// creation time via `ability_utils::parent_target_controller`, capturing the
+    /// referent's controller from last-known information (the object has left the
+    /// stack by the time the chained restriction resolves). Distinct from
+    /// `ParentTargetedPlayer` ("that player", CR 608.2c — a reused *player* target):
+    /// this derives a player from an *object* target's controller (CR 109.4).
+    /// Mirrors `PlayerFilter::ParentObjectTargetController` /
+    /// `PlayerScope::ParentObjectTargetController` on the sibling enums.
+    ParentObjectTargetController,
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
     /// ("Whenever ~ attacks, defending player can't cast spells this turn." —
@@ -3744,6 +3757,12 @@ pub enum FilterProp {
     /// CR 707.2: Matches face-down objects on the battlefield.
     /// Used for "face-down creature" trigger subjects.
     FaceDown,
+    /// CR 701.27g: Matches transformed permanents — a transforming double-faced
+    /// permanent on the battlefield with its back face up. Used for "transformed
+    /// permanent"/"transformed creature" selectors (Mutagen Connoisseur's "+1/+0
+    /// for each transformed permanent you control"). Mirrors `FaceDown`/`Tapped`:
+    /// a per-object battlefield state read from `GameObject::transformed`.
+    Transformed,
     /// CR 115.9c: Matches stack entries whose targets ALL satisfy the given filter.
     /// Used for "that targets only ~", "that targets only a single creature you control", etc.
     /// Permissive at the per-object filter level; validated against the stack entry's actual
@@ -9816,6 +9835,15 @@ pub enum Effect {
         /// with the subject rebound as controller. Sacrifice for Make an
         /// Example; the building block accepts any per-object effect.
         chosen_pile_effect: Box<AbilityDefinition>,
+        /// CR 700.3: Where the objects come from. `Battlefield` is the Make an
+        /// Example shape; `RevealedFromLibraryTop` is the Fact or Fiction shape.
+        #[serde(default = "default_pile_source_battlefield")]
+        pile_source: PileSource,
+        /// CR 608.2c: Optional sub-effect applied to each unchosen pile object.
+        /// `None` for Make an Example (unchosen pile stays); `Some(ChangeZone)`
+        /// for Fact or Fiction (unchosen pile goes to graveyard).
+        #[serde(default)]
+        unchosen_pile_effect: Option<Box<AbilityDefinition>>,
     },
     /// CR 613.4d: Switch a creature's power and toughness. Applied in layer 7d.
     SwitchPT {
@@ -12590,6 +12618,22 @@ fn default_voter_scope_all() -> VoterScope {
     VoterScope::AllPlayers
 }
 
+/// CR 700.3: Where the objects for a pile-separation effect originate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PileSource {
+    /// Objects come from the battlefield (Make an Example shape).
+    Battlefield,
+    /// Objects are revealed from the top of the controller's library
+    /// (Fact or Fiction shape). `count` is the number of cards to reveal.
+    RevealedFromLibraryTop { count: u32 },
+}
+
+/// Default pile source is Battlefield (backward-compatible with Make an Example).
+fn default_pile_source_battlefield() -> PileSource {
+    PileSource::Battlefield
+}
+
 /// CR 701.38a + CR 800.4g: Which players cast votes for an `Effect::Vote`.
 ///
 /// `AllPlayers` is the classic Council's-dilemma shape ("starting with you,
@@ -12612,6 +12656,9 @@ pub enum VoterScope {
     /// votes. The controller does not vote — they receive per-choice
     /// sub-effects via `PlayerFilter::VotedFor` against the recorded ballots.
     EachOpponent,
+    /// CR 700.3 + CR 608.2d: A single opponent (chosen or determined at
+    /// resolution) performs the pile separation. Used by Fact or Fiction.
+    AnOpponent,
     /// CR 101.4 + CR 608.2: Battlebond's friend-or-foe keyword action has
     /// no dedicated CR section. The spell controller alone makes one choice
     /// per non-eliminated player, in APNAP order from the controller. The

@@ -1541,6 +1541,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // object goes to derived pile B) is the simplest legal partition, and
         // pile A is the default choice for the chooser. Tactical AI override
         // happens through legal_actions; this is the safety net.
+        WaitingFor::SeparatePilesChooseOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opp| GameAction::ChoosePileOpponent { opponent: opp }),
         WaitingFor::SeparatePilesPartition { .. } => {
             Some(GameAction::SubmitPilePartition { pile_a: Vec::new() })
         }

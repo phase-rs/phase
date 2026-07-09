@@ -1096,6 +1096,12 @@ fn apply_action(
         WaitingFor::RevealChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
+            // both the opponent's partition step and the controller's pile
+            // choice — the cards remain public while both players interact.
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
+            | WaitingFor::SeparatePilesPartition { .. }
+            | WaitingFor::SeparatePilesChoice { .. }
     ) {
         state.revealed_cards.clear();
     }

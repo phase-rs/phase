@@ -4233,6 +4233,120 @@ fn static_cant_attack_if_defending_player_controls() {
     );
 }
 
+// Akron Legionnaire — a leading "Except for <A> and <B>, " exempt-list clause
+// scoping an otherwise-blanket CantAttack restriction (CR 508.1c + CR 201.2a).
+// `parse_leading_except_for_rule_static` must peel the exempt clause, resolve
+// each conjunct independently (a named exemption within a type class, and a
+// bare type-phrase exemption), Or-combine them, and AND `Not{Or{..}}` onto the
+// `affected` filter the existing single-subject dispatcher
+// (`parse_compound_subject_rule_static`) produces for the remainder.
+#[test]
+fn akron_legionnaire_leading_except_for_exempts_named_and_artifact_creatures() {
+    let line = "Except for creatures named Akron Legionnaire and artifact creatures, \
+                creatures you control can't attack.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(
+        defs.len(),
+        1,
+        "Akron Legionnaire is one restriction static: {defs:?}"
+    );
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::CantAttack);
+
+    let Some(TargetFilter::And { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be And{{subject, Not{{exempt}}}}: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "subject conjunct + negated exempt conjunct: {filters:?}"
+    );
+
+    // Subject conjunct: creatures you control (the sibling dispatcher's own
+    // resolution of the remainder, untouched).
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You))),
+        "expected a creatures-you-control subject conjunct: {filters:?}"
+    );
+
+    // Negated exempt conjunct: Not{Or{named Akron Legionnaire, artifact creatures}}.
+    let not_exempt = filters
+        .iter()
+        .find_map(|f| match f {
+            TargetFilter::Not { filter } => Some(filter.as_ref()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a Not{{..}} exempt conjunct: {filters:?}"));
+    let TargetFilter::Or {
+        filters: exempt_filters,
+    } = not_exempt
+    else {
+        panic!("expected Not{{Or{{..}}}}, got Not{{{not_exempt:?}}}");
+    };
+    assert_eq!(
+        exempt_filters.len(),
+        2,
+        "one disjunct per exempt conjunct: {exempt_filters:?}"
+    );
+    assert!(
+        exempt_filters
+            .iter()
+            .any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.properties.contains(&FilterProp::Named {
+                    name: "akron legionnaire".to_string()
+                }))),
+        "expected a creatures-named-Akron-Legionnaire exempt conjunct: {exempt_filters:?}"
+    );
+    assert!(
+        exempt_filters
+            .iter()
+            .any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Artifact)
+                && tf.type_filters.contains(&TypeFilter::Creature))),
+        "expected an artifact-creatures exempt conjunct: {exempt_filters:?}"
+    );
+}
+
+// Guard: dispatch order must not disturb the untouched sibling. A plain
+// "creatures you control can't attack." (no leading "except for" clause) must
+// still resolve through `parse_compound_subject_rule_static` unwrapped — no
+// spurious And/Not wrapper from the new dispatcher declining and falling
+// through. Scoped (non-self) "can't attack" subjects are deferred by the
+// single-return `parse_static_line_inner` dispatcher (dispatch.rs) to the
+// multi path, so this must go through `parse_static_line_multi`.
+#[test]
+fn plain_cant_attack_unaffected_by_leading_except_for_dispatcher() {
+    let defs = parse_static_line_multi("Creatures you control can't attack.");
+    assert_eq!(defs.len(), 1, "{defs:?}");
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You)),
+        "expected an unwrapped creatures-you-control subject: {:?}",
+        def.affected
+    );
+}
+
+// Guard: an exempt clause that isn't the printed 2-conjunct "<A> and <B>"
+// shape (only one conjunct, no "and") must strict-fail rather than mis-parse
+// — this dispatcher is scoped to the evidence-backed 2-conjunct form (see
+// `parse_leading_except_for_rule_static`'s doc comment).
+#[test]
+fn leading_except_for_declines_single_conjunct_exempt_clause() {
+    assert!(
+        parse_static_line_multi("Except for Elves, creatures you control can't attack.").is_empty(),
+        "single-conjunct exempt clause must not be claimed by the 2-conjunct dispatcher"
+    );
+}
+
 /// CR 509.1c: "~ can't block if you control [filter]" attaches the "if"
 /// clause as a controller-scoped board-presence condition (Branded Brawlers).
 #[test]
@@ -10325,6 +10439,65 @@ fn static_cast_as_though_flash() {
 }
 
 #[test]
+fn static_grant_blitz_self_mana_cost() {
+    // CR 702.152a + CR 604.1 + CR 118.9: Henzie "Toolbox" Torre — "Each creature
+    // spell you cast with mana value 4 or greater has blitz. The blitz cost is
+    // equal to its mana cost." lowers to a single `CastWithKeyword` granting
+    // `Blitz(SelfManaCost)` to the controller's MV>=4 creature spells; the
+    // self-referential cost resolves to each spell's own mana cost at cast time
+    // (mirrors the granted-flashback path). The two-sentence cost continuation is
+    // consumed into the same static, not dropped as a separate unimplemented line.
+    use crate::types::mana::ManaCost;
+    let def = parse_static_line(
+        "Each creature spell you cast with mana value 4 or greater has blitz. The blitz cost is equal to its mana cost.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Blitz(ManaCost::SelfManaCost),
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!(
+            "affected must be a Typed creature filter, got {:?}",
+            def.affected
+        );
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }
+        )),
+        "must constrain to mana value 4 or greater, got {:?}",
+        tf.properties
+    );
+}
+
+#[test]
+fn static_grant_blitz_simple_form() {
+    // The bare "Creature spells you cast have blitz. The blitz cost is equal to
+    // its mana cost." form (no mana-value qualifier) grants blitz to every
+    // creature spell the controller casts.
+    use crate::types::mana::ManaCost;
+    let def = parse_static_line(
+        "Creature spells you cast have blitz. The blitz cost is equal to its mana cost.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Blitz(ManaCost::SelfManaCost),
+        }
+    );
+}
+
+#[test]
 fn static_cast_as_though_flash_all_spells() {
     // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
     // Orrery) grants flash to every spell the controller casts.
@@ -14949,6 +15122,72 @@ fn lignify_subtype_only_with_base_pt_type_change() {
     );
 }
 
+/// CR 205.1a + CR 613.1d: subtype-only creature type-change WITHOUT a base P/T —
+/// "Enchanted creature is a Flagbearer." (Coalition Flag). The copula names a
+/// bare creature subtype and there is no base P/T (unlike Lignify), so the
+/// enchanted permanent BEING a creature is the disambiguator from the basic-land
+/// change ("Enchanted land is a Mountain"). Emits the subtype replacement
+/// (RemoveAllSubtypes{Creature} → AddSubtype) with NO SetCardTypes (card types
+/// preserved) and NO P/T change. Before the fix this dropped the whole static.
+#[test]
+fn coalition_flag_subtype_only_no_base_pt_type_change() {
+    use crate::types::card_type::SubtypeSet;
+    let def = parse_static_line("Enchanted creature is a Flagbearer.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "subtype change must not emit SetCardTypes: {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. }
+        )),
+        "'is a Flagbearer' does not change P/T: {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Flagbearer".to_string(),
+    }));
+    let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+    assert!(
+        pos(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }) < pos(&ContinuousModification::AddSubtype {
+            subtype: "Flagbearer".to_string(),
+        }),
+        "RemoveAllSubtypes must precede AddSubtype(Flagbearer): {mods:?}"
+    );
+}
+
+/// Regression guard for the fix above: a bare land subtype change with NO base
+/// P/T ("Enchanted land is a Mountain") enchants a LAND, not a creature, so it
+/// must NOT be caught by the creature-subtype branch — it stays a basic-land
+/// type change (`SetBasicLandType`), never `AddSubtype(Mountain)`.
+#[test]
+fn enchanted_land_is_mountain_stays_basic_land_change() {
+    let def = parse_static_line("Enchanted land is a Mountain.").unwrap();
+    let mods = &def.modifications;
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetBasicLandType { .. })),
+        "basic-land change must route to SetBasicLandType: {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { .. }
+                | ContinuousModification::RemoveAllSubtypes { .. }
+        )),
+        "must not be caught by the creature-subtype branch: {mods:?}"
+    );
+}
+
 #[test]
 fn enchanted_is_type_with_base_pt_preserves_trailing_keyword_clause() {
     // Building-block check: the trailing "and has <kw> ... loses all
@@ -16640,6 +16879,59 @@ fn dynamic_keyword_annihilator_x() {
     assert!(
         has_dynamic_keyword,
         "Expected AddDynamicKeyword(Annihilator), got {:?}",
+        def.modifications
+    );
+}
+
+#[test]
+fn dynamic_keyword_mobilize_x_infantry_shield() {
+    // Issue #5266 + CR 702.181a: Infantry Shield — "Equipped creature has menace
+    // and mobilize X, where X is its power." The mobilize count must be the
+    // dynamic equipped-creature power (AddDynamicKeyword), NOT a Fixed-1 grant.
+    let def =
+        parse_static_line("Equipped creature has menace and mobilize X, where X is its power.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    // Menace is still granted as a plain keyword.
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Menace
+            }
+        )),
+        "menace must still be granted: {:?}",
+        def.modifications
+    );
+    // Mobilize is granted as a DYNAMIC keyword whose count is the equipped
+    // creature's power — a RECIPIENT-scoped Power reference (CR 613.4c), not a
+    // Fixed-1 grant nor the Source-scoped (equipment) value that resolves to 0.
+    let mobilize_value = def.modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicKeyword {
+            kind: crate::types::keywords::DynamicKeywordKind::Mobilize,
+            value,
+        } => Some(value.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        mobilize_value,
+        Some(crate::types::ability::QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Recipient,
+            },
+        }),
+        "mobilize must be a Recipient-scoped dynamic power grant; got {:?}",
+        def.modifications
+    );
+    // Regression guard: the buggy Fixed-count mobilize must NOT be emitted.
+    assert!(
+        !def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Mobilize(_)
+            }
+        )),
+        "mobilize must be dynamic, not a Fixed AddKeyword: {:?}",
         def.modifications
     );
 }
@@ -23063,6 +23355,62 @@ fn top_of_library_cast_permission_crystal_skull_historic_disjunctive() {
     );
 }
 
+/// CR 305.1 + CR 401.5 + CR 601.2a: Case of the Locked Hothouse — the solved reward uses a
+/// simple land branch plus a compound spell branch ("creature and enchantment
+/// spells"). The mixed disjunction must still lower to one `Play` permission.
+#[test]
+fn top_of_library_cast_permission_locked_hothouse_mixed_disjunctive() {
+    let text =
+        "You may play lands and cast creature and enchantment spells from the top of your library.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("Case of the Locked Hothouse reward must parse");
+    match def.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            ref alt_cost,
+        } => {
+            assert_eq!(play_mode, CardPlayMode::Play);
+            assert_eq!(frequency, CastFrequency::Unlimited);
+            assert!(alt_cost.is_none());
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    let filter = def.affected.expect("affected filter set");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or over land / creature-or-enchantment branches, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land branch, got {:?}",
+        filters[0]
+    );
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Or { filters: spell_filters }
+                if spell_filters.len() == 2
+                    && spell_filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                    ))
+                    && spell_filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Enchantment)
+                    ))
+        ),
+        "expected creature-or-enchantment spell branch, got {:?}",
+        filters[1]
+    );
+}
+
 #[test]
 fn top_of_library_cast_permission_keeps_as_long_as_condition() {
     let text = "You may cast creature spells from the top of your library as long as you control three or more creatures with different powers.";
@@ -26031,6 +26379,46 @@ fn static_self_dynamic_pump_for_each_other_creature_on_battlefield_with_keyword(
         "must not emit flat P/T modifications alongside dynamic ones: {:?}",
         def.modifications
     );
+}
+
+/// CR 701.27g + CR 613.4c: Mutagen Connoisseur's "for each transformed
+/// permanent you control" must lower through the production static parser to a
+/// dynamic object count over `FilterProp::Transformed`, not a flat +1/+0 pump.
+#[test]
+fn static_self_gets_dynamic_power_for_each_transformed_permanent() {
+    let def = parse_static_line("~ gets +1/+0 for each transformed permanent you control.")
+        .expect("Mutagen Connoisseur dynamic P/T static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    let dynamic_power = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected AddDynamicPower, not a flat +1 modifier");
+
+    match dynamic_power {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(typed),
+                },
+        } => {
+            assert_eq!(typed.controller, Some(ControllerRef::You));
+            assert!(
+                typed
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::Transformed)),
+                "power must count transformed permanents, got {:?}",
+                typed.properties
+            );
+        }
+        other => panic!("expected ObjectCount over a Transformed filter, got {other:?}"),
+    }
 }
 
 /// CR 205.4a + CR 205.4g + CR 613.1d (Layer 4): Glittering Frost's "Enchanted

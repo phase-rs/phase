@@ -581,6 +581,19 @@ fn restriction_scope_matches_player(
             debug_assert!(false, "ScopedPlayer should be resolved by add_restriction");
             false
         }
+        RestrictionPlayerScope::ParentObjectTargetController => {
+            // CR 109.4: normally resolved to `SpecificPlayer` by `add_restriction`
+            // (via `parent_target_controller`) when the restriction is created.
+            // Unlike the always-resolved sibling scopes (`TargetedPlayer`,
+            // `ScopedPlayer`), this one can legitimately remain unresolved when
+            // there is no object referent — a malformed or hostile state, proven
+            // reachable by `add_restriction`'s
+            // `parent_object_target_controller_unresolved_without_object_target`.
+            // That is a genuine fail-closed outcome (restrict no one), NOT a bug,
+            // so this arm must return `false` rather than `debug_assert!(false)` —
+            // a debug/test panic here would break the documented fail-closed path.
+            false
+        }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }

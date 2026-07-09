@@ -847,8 +847,6 @@ export function GameProvider({
             //    their original seat.
             const sessionKey = `phase-${code}`;
             const existing = await loadP2PSession(sessionKey);
-            const reservationToken =
-              window.sessionStorage.getItem(`phase-p2p-reservation:${code}`) ?? undefined;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -857,7 +855,7 @@ export function GameProvider({
               conn,
               existing?.playerToken,
               useMultiplayerStore.getState().displayName || undefined,
-              reservationToken,
+              undefined,
               sessionKey,
             );
             p2pAdapter = adapter;
@@ -954,9 +952,9 @@ export function GameProvider({
       const sessionKey = `phase-join-password:${joinCode ?? ""}`;
       let password: string | undefined =
         (joinCode && window.sessionStorage.getItem(sessionKey)) || undefined;
-      const reservationSessionKey = `phase-join-reservation:${joinCode ?? ""}`;
-      const reservationToken: string | undefined =
-        (joinCode && window.sessionStorage.getItem(reservationSessionKey)) || undefined;
+      if (joinCode) {
+        window.sessionStorage.removeItem(`phase-join-reservation:${joinCode}`);
+      }
       if (!password && urlParams.has("password")) {
         password = urlParams.get("password") ?? undefined;
         if (password && joinCode) {
@@ -983,7 +981,7 @@ export function GameProvider({
           deck,
           wsMode === "join" ? joinCode : undefined,
           wsMode === "join" ? password : undefined,
-          wsMode === "join" ? reservationToken : undefined,
+          undefined,
           useMultiplayerStore.getState().displayName || "Player",
         );
 

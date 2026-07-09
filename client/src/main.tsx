@@ -1,3 +1,4 @@
+import "./polyfills/cryptoRandomUUID";
 import { createRoot } from "react-dom/client";
 // Self-hosted variable webfonts (served from node_modules by Vite — no Google
 // CDN). Newsreader = serif display; JetBrains Mono = codes / tabular numbers.

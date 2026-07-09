@@ -43,6 +43,11 @@ pub(crate) struct ParseContext {
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,
+    /// CR 608.2k + CR 601.2a: Event object that bare object pronouns in the
+    /// current trigger body ("it", "them") should bind to. Spell-cast triggers
+    /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."
+    /// moves the spell on the stack, not the trigger source or a parent target.
+    pub object_pronoun_ref: Option<TargetFilter>,
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
     pub diagnostics: Vec<OracleDiagnostic>,

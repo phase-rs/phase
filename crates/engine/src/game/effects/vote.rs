@@ -164,7 +164,7 @@ pub fn resolve(
         .into_iter()
         .filter(|pid| match scope {
             VoterScope::AllPlayers => true,
-            VoterScope::EachOpponent => *pid != controller,
+            VoterScope::EachOpponent | VoterScope::AnOpponent => *pid != controller,
             // CR 101.4: `ControllerLabels` cycles the SUBJECT (labeled player)
             // through every non-eliminated player in APNAP order from the
             // controller. The ACTOR is always the controller; that gets pinned
@@ -208,7 +208,9 @@ pub fn resolve(
     // iteration without recomputation.
     let actor = match scope {
         VoterScope::ControllerLabels => VoteActor::Delegated(controller),
-        VoterScope::AllPlayers | VoterScope::EachOpponent => VoteActor::SubjectActs,
+        VoterScope::AllPlayers | VoterScope::EachOpponent | VoterScope::AnOpponent => {
+            VoteActor::SubjectActs
+        }
     };
 
     state.waiting_for = WaitingFor::VoteChoice {

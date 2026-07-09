@@ -3850,6 +3850,107 @@ mod tests {
         );
     }
 
+    /// CR 303.4 + CR 707.9: Copy Enchantment copies "any enchantment on the
+    /// battlefield". An Aura — including a Curse attached to a player — is an
+    /// enchantment permanent (CR 303.4a), so being attached must not remove it
+    /// from the copy-choice pool. Reported in #5289.
+    #[test]
+    fn find_copy_targets_includes_attached_auras_and_curses() {
+        use crate::game::game_object::AttachTarget;
+        use crate::types::ability::Effect;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        fn make_enchantment(
+            state: &mut GameState,
+            card: u64,
+            name: &str,
+            aura: bool,
+        ) -> crate::types::ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            if aura {
+                obj.base_card_types.subtypes = vec!["Aura".to_string()];
+                obj.card_types.subtypes = vec!["Aura".to_string()];
+            }
+            id
+        }
+
+        let prison = make_enchantment(&mut state, 1, "Ghostly Prison", false);
+        let host = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        // CR 303.4f: an Aura attached to a permanent.
+        let pacifism = make_enchantment(&mut state, 3, "Pacifism", true);
+        state.objects.get_mut(&pacifism).unwrap().attached_to = Some(AttachTarget::Object(host));
+        // CR 303.4: a Curse attached to a player.
+        let curse = make_enchantment(&mut state, 4, "Cruel Reality", true);
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+
+        let source = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Use the REAL parsed copy filter so this pins parser + runtime together.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+            "Copy Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let filter = parsed
+            .replacements
+            .iter()
+            .find_map(|r| match r.execute.as_deref()?.effect.as_ref() {
+                Effect::BecomeCopy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Copy Enchantment must parse a BecomeCopy clone replacement");
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+
+        assert!(
+            targets.contains(&prison),
+            "unattached enchantment must be copyable"
+        );
+        assert!(
+            targets.contains(&pacifism),
+            "#5289: an Aura attached to a creature is still an enchantment permanent"
+        );
+        assert!(
+            targets.contains(&curse),
+            "#5289: a Curse attached to a player is still an enchantment permanent"
+        );
+        assert!(
+            !targets.contains(&host),
+            "the creature host is not an enchantment"
+        );
+    }
+
     /// CR 400.1 + CR 122.1: The Master, Formed Anew — the copy source is "a
     /// creature card in exile with a takeover counter on it". `find_copy_targets`
     /// must scan EXILE (per `InZone { Exile }`) and honor the takeover-counter
