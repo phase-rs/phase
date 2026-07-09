@@ -21096,6 +21096,85 @@ pub mod tests {
         );
     }
 
+    #[test]
+    fn dynamically_granted_replicate_enqueues_copy_trigger() {
+        // Issue #5323 (Hatchery Sliver: "Each Sliver spell you cast has replicate.
+        // The replicate cost is equal to its mana cost."). CR 702.56a + CR 611.2f:
+        // a Sliver spell with NO printed Replicate, cast while a
+        // `CastWithKeyword { Replicate(SelfManaCost) }` static grants it Replicate
+        // and one replicate instance was paid, must get a synthesized Replicate
+        // copy trigger from the `dynamically_granted_replicate` seam. This proves
+        // the parser grant (keyword_grant.rs) functions end-to-end with no engine
+        // change — the same path #5436 shipped for granted Blitz.
+        use crate::types::mana::ManaCost;
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        // Battlefield grantor: "Each Sliver spell you cast has replicate."
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Hatchery Sliver".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Replicate(ManaCost::SelfManaCost),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Sliver".into())).controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        // A Sliver spell with NO printed Replicate, one granted replicate instance paid.
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Cheap Sliver".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Sliver".into());
+            obj.cast_from_zone = Some(Zone::Hand);
+            // CR 702.56b: one granted replicate instance (ordinal 0, since there
+            // are no printed instances) was paid once.
+            obj.additional_cost_payments.push(
+                crate::types::ability::AdditionalCostInstancePayment {
+                    origin: AdditionalCostOrigin::Replicate,
+                    origin_ordinal: 0,
+                    count: 1,
+                },
+            );
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(2),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { ability, .. }
+                    if matches!(ability.effect, Effect::CopySpell { .. })
+            )),
+            "dynamically granted Replicate should enqueue a copy trigger, stack: {:?}",
+            state.stack.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
+
     fn count_demonstrate_triggers(state: &GameState) -> usize {
         state
             .stack

@@ -10648,6 +10648,42 @@ fn static_grant_blitz_simple_form() {
 }
 
 #[test]
+fn static_grant_replicate_hatchery_sliver() {
+    // Issue #5323 — Hatchery Sliver: "Each Sliver spell you cast has replicate.
+    // The replicate cost is equal to its mana cost." lowers to a single
+    // `CastWithKeyword` granting `Replicate(SelfManaCost)` to the controller's
+    // Sliver spells (CR 702.56a). The self-referential cost resolves to each
+    // spell's own mana cost at cast time (same template as the granted-Blitz
+    // path), and the granted replicate functions end-to-end: the cost is read by
+    // `effective_replicate_additional_cost_instances` and the copy trigger by the
+    // `dynamically_granted_replicate` seam in `game/triggers.rs`.
+    use crate::types::mana::ManaCost;
+    let def = parse_static_line(
+        "Each Sliver spell you cast has replicate. The replicate cost is equal to its mana cost.",
+    )
+    .expect("Hatchery Sliver granted-replicate static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Replicate(ManaCost::SelfManaCost),
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!(
+            "affected must be a Typed Sliver filter, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert_eq!(
+        tf.get_subtype(),
+        Some("Sliver"),
+        "must scope to Sliver spells, got {:?}",
+        tf.type_filters
+    );
+}
+
+#[test]
 fn static_cast_as_though_flash_all_spells() {
     // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
     // Orrery) grants flash to every spell the controller casts.

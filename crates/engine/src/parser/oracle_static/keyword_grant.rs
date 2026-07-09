@@ -234,27 +234,38 @@ pub(crate) fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDef
 /// path uses (Dream Devourer). Table-driven so further cast-variant alt-cost
 /// keywords that use this exact template slot in without new control flow. Only
 /// keywords the casting flow already surfaces from `effective_spell_keywords`
-/// (granted `CastingVariant::Blitz`) belong here, so the grant actually functions.
+/// belong here, so the grant actually functions:
+///   - `blitz` (Henzie "Toolbox" Torre) → granted `CastingVariant::Blitz`.
+///   - `replicate` (Hatchery Sliver: "Each Sliver spell you cast has replicate.
+///     The replicate cost is equal to its mana cost.") — CR 702.56a: the granted
+///     `CastWithKeyword { Replicate(SelfManaCost) }` is read as a repeatable
+///     additional cost by `effective_replicate_additional_cost_instances`, and
+///     the per-instance copy trigger is synthesized by the
+///     `dynamically_granted_replicate` seam in `game/triggers.rs`, so granted
+///     Replicate functions end-to-end with no engine change.
 fn parse_granted_self_cost_keyword(keyword_str: &str) -> Option<Keyword> {
-    [("blitz", Keyword::Blitz as fn(ManaCost) -> Keyword)]
-        .into_iter()
-        .find_map(|(name, ctor)| {
-            let parsed: OracleResult<'_, ()> = (|| {
-                let (i, _) = tag::<_, _, OracleError<'_>>(name).parse(keyword_str)?;
-                let (i, _) = tag(". the ").parse(i)?;
-                let (i, _) = tag(name).parse(i)?;
-                let (i, _) = tag(" cost is equal to ").parse(i)?;
-                let (i, _) = alt((tag("its"), tag("that card's"), tag("the card's"))).parse(i)?;
-                let (i, _) = tag(" mana cost").parse(i)?;
-                Ok((i, ()))
-            })();
-            let (rest, ()) = parsed.ok()?;
-            rest.trim()
-                .trim_end_matches('.')
-                .trim()
-                .is_empty()
-                .then(|| ctor(ManaCost::SelfManaCost))
-        })
+    [
+        ("blitz", Keyword::Blitz as fn(ManaCost) -> Keyword),
+        ("replicate", Keyword::Replicate as fn(ManaCost) -> Keyword),
+    ]
+    .into_iter()
+    .find_map(|(name, ctor)| {
+        let parsed: OracleResult<'_, ()> = (|| {
+            let (i, _) = tag::<_, _, OracleError<'_>>(name).parse(keyword_str)?;
+            let (i, _) = tag(". the ").parse(i)?;
+            let (i, _) = tag(name).parse(i)?;
+            let (i, _) = tag(" cost is equal to ").parse(i)?;
+            let (i, _) = alt((tag("its"), tag("that card's"), tag("the card's"))).parse(i)?;
+            let (i, _) = tag(" mana cost").parse(i)?;
+            Ok((i, ()))
+        })();
+        let (rest, ()) = parsed.ok()?;
+        rest.trim()
+            .trim_end_matches('.')
+            .trim()
+            .is_empty()
+            .then(|| ctor(ManaCost::SelfManaCost))
+    })
 }
 
 /// Parse "[Type] spells you cast [from zone] have [keyword]" patterns.
