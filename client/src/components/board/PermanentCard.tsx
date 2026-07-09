@@ -19,8 +19,10 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
-import { COUNTER_COLORS, computePTDisplay, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, counterIconClass, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
+import { loyaltyStartIconClasses } from "../../viewmodel/costLabel.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
+import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { KeywordStrip } from "./KeywordStrip.tsx";
@@ -473,13 +475,17 @@ export const PermanentCard = memo(function PermanentCard({
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
 
+  // mana-font shield glyph for the current loyalty total, or null when the
+  // total has no numeral glyph (falls back to the plain amber badge below).
+  const loyaltyShield = obj.loyalty != null ? loyaltyStartIconClasses(obj.loyalty) : null;
+
   // Tap rotation: 17deg in MTGA mode (or compact-height), 90deg in classic mode
-  const tapBaseOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped && !isAttacking ? 0.85 : 1;
+  const tapBaseOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped ? 0.85 : 1;
   // CR 702.26: Phased-out permanents render at 70% opacity (matching the
   // player-area phasing treatment in PlayerArea.tsx commit 4d6cfb506) so the
   // sky-blue tint reads as "ethereal" rather than overpowering the art.
   const tapOpacity = isPhasedOut ? Math.min(tapBaseOpacity, 0.7) : tapBaseOpacity;
-  const isRotatedFull = isAttacking || obj.tapped;
+  const isRotatedFull = obj.tapped;
 
   // Attacker slide-forward: player creatures slide up, opponent creatures slide down.
   // Reduced on compact-height where 30px would overflow the small creature row.
@@ -732,14 +738,6 @@ export const PermanentCard = memo(function PermanentCard({
         <>
           <div className="relative z-10 rounded-lg overflow-hidden">
             <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
-            {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
-            {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
-              <KeywordStrip
-                keywords={obj.keywords}
-                baseKeywords={obj.base_keywords}
-                sourceByKeyword={keywordSourceMap}
-              />
-            )}
             {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
                 matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
             {isPhasedOut && (
@@ -767,12 +765,26 @@ export const PermanentCard = memo(function PermanentCard({
             </div>
           )}
 
-          {/* Loyalty shield for planeswalkers */}
-          {obj.loyalty != null && (
+          {/* Loyalty shield for planeswalkers — mana-font shield glyph when a
+              numeral exists, else the plain amber badge (also the FOUC path). */}
+          {obj.loyalty != null && (loyaltyShield ? (
+            // Font-size on the wrapper drives the glyph: `.ms-loyalty-start` is
+            // 2em, so ~13px here → a ~26px shield with a white numeral overlay.
+            <div
+              className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 font-bold leading-none text-amber-300 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]"
+              style={{ fontSize: "13px" }}
+            >
+              <ManaFontIcon
+                iconClass={loyaltyShield}
+                fallbackText={String(obj.loyalty)}
+                label={String(obj.loyalty)}
+              />
+            </div>
+          ) : (
             <div className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 rounded-t bg-gray-900/90 px-1.5 py-0.5 text-xs font-bold text-amber-300">
               {obj.loyalty}
             </div>
-          )}
+          ))}
 
           {/* Class level badge (CR 716) — gold-leaf bookmark */}
           {obj.class_level != null && (
@@ -808,26 +820,77 @@ export const PermanentCard = memo(function PermanentCard({
             </div>
           )}
 
-          {/* Counter badges (top-right to avoid overlap with P/T box) */}
-          {counters.length > 0 && (
-            <div className="absolute right-1 top-1 z-[60] flex flex-col gap-0.5">
-              {counters.map(([type, count]) => (
+          {/* Top-right overlay stack: counter badges kept clear of the
+              bottom-right P/T box. */}
+          <div className="absolute right-0.5 top-0.5 z-[60] flex flex-col items-end gap-0.5">
+            {counters.map(([type, count]) => {
+              const iconClass = counterIconClass(type);
+              return (
                 <CounterTooltip key={type} type={type} count={count}>
                   <span
-                    className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                    className={`flex items-center gap-0.5 rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                   >
+                    {iconClass && (
+                      <ManaFontIcon
+                        iconClass={iconClass}
+                        fallbackText=""
+                        label={formatCounterType(type)}
+                      />
+                    )}
                     {formatCounterType(type)} x{count}
                   </span>
                 </CounterTooltip>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
 
         </>
       )}
 
+      {/* Keyword badges: a vertical column of square glyph badges straddling
+          the card's top-left edge. Rendered at the SHARED motion.div level
+          (after the art-crop/full-card ternary) so it appears in BOTH display
+          modes, and — being at the overflow-visible level, outside the rounded
+          overflow-hidden art wrapper — the half-off-card portion isn't clipped.
+          Badge size scales off the active card width var. */}
+      {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
+        <KeywordStrip
+          keywords={obj.keywords}
+          baseKeywords={obj.base_keywords}
+          sourceByKeyword={keywordSourceMap}
+          badgeSize={
+            useArtCrop
+              ? "clamp(11px, calc(var(--art-crop-w) * 0.22), 22px)"
+              : "clamp(13px, calc(var(--card-w) * 0.2), 26px)"
+          }
+          maxVisible={useArtCrop ? 4 : 5}
+        />
+      )}
+
       {hasSummoningSickness && (
         <SummoningSicknessOverlay variant={useArtCrop ? "artCrop" : "fullCard"} />
+      )}
+
+      {/* Tapped indicator: a light wash + a centered tap glyph. The glyph
+          counter-rotates by the card's tap angle so it reads upright even when
+          the whole card is turned 90°. */}
+      {obj.tapped && !obj.face_down && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-lg bg-white/20"
+        >
+          <ManaFontIcon
+            iconClass="ms-tap"
+            fallbackText=""
+            className="text-white/90 drop-shadow-[0_1px_4px_rgba(0,0,0,0.95)]"
+            style={{
+              fontSize: useArtCrop
+                ? "clamp(16px, calc(var(--art-crop-w) * 0.42), 40px)"
+                : "clamp(20px, calc(var(--card-w) * 0.4), 56px)",
+              transform: `rotate(${-tapAngle}deg)`,
+            }}
+          />
+        </div>
       )}
 
       {glowClass && (
@@ -848,10 +911,10 @@ export const PermanentCard = memo(function PermanentCard({
 
       {isSelectableForBoardChoice && boardChoice && (
         // Selected cards get a checkmark + solid, white-ringed badge; eligible-
-        // but-unselected cards get the same label dimmed, so the current
+        // but-unselected cards get the same opaque label, so the current
         // selection is unambiguous and the badge reads as a toggle.
         <div
-          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "left-1 top-7" : "left-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "opacity-60 ring-1 ring-black/70"}`}
+          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "right-1 top-7" : "right-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "ring-1 ring-black/70"}`}
         >
           {isSelectedForBoardChoice ? `✓ ${t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}` : t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}
         </div>

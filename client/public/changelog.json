@@ -1,6 +1,62 @@
 {
   "entries": [
     {
+      "id": 169,
+      "date": "2026-07-09",
+      "title": "Fact or Fiction piles resolve",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Fact or Fiction now works end-to-end: reveal the top cards, have an opponent separate them into two piles, then choose the pile that goes to your hand (with Steam Augury-style variants and multiplayer opponent selection)\n• Henzie \"Toolbox\" Torre now grants blitz with each spell's own mana cost, and Hatchery Sliver grants replicate with the Sliver spell's own mana cost\n• Render Silent now keeps the controller of the countered spell from casting spells for the rest of the turn\n• Bello, Bard of the Brambles now animates non-Equipment artifacts and non-Aura enchantments you control with mana value 4 or greater, granting the full Elemental package and combat-damage draw trigger\n\n🛠️ Cards That Now Work Right\n• Animate Dead and Dance of the Dead now reanimate their enchanted graveyard creature correctly, attach to it, and clean up when it leaves\n• Dauthi Voidwalker and Forbidden Crypt now exile only the cards from the correctly scoped graveyard, preserving their counter riders\n• Ambush Commander now animates the Forests you control; Raggadragga, Muraganda Petroglyphs, and Ruxa now recognize mana-ability and no-ability creature qualifiers\n• Cranial Ram now grants its mixed +X/+1 bonus, and Mishra Warform preserves the copied token's name\n• Machine Man's \"he gains flying\" continuation, Mutagen Connoisseur's transformed filter, and Coalition Flag's subtype-only type change now parse correctly\n• Equipment-attachment follow-ups now attach the Equipment to the source when the printed condition says to do so\n• Haunting Apparition can count filtered cards in the chosen player's graveyard\n• Cockatrice, Venom, Mammoth Harness, Karn Silver Golem, and similar \"blocks or becomes blocked by\" abilities now keep their blocker filters\n\n⚔️ Combat & Gameplay\n• \"Attacks alone\" triggers now evaluate relative to the lone attacker, so observer abilities such as Exalted and Sharon Carter-style checks fire when another creature attacks alone\n• Attack-count and attack-target qualifiers now use the full attack declaration while preserving the correct stack-time conditions\n• Captain America now triggers only when a creature becomes tapped during its controller's turn, not during every player's turn\n\n🖥️ Interface\n• Player-attached Auras and Curses are now visible and interactive in split-view seat headers\n• Auras attached to players can now be selected for every object-choice prompt that offers them, including copy and retarget choices\n• The Replay Viewer link has been removed from the home dashboard\n\n🌐 Multiplayer\n• Fact or Fiction-style effects with multiple possible opponents now prompt the selected opponent to separate the revealed cards into piles",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524892896770265093"
+    },
+    {
+      "id": 168,
+      "date": "2026-07-09",
+      "title": "Combat requirement badges arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Loyalty ultimates that finally fire: Kaya, Geist Hunter (token doubling), Vraska, Betrayal's Sting (Treasure and poison abilities), and Sothera, the Supervoid (dies-edict exile + reanimation)\n• More static-ability cards working: Rukarumel, Biologist and Shalai, Voice of Plenty (multi-subject type & hexproof grants), Triarch Stalker & Beckoning Will-o'-Wisp (\"attacking the last chosen player\"), Akron Legionnaire (\"except for…\" attack restriction), and Glaring Spotlight (hexproof bypass)\n• Nightcreep now turns all creatures black and all lands into Swamps\n• Infantry Shield grants Mobilize equal to the equipped creature's power; Death's Presence adds counters equal to the dead creature's power; Etali, Primal Sickness deals poison from its combat damage\n• Brine Elemental skips an opponent's next untap step; Jaheira grants her mana ability to every token you control (Treasures, Clues, and Food included)\n\n🛠️ Cards That Now Work Right\n• Winter Orb and Static Orb once again stop players from untapping (they were silently doing nothing)\n• Quest for Renewal's Seedborn untap kicks in once it has four quest counters\n• Veyran, Voice of Duality only doubles instant/sorcery cast triggers now, not every trigger you control\n• Cruel Revival no longer hands back the creature it destroyed when you decline the optional bounce\n• Kodama's enter-the-battlefield triggers wait for the tutor spell to finish resolving\n• Leeching Sliver drains the correct defending player when a different Sliver attacks\n• Armory Automaton's attach step can be skipped\n• Sram, Senior Edificer triggers on Aura, Equipment, AND Vehicle casts (not just Auras)\n• Panther Habit's damage prevention shields only the equipped creature\n\n⚔️ Combat & Gameplay\n• On-card badges now show attack and block requirements — must-attack, goad, must-block, can't-attack/block — with a clear message when a required attacker or blocker hasn't been declared\n• Sequential combat-damage prompts (e.g. 10+ tramplers from Stonehoof Chieftain) now appear one after another instead of looking frozen\n\n🖥️ Interface\n• Your companion now sits as the far-right card in your hand fan\n• A new viewer lets you review and clear \"Don't ask me again this game\" auto-choices for optional triggers\n• The scry/surveil dialog scrolls to reach every card at large counts\n• MTGA deck imports accept lowercase set codes\n• Spell colors now drive the auto-WUBRG battlefield background\n\n🌐 Multiplayer\n• Server-hosted rooms resume after a page reload",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524680978029744218"
+    },
+    {
+      "id": 167,
+      "date": "2026-07-08",
+      "title": "Eidolon taxes opponents, dredge works mid-draw",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Eidolon of Obstruction now taxes opponents — loyalty abilities of planeswalkers your opponents control cost {1} more to activate, and the tax is enforced on the real activation, not just in theory\n• The Doctor's Tomb now redistributes life correctly even when a replacement effect interrupts the assignment\n\n🛠️ Cards That Now Work Right\n• Dredge, Notion Thief, and Hullbreacher now behave during multi-card draws — dredging one card of a two-card draw delivers the dredged card plus a normal draw instead of drawing nothing\n• Famished Worldsire (“Devour land 3”) now enters with 3 counters per sacrificed permanent instead of just 1\n• Scourglass and Elspeth Tirel now spare the excepted permanents on “destroy all X except for artifacts and lands / lands and tokens” instead of wiping everything\n• Park Heights Pegasus now draws only when two or more creatures entered this turn, not on every combat hit\n• Spelunking's “if you put a Cave onto the battlefield this way, gain 4 life” bonus now actually triggers\n• Evelyn, the Covetous and Ragavan — permanents you cast or play from exile that you don't own now enter under your control, not their owner's\n• Relic of Progenitus and similar “target player exiles a card from their graveyard” effects now target the chosen player's graveyard, not your own\n• Cloud-style “when this enters, attach up to one target Equipment you control to it” abilities now attach to the creature that entered\n• Underworld Breach and other battlefield-only static grants no longer leak their effect while off the battlefield\n• Perpetual cost-grant effects now bind to the right earlier card instead of a stray referent\n• A batch of triaged interaction bugs around playing cards from exile and cost-paid toughness conditions now resolve correctly\n• More card templates parse cleanly: relative card-type targets, repeated named-permanent control clauses, compound activation conditions, source-exile play durations, and supertype-qualified enchant targets\n\n⚔️ Combat & Gameplay\n• Auto-pass is smarter: it now holds priority so you can tap a mana creature whose trigger benefits you (like Zhur-Taa Druid pinging an opponent), while still auto-passing on symmetric or self-punishing taps like Manabarbs\n• Grouped mana sources handle priority more reliably during auto-pass\n• Attack splitting across multiple defending players is fixed\n\n🖥️ Interface\n• Real mana-font iconography throughout the board — keyword ability badges on cards, loyalty +N/−N/0 badges in planeswalker choices, counter and energy/rad/poison glyphs on pills and the HUD, and a proper tap glyph on tapped cards\n• Tooltips and dialogs now layer correctly instead of hiding behind card previews\n• Board choice overlays and the attack-target picker are cleaner and more reliable\n\n🌐 Multiplayer\n• P2P draft backup snapshots now require host-owner verification to read, so a guessed draft code alone can no longer expose them",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524438100871221280"
+    },
+    {
+      "id": 166,
+      "date": "2026-07-07",
+      "title": "Ad Nauseam repeats resolve correctly",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Bludgeon Brawl and Bram-style effects now grant real equip abilities, including mana-value-based equip costs\n• Siren's Call and Maddening Imp now force attacks and punish only the creatures they actually affected at the end step\n• The Mycotyrant, Tidus Doom, Chaos Warp, K'rrik, and broader source-defined token stats are now supported\n• Role tokens now bring their printed abilities and correct face art, so Monster, Royal, and other Roles actually buff the attached creature\n\n🛠️ Cards That Now Work Right\n• Ad Nauseam now reveals, draws, and charges life one repeat at a time instead of batching every accepted reveal at the end\n• Protection choices such as Apostle's Blessing, Giver of Runes, and Angelic Intervention now ask you to choose one protection option instead of building an unusable combined protection\n• Super Intelligence and Maddening Hex-style Auras now trigger only for the enchanted creature's controller or enchanted player\n• Lignify-style enchanted-creature type changes now keep the creature's other card types while replacing creature subtypes and setting base power/toughness\n• Arixmethes-style “it's a type” effects now replace card types correctly, while artifact-creature animations stay additive\n• Enchantments that stop activated abilities now keep the “unless they're mana abilities” exception even when Oracle text uses curly apostrophes\n\n⚔️ Combat & Gameplay\n• Mulligan bottoming now happens at each player's keep or Serum Powder decision point, and the frontend no longer lets you bottom the earmarked Serum Powder\n• “Attacks alone” triggers now fire only when exactly one creature attacks, fixing Exalted and Sharon Carter-style checks\n• Land type-change and land animation statics now cover more compound-subject forms\n• Token dies triggers, X/X token sizing, tracked-set token power/toughness, and split token follow-ups are more reliable\n\n🖥️ Interface\n• Multiplayer turn order chips are clearer and card image fallbacks work better\n• Game surfaces no longer use border styling that looked like interactive tells\n\n🌐 Multiplayer\n• P2P draft backup deletion now requires the host peer id, matching the existing overwrite protection",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524182518331478178"
+    },
+    {
       "id": 165,
       "date": "2026-07-06",
       "title": "Morph face-down casting arrives",

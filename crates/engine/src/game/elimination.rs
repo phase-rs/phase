@@ -128,24 +128,17 @@ pub fn eliminate_players_simultaneously(
     }
 }
 
-/// CR 103.5 + CR 800.4a: Prune eliminated players from in-flight mulligan
-/// pending lists. If pruning empties the decision phase, transition to the
-/// bottoms phase (or finish mulligans). If it empties the bottoms phase,
-/// finish mulligans directly.
+/// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
+/// mulligan pending list. If pruning empties it, finish the mulligan flow
+/// directly — bottoming is now resolved per-entry at the declare point, so
+/// there is no separate batch bottoms phase left to advance to.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // CR 800.4a: Drop any final-mulligan-count entries for players who have
-    // been eliminated. Symmetric with the pending-list pruning below so
-    // enter_bottom_phase never sees stale entries for dead players.
     let alive: HashSet<PlayerId> = state
-        .final_mulligan_counts
+        .prepaid_mulligan_bottoms
         .keys()
-        .chain(state.prepaid_mulligan_bottoms.keys())
         .copied()
         .filter(|pid| players::is_alive(state, *pid))
         .collect();
-    state
-        .final_mulligan_counts
-        .retain(|pid, _| alive.contains(pid));
     state
         .prepaid_mulligan_bottoms
         .retain(|pid, _| alive.contains(pid));
@@ -155,30 +148,26 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             pending,
             free_first_mulligan,
         } => {
+            // CR 800.4a: A pruned player whose entry was mid-`BottomCards
+            // { then: UseSerumPowder { object_id } }` needs no special
+            // cleanup of `object_id` — that reference lives only inside this
+            // `MulliganDecisionEntry`. By the time this function runs,
+            // `eliminate_players_simultaneously` has already exiled every
+            // object the leaving player owned, including the Serum Powder
+            // itself. A plain is_alive-filtered removal of the whole entry
+            // is sufficient.
             let alive: Vec<_> = pending
                 .into_iter()
                 .filter(|e| players::is_alive(state, e.player))
                 .collect();
             if alive.is_empty() {
-                state.waiting_for = super::mulligan::enter_bottom_phase_public(state, events);
+                state.prepaid_mulligan_bottoms.clear();
+                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
             } else {
                 state.waiting_for = WaitingFor::MulliganDecision {
                     pending: alive,
                     free_first_mulligan,
                 };
-            }
-        }
-        WaitingFor::MulliganBottomCards { pending } => {
-            let alive: Vec<_> = pending
-                .into_iter()
-                .filter(|e| players::is_alive(state, e.player))
-                .collect();
-            if alive.is_empty() {
-                state.final_mulligan_counts.clear();
-                state.prepaid_mulligan_bottoms.clear();
-                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
-            } else {
-                state.waiting_for = WaitingFor::MulliganBottomCards { pending: alive };
             }
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
@@ -1124,6 +1113,14 @@ mod tests {
             count: 1,
             applied: HashSet::new(),
         });
+        // CR 121.6b: a paused multi-card draw owned by the LEAVING chooser
+        // (P2) — single-player-scoped, must clear alongside its siblings via
+        // `abandon_post_replacement_continuation` (replacement.rs).
+        state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
+            player: PlayerId(2),
+            remaining: 1,
+            accumulated: 0,
+        });
         // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: o,
@@ -1165,6 +1162,11 @@ mod tests {
              applied seed, not just its established siblings (issue #4886, review #6)"
         );
         assert!(state.pending_connive_reentry.is_none());
+        assert!(
+            state.pending_multi_draw.is_none(),
+            "CR 121.6b: the leaving chooser's paused multi-card draw must be \
+             cleared via abandon_post_replacement_continuation, not stranded"
+        );
         assert!(
             state.pending_spell_resolution.is_none(),
             "the leaving chooser's coupled spell-resolution ctx must be torn down"
@@ -1213,6 +1215,13 @@ mod tests {
             additional_cost_payments: vec![],
             convoked_creatures: vec![],
         });
+        // CR 121.6b: a paused multi-card draw owned by the LIVING chooser (P0)
+        // must survive a different player's departure — no over-clear.
+        state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
+            player: PlayerId(0),
+            remaining: 2,
+            accumulated: 1,
+        });
 
         let mut events = Vec::new();
         eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
@@ -1226,6 +1235,15 @@ mod tests {
         assert!(
             state.pending_spell_resolution.is_some(),
             "an opponent leaving must not tear down the living player's spell-resolution ctx"
+        );
+        assert_eq!(
+            state.pending_multi_draw,
+            Some(crate::types::game_state::PendingMultiDraw {
+                player: PlayerId(0),
+                remaining: 2,
+                accumulated: 1,
+            }),
+            "an opponent leaving must not clear the living chooser's paused multi-card draw"
         );
         assert!(
             matches!(

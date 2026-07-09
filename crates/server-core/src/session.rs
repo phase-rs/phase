@@ -90,7 +90,7 @@ pub fn acting_players(state: &GameState) -> Vec<PlayerId> {
 /// CR 103.5: True iff `player` is one of the actors permitted to submit an
 /// action for the current WaitingFor. Replaces the
 /// `acting_player(state) == Some(player)` idiom at multiplayer routing sites
-/// so the simultaneous-decision states (MulliganDecision, MulliganBottomCards,
+/// so the simultaneous-decision states (MulliganDecision,
 /// OpeningHandBottomCards)
 /// route legal actions to every pending player, not just the first.
 pub fn is_acting(state: &GameState, player: PlayerId) -> bool {
@@ -1104,6 +1104,32 @@ impl SessionManager {
         // A preference toggle is not an undo point, so — unlike ReorderHand — it
         // takes NO takeback snapshot. CR 117.3d.
         if matches!(action, GameAction::SetPriorityYield { .. }) {
+            let result = apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?;
+            let (new_legal_actions, spell_costs, by_object) =
+                engine_legal_actions_full(&session.state);
+            let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
+            return Ok((
+                session.state.clone(),
+                result.events,
+                new_legal_actions,
+                result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ));
+        }
+
+        // SetMayTriggerAutoChoice: per-player "don't ask again" auto-choice
+        // preference for optional ("may") triggers, keyed to the authenticated
+        // player, not the priority holder. Bypasses the turn/legal-action
+        // prechecks (any player may adjust their own auto-choices at any time)
+        // and delegates the mutation to the engine (single authority — the write
+        // handler enforces actor scoping). Not an undo point → no takeback
+        // snapshot, mirroring SetPriorityYield. CR 603.5.
+        if matches!(action, GameAction::SetMayTriggerAutoChoice { .. }) {
             let result = apply(&mut session.state, player, action).map_err(|e| {
                 warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
                 format!("Engine error: {}", e)
@@ -2300,6 +2326,7 @@ mod tests {
             pending: vec![engine::types::game_state::MulliganDecisionEntry {
                 player: ai_pid,
                 mulligan_count: 0,
+                phase: engine::types::game_state::MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: true,
         };

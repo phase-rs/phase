@@ -4940,18 +4940,32 @@ fn parse_graveyard_exile_replacement(
 
     // Scope of the subject's destination graveyard. Valid-card filter is keyed
     // off this: "opponent's graveyard" ⇒ `Owned { controller: Opponent }`.
+    // Scope of the subject's destination graveyard, keying the valid-card owner
+    // filter. "your graveyard" ⇒ `Owned { You }` (Forbidden Crypt — the redirect
+    // must NOT exile opponents' cards); "opponent's graveyard" ⇒ `Owned { Opponent }`
+    // (Leyline of the Void); any other graveyard phrase ⇒ no owner constraint.
+    // CR 400.3 + CR 108.3: cards go to their owner's graveyard, so ownership is
+    // the stable discriminant for whose-graveyard scoping.
     #[derive(Clone)]
     enum Scope {
         Any,
+        You,
         Opponent,
     }
 
     // The outcome clause ("exile it instead" or the shuffle-back phrasing)
-    // determines what ChangeZone + sub_ability chain we emit.
+    // determines what ChangeZone + sub_ability chain we emit. The exile variant
+    // carries any `with N <type> counter(s) on it` rider (CR 122.1) lifted by the
+    // shared anaphor recognizer — Dauthi Voidwalker's "instead exile it with a
+    // void counter on it" is the exemplar.
     #[derive(Clone)]
     enum Outcome {
-        Exile,
-        ShuffleBack { reveal: bool },
+        Exile {
+            enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        },
+        ShuffleBack {
+            reveal: bool,
+        },
     }
 
     // CR 730.3e + CR 111.1: the subject's token axis. "a card or token" is
@@ -5011,6 +5025,11 @@ fn parse_graveyard_exile_replacement(
                 value(Scope::Opponent, tag("an opponent's graveyard")),
                 value(Scope::Opponent, tag("an opponents graveyard")),
                 value(Scope::Opponent, tag("opponent's graveyard")),
+                // CR 400.3: "your graveyard" (Forbidden Crypt) scopes to You-owned
+                // cards — the redirect must not exile opponents' cards. Tried
+                // before the generic ` graveyard` fallthrough so the possessive
+                // owner is captured rather than swallowed as unscoped.
+                value(Scope::You, tag("your graveyard")),
                 value(
                     Scope::Any,
                     preceded(take_until(" graveyard"), tag(" graveyard")),
@@ -5020,20 +5039,33 @@ fn parse_graveyard_exile_replacement(
             let (i, _) = opt(tag(" from anywhere")).parse(i)?;
             let (i, _) = tag(", ").parse(i)?;
 
-            // Outcome dispatch. The shuffle-back variant optionally prefixes
-            // "reveal ~ and " (CR 701.20); the exile variant has no such prefix.
-            let (i, outcome) = alt((
-                value(Outcome::Exile, tag("exile it instead")),
-                value(
-                    Outcome::ShuffleBack { reveal: true },
-                    tag("reveal ~ and shuffle it into its owner's library instead"),
-                ),
-                value(
-                    Outcome::ShuffleBack { reveal: false },
-                    tag("shuffle it into its owner's library instead"),
-                ),
-            ))
-            .parse(i)?;
+            // Outcome dispatch. The exile variant delegates to the shared
+            // `parse_exile_anaphor_clause` so it accepts both word orders
+            // ("exile it instead" / "instead exile it") AND lifts an inline
+            // `with N <type> counter(s) on it` rider (CR 122.1) — Dauthi
+            // Voidwalker's "instead exile it with a void counter on it". The
+            // shuffle-back variant optionally prefixes "reveal ~ and " (CR 701.20).
+            let exile_anaphor = parse_exile_anaphor_clause(TextPair::new(i, i));
+            let (i, outcome) = if exile_anaphor.matched {
+                (
+                    exile_anaphor.continuation.lower,
+                    Outcome::Exile {
+                        enter_with_counters: exile_anaphor.enter_with_counters,
+                    },
+                )
+            } else {
+                alt((
+                    value(
+                        Outcome::ShuffleBack { reveal: true },
+                        tag("reveal ~ and shuffle it into its owner's library instead"),
+                    ),
+                    value(
+                        Outcome::ShuffleBack { reveal: false },
+                        tag("shuffle it into its owner's library instead"),
+                    ),
+                ))
+                .parse(i)?
+            };
 
             Ok((i, (scope, token_scope, outcome, subject.to_string())))
         })?;
@@ -5042,7 +5074,7 @@ fn parse_graveyard_exile_replacement(
 
     // Destination routing is determined by the outcome branch.
     let destination = match &outcome {
-        Outcome::Exile => Zone::Exile,
+        Outcome::Exile { .. } => Zone::Exile,
         Outcome::ShuffleBack { .. } => Zone::Library,
     };
 
@@ -5053,10 +5085,15 @@ fn parse_graveyard_exile_replacement(
     // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
     // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
     let mut props = Vec::new();
-    if let Scope::Opponent = scope {
-        props.push(FilterProp::Owned {
+    match scope {
+        // CR 400.3: "your graveyard" ⇒ You-owned cards only (Forbidden Crypt).
+        Scope::You => props.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        }),
+        Scope::Opponent => props.push(FilterProp::Owned {
             controller: ControllerRef::Opponent,
-        });
+        }),
+        Scope::Any => {}
     }
     if let TokenScope::NonToken = token_scope {
         props.push(FilterProp::NonToken);
@@ -5071,9 +5108,21 @@ fn parse_graveyard_exile_replacement(
         None
     };
 
-    // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts only
-    // the `destination` field from this top-level ChangeZone — other fields here
-    // (owner_library, etc.) are inert metadata along the redirect path.
+    // CR 122.1: A `with N <type> counter(s) on it` rider on the exile outcome
+    // (Dauthi Voidwalker's void counter) is lifted onto the redirect's
+    // `enter_with_counters`, which `event_modifiers_for_ability` →
+    // `extract_etb_counters` reads and applies as the object enters exile.
+    let redirect_counters = match &outcome {
+        Outcome::Exile {
+            enter_with_counters,
+        } => enter_with_counters.clone(),
+        Outcome::ShuffleBack { .. } => vec![],
+    };
+
+    // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts the
+    // `destination` field (and `enter_with_counters`, when present) from this
+    // top-level ChangeZone — other fields here (owner_library, etc.) are inert
+    // metadata along the redirect path.
     let redirect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
@@ -5086,7 +5135,7 @@ fn parse_graveyard_exile_replacement(
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
-            enter_with_counters: vec![],
+            enter_with_counters: redirect_counters,
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
             enters_modified_if: None,
@@ -5097,7 +5146,7 @@ fn parse_graveyard_exile_replacement(
     // The mandatory post-effect extractor at `replacement.rs` sees a top-level
     // ChangeZone and stashes `sub_ability` to run after the redirected move lands.
     let execute = match outcome {
-        Outcome::Exile => redirect,
+        Outcome::Exile { .. } => redirect,
         Outcome::ShuffleBack { reveal } => {
             // CR 701.24: shuffle into owner's library. CR 400.3 is the owner-routing
             // authority — TargetFilter::Owner resolves to state.objects[source_id].owner,
@@ -7025,7 +7074,10 @@ fn parse_optional_token_substitution_choice(
 /// Deepest Foundation's "three times that many"), plus "those tokens plus [spec]"
 /// (Chatterfang — "that many 1/1 green Squirrel creature tokens"; Donatello —
 /// "a Mutagen token").
-fn parse_token_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+pub(crate) fn parse_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
     let modification_mode = parse_token_replacement_shape(lower)?;
@@ -8187,6 +8239,19 @@ fn strip_as_long_as_prefix_for_prevention(
     }
 }
 
+/// CR 615.1a: subject-first prevention recipient "<subject> would be dealt …".
+/// The attached creature (CR 301.5f "equipped creature" / CR 303.4b "enchanted
+/// creature") is the shield's recipient for the Panther-Habit class ("If
+/// equipped creature would be dealt damage, prevent that damage …"). Composes
+/// `parse_attached_subject_target_filter` (whose core does not consume trailing
+/// whitespace) with the leading-space `tag(" would be dealt")`, so it matches
+/// both "would be dealt damage" and "…would be dealt combat damage". The
+/// self-subject forms ("~" / "this creature") are handled by the earlier
+/// if-branch (they map to `SelfRef`), so no self arm belongs here.
+fn parse_subject_first_prevention_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
+    terminated(parse_attached_subject_target_filter, tag(" would be dealt")).parse(input)
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -8356,6 +8421,17 @@ fn parse_damage_prevention_replacement(
             )
             .parse(input)
         })
+        // CR 615.1a + CR 301.5f/303.4b: subject-first form "If equipped/enchanted
+        // creature would be dealt damage, …" (Panther Habit). Disjoint from the
+        // "dealt to <attached>" recipient scan above (passive subject-first vs.
+        // recipient clause) and from `parse_damage_recipient_valid_card_filter`
+        // below, so chaining it here as an additional fallback cannot shadow them.
+        .or_else(|| {
+            nom_primitives::scan_at_word_boundaries(
+                working_lower,
+                parse_subject_first_prevention_recipient,
+            )
+        })
         .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
     };
 
@@ -8386,6 +8462,19 @@ fn parse_damage_prevention_replacement(
     // the prevented event's damage recipient, exactly like a typed `valid_card`
     // does — so the cohort-2 anaphor rewrite must fire for it too.
     let recipient_is_event_filter = valid_card_filter.is_some() || recipient_from_event;
+    // CR 301.5f/303.4b: an OBJECT-recipient shield (typed `valid_card`, e.g.
+    // Panther Habit's equipped creature) rebinds a bare "it" rider to the damage
+    // recipient. Compute by borrow BEFORE the move below; the self-scoped cohort
+    // (`valid_card == SelfRef` — Anti-Venom, Unbreathing Horde) is excluded so it
+    // keeps its source-referring rider.
+    let recipient_is_object =
+        matches!(&valid_card_filter, Some(f) if !matches!(f, TargetFilter::SelfRef));
+    // CR 608.2k: A self-scoped shield ("dealt to ~") rebinds the rider's dangling
+    // anaphor to the SOURCE, not the event recipient — see the follow-up rewrite
+    // branch below. Kept as its own predicate (rather than `!recipient_is_object`)
+    // because a `valid_card`-less pure-event shield is neither self- nor object-
+    // scoped and must not take the self-scoped branch.
+    let recipient_is_self_scoped = matches!(&valid_card_filter, Some(TargetFilter::SelfRef));
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
@@ -8453,8 +8542,30 @@ fn parse_damage_prevention_replacement(
         // its all-consuming recipient terminator fails, so this rewrite
         // does not fire and `ParentTarget` correctly inherits the spell's
         // chosen target.
-        if recipient_is_event_filter {
-            rewrite_parent_target_to_post_replacement_damage_target(&mut followup_def);
+        //
+        // CR 608.2k: The two recipient cohorts are mutually exclusive and demand
+        // opposite anaphor bindings, so branch on them rather than layering
+        // rewrites. A SELF-scoped shield (`valid_card == SelfRef` — Anti-Venom,
+        // Unbreathing Horde) refers back to the SOURCE: any dangling `ParentTarget`
+        // in the rider (e.g. "him"/"her", which lower to the generic CR 608.2c
+        // anaphor rather than binding to the `subject: SelfRef` thread) must
+        // resolve to `SelfRef`, and a `SelfRef` rider stays put. An OBJECT- or
+        // event-recipient shield refers to the PREVENTED EVENT'S recipient: both a
+        // dangling `ParentTarget` and a `subject`-bound `SelfRef` in the rider must
+        // resolve to `PostReplacementDamageTarget`.
+        if recipient_is_self_scoped {
+            rewrite_parent_target_to_self_ref(&mut followup_def);
+        } else {
+            if recipient_is_event_filter {
+                rewrite_parent_target_to_post_replacement_damage_target(&mut followup_def);
+            }
+            // CR 615.5 + CR 301.5f/303.4b: in an object-recipient shield a bare
+            // "it" in the prevented-amount rider (Panther Habit "put that many
+            // +1/+1 counters on it") lowers to SelfRef but means the damage
+            // recipient.
+            if recipient_is_object {
+                rewrite_self_ref_to_post_replacement_damage_target(&mut followup_def);
+            }
         }
         def = def.execute(followup_def);
     }
@@ -8633,6 +8744,58 @@ fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefi
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_parent_target_to_post_replacement_damage_target(else_branch);
+    }
+}
+
+/// CR 615.5 + CR 301.5f/303.4b: In an OBJECT-recipient prevention shield (typed
+/// `valid_card`, e.g. Panther Habit's "equipped creature"), a bare "it" in the
+/// prevented-amount rider lowers to `SelfRef` (via the `subject: SelfRef` thread
+/// on the follow-up parse) but semantically refers to the prevented event's
+/// damage recipient — the attached creature, not the source permanent. Rewrite
+/// `SelfRef` → `PostReplacementDamageTarget` across the follow-up tree so the
+/// counter lands on the recipient. Only invoked for the object-recipient cohort;
+/// the self-scoped cohort (Anti-Venom, Unbreathing Horde — `valid_card` SelfRef)
+/// deliberately keeps its source-referring rider and never calls this. Mirrors
+/// `rewrite_parent_target_to_post_replacement_damage_target`'s recursion into
+/// `sub_ability` and `else_ability`; uses the shared `each_target_filter_mut`
+/// walker (which visits `PutCounter`/`RemoveCounter` targets).
+fn rewrite_self_ref_to_post_replacement_damage_target(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::SelfRef) {
+            *f = TargetFilter::PostReplacementDamageTarget;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_self_ref_to_post_replacement_damage_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_self_ref_to_post_replacement_damage_target(else_branch);
+    }
+}
+
+/// CR 608.2k + CR 615.5: In a SELF-scoped prevention shield ("If damage would be
+/// dealt to ~, … put that many +1/+1 counters on him." — Anti-Venom class), the
+/// rider's anaphor refers back to the shield's source. A gendered/singular
+/// pronoun ("him"/"her") does not bind to the follow-up's `subject: SelfRef`
+/// thread the way bare "it" does — it lowers to the generic CR 608.2c parent
+/// anaphor (`ParentTarget`). There is no parent target slot in a passive
+/// replacement, so remap the dangling `ParentTarget` to `SelfRef` so the counter
+/// lands on the source. The counterpart object-recipient cohort routes the same
+/// dangling anaphor to `PostReplacementDamageTarget` instead
+/// (`rewrite_parent_target_to_post_replacement_damage_target`); the two are
+/// mutually exclusive at the call site. Recurses into `sub_ability`/`else_ability`
+/// and uses the shared `each_target_filter_mut` walker, mirroring its siblings.
+fn rewrite_parent_target_to_self_ref(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::ParentTarget) {
+            *f = TargetFilter::SelfRef;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_parent_target_to_self_ref(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_parent_target_to_self_ref(else_branch);
     }
 }
 
@@ -10473,6 +10636,124 @@ mod tests {
                     ),
                     "expected count to be EventContextAmount; got count={count:?}, repeat_for={:?}",
                     execute.repeat_for
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 615.1a + CR 301.5f + CR 615.5 + issue #5246: Panther Habit — "If
+    /// equipped creature would be dealt damage, prevent that damage and put that
+    /// many +1/+1 counters on it."
+    ///
+    /// Two coupled bugs are fixed here:
+    /// - BUG 1: the shield must scope to the equipped creature (`valid_card`
+    ///   Typed(Creature, EquippedBy)), not fire on every DamageDone event.
+    /// - BUG 2: the rider "put that many +1/+1 counters on it" — the bare "it"
+    ///   lowers to SelfRef but means the equipped creature (the damage
+    ///   recipient), so it must be rewritten to `PostReplacementDamageTarget`.
+    #[test]
+    fn panther_habit_equipped_recipient_scope_and_counter_target_rewrite() {
+        let def = parse_replacement_line(
+            "If equipped creature would be dealt damage, prevent that damage and put that many +1/+1 counters on it.",
+            "Panther Habit",
+        )
+        .expect("Panther Habit should parse as a damage prevention replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        // (BUG 1) valid_card scopes the shield to the equipped creature.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            )),
+            "shield must scope to equipped creature, got {:?}",
+            def.valid_card
+        );
+        assert!(
+            def.damage_target_filter.is_none(),
+            "scoping comes from valid_card alone, got {:?}",
+            def.damage_target_filter
+        );
+
+        // (BUG 2) rider PutCounter targets the damage recipient (not SelfRef).
+        let execute = def.execute.as_ref().expect("execute rider present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(
+                    *target,
+                    TargetFilter::PostReplacementDamageTarget,
+                    "rider 'it' must rebind to the damage recipient, not the Equipment"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "counter count must be the prevented amount; got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 615.1a + CR 303.4b + CR 615.5: Enchanted-creature synthetic member of
+    /// the Panther Habit class — the subject-first recipient + "it"-rider rewrite
+    /// must work for the Aura attachment axis too (EnchantedBy).
+    #[test]
+    fn enchanted_creature_subject_first_prevention_counter_target_rewrite() {
+        let def = parse_replacement_line(
+            "If enchanted creature would be dealt damage, prevent that damage and put that many +1/+1 counters on it.",
+            "Synthetic Habit Aura",
+        )
+        .expect("enchanted-creature prevention should parse");
+
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+            )),
+            "shield must scope to enchanted creature, got {:?}",
+            def.valid_card
+        );
+        let execute = def.execute.as_ref().expect("execute rider present");
+        match &*execute.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 615.1a + CR 615.5 regression: a SELF-scoped shield (Anti-Venom —
+    /// "If damage would be dealt to ~, … put that many +1/+1 counters on him.")
+    /// keeps its source-referring rider. `valid_card` is `SelfRef` (not an object
+    /// filter), so the object-recipient rewrite must NOT fire and the counter
+    /// must stay on `SelfRef`. Guards against the BUG-2 fix over-reaching into the
+    /// self-scoped cohort.
+    #[test]
+    fn anti_venom_self_scoped_rider_stays_self_ref() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on him.",
+            "Anti-Venom, Horrifying Healer",
+        )
+        .expect("Anti-Venom prevention should parse");
+
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("execute rider present");
+        match &*execute.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "self-scoped rider must keep SelfRef, not be rewritten to the recipient"
                 );
             }
             other => panic!("expected Effect::PutCounter, got {other:?}"),
@@ -12912,6 +13193,107 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 614.1a + CR 122.1: Dauthi Voidwalker (#5245) — "If a card would be put
+    /// into an opponent's graveyard from anywhere, instead exile it with a void
+    /// counter on it." The graveyard-exile replacement must accept BOTH the
+    /// "instead exile it" prefix word order AND the "with a void counter on it"
+    /// rider, lifting the counter onto the exile redirect's `enter_with_counters`
+    /// (which `extract_etb_counters` applies as the card enters exile).
+    #[test]
+    fn dauthi_voidwalker_exile_with_void_counter() {
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.",
+            "Dauthi Voidwalker",
+        )
+        .expect("Dauthi's graveyard-exile-with-counter replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        // Opponent-owned, token-excluding (CR 730.3e) — same subject scope as Leyline.
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }));
+                assert!(properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("Expected Typed(Owned Opponent + NonToken), got {other:?}"),
+        }
+        // Exile redirect carries the void counter.
+        match def.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                enter_with_counters,
+                ..
+            }) => {
+                assert_eq!(
+                    enter_with_counters.len(),
+                    1,
+                    "expected one counter rider, got {enter_with_counters:?}"
+                );
+                let (ct, qty) = &enter_with_counters[0];
+                assert_eq!(&*ct.as_str(), "void", "expected a void counter, got {ct:?}");
+                assert_eq!(qty, &QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("Expected ChangeZone→Exile with counters, got {other:?}"),
+        }
+    }
+
+    /// CR 400.3: Forbidden Crypt — "If a card would be put into your graveyard
+    /// from anywhere, exile that card instead." The "your graveyard" scope must
+    /// bind the redirect to YOU-owned cards; without it the anaphor recognizer
+    /// (which now makes this card parse) would exile opponents' cards too. Review
+    /// finding on #5443 (matthewevans).
+    #[test]
+    fn forbidden_crypt_your_graveyard_scopes_to_you() {
+        let def = parse_replacement_line(
+            "If a card would be put into your graveyard from anywhere, exile that card instead.",
+            "Forbidden Crypt",
+        )
+        .expect("Forbidden Crypt graveyard-exile replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(
+                    properties.contains(&FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    }),
+                    "'your graveyard' must scope to You-owned cards, got {properties:?}"
+                );
+                // Must NOT be scoped to an opponent.
+                assert!(!properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }));
+                // "a card" is still token-excluding (CR 730.3e).
+                assert!(properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("Expected Typed(Owned You + NonToken), got {other:?}"),
+        }
+    }
+
+    /// Regression guard: the plain "exile it instead" suffix word order (Leyline /
+    /// Rest in Peace) must stay counter-free after the anaphor-recognizer refactor.
+    #[test]
+    fn graveyard_exile_no_counter_suffix_word_order_unchanged() {
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .unwrap();
+        match def.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                enter_with_counters,
+                ..
+            }) => assert!(
+                enter_with_counters.is_empty(),
+                "plain exile must carry no counters, got {enter_with_counters:?}"
+            ),
+            other => panic!("Expected ChangeZone→Exile, got {other:?}"),
+        }
     }
 
     /// CR 730.3e + CR 111.1: a card-only subject targeting ANY graveyard ("a

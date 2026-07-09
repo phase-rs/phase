@@ -43,7 +43,12 @@ export function sortCreaturesForBlockers(
   blockerGroups.sort((a, b) => {
     const colA = getMinAttackerColumn(a, blockerAssignments, attackerColumn);
     const colB = getMinAttackerColumn(b, blockerAssignments, attackerColumn);
-    return colA - colB;
+    // Two blockers whose assigned attacker has no opponent column (e.g. aimed at
+    // a planeswalker/player, so absent from `attackerColumn`) both yield
+    // `Infinity`; `Infinity - Infinity` is NaN — a comparator must never return
+    // NaN (its ordering is then implementation-defined). Short-circuit equal
+    // columns so equal/off-row blockers keep their original relative order.
+    return colA === colB ? 0 : colA - colB;
   });
 
   return [...blockerGroups, ...nonBlockerGroups];

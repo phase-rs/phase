@@ -195,6 +195,7 @@ fn token_storm_declare_attackers_gate() {
         player: active,
         valid_attacker_ids,
         valid_attack_targets,
+        attacker_constraints: Default::default(),
     };
 
     perf_counters::reset();

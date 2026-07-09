@@ -140,6 +140,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::ManaExpend => match_mana_expend,
         TriggerMode::EntersOrAttacks => match_enters_or_attacks,
         TriggerMode::AttacksOrBlocks => match_attacks_or_blocks,
+        TriggerMode::BlocksOrBecomesBlocked => match_blocks_or_becomes_blocked,
         // CR 702.55c: ETB half only on the battlefield; haunted-dies half is synthesized
         // into exile as `HauntedCreatureDies`.
         TriggerMode::EntersOrHauntedCreatureDies => match_changes_zone,
@@ -423,6 +424,13 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Compound: attacks or blocks — fires on attack or block events
     r.insert(TriggerMode::AttacksOrBlocks, match_attacks_or_blocks);
 
+    // CR 509.1h + CR 509.3d: blocks or becomes blocked — fires on either the
+    // blocker-declaration or the becomes-blocked event.
+    r.insert(
+        TriggerMode::BlocksOrBecomesBlocked,
+        match_blocks_or_becomes_blocked,
+    );
+
     // CR 702.55c: haunt creature ETB half — haunted-dies half is synthesized in exile.
     r.insert(TriggerMode::EntersOrHauntedCreatureDies, match_changes_zone);
 
@@ -615,7 +623,7 @@ fn valid_source_controller_matches(
     }
 }
 
-pub(super) fn valid_player_matches(
+pub(crate) fn valid_player_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
     player_id: PlayerId,
@@ -657,6 +665,22 @@ fn player_matches_filter(
                 .get(&source_id)
                 .and_then(|source| source.attached_to)
                 .and_then(|host| host.as_player())
+                == Some(player_id)
+        }
+        // CR 303.4e + CR 109.4: "enchanted [permanent]'s controller" — for an Aura
+        // phase trigger the scoped player is the CONTROLLER of the permanent the
+        // source is attached to (per CR 303.4e this may differ from the Aura's own
+        // controller). Resolves the attached object's current controller; a source
+        // attached to a player (not an object) or unattached never matches, so the
+        // trigger stays inert until the Aura is on a creature.
+        TargetFilter::ParentTargetController => {
+            state
+                .objects
+                .get(&source_id)
+                .and_then(|source| source.attached_to)
+                .and_then(|host| host.as_object())
+                .and_then(|obj_id| state.objects.get(&obj_id))
+                .map(|obj| obj.controller)
                 == Some(player_id)
         }
         _ => true,
@@ -773,6 +797,7 @@ pub(super) fn target_filter_matches_object(
         // CR 201.5a: a source-relative object ref, concretized to SpecificObject
         // before any trigger evaluates; delegates like the other object refs.
         | TargetFilter::GrantingObject
+        | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(_)
         | TargetFilter::Not { .. }
@@ -909,6 +934,7 @@ fn count_matching_trigger_event_subjects(
         // Mirrors BlockersDeclared: the "becomes blocked" trigger uses the
         // dedicated matcher, not this generic per-object count helper.
         | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
         | GameEvent::VehicleCrewed { .. }
@@ -1789,6 +1815,18 @@ pub(super) fn match_attackers_declared(
     matches!(event, GameEvent::AttackersDeclared { .. })
 }
 
+/// CR 509.3d: A genuine CR 509 blocker/attacker filter is always an *object*
+/// filter, never `TargetFilter::Player`. `lower_trigger_ir` may surface
+/// `TargetFilter::Player` into `valid_target` purely because the effect body
+/// names a "target opponent"/"target player" (e.g. Goblin Cadets). Combat-side
+/// filter checks must treat that spurious `Player` as "no filter present".
+fn combat_filter(trigger: &TriggerDefinition) -> Option<&TargetFilter> {
+    trigger
+        .valid_target
+        .as_ref()
+        .filter(|f| !matches!(f, TargetFilter::Player))
+}
+
 pub(super) fn match_blocks(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1796,6 +1834,32 @@ pub(super) fn match_blocks(
     state: &GameState,
 ) -> bool {
     !matching_block_events(event, trigger, source_id, state).is_empty()
+}
+
+/// CR 509.1h + CR 509.3d: "Whenever ~ blocks or becomes blocked [by a <filter>]"
+/// — the union of the blocker-side (`Blocks`) and attacker-side
+/// (`BecomesBlocked`) matchers for the same firing event.
+pub(super) fn match_blocks_or_becomes_blocked(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    !matching_blocks_or_becomes_blocked_events(event, trigger, source_id, state).is_empty()
+}
+
+pub(super) fn matching_blocks_or_becomes_blocked_events(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<GameEvent> {
+    matching_block_events(event, trigger, source_id, state)
+        .into_iter()
+        .chain(matching_becomes_blocked_events(
+            event, trigger, source_id, state,
+        ))
+        .collect()
 }
 
 pub(super) fn matching_block_events(
@@ -1813,7 +1877,21 @@ pub(super) fn matching_block_events(
                 } else {
                     *blocker == source_id
                 };
-                blocker_matches.then_some(GameEvent::BlockersDeclared {
+                if !blocker_matches {
+                    return None;
+                }
+                // CR 509.3b: "blocks a <filter> creature" — the attacker (the
+                // creature being blocked) must satisfy the target-side qualifier.
+                // `combat_filter` excludes a spurious `TargetFilter::Player`
+                // surfaced by the effect-text lowering, which is never a real
+                // CR 509 attacker filter.
+                let attacker_matches = match combat_filter(trigger) {
+                    Some(filter) => {
+                        target_filter_matches_object(state, *attacker, filter, source_id)
+                    }
+                    None => true,
+                };
+                attacker_matches.then_some(GameEvent::BlockersDeclared {
                     assignments: vec![(*blocker, *attacker)],
                 })
             })
@@ -2814,7 +2892,7 @@ pub(super) fn match_revealed(
 /// Extracted as a standalone authority so the aura mana-refund probe
 /// (`mana_sources::aura_taps_for_mana_sources_for_land`) can ask the same
 /// question without synthesizing a `GameEvent`.
-pub(super) fn taps_for_mana_card_matches(
+pub(crate) fn taps_for_mana_card_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
     mana_source: ObjectId,
@@ -3326,10 +3404,13 @@ pub(super) fn matching_becomes_blocked_events(
 ) -> Vec<GameEvent> {
     if let GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
         // CR 509.3d: an effect-driven block is NOT "blocked by a creature" — the
-        // "becomes blocked by a creature" form (which carries a `valid_target`
-        // blocker filter) must NOT fire. Only the bare "becomes blocked" form
-        // (CR 509.3c) fires, and only for the matching attacker.
-        if trigger.valid_target.is_some() {
+        // "becomes blocked by a creature" form (which carries a genuine blocker
+        // filter) must NOT fire. Only the bare "becomes blocked" form (CR 509.3c)
+        // fires, and only for the matching attacker. `combat_filter` excludes a
+        // spurious `TargetFilter::Player` surfaced by effect-text lowering (e.g.
+        // Goblin Cadets' "target opponent gains control"), which is not a real
+        // CR 509 blocker filter and must not suppress this bare-form firing.
+        if combat_filter(trigger).is_some() {
             return Vec::new();
         }
         let attacker_matches = if trigger.valid_card.is_some() {
@@ -3350,7 +3431,7 @@ pub(super) fn matching_becomes_blocked_events(
         // blocker qualifier, `valid_target: None`) triggers only once each combat
         // for the attacker, regardless of how many creatures block it — so the
         // matching assignments are collapsed to a single event per attacker.
-        let per_blocker = trigger.valid_target.is_some();
+        let per_blocker = combat_filter(trigger).is_some();
         let mut emitted_attackers: Vec<ObjectId> = Vec::new();
         assignments
             .iter()
@@ -3363,7 +3444,7 @@ pub(super) fn matching_becomes_blocked_events(
                 if !attacker_matches {
                     return None;
                 }
-                let blocker_matches = match &trigger.valid_target {
+                let blocker_matches = match combat_filter(trigger) {
                     Some(filter) => {
                         target_filter_matches_object(state, *blocker, filter, source_id)
                     }
@@ -3379,8 +3460,20 @@ pub(super) fn matching_becomes_blocked_events(
                     }
                     emitted_attackers.push(*attacker);
                 }
-                Some(GameEvent::BlockersDeclared {
-                    assignments: vec![(*blocker, *attacker)],
+                // CR 509.3d: the per-blocker form carries an unambiguous
+                // (attacker, blocker) pair so "that creature"/"the other creature"
+                // resolution never has to infer orientation. The bare
+                // once-per-combat form has no single blocker to carry, so it keeps
+                // the generic `BlockersDeclared` shape.
+                Some(if per_blocker {
+                    GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                        attacker: *attacker,
+                        blocker: *blocker,
+                    }
+                } else {
+                    GameEvent::BlockersDeclared {
+                        assignments: vec![(*blocker, *attacker)],
+                    }
                 })
             })
             .collect()
@@ -4938,6 +5031,102 @@ mod tests {
                 source_id: None,
             },
             &trigger,
+            source,
+            &state,
+        ));
+    }
+
+    #[test]
+    fn discarded_all_valid_target_and_valid_card_are_independent() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Doctor Doom, King of Latveria".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Discarded Land".to_string(),
+            Zone::Graveyard,
+        );
+        let p1_land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Discarded Land".to_string(),
+            Zone::Graveyard,
+        );
+        let p0_nonland = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Discarded Creature".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [p0_land, p1_land] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+        state
+            .objects
+            .get_mut(&p0_nonland)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger =
+            make_trigger(TriggerMode::DiscardedAll).valid_target(TargetFilter::Controller);
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)));
+
+        assert!(match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id: p0_land,
+                source_id: None,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(1),
+                object_id: p1_land,
+                source_id: None,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id: p0_nonland,
+                source_id: None,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+
+        let broad = make_trigger(TriggerMode::DiscardedAll).valid_target(TargetFilter::Controller);
+        assert!(match_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(0),
+                object_id: p0_nonland,
+                source_id: None,
+            },
+            &broad,
             source,
             &state,
         ));
@@ -8789,14 +8978,20 @@ mod tests {
 
         let matched = matching_becomes_blocked_events(&event, &trigger, attacker, &state);
 
+        // CR 509.3d: the per-blocker form now emits the disambiguated
+        // `AttackerBecameBlockedByFilteredBlocker` event (carrying both ids)
+        // instead of a re-wrapped `BlockersDeclared`, so "that creature"/"the
+        // other creature" resolution never has to infer orientation.
         assert_eq!(
             matched,
             vec![
-                GameEvent::BlockersDeclared {
-                    assignments: vec![(first_blocker, attacker)]
+                GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: first_blocker,
                 },
-                GameEvent::BlockersDeclared {
-                    assignments: vec![(second_blocker, attacker)]
+                GameEvent::AttackerBecameBlockedByFilteredBlocker {
+                    attacker,
+                    blocker: second_blocker,
                 },
             ]
         );
@@ -8855,6 +9050,158 @@ mod tests {
                 assignments: vec![(first_blocker, attacker)]
             }],
             "CR 509.3c: bare 'becomes blocked' fires once per combat, not once per blocker"
+        );
+    }
+
+    /// CR 509.3d: `TargetFilter::Player` (surfaced by effect-text lowering for
+    /// "target opponent"/"target player") is never a real CR 509 blocker/attacker
+    /// filter. `combat_filter` must strip it while preserving genuine object
+    /// filters.
+    #[test]
+    fn combat_filter_excludes_player_keeps_object_filters() {
+        let mut t = make_trigger(TriggerMode::BecomesBlocked);
+        assert!(
+            combat_filter(&t).is_none(),
+            "None valid_target => no combat filter"
+        );
+        t.valid_target = Some(TargetFilter::Player);
+        assert!(
+            combat_filter(&t).is_none(),
+            "Player is never a CR 509 combat filter"
+        );
+        let typed = TargetFilter::Typed(TypedFilter::creature());
+        t.valid_target = Some(typed.clone());
+        assert_eq!(combat_filter(&t), Some(&typed));
+    }
+
+    /// CR 509.3d: a spurious `TargetFilter::Player` on a `Blocks` trigger (e.g.
+    /// Goblin Cadets' "target opponent" effect surfacing Player) must not act as
+    /// an attacker filter — the block-half must fire identically to the no-filter
+    /// case (Nascent Metamorph / Vraska's Conquistador regression).
+    #[test]
+    fn matching_block_events_treats_player_filter_as_no_filter() {
+        let mut state = setup();
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, attacker)],
+        };
+        let no_filter = make_trigger(TriggerMode::Blocks).valid_card(TargetFilter::SelfRef);
+        let mut player_filter = make_trigger(TriggerMode::Blocks).valid_card(TargetFilter::SelfRef);
+        player_filter.valid_target = Some(TargetFilter::Player);
+
+        let baseline = matching_block_events(&event, &no_filter, blocker, &state);
+        // Reach guard: the block event genuinely matches for the no-filter case.
+        assert!(
+            !baseline.is_empty(),
+            "reach guard: block event must match the bare trigger"
+        );
+        assert_eq!(
+            matching_block_events(&event, &player_filter, blocker, &state),
+            baseline,
+            "a spurious Player valid_target must not filter the attacker side"
+        );
+    }
+
+    /// CR 509.3c/509.3d: a spurious `TargetFilter::Player` on a `BecomesBlocked`
+    /// trigger must be treated as the BARE once-per-combat form (not the
+    /// per-blocker form), so it collapses multi-blocker assignments identically
+    /// to the no-filter case.
+    #[test]
+    fn matching_becomes_blocked_events_treats_player_filter_as_bare_form() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let first_blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "First Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_blocker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(first_blocker, attacker), (second_blocker, attacker)],
+        };
+        let bare = make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        let mut player_filter =
+            make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        player_filter.valid_target = Some(TargetFilter::Player);
+
+        let baseline = matching_becomes_blocked_events(&event, &bare, attacker, &state);
+        // Reach guard: the bare form collapses to exactly one BlockersDeclared.
+        assert_eq!(
+            baseline,
+            vec![GameEvent::BlockersDeclared {
+                assignments: vec![(first_blocker, attacker)]
+            }],
+            "reach guard: bare becomes-blocked fires once per combat"
+        );
+        assert_eq!(
+            matching_becomes_blocked_events(&event, &player_filter, attacker, &state),
+            baseline,
+            "a spurious Player valid_target must not turn a bare trigger per-blocker"
+        );
+    }
+
+    /// CR 509.3c: the bare "becomes blocked" form must still fire when an EFFECT
+    /// makes the attacker become blocked (`AttackerBecameBlockedByEffect`). A
+    /// spurious `TargetFilter::Player` surfaced by effect-text lowering (Goblin
+    /// Cadets' "target opponent gains control of it") must NOT be mistaken for a
+    /// genuine CR 509 blocker filter and suppress the firing. Reverting the
+    /// `combat_filter(trigger).is_some()` guard to the raw
+    /// `trigger.valid_target.is_some()` check makes this assertion fail (the
+    /// Player-artifact would wrongly stop the trigger entirely).
+    #[test]
+    fn matching_becomes_blocked_events_effect_driven_block_ignores_player_filter_artifact() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::AttackerBecameBlockedByEffect { attacker };
+        let bare = make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        let mut player_filter =
+            make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        player_filter.valid_target = Some(TargetFilter::Player);
+
+        let baseline = matching_becomes_blocked_events(&event, &bare, attacker, &state);
+        // Reach guard: the bare form genuinely fires on an effect-driven block.
+        assert_eq!(
+            baseline,
+            vec![event.clone()],
+            "reach guard: bare becomes-blocked fires on an effect-driven block"
+        );
+        assert_eq!(
+            matching_becomes_blocked_events(&event, &player_filter, attacker, &state),
+            baseline,
+            "a spurious Player valid_target must not suppress an effect-driven bare firing"
         );
     }
 

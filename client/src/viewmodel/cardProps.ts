@@ -3,8 +3,14 @@ import { isChangeling } from "./keywordProps";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
 export const FACE_DOWN_CARD_NAME = "Face-down card";
-/** Convert a small integer (1–5) to a Roman numeral string. */
-export function toRoman(n: number): string { return ROMAN[n] ?? String(n); }
+/** Convert a small integer (1–5) to a Roman numeral string. Values outside the
+ *  table fall back to the arabic numeral for a positive integer, or "" for a
+ *  non-positive / non-integer input — so a missing/NaN class level renders blank
+ *  rather than the literal string "undefined"/"NaN" (`ROMAN[undefined]` is
+ *  `undefined`, and the old `?? String(n)` stringified it onto the card badge). */
+export function toRoman(n: number): string {
+  return ROMAN[n] ?? (Number.isInteger(n) && n > 0 ? String(n) : "");
+}
 
 export interface CardViewProps {
   id: ObjectId;
@@ -90,6 +96,52 @@ export function formatCounterType(type: string): string {
   if (type === "P1P1") return "+1/+1";
   if (type === "M1M1") return "-1/-1";
   return type;
+}
+
+/**
+ * Counter serde key (from `CounterType::as_str`, e.g. "P1P1", "stun", "charge")
+ * → mana-font `ms-counter-*` glyph class. Every value is verified present in
+ * `mana-font/css/mana.css` by the guardrail test; counter types with no shipped
+ * glyph are absent and render text-only.
+ */
+export const COUNTER_ICON_CLASS: Record<string, string> = {
+  P1P1: "ms-counter-plus",
+  M1M1: "ms-counter-minus",
+  loyalty: "ms-counter-loyalty",
+  lore: "ms-counter-lore",
+  stun: "ms-counter-stun",
+  shield: "ms-counter-shield",
+  time: "ms-counter-time",
+  charge: "ms-counter-charge",
+  gold: "ms-counter-gold",
+  ki: "ms-counter-ki",
+  rad: "ms-counter-rad",
+  verse: "ms-counter-verse",
+  void: "ms-counter-void",
+  flame: "ms-counter-flame",
+  flood: "ms-counter-flood",
+  fungus: "ms-counter-fungus",
+  muster: "ms-counter-muster",
+  doom: "ms-counter-doom",
+  echo: "ms-counter-echo",
+  finality: "ms-counter-finality",
+  brick: "ms-counter-brick",
+  mining: "ms-counter-mining",
+  paw: "ms-counter-paw",
+  pin: "ms-counter-pin",
+  scream: "ms-counter-scream",
+  skull: "ms-counter-skull",
+  slime: "ms-counter-slime",
+  vortex: "ms-counter-vortex",
+  goad: "ms-counter-goad",
+  damage: "ms-counter-damage",
+  deathtouch: "ms-counter-deathtouch",
+  devotion: "ms-counter-devotion",
+};
+
+/** Resolve a counter type's mana-font glyph class, or null when none ships. */
+export function counterIconClass(type: string): string | null {
+  return COUNTER_ICON_CLASS[type] ?? null;
 }
 
 type CounterTooltipTranslator = (

@@ -98,6 +98,9 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
         is_bare_object_pronoun(pronoun),
         "resolve_pronoun_target called with non-pronoun token: {pronoun}"
     );
+    if let Some(target) = ctx.object_pronoun_ref.clone() {
+        return target;
+    }
     match &ctx.subject {
         Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
             resolve_it_pronoun(ctx)
@@ -914,6 +917,27 @@ pub fn parse_target_with_syntax<'a>(
             rest,
             syntax,
         );
+    }
+
+    // CR 608.2k + CR 509.3d: "the other creature"/"the other permanent" — the
+    // single object opposite the trigger's own source in a compound
+    // blocks-or-becomes-blocked pairing (Venom's "destroy the other creature",
+    // Mammoth Harness). This is a per-firing anaphor resolved at runtime via
+    // `blocked_attacker_from_event`, NOT the split-pile "the other" tracked-set
+    // reference in TRACKED_SET_PHRASES below — so it MUST be matched first, or
+    // the bare "the other" prefix would consume it and bind it to an
+    // (unpopulated) tracked set.
+    if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(
+                TargetFilter::ParentTarget,
+                tag::<_, _, OracleError<'_>>("the other creature"),
+            ),
+            value(TargetFilter::ParentTarget, tag("the other permanent")),
+        ))
+        .parse(input)
+    }) {
+        return (filter, rest, syntax);
     }
 
     // CR 603.7: Anaphoric tracked-set pronouns
@@ -2342,6 +2366,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // suffixes like "creatures". Stop before `Card` / `Subtype` — those are
     // informational suffixes ("creature card") or belong to the subtype slot.
     let mut extra_core_type_filters: Vec<TypeFilter> = Vec::new();
+    let mut relative_core_type_filters: Vec<TypeFilter> = Vec::new();
     if matches!(
         card_type,
         Some(
@@ -2624,6 +2649,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // Positive relative card-type restriction:
+    // "permanent that's an artifact, creature, or enchantment" keeps the base
+    // permanent/supertype restrictions and distributes the trailing card-type
+    // list as OR branches.
+    if let Some((core_types, consumed)) = parse_that_is_core_type_suffix(&lower[pos..]) {
+        relative_core_type_filters = core_types;
+        pos += consumed;
+    }
+
     // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
     if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..], Some(ctx)) {
         properties.extend(that_props);
@@ -2674,6 +2708,23 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 }
                 pos += ws + prefix_len + consumed;
             }
+        }
+    }
+
+    // CR 608.2c + CR 205.2b: "<type> except for <type-list>" — plain type-list
+    // exclusion (Scourglass: "Destroy all permanents except for artifacts and
+    // lands"; Elspeth Tirel: "except for lands and tokens"), distinct from the
+    // predicate-based "except those that" clause immediately above. Tried only
+    // when that block didn't match — "except those "/"other than those " vs
+    // "except for " diverge at the 8th character of "except ", so the two are
+    // mutually exclusive.
+    {
+        let rem = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - rem.len();
+        if let Some((excl_types, excl_props, consumed)) = parse_except_for_type_list_suffix(rem) {
+            neg_type_filters.extend(excl_types);
+            properties.extend(excl_props);
+            pos += ws + consumed;
         }
     }
 
@@ -2895,8 +2946,16 @@ pub fn parse_type_phrase_with_ctx<'a>(
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
-    } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("exiled with ~").parse(remaining_exiled)
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("exiled with ~"),
+        // CR 607.2 + CR 406.6: "exiled with it" — the anaphoric "it" names the
+        // source object, identical linked-exile semantics to "exiled with ~"
+        // (Sothera, the Supervoid: "a creature card exiled with it"). The
+        // "exiled with this <type>" arm above already claimed the demonstrative
+        // form, so "it" is the disjoint pronoun variant.
+        tag("exiled with it"),
+    ))
+    .parse(remaining_exiled)
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
@@ -3040,7 +3099,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    let type_filters = [
+    let mut base_type_filters = [
         adjective_type_filters,
         card_type.map(|ct| vec![ct]).unwrap_or_default(),
         extra_core_type_filters,
@@ -3050,12 +3109,29 @@ pub fn parse_type_phrase_with_ctx<'a>(
         neg_type_filters,
     ]
     .concat();
-    let filter = if property_disjunction_ranges.is_empty() {
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            properties,
-        })
+
+    let type_filter_branches = if relative_core_type_filters.is_empty() {
+        vec![base_type_filters]
+    } else if relative_core_type_filters.len() == 1 {
+        base_type_filters.push(
+            relative_core_type_filters
+                .pop()
+                .expect("len checked to be exactly 1"),
+        );
+        vec![base_type_filters]
+    } else {
+        relative_core_type_filters
+            .into_iter()
+            .map(|relative_type| {
+                let mut branch = base_type_filters.clone();
+                branch.push(relative_type);
+                branch
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let property_branches = if property_disjunction_ranges.is_empty() {
+        vec![properties]
     } else {
         let mut disjunctive_indices = vec![false; properties.len()];
         for (start, len) in &property_disjunction_ranges {
@@ -3083,18 +3159,23 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 })
                 .collect();
         }
-        TargetFilter::Or {
-            filters: branch_props
-                .into_iter()
-                .map(|properties| {
-                    TargetFilter::Typed(TypedFilter {
-                        type_filters: type_filters.clone(),
-                        controller: controller.clone(),
-                        properties,
-                    })
-                })
-                .collect(),
+        branch_props
+    };
+
+    let mut filters = Vec::new();
+    for type_filters in type_filter_branches {
+        for properties in &property_branches {
+            filters.push(TargetFilter::Typed(TypedFilter {
+                type_filters: type_filters.clone(),
+                controller: controller.clone(),
+                properties: properties.clone(),
+            }));
         }
+    }
+    let filter = if filters.len() == 1 {
+        filters.pop().expect("single typed filter should exist")
+    } else {
+        TargetFilter::Or { filters }
     };
     let filter = if exclude_chosen_type {
         TargetFilter::And {
@@ -3334,6 +3415,25 @@ fn starts_with_type_phrase_lead(text: &str) -> bool {
 /// Guard for comma/and/or type-list continuations where core-type segments may
 /// carry their own article — e.g. "an artifact, a creature, or a land" (Braids,
 /// Cabal Minion / issue #847).
+/// Guard for a post-comma continuation of an Oxford-comma type list — the
+/// segment may carry a leading list conjunction ("or " / "and " / "and/or ")
+/// before its type word or article + type word (CR 205.3a: "an Aura,
+/// Equipment, or Vehicle spell"). Used by payload truncation logic that must
+/// distinguish a ", " continuing a type list from the ", " that begins a
+/// trailing clause (issue #5324, Sram, Senior Edificer).
+pub(crate) fn starts_with_type_list_continuation(text: &str) -> bool {
+    let text = text.trim_start();
+    let text = opt(alt((
+        tag::<_, _, OracleError<'_>>("and/or "),
+        tag("or "),
+        tag("and "),
+    )))
+    .parse(text)
+    .map(|(rest, _)| rest)
+    .unwrap_or(text);
+    starts_with_or_article_type_segment(text)
+}
+
 fn starts_with_or_article_type_segment(text: &str) -> bool {
     let text = text.trim_start();
     if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(text) {
@@ -3748,11 +3848,21 @@ pub(crate) fn distribute_core_type_to_or(filter: TargetFilter) -> TargetFilter {
     TargetFilter::Or { filters }
 }
 
-/// CR 205.4b: When a leading `non-` negation scopes a type disjunction
-/// ("non-Lesson instant and sorcery card"), the negated type must bind to
-/// every disjunct — not only the first leg parsed before the `and`/`or`
-/// connector. Without this, "non-Lesson instant and sorcery" would match
-/// any sorcery, including Lessons (issue #1163, Iroh, Grand Lotus).
+/// CR 109.2 + CR 205.2a + CR 205.3: When a leading `non-` negation scopes a
+/// type/subtype disjunction ("non-Lesson instant and sorcery card"), the
+/// negated type must bind to every disjunct — not only the first leg parsed
+/// before the `and`/`or` connector. Without this, "non-Lesson instant and
+/// sorcery" would match any sorcery, including Lessons (issue #1163, Iroh,
+/// Grand Lotus).
+///
+/// Guarded to a single shared negation: if any OTHER leg already carries its
+/// own `Non(_)` type filter, the legs are independently negated ("non-Equipment
+/// artifact and non-Aura enchantment" — Bello, Bard of the Brambles) and must
+/// NOT be cross-contaminated with the first leg's negation. Distributing
+/// unconditionally would leak the artifact leg's `Non(Equipment)` onto the
+/// enchantment leg (which only wants `Non(Aura)`), silently narrowing Bello's
+/// enchantment conjunct to exclude non-Aura-non-Equipment enchantments the
+/// Oracle text never excludes.
 pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetFilter {
     let TargetFilter::Or { mut filters } = filter else {
         return filter;
@@ -3776,6 +3886,14 @@ pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetF
         .unwrap_or_default();
 
     if neg_filters.is_empty() {
+        return TargetFilter::Or { filters };
+    }
+
+    let other_legs_already_negated = filters.iter().skip(1).any(|f| {
+        matches!(f, TargetFilter::Typed(TypedFilter { type_filters, .. })
+            if type_filters.iter().any(|tf| matches!(tf, TypeFilter::Non(_))))
+    });
+    if other_legs_already_negated {
         return TargetFilter::Or { filters };
     }
 
@@ -4093,6 +4211,10 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::IsSaddled
                 | FilterProp::ProtectorMatches { .. }
                 | FilterProp::FaceDown
+                // CR 701.27g: "transformed" is a battlefield designation that appears
+                // as an adjective prefix in type phrases ("transformed permanent",
+                // Mutagen Connoisseur).
+                | FilterProp::Transformed
                 // CR 701.60b: "suspected" is a battlefield designation that appears
                 // as an adjective prefix in type phrases ("suspected creatures").
                 | FilterProp::Suspected
@@ -6153,6 +6275,92 @@ fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResu
     nom_primitives::parse_color(rest)
 }
 
+/// CR 608.2c + CR 205.2b: "<type> except for <type-1>[, <type-2>]* and <type-N>"
+/// — a plain type-list exclusion suffix (Scourglass: "Destroy all permanents
+/// except for artifacts and lands"; Elspeth Tirel: "except for lands and
+/// tokens"). Distinct from `parse_that_isnt_subtype_suffix`/the "except those
+/// that <relative-clause>" suffix in `parse_type_phrase_with_ctx`, which
+/// handle predicate-based exclusions, not bare type lists.
+///
+/// Reuses `classify_negation` per list item — it already produces
+/// `TypeFilter::Non(..)`-wrapped types and the matching `FilterProp`s
+/// (`NonToken`, `NotColor`, `NotSupertype`, `NotHistoric`) that the
+/// `"nonartifact"` prefix-negation loop above already feeds into
+/// `neg_type_filters`/`properties`. List items are Oxford-comma-tolerant via
+/// the existing `match_mass_union_separator`, reused rather than duplicated.
+///
+/// Guard: `classify_negation`'s catch-all treats any unrecognized word as a
+/// negated Subtype (correct for its "non-<word>" prefix context — CR 205.3
+/// subtype negation like "nonZombie" is a real pattern). That fallback is
+/// UNSAFE here: "except for Mageta" or "except for commanders" would silently
+/// classify as `Non(Subtype("Mageta"))`, which no permanent has, making the
+/// exclusion a silent no-op that looks fixed but isn't. This function rejects
+/// the whole clause (returns `None`) if any item resolves to a negated
+/// Subtype, leaving those cards' existing (unhandled, honestly silent)
+/// behavior unchanged rather than mis-firing on a named/designation exception.
+fn parse_except_for_type_list_suffix(
+    text: &str,
+) -> Option<(Vec<TypeFilter>, Vec<FilterProp>, usize)> {
+    let (mut rest, _) = tag::<_, _, OracleError<'_>>("except for ")
+        .parse(text)
+        .ok()?;
+    let mut consumed = text.len() - rest.len();
+    let mut neg_types = Vec::new();
+    let mut props = Vec::new();
+
+    loop {
+        let trimmed = rest.trim_start();
+        consumed += rest.len() - trimmed.len();
+        rest = trimmed;
+
+        let (after_word, word) =
+            take_till1::<_, _, OracleError<'_>>(|c: char| !c.is_ascii_alphabetic())
+                .parse(rest)
+                .ok()?;
+        let singular = word.trim_end_matches('s');
+        match classify_negation(singular) {
+            NegationResult::Type(TypeFilter::Non(inner))
+                if matches!(*inner, TypeFilter::Subtype(_)) =>
+            {
+                // Unrecognized word (name, designation, etc.) — decline the
+                // whole clause rather than emit a silently-vacuous exclusion.
+                return None;
+            }
+            NegationResult::Type(tf) => neg_types.push(tf),
+            NegationResult::Prop(prop) => props.push(prop),
+        }
+        consumed += rest.len() - after_word.len();
+        rest = after_word;
+
+        match match_mass_union_separator(rest) {
+            Some(sep_len) => {
+                consumed += sep_len;
+                rest = &rest[sep_len..];
+            }
+            None => break,
+        }
+    }
+
+    // GitHub #4710 CI catch (Flame Sweep): "each creature except for
+    // creatures you control with flying" is a FILTERED-SUBSET exception
+    // (creatures you control with flying), not a bare type list — but the
+    // first word "creatures" alone is a recognized type, so the loop above
+    // greedily accepts it and stops at "you", which isn't a valid separator.
+    // Left unchecked, this silently emits `Non(Creature)` alongside the base
+    // `Creature` filter, a self-contradictory filter matching nothing. A
+    // genuine type-list exception ends the clause outright (Scourglass,
+    // Elspeth Tirel both terminate at "."); if trailing text remains beyond
+    // optional whitespace, this isn't a type list — decline the whole clause
+    // rather than partially apply it, mirroring the Subtype-fallback guard
+    // above.
+    let trailing = rest.trim_start();
+    if !trailing.is_empty() && !trailing.starts_with('.') {
+        return None;
+    }
+
+    Some((neg_types, props, consumed))
+}
+
 /// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
 /// relative-clause negation suffix. Returns negated type filters to append to
 /// the enclosing target's `neg_type_filters`. Mirrors the `non-<Subtype>`
@@ -6193,6 +6401,88 @@ fn parse_that_isnt_subtype_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
         vec![TypeFilter::Non(Box::new(TypeFilter::Subtype(subtype)))],
         total,
     ))
+}
+
+fn is_relative_core_type_filter(type_filter: &TypeFilter) -> bool {
+    matches!(
+        type_filter,
+        TypeFilter::Creature
+            | TypeFilter::Land
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Instant
+            | TypeFilter::Sorcery
+            | TypeFilter::Planeswalker
+            | TypeFilter::Battle
+            | TypeFilter::Permanent
+            | TypeFilter::Card
+    )
+}
+
+fn parse_relative_core_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    )))
+    .parse(input)?;
+    let (rest, type_filter) = nom_target::parse_type_filter_word(input)?;
+    if is_relative_core_type_filter(&type_filter) {
+        Ok((rest, type_filter))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )))
+    }
+}
+
+fn parse_relative_core_type_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", and/or "),
+            tag(", and "),
+            tag(", or "),
+            tag(" and/or "),
+            tag(" and "),
+            tag(" or "),
+            tag(", "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    let (mut rest, first) = parse_relative_core_type_leg(input)?;
+    let mut type_filters = vec![first];
+
+    while let Ok((after_separator, _)) = parse_relative_core_type_separator(rest) {
+        let Ok((after_type, next_type)) = parse_relative_core_type_leg(after_separator) else {
+            break;
+        };
+        type_filters.push(next_type);
+        rest = after_type;
+    }
+
+    Ok((rest, type_filters))
+}
+
+/// Parses a positive relative card-type clause like
+/// "that's an artifact, creature, or enchantment" into the trailing card-type
+/// list. The caller applies those types as branches against the already-parsed
+/// base filter, so shared prefixes like Legendary/Permanent stay attached to
+/// every leg.
+fn parse_that_is_core_type_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    if negated {
+        return None;
+    }
+
+    let (rest, type_filters) = parse_relative_core_type_list(after_intro).ok()?;
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    Some((type_filters, consumed))
 }
 
 /// CR 205.3 (#2905): the positive counterpart of `parse_that_isnt_subtype_suffix`.
@@ -6642,6 +6932,12 @@ enum ZoneQual {
     /// "its owner's ", "that player's ", "defending player's ", "each player's ".
     /// No ownership constraint emitted; referent is resolved by context upstream.
     OtherPoss,
+    /// "the chosen player's " — the player persisted on the source via an earlier
+    /// "choose a player" (Haunting Apparition: "green creature cards in the chosen
+    /// player's graveyard"). Sets `ControllerRef::SourceChosenPlayer`, mirroring
+    /// how `You` sets `ControllerRef::You`; CR 613.1 resolves it against the
+    /// source's persisted choice.
+    ChosenPlayer,
     /// "a ", "the ", or nothing (e.g., "from exile").
     Plain,
 }
@@ -6811,6 +7107,10 @@ fn parse_zone_suffix_nom(
                 vec![FilterProp::InAnyZone { zones }],
                 Some(ControllerRef::You),
             ),
+            ZoneQual::ChosenPlayer => (
+                vec![FilterProp::InAnyZone { zones }],
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
             ZoneQual::TargetPlayer => (
                 vec![
                     FilterProp::Owned {
@@ -6845,6 +7145,10 @@ fn parse_zone_suffix_nom(
                 None,
             ),
             ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+            ZoneQual::ChosenPlayer => (
+                vec![FilterProp::InZone { zone }],
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
             ZoneQual::TargetPlayer => (
                 vec![
                     FilterProp::Owned {
@@ -6877,6 +7181,9 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
+        // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
+        // isn't consumed as a bare "the " article.
+        value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
         value(ZoneQual::TargetPlayer, tag("target player's ")),
         value(ZoneQual::Their, tag("their ")),
         value(
@@ -7068,6 +7375,71 @@ mod tests {
         assert!(tf.properties.contains(&FilterProp::NonToken));
         assert!(tf.properties.contains(&FilterProp::Modified));
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// GitHub #4710 (Scourglass): "permanents except for artifacts and lands"
+    /// must exclude BOTH types, not silently drop the exception clause. Before
+    /// the fix, `parse_type_phrase_with_ctx` had no suffix parser for "except
+    /// for <type-list>" (only the predicate-based "except those that ..." was
+    /// recognized), so the trailing clause was left unconsumed and the filter
+    /// silently matched every permanent.
+    #[test]
+    fn except_for_type_list_excludes_both_types() {
+        let (filter, rest) = parse_type_phrase("permanents except for artifacts and lands");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+    }
+
+    /// Elspeth Tirel −5 ("other permanents except for lands and tokens"): the
+    /// exclusion list is heterogeneous — "lands" is a `TypeFilter::Non`
+    /// entry, "tokens" is a `FilterProp::NonToken` entry (tokens are a
+    /// property, not a card type) — proving the mechanism routes each list
+    /// item to the correct accumulator, mirroring how the pre-existing
+    /// "nonartifact, nontoken permanent" prefix negation already splits the
+    /// same two categories.
+    #[test]
+    fn except_for_type_list_splits_type_and_token_property() {
+        let (filter, rest) = parse_type_phrase("other permanents except for lands and tokens");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+        assert!(
+            !tf.type_filters.iter().any(
+                |t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Subtype(_)))
+            ),
+            "must not misclassify 'tokens' as a negated Subtype, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// GitHub #4710 hostile fixture (Mageta the Lion class): "except for
+    /// Mageta" names a specific permanent, not a type. `classify_negation`'s
+    /// catch-all treats any unrecognized word as a negated Subtype, which
+    /// would silently produce `Non(Subtype("Mageta"))` — a no-op exclusion
+    /// (no permanent has that subtype) that looks fixed but isn't. The suffix
+    /// parser must decline the whole clause instead, leaving the base filter
+    /// unchanged rather than mis-firing on a named exception it can't model.
+    #[test]
+    fn except_for_named_exception_does_not_misfire_as_subtype_negation() {
+        let (filter, rest) = parse_type_phrase("creatures except for Mageta");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tag::<_, _, OracleError<'_>>("except for")
+                .parse(rest.trim_start())
+                .is_ok(),
+            "the unrecognized exception clause must be left unconsumed, got rest={rest:?}"
+        );
     }
 
     /// CR 201.2 (issue #2016): the "named <CardName>" suffix must terminate the
@@ -10245,6 +10617,40 @@ mod tests {
     }
 
     #[test]
+    fn creature_card_exiled_with_it_produces_and_filter() {
+        // CR 607.2 + CR 406.6: Sothera, the Supervoid's descriptor form (no
+        // "target" keyword, anaphoric "it") — "put a creature card exiled with
+        // it onto the battlefield". Must compose the typed filter with the
+        // exile-link constraint identically to the "exiled with ~" form; without
+        // the "exiled with it" arm the suffix is dropped and the target degrades
+        // to a bare battlefield "creature card".
+        let (f, rest) = parse_target("a creature card exiled with it");
+        assert_eq!(
+            f,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+            "expected And{{Typed(creature), ExiledBySource}}, got {f:?} — the \
+             ExiledBySource leg (the revert-failing assertion) restricts \
+             reanimation to the source's OWN linked-exile pool"
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn bare_card_exiled_with_it_unaffected_by_typed_arm() {
+        // Sibling guard: the untyped "card exiled with it" form (handled by the
+        // top-of-function plural/each-card block) still yields bare
+        // ExiledBySource — the new typed arm must not perturb it.
+        let (f, rest) = parse_target("card exiled with it");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
     fn target_creature_card_exiled_with_this_creature_produces_and_filter() {
         let (f, rest) = parse_target("target creature card exiled with this creature");
         assert_eq!(
@@ -10717,6 +11123,43 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer))
         );
+        assert_eq!(rest.trim(), "");
+    }
+
+    /// Building-block regression guard: the general compound-core-type-Or
+    /// splitter (the `TYPE_SEPARATORS` recursion plus
+    /// `distribute_controller_to_or`) handles the "target player/opponent
+    /// controls" controller-suffix family the same way it already handles
+    /// "your opponents control" (see `artifacts_and_creatures_your_opponents_control`
+    /// below). This is what makes compound-subject "don't/doesn't untap"
+    /// restrictions like Exhaustion ("Creatures and lands target opponent
+    /// controls don't untap during their next untap step.") and Icebreaker
+    /// Kraken resolve correctly through the single generic
+    /// `parse_subject_application` call in `try_parse_subject_restriction_clause`
+    /// — no dedicated compound-subject dispatcher needed for this predicate
+    /// class (confirmed via the PR parse-diff baseline: both cards are
+    /// already `supported: true` on main).
+    #[test]
+    fn compound_creatures_and_lands_target_opponent_controls() {
+        let (f, rest) = parse_type_phrase("creatures and lands target opponent controls");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "expected 2 disjuncts, got {filters:?}");
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+            }
+            other => panic!("expected Or filter, got {other:?}"),
+        }
         assert_eq!(rest.trim(), "");
     }
 
@@ -14082,6 +14525,38 @@ mod tests {
             "expected HasSupertype(Legendary) in {:?}",
             tf.properties
         );
+    }
+
+    /// Bounty Agent: "target legendary permanent that's an artifact, creature,
+    /// or enchantment" must keep the Legendary restriction and distribute the
+    /// relative card-type disjunction across three permanent-type legs.
+    #[test]
+    fn parse_target_legendary_permanent_with_relative_type_union() {
+        let (filter, rest) =
+            parse_target("target legendary permanent that's an artifact, creature, or enchantment");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3, "expected three type legs: {filters:?}");
+        for ty in [
+            TypeFilter::Artifact,
+            TypeFilter::Creature,
+            TypeFilter::Enchantment,
+        ] {
+            let Some(TargetFilter::Typed(tf)) = filters.iter().find(
+                |filter| matches!(filter, TargetFilter::Typed(tf) if has_type(tf, ty.clone())),
+            ) else {
+                panic!("missing {ty:?} leg in {filters:?}");
+            };
+            assert!(has_type(tf, TypeFilter::Permanent));
+            assert!(tf.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary
+                }
+            )));
+        }
     }
 
     /// CR 205.2a: "artifact or creature" is an OR-union of the two core types,

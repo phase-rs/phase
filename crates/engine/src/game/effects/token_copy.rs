@@ -1467,6 +1467,80 @@ mod tests {
         );
     }
 
+    /// CR 707.2 + CR 111.10: a copy token sourced from a card with only a
+    /// runtime name, no printed ref, and no source-related token ids remains a
+    /// card-display copy even if the copied body matches a catalog token preset.
+    #[test]
+    fn copy_token_of_name_only_card_does_not_bind_catalog_preset() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fanatic of Rhonas".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.display_source = DisplaySource::Card;
+            source.base_power = Some(4);
+            source.base_toughness = Some(4);
+            source.power = Some(4);
+            source.toughness = Some(4);
+            source.base_color = vec![ManaColor::Black];
+            source.color = vec![ManaColor::Black];
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![
+                    "Zombie".to_string(),
+                    "Snake".to_string(),
+                    "Druid".to_string(),
+                ],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert_eq!(token.name, "Fanatic of Rhonas");
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(4));
+        assert_eq!(token.color, vec![ManaColor::Black]);
+        assert_eq!(token.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(
+            token.card_types.subtypes,
+            vec![
+                "Zombie".to_string(),
+                "Snake".to_string(),
+                "Druid".to_string()
+            ]
+        );
+        assert_eq!(token.display_source, DisplaySource::Card);
+        assert_eq!(token.token_image_ref, None);
+    }
+
     /// CR 614.1a + CR 707.2: A token-count-doubling replacement (Doubling
     /// Season / Adrix and Nev / Parallel Lives / Anointed Procession / Mondrak)
     /// applies to a token that's a *copy* of a permanent, exactly as it applies
@@ -3146,6 +3220,95 @@ mod tests {
             state.objects[&token_id].zone,
             Zone::Battlefield,
             "non-legendary token-copy must remain on battlefield"
+        );
+    }
+
+    /// CR 704.5j + CR 707.9b: A token-copy exception that renames the copy
+    /// avoids the legend rule through the generic `SetName` modification path,
+    /// without any SBA special-case for Mishra, Eminent One.
+    #[test]
+    fn legend_rule_does_not_fire_when_copy_token_is_renamed() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mishra, Eminent One".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_card_types = CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let oracle = "create a token that's a copy of target noncreature artifact you control, except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types";
+        let mut ctx = crate::parser::oracle_ir::context::ParseContext {
+            card_name: Some("Mishra, Eminent One".to_string()),
+            ..Default::default()
+        };
+        let effect =
+            crate::parser::oracle_effect::try_parse_token(&oracle.to_lowercase(), oracle, &mut ctx)
+                .expect("Mishra token-copy text should parse");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = &effect
+        else {
+            panic!("expected parser-produced CopyTokenOf, got {effect:?}");
+        };
+        assert!(
+            additional_modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetName { name } if name == "Mishra's Warform"
+            )),
+            "runtime regression must be driven by the parser-produced Mishra's Warform rename; got {additional_modifications:?}"
+        );
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            effect,
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = state.last_created_token_ids[0];
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "legend rule must not present a choice when the copy token has a distinct name; \
+             got waiting_for={:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&source_id].zone, Zone::Battlefield);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.zone, Zone::Battlefield);
+        assert_eq!(token.name, "Mishra's Warform");
+        assert_eq!(token.base_name, "Mishra's Warform");
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(4));
+        assert!(
+            token.card_types.core_types.contains(&CoreType::Artifact),
+            "renamed copy token must be an artifact; got {:?}",
+            token.card_types.core_types
+        );
+        assert!(
+            token.card_types.core_types.contains(&CoreType::Creature),
+            "renamed copy token must be a creature; got {:?}",
+            token.card_types.core_types
+        );
+        assert!(
+            token.card_types.subtypes.contains(&"Construct".to_string()),
+            "renamed copy token must be a Construct; got {:?}",
+            token.card_types.subtypes
         );
     }
 

@@ -171,6 +171,18 @@ describe("getWaitingForObjectChoiceIds", () => {
       }),
     ).toEqual([]);
   });
+
+  // CR 707.9: Copy Enchantment's copy pool arrives as `CopyTargetChoice`.
+  // Every surface that can offer one of these objects — battlefield card or
+  // the player-attached-Aura dialog — must read the pool from here.
+  it("returns valid_targets for CopyTargetChoice", () => {
+    expect(
+      getWaitingForObjectChoiceIds({
+        type: "CopyTargetChoice",
+        data: { player: 0, source_id: 1, valid_targets: [30, 31] },
+      }),
+    ).toEqual([30, 31]);
+  });
 });
 
 describe("getBattlefieldSacrificeChoice", () => {
@@ -299,6 +311,7 @@ describe("getBoardChoiceView", () => {
       type: "CrewVehicle",
       data: { vehicle_id: 30, creature_ids: [10, 11] },
     });
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
   });
 
   // Regression: a Pilot token (Shorikai) has printed power 1 but crews "as though

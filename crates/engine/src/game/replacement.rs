@@ -327,6 +327,13 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     state.post_replacement_event_target = None;
     state.post_replacement_token_choice_applied = None;
     state.pending_connive_reentry = None;
+    // CR 121.6b + CR 800.4a: `PendingMultiDraw` is single-player-scoped (it
+    // tracks only the departing player's own in-flight multi-card draw), so
+    // it is safe to null outright here — unlike the deliberately-preserved
+    // multi-player queue fields nearby in `elimination.rs`
+    // (`pending_team_draw_step` etc.), which need the interrupted APNAP queue
+    // resumed for the remaining players rather than field-nulling.
+    state.pending_multi_draw = None;
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -2680,6 +2687,28 @@ fn create_token_applier(
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
+    // Extract the seven fields the applier reads, given a def and the controller
+    // that installed it. Shared by the object-hosted branch and the floating
+    // (`ObjectId(0)` sentinel) branch so both produce an identical tuple.
+    let extract = |def: &ReplacementDefinition, controller: PlayerId| {
+        (
+            def.quantity_modification.clone(),
+            def.additional_token_spec.clone(),
+            def.ensure_token_specs.clone(),
+            def.token_owner_redirect.clone(),
+            // CR 614.1a + CR 111.1: Full token-substitution payload
+            // (Divine Visitation) — carried as an Effect::Token in the
+            // existing `execute` field (Approach A, no new field).
+            def.execute
+                .as_deref()
+                .map(|ability| (*ability.effect).clone())
+                .filter(|effect| matches!(effect, Effect::Token { .. })),
+            def.execute
+                .as_deref()
+                .is_some_and(is_choose_token_substitution),
+            controller,
+        )
+    };
     let (
         modification,
         additional_spec,
@@ -2688,34 +2717,31 @@ fn create_token_applier(
         substitute_effect,
         choose_token_substitution,
         source_controller,
-    ) = state
-        .objects
-        .get(&rid.source)
-        .and_then(|obj| {
-            obj.replacement_definitions
-                .get(rid.index)
-                .map(|def| (def, obj.controller))
-        })
-        .map(|(def, controller)| {
-            (
-                def.quantity_modification.clone(),
-                def.additional_token_spec.clone(),
-                def.ensure_token_specs.clone(),
-                def.token_owner_redirect.clone(),
-                // CR 614.1a + CR 111.1: Full token-substitution payload
-                // (Divine Visitation) — carried as an Effect::Token in the
-                // existing `execute` field (Approach A, no new field).
-                def.execute
-                    .as_deref()
-                    .map(|ability| (*ability.effect).clone())
-                    .filter(|effect| matches!(effect, Effect::Token { .. })),
-                def.execute
-                    .as_deref()
-                    .is_some_and(is_choose_token_substitution),
-                controller,
-            )
-        })
-        .unwrap_or((None, None, None, None, None, false, PlayerId(0)));
+    ) = if rid.source == ObjectId(0) {
+        // CR 614.1a + CR 111.2: Floating token-creation replacements (Kaya,
+        // Geist Hunter −2) live under the `ObjectId(0)` sentinel in
+        // `pending_damage_replacements`; their installing controller is latched
+        // in `source_controller` (mirrors `damage_modification_for_rid`). Fall
+        // back to the active player when unstamped.
+        state
+            .pending_damage_replacements
+            .get(rid.index)
+            .map(|def| {
+                let controller = def.source_controller.unwrap_or(state.active_player);
+                extract(def, controller)
+            })
+            .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| {
+                obj.replacement_definitions
+                    .get(rid.index)
+                    .map(|def| extract(def, obj.controller))
+            })
+            .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
+    };
 
     if let ProposedEvent::CreateToken {
         owner,
@@ -4454,6 +4480,34 @@ fn apply_state_level_gates(
             return false;
         }
     }
+    // CR 111.2 + CR 614.1a: "under your control" — a floating token-creation
+    // replacement (Kaya, Geist Hunter −2) only doubles tokens whose owner is the
+    // installing controller (`source_controller`). Mirrors the object-path gate
+    // in `object_replacement_candidate_applies`, but keyed on the latched
+    // installer instead of a live object controller. Fail-closed on every scope
+    // that has no meaningful installer-relative reading here.
+    if let Some(ref scope) = repl_def.token_owner_scope {
+        if let ProposedEvent::CreateToken { owner, .. } = event {
+            let matches = match scope {
+                crate::types::ability::ControllerRef::You => *owner == source_controller,
+                crate::types::ability::ControllerRef::Opponent => *owner != source_controller,
+                crate::types::ability::ControllerRef::ScopedPlayer
+                | crate::types::ability::ControllerRef::TargetPlayer
+                | crate::types::ability::ControllerRef::TargetOpponent
+                | crate::types::ability::ControllerRef::ParentTargetController
+                | crate::types::ability::ControllerRef::ParentTargetOwner
+                | crate::types::ability::ControllerRef::DefendingPlayer
+                | crate::types::ability::ControllerRef::SourceChosenPlayer
+                | crate::types::ability::ControllerRef::ChosenPlayer { .. }
+                | crate::types::ability::ControllerRef::TriggeringPlayer
+                | crate::types::ability::ControllerRef::EnchantedPlayer
+                | crate::types::ability::ControllerRef::ActivePlayer => false,
+            };
+            if !matches {
+                return false;
+            }
+        }
+    }
     true
 }
 
@@ -5354,6 +5408,21 @@ pub fn find_applicable_replacements(
     }
 
     candidates
+}
+
+/// CR 614.1b + CR 614.10: Read-only probe for whether a turn-start skip
+/// replacement would replace the proposed turn with nothing. This deliberately
+/// does not call `replace_event`, so projection code can answer display-only
+/// questions without marking replacements applied, rebuilding indexes, or
+/// emitting events.
+pub(crate) fn begin_turn_would_be_prevented(
+    state: &GameState,
+    player: PlayerId,
+    is_extra_turn: bool,
+) -> bool {
+    let proposed = ProposedEvent::begin_turn(player, is_extra_turn);
+    let registry = replacement_registry();
+    !find_applicable_replacements(state, &proposed, registry).is_empty()
 }
 
 const MAX_REPLACEMENT_DEPTH: u16 = 16;
@@ -9639,6 +9708,144 @@ mod tests {
         assert!(
             find_applicable_replacements(&state, &stale_controller_draw, &registry).is_empty(),
             "dredge must not follow the card's stale battlefield controller"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // CR 121.6b (GitHub Dredge/Bazaar-of-Baghdad report): a multi-card draw must
+    // offer replacement independently per unit, not as one atomic batch. Drives
+    // the real production path (`resume_multi_draw` + `apply_as_current` +
+    // `GameAction::ChooseReplacement`), matching `library_placement_survives_two_
+    // sequential_parks`'s pattern (zone_pipeline.rs) for a genuine multi-pause
+    // resume, not just a `find_applicable_replacements` shape check.
+    // ---------------------------------------------------------------------------
+
+    /// Reported bug reproduction: a `count: 2` draw with exactly one
+    /// dredge-eligible card must dredge ONE unit and draw the other normally —
+    /// not zero out both (the pre-fix behavior: the whole count was replaced by
+    /// the single dredge outcome, matching "drew no cards" from the report).
+    #[test]
+    fn multi_draw_dredges_one_of_two_units_other_draws_normally() {
+        use crate::game::effects::draw::resume_multi_draw;
+        use crate::types::actions::GameAction;
+
+        let mut state = dredge_state(10);
+        let mut events = Vec::new();
+
+        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let ReplacementResult::NeedsChoice(chooser) = result else {
+            panic!("expected the first unit's dredge offer to pause, got {result:?}");
+        };
+        assert_eq!(chooser, PlayerId(0));
+        assert_eq!(
+            state.pending_multi_draw,
+            Some(crate::types::game_state::PendingMultiDraw {
+                player: PlayerId(0),
+                remaining: 1,
+                accumulated: 0,
+            }),
+            "one unit must remain queued after the first unit parks"
+        );
+
+        // Accept the dredge offer for unit 1 through the real production path —
+        // `handle_replacement_choice` applies the accepted event AND drains
+        // `pending_multi_draw` for the remaining unit.
+        state.priority_player = chooser;
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("resume the dredge choice");
+
+        assert!(
+            state.pending_multi_draw.is_none(),
+            "the multi-draw must fully complete once both units resolve, got {:?}",
+            state.pending_multi_draw
+        );
+        assert!(
+            state.players[0].hand.contains(&ObjectId(10)),
+            "the dredged card must return to hand"
+        );
+        assert_eq!(
+            state.players[0]
+                .hand
+                .iter()
+                .filter(|id| **id != ObjectId(10))
+                .count(),
+            1,
+            "unit 2 must draw exactly one normal card (not zero, not two) since \
+             the only dredge-eligible card left the graveyard after unit 1"
+        );
+        assert_eq!(
+            state.last_effect_count,
+            Some(1),
+            "CR 609.3: the TRUE total actually drawn across the whole 2-unit \
+             instruction is 1 (unit 1 dredged for 0, unit 2 drew 1 normally) — \
+             not 2 (the naive per-unit count) and not 0 (the last unit's count \
+             if last_effect_count were wrongly overwritten per-unit)"
+        );
+    }
+
+    /// Declining the dredge offer on unit 1 must still let unit 2 draw normally
+    /// — the hostile sibling of the accept case above.
+    #[test]
+    fn multi_draw_decline_dredge_unit_one_still_draws_unit_two_normally() {
+        use crate::game::effects::draw::resume_multi_draw;
+        use crate::types::actions::GameAction;
+
+        let mut state = dredge_state(10);
+        let mut events = Vec::new();
+
+        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let ReplacementResult::NeedsChoice(chooser) = result else {
+            panic!("expected the first unit's dredge offer to pause, got {result:?}");
+        };
+
+        // Decline (index 1) — the dredge card stays in the graveyard, unit 1
+        // draws normally, and unit 2 must ALSO still be offered the same dredge
+        // (still eligible, since it was never returned to hand).
+        state.priority_player = chooser;
+        let outcome = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("resume the decline choice");
+
+        assert!(
+            matches!(outcome.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "declining unit 1 must still offer the SAME dredge for unit 2 \
+             (the card never left the graveyard) — got {:?}",
+            outcome.waiting_for
+        );
+        assert!(
+            state.objects[&ObjectId(10)].zone == Zone::Graveyard,
+            "the dredge card must remain in the graveyard after unit 1 declines"
+        );
+
+        // Decline unit 2's offer as well — both units now draw normally. This
+        // is the exact regression matthewevans's review flagged on PR #5360:
+        // unit 1's actually-drawn count is folded into `pending_multi_draw`
+        // directly in `handle_replacement_choice`'s `Draw` arm (NOT inside
+        // `resume_multi_draw`'s own closure, since that arm resolves the
+        // ALREADY-paused unit rather than looping into a fresh one) — before
+        // this fix, that count was silently dropped, undercounting the total.
+        let outcome_2 = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("resume unit 2's decline choice");
+        assert!(
+            matches!(outcome_2.waiting_for, WaitingFor::Priority { .. }),
+            "both units resolved — no further replacement choice should remain, got {:?}",
+            outcome_2.waiting_for
+        );
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "CR 609.3: both units drew normally (unit 1's declined draw, folded \
+             into the resumed multi-draw's total, PLUS unit 2's declined draw) \
+             — the total must be 2, not 1 (which would mean unit 1's own draw \
+             was silently dropped from the accumulator)"
         );
     }
 

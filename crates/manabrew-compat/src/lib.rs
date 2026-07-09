@@ -12,7 +12,8 @@ use engine::types::ability::TargetRef;
 use engine::types::card::CardFace;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    GameState, ManaChoice, ManaChoicePrompt, StackEntryKind, WaitingFor,
+    GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::mana::{ManaColor as EngineManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
@@ -418,6 +419,9 @@ pub enum PromptOutput {
     MulliganDecision {
         keep: bool,
     },
+    MulliganUseSerumPowder {
+        card_id: String,
+    },
     MulliganPutBackDecision {
         card_ids: Vec<String>,
     },
@@ -664,6 +668,7 @@ pub struct MulliganInput {
 )]
 pub enum MulliganOutput {
     MulliganDecision { keep: bool },
+    MulliganUseSerumPowder { card_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -672,6 +677,12 @@ pub struct MulliganPutBackInput {
     pub hand_card_ids: Vec<String>,
     pub cards: Vec<CardDto>,
     pub count: usize,
+    /// The earmarked Serum Powder object committed to a pending
+    /// `UseSerumPowder` continuation, if any — the client must not offer it
+    /// as selectable in the bottom-cards picker. `None` for both `Keep`
+    /// resolutions and the (unrelated) `OpeningHandBottomCards` phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_card_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1206,14 +1217,34 @@ fn build_prompt_input(
         })),
         WaitingFor::MulliganDecision { pending, .. } => {
             let entry = pending_entry_for_viewer(&prepared.state, prepared.viewer, pending)?;
-            let hand = &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
-            Ok(PromptInput::Mulligan(MulliganInput {
-                hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
-                mulligan_count: u32::from(entry.mulligan_count),
-            }))
+            match &entry.phase {
+                MulliganDecisionPhase::Declare => {
+                    let hand =
+                        &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
+                    Ok(PromptInput::Mulligan(MulliganInput {
+                        hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
+                        mulligan_count: u32::from(entry.mulligan_count),
+                    }))
+                }
+                MulliganDecisionPhase::BottomCards { count, then } => {
+                    let cards = CardBuildContext { card_lookup };
+                    let hand =
+                        &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
+                    Ok(PromptInput::MulliganPutBack(MulliganPutBackInput {
+                        hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
+                        cards: objects_from_ids(&prepared.state, hand, &cards)?,
+                        count: usize::from(*count),
+                        excluded_card_id: match then {
+                            PendingMulliganAction::Keep => None,
+                            PendingMulliganAction::UseSerumPowder { object_id } => {
+                                Some(encode_object_id(*object_id))
+                            }
+                        },
+                    }))
+                }
+            }
         }
-        WaitingFor::MulliganBottomCards { pending }
-        | WaitingFor::OpeningHandBottomCards { pending, .. } => {
+        WaitingFor::OpeningHandBottomCards { pending, .. } => {
             let entry = pending_bottom_entry_for_viewer(&prepared.state, prepared.viewer, pending)?;
             let cards = CardBuildContext { card_lookup };
             let hand = &prepared.state.players[player_index(&prepared.state, entry.player)?].hand;
@@ -1221,6 +1252,7 @@ fn build_prompt_input(
                 hand_card_ids: hand.iter().copied().map(encode_object_id).collect(),
                 cards: objects_from_ids(&prepared.state, hand, &cards)?,
                 count: usize::from(entry.count),
+                excluded_card_id: None,
             }))
         }
         WaitingFor::DeclareAttackers {
@@ -1419,7 +1451,7 @@ pub fn translate_response(
             viewer: context.deciding_player,
         });
     }
-    if !response_output_matches_waiting(&response.output, &state.waiting_for) {
+    if !response_output_matches_waiting(&response.output, state, context.deciding_player) {
         return Err(AdapterError::IllegalResponseForPrompt {
             response_kind: response_output_type(&response.output),
         });
@@ -1453,6 +1485,11 @@ pub fn translate_response(
                 engine::types::actions::MulliganChoice::Keep
             } else {
                 engine::types::actions::MulliganChoice::Mulligan
+            },
+        }),
+        PromptOutput::MulliganUseSerumPowder { card_id } => Ok(GameAction::MulliganDecision {
+            choice: engine::types::actions::MulliganChoice::UseSerumPowder {
+                object_id: parse_object_id(&card_id)?,
             },
         }),
         PromptOutput::MulliganPutBackDecision { card_ids } => Ok(GameAction::SelectCards {
@@ -1635,6 +1672,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
         }
+        GameAction::ChoosePileOpponent { .. } => {
+            AvailableActionConversion::Unsupported("local.pile-opponent-unsupported")
+        }
         GameAction::ChooseAssistPlayer { .. } | GameAction::CommitAssistPayment { .. } => {
             AvailableActionConversion::Unsupported("local.assist-unsupported")
         }
@@ -1686,6 +1726,7 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::SubmitSpellbookDraft { .. }
         | GameAction::ChoosePile { .. }
         | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
         | GameAction::ChooseDamageSource { .. } => {
             AvailableActionConversion::Unsupported("local.selection-unsupported")
         }
@@ -1767,7 +1808,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::SetAutoPass { .. }
         | GameAction::CancelAutoPass
         | GameAction::SetPhaseStops { .. }
-        | GameAction::SetPriorityYield { .. } => {
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
         GameAction::AssignCombatDamage { .. } => AvailableActionConversion::Skip,
@@ -2373,7 +2415,12 @@ fn choose_mana_color_input(choice: &ManaChoicePrompt) -> Result<ChooseColorInput
     }
 }
 
-fn response_output_matches_waiting(output: &PromptOutput, waiting_for: &WaitingFor) -> bool {
+fn response_output_matches_waiting(
+    output: &PromptOutput,
+    state: &GameState,
+    viewer: PlayerId,
+) -> bool {
+    let waiting_for = &state.waiting_for;
     match output {
         PromptOutput::Pass { .. }
         | PromptOutput::Concede
@@ -2387,13 +2434,31 @@ fn response_output_matches_waiting(output: &PromptOutput, waiting_for: &WaitingF
         PromptOutput::Pay { .. } | PromptOutput::PayLife | PromptOutput::Cancel => {
             matches!(waiting_for, WaitingFor::ManaPayment { .. })
         }
-        PromptOutput::MulliganDecision { .. } => {
-            matches!(waiting_for, WaitingFor::MulliganDecision { .. })
+        // A declare-point response (keep/mulligan or use Serum Powder) is only
+        // legal while the viewer's own entry is in the `Declare` phase.
+        PromptOutput::MulliganDecision { .. } | PromptOutput::MulliganUseSerumPowder { .. } => {
+            match waiting_for {
+                WaitingFor::MulliganDecision { pending, .. } => {
+                    pending_entry_for_viewer(state, viewer, pending)
+                        .is_ok_and(|entry| matches!(entry.phase, MulliganDecisionPhase::Declare))
+                }
+                _ => false,
+            }
         }
-        PromptOutput::MulliganPutBackDecision { .. } => matches!(
-            waiting_for,
-            WaitingFor::MulliganBottomCards { .. } | WaitingFor::OpeningHandBottomCards { .. }
-        ),
+        // A bottom-cards selection is legal while the viewer's own entry is in
+        // the `BottomCards` sub-phase, or during the unrelated
+        // `OpeningHandBottomCards` phase.
+        PromptOutput::MulliganPutBackDecision { .. } => match waiting_for {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                pending_entry_for_viewer(state, viewer, pending).is_ok_and(|entry| {
+                    matches!(entry.phase, MulliganDecisionPhase::BottomCards { .. })
+                })
+            }
+            WaitingFor::OpeningHandBottomCards { pending, .. } => {
+                pending_bottom_entry_for_viewer(state, viewer, pending).is_ok()
+            }
+            _ => false,
+        },
         PromptOutput::DeclareAttackers { .. } => {
             matches!(waiting_for, WaitingFor::DeclareAttackers { .. })
         }
@@ -2439,6 +2504,7 @@ fn response_output_type(output: &PromptOutput) -> &'static str {
         PromptOutput::PayLife => "payLife",
         PromptOutput::Cancel => "cancel",
         PromptOutput::MulliganDecision { .. } => "mulliganDecision",
+        PromptOutput::MulliganUseSerumPowder { .. } => "mulliganUseSerumPowder",
         PromptOutput::MulliganPutBackDecision { .. } => "mulliganPutBackDecision",
         PromptOutput::DeclareAttackers { .. } => "declareAttackers",
         PromptOutput::DeclareBlockers { .. } => "declareBlockers",
@@ -2812,7 +2878,6 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
     match waiting_for {
         WaitingFor::Priority { .. } => "Priority",
         WaitingFor::MulliganDecision { .. } => "MulliganDecision",
-        WaitingFor::MulliganBottomCards { .. } => "MulliganBottomCards",
         WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
         WaitingFor::ManaPayment { .. } => "ManaPayment",
         WaitingFor::ChooseXValue { .. } => "ChooseXValue",
@@ -2850,8 +2915,8 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{Effect, ResolvedAbility, TargetFilter};
     use engine::types::game_state::{
-        MulliganBottomEntry, MulliganDecisionEntry, PendingCast, TargetSelectionProgress,
-        TargetSelectionSlot,
+        MulliganDecisionEntry, MulliganDecisionPhase, PendingCast, PendingMulliganAction,
+        TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use pretty_assertions::assert_eq;
@@ -3097,6 +3162,7 @@ mod tests {
             pending: vec![MulliganDecisionEntry {
                 player: PlayerId(0),
                 mulligan_count: 0,
+                phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
         };
@@ -3164,6 +3230,52 @@ mod tests {
             Err(AdapterError::IllegalResponseForPrompt {
                 response_kind: "mulliganDecision"
             })
+        ));
+    }
+
+    /// Round-trip (CR 103.5b): a `MulliganUseSerumPowder` response submitted
+    /// while the viewer's entry is in the `Declare` phase translates to
+    /// `MulliganChoice::UseSerumPowder` carrying the referenced object id.
+    #[test]
+    fn mulligan_use_serum_powder_response_translates() {
+        let context = PromptContext {
+            prompt_id: 1,
+            deciding_player: PlayerId(0),
+            action_table: Vec::new(),
+        };
+        let mut state = GameState::new_two_player(7);
+        let powder = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Serum Powder".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 0,
+                phase: MulliganDecisionPhase::Declare,
+            }],
+            free_first_mulligan: false,
+        };
+
+        let action = translate_response(
+            PromptResponse {
+                prompt_id: 1,
+                output: PromptOutput::MulliganUseSerumPowder {
+                    card_id: encode_object_id(powder),
+                },
+            },
+            &context,
+            &state,
+        )
+        .unwrap();
+        assert!(matches!(
+            action,
+            GameAction::MulliganDecision {
+                choice: engine::types::actions::MulliganChoice::UseSerumPowder { object_id },
+            } if object_id == powder
         ));
     }
 
@@ -3442,17 +3554,23 @@ mod tests {
                     pending: vec![MulliganDecisionEntry {
                         player: PlayerId(0),
                         mulligan_count: 1,
+                        phase: MulliganDecisionPhase::Declare,
                     }],
                     free_first_mulligan: false,
                 },
             ),
             (
                 "mulliganPutBack",
-                WaitingFor::MulliganBottomCards {
-                    pending: vec![MulliganBottomEntry {
+                WaitingFor::MulliganDecision {
+                    pending: vec![MulliganDecisionEntry {
                         player: PlayerId(0),
-                        count: 1,
+                        mulligan_count: 1,
+                        phase: MulliganDecisionPhase::BottomCards {
+                            count: 1,
+                            then: PendingMulliganAction::Keep,
+                        },
                     }],
+                    free_first_mulligan: false,
                 },
             ),
             (
@@ -3461,6 +3579,7 @@ mod tests {
                     player: PlayerId(0),
                     valid_attacker_ids: vec![ObjectId(1)],
                     valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+                    attacker_constraints: Default::default(),
                 },
             ),
             (
@@ -3470,6 +3589,7 @@ mod tests {
                     valid_blocker_ids: vec![ObjectId(1)],
                     valid_block_targets: HashMap::from([(ObjectId(2), vec![ObjectId(1)])]),
                     block_requirements: HashMap::new(),
+                    blocker_constraints: Default::default(),
                 },
             ),
             (
@@ -3583,6 +3703,7 @@ mod protocol_wire_tests {
                     hand_card_ids: vec!["card-1".to_string()],
                     cards: vec![card()],
                     count: 1,
+                    excluded_card_id: None,
                 }),
             ),
             (

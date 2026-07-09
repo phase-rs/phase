@@ -159,6 +159,8 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::Token, tag("token")),
         value(FilterProp::NonToken, tag("nontoken")),
         value(FilterProp::FaceDown, tag("face down")),
+        // CR 701.27g: "transformed permanent"/"transformed creature" selector.
+        value(FilterProp::Transformed, tag("transformed")),
         value(FilterProp::Unblocked, tag("unblocked")),
         value(FilterProp::Suspected, tag("suspected")),
         value(FilterProp::Renowned, tag("renowned")),
@@ -529,6 +531,14 @@ mod tests {
         let (rest, p) = parse_property_filter("face down").unwrap();
         assert_eq!(p, FilterProp::FaceDown);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_property_filter_transformed() {
+        // CR 701.27g: "transformed permanent" selector (Mutagen Connoisseur).
+        let (rest, p) = parse_property_filter("transformed permanent").unwrap();
+        assert_eq!(p, FilterProp::Transformed);
+        assert_eq!(rest, " permanent");
     }
 
     #[test]

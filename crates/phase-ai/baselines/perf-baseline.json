@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "git_sha": "8d479ebc13d2",
-  "card_data_hash": "863056e7cd77b33532075380684122a4cd85848e",
+  "card_data_hash": "80d3be5e75d1442245bfcb46bb0a8b8857c58022",
   "base_seed": 2654435769,
   "action_cap": 3000,
   "sample_count": 5,
@@ -11,7 +11,7 @@
     "enchantress-mirror"
   ],
   "counters": {
-    "attackable_player_sweeps": 555,
+    "attackable_player_sweeps": 731,
     "auto_tap_source_cache_builds": 516,
     "cached_auto_tap_source_rejects": 0,
     "cached_auto_tap_source_reuses": 509,

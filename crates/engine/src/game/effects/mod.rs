@@ -164,6 +164,7 @@ pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
 pub mod rebound;
+pub mod redistribute_life_totals;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remember_card;
@@ -1865,6 +1866,10 @@ fn apply_parent_chain_context(
         child.dig_found_nothing_for_parent_target = true;
         state.last_dig_found_nothing = false;
     }
+    if state.last_choose_from_zone_found_nothing {
+        child.choose_from_zone_found_nothing_for_parent_target = true;
+        state.last_choose_from_zone_found_nothing = false;
+    }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
     // its parent; its instructions are followed in order during a single
     // resolution. Propagate the parent's `ability_index` so chain-level
@@ -1903,6 +1908,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
@@ -2178,6 +2184,17 @@ fn sub_ability_is_reflexive(sub: &ResolvedAbility) -> bool {
     match &sub.condition {
         Some(AbilityCondition::WhenYouDo) => true,
         Some(condition) => condition_depends_on_effect_performed(condition),
+        None => false,
+    }
+}
+
+fn sub_ability_target_belongs_to_reflexive_context(sub: &ResolvedAbility) -> bool {
+    match &sub.condition {
+        Some(AbilityCondition::WhenYouDo) => true,
+        Some(condition) => {
+            condition_depends_on_effect_performed(condition)
+                || condition_depends_on_zone_change_this_way(condition)
+        }
         None => false,
     }
 }
@@ -3354,6 +3371,7 @@ pub fn resolve_effect(
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
         Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
         Effect::ExchangeLifeTotals { .. } => exchange_life_totals::resolve(state, ability, events),
+        Effect::RedistributeLifeTotals => redistribute_life_totals::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())
@@ -5437,6 +5455,7 @@ pub fn resolve_ability_chain(
         // (e.g. Avenging Angel's LTB self-return). Reset at every fresh
         // resolution so that can never happen.
         state.last_dig_found_nothing = false;
+        state.last_choose_from_zone_found_nothing = false;
         // CR 701.20e: A new top-level resolution ends any prior private "look at"
         // peek window — the looked-at card from an unrelated resolution must not
         // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
@@ -7343,17 +7362,21 @@ fn resolve_chain_body(
             }
 
             // CR 608.2c + CR 400.7j: When the parent effect wrote the
-            // last-revealed set (a look/reveal/dig) but carries no targets of its
-            // own, the gated sub references that revealed object both in its
+            // last-revealed set (a look/reveal/dig), the gated sub may reference
+            // that revealed object both in its
             // condition ("if it has three or more colored mana symbols in its
             // mana cost") and in its effect ("add three mana in any combination
-            // of its colors") — Omnath, Locus of All. CR 400.7j: an effect can
+            // of its colors") — Omnath, Locus of All. It can also carry an
+            // unrelated original target while the condition binds to the reveal
+            // result (Chaos Warp). CR 400.7j: an effect can
             // find an object it moved to a public zone, so the deep add-mana sub
-            // still finds the revealed card after it is put into hand. Inject the
-            // revealed ids as the parent's targets so BOTH the condition
-            // evaluation and the performed-true sub-resolution (which inherits
-            // the parent's targets via the early continuation/sibling paths) bind
-            // to the revealed object.
+            // still finds the revealed card after it is put into hand. When the
+            // parent has no targets, inject the revealed ids as the parent's
+            // targets so BOTH the condition evaluation and the performed-true
+            // sub-resolution bind to the revealed object. When the parent already
+            // has original targets, use the revealed ids only for this condition
+            // check so later target inheritance remains anchored to the original
+            // target.
             let injected_parent;
             let ability: &ResolvedAbility = if effect_writes_last_revealed_ids(&ability.effect)
                 && !state.last_revealed_ids.is_empty()
@@ -7367,7 +7390,22 @@ fn resolve_chain_body(
                 ability
             };
 
-            let condition_met = evaluate_condition(condition, state, ability);
+            let condition_injected_parent;
+            let condition_ability: &ResolvedAbility =
+                if effect_writes_last_revealed_ids(&ability.effect)
+                    && !state.last_revealed_ids.is_empty()
+                    && !ability.targets.is_empty()
+                    && condition_depends_on_result_object(condition)
+                {
+                    let mut clone = ability.clone();
+                    clone.targets = inject_last_revealed_targets(state, ability, sub.as_ref());
+                    condition_injected_parent = clone;
+                    &condition_injected_parent
+                } else {
+                    ability
+                };
+
+            let condition_met = evaluate_condition(condition, state, condition_ability);
             if !condition_met {
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
@@ -7699,6 +7737,26 @@ fn resolve_chain_body(
                             .insert(0, TargetRef::Object(forwarded_objects[0]));
                     }
                 }
+                // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
+                // reanimator-Aura's own identity — surviving the forward_result rebind above
+                // that would otherwise point source_id at the just-reanimated creature
+                // instead of the Aura whose own keyword text this static is rewriting
+                // (Animate Dead / Dance of the Dead class: "it loses ... and gains ...").
+                // Concretized here, eagerly, in-place — never persisted as a ResolvedAbility
+                // field — because this is the ONE point in the whole chain where the
+                // pre-rebind `ability.source_id` and the about-to-be-mutated clone coexist.
+                if let Effect::GenericEffect {
+                    static_abilities, ..
+                } = &mut sub_with_context.effect
+                {
+                    for sd in static_abilities.iter_mut() {
+                        if sd.affected == Some(TargetFilter::OriginalSource) {
+                            sd.affected = Some(TargetFilter::SpecificObject {
+                                id: ability.source_id,
+                            });
+                        }
+                    }
+                }
             }
             apply_parent_chain_context(
                 &mut sub_with_context,
@@ -7787,7 +7845,29 @@ fn resolve_chain_body(
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
-            sub_with_targets.targets = ability.targets.clone();
+            // CR 115.6 + CR 608.2c (issue #5281): Inherit the parent instruction's
+            // targets, but NEVER hand a parent OBJECT target to an independent
+            // object-target slot whose empty `sub.targets` means the slot was
+            // legally declined (Cruel Revival's "Return up to one target Zombie
+            // card from your graveyard ..." per CR 115.6). Player targets are
+            // shared across the chain (Paradigm's "that player" draw + lose-life;
+            // relative-controller change-zone) and are always inherited. Reflexive
+            // gated subs ("When you discard a card this way, put a counter on target
+            // Faerie") keep inheriting their selected target through the parent
+            // chain; their condition decides whether the sub fires.
+            let has_independent_target_slot =
+                crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
+                    && !effect_refs_parent_target(&sub.effect)
+                    && !sub_ability_target_belongs_to_reflexive_context(sub);
+            sub_with_targets.targets = ability
+                .targets
+                .iter()
+                .filter(|target_ref| match target_ref {
+                    TargetRef::Player(_) => true,
+                    TargetRef::Object(_) => !has_independent_target_slot,
+                })
+                .cloned()
+                .collect();
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,
@@ -15929,6 +16009,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::OncePerTurn,
                     source_id: None,
+                    invalidation: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     card_filter: None,
@@ -19149,6 +19230,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
                     source_id: None,
+                    invalidation: None,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                     card_filter: None,

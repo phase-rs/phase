@@ -29,6 +29,13 @@ import init, {
   set_multiplayer_mode,
   resolve_all,
   estimate_bracket_for_deck,
+  has_replay_recording,
+  export_replay_log,
+  load_replay_for_playback,
+  replay_length_js,
+  replay_header_js,
+  replay_seek_js,
+  clear_replay_playback,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
@@ -83,7 +90,14 @@ type EngineRequest =
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
   | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number }
-  | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest };
+  | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest }
+  | { type: "hasReplayRecording"; id: number }
+  | { type: "exportReplayLog"; id: number }
+  | { type: "loadReplayForPlayback"; id: number; replayJson: string }
+  | { type: "replayLength"; id: number }
+  | { type: "replayHeader"; id: number }
+  | { type: "replaySeek"; id: number; target: number }
+  | { type: "clearReplayPlayback"; id: number };
 
 type EngineResponse =
   | { type: "ready" }
@@ -397,6 +411,54 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      // ── Replay system ────────────────────────────────────────────────
+      // Recording lives alongside GAME_STATE in WASM (see initializeGame /
+      // submitAction above) — these calls just surface it. Playback
+      // (loadReplayForPlayback / replaySeek / replayLength / replayHeader /
+      // clearReplayPlayback) is independent of GAME_STATE entirely.
+
+      case "hasReplayRecording": {
+        result(msg.id, has_replay_recording());
+        break;
+      }
+
+      case "exportReplayLog": {
+        // export_replay_log / load_replay_for_playback return Result<T, JsValue>
+        // on the Rust side — wasm-bindgen throws on Err, which the outer
+        // try/catch around this switch already converts to an error response.
+        result(msg.id, export_replay_log());
+        break;
+      }
+
+      case "loadReplayForPlayback": {
+        result(msg.id, load_replay_for_playback(msg.replayJson));
+        break;
+      }
+
+      case "replayLength": {
+        result(msg.id, replay_length_js());
+        break;
+      }
+
+      case "replayHeader": {
+        result(msg.id, replay_header_js() ?? null);
+        break;
+      }
+
+      case "replaySeek": {
+        // replay_seek_js returns Result<JsValue, JsValue> on the Rust side —
+        // `null` only for "no replay loaded"; a reconstruction desync throws,
+        // which the outer try/catch around this switch converts to an error
+        // response instead of silently returning null for both cases.
+        result(msg.id, replay_seek_js(msg.target));
+        break;
+      }
+
+      case "clearReplayPlayback": {
+        clear_replay_playback();
+        result(msg.id, null);
+        break;
+      }
     }
   } catch (err) {
     const id = "id" in msg ? (msg as { id: number }).id : -1;

@@ -11,6 +11,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "nextUp": {
+    "label": "Próximo",
+    "tooltip": "O turno deste jogador é o próximo."
+  },
   "card": {
     "faceDownName": "Carta virada para baixo",
     "loading": "Carregando {{name}}",
@@ -274,7 +278,8 @@
     "assignRemaining_one": "Atribuir mais {{count}}",
     "assignRemaining_other": "Atribuir mais {{count}}",
     "confirmDistribute_one": "Declarar {{count}} Atacante",
-    "confirmDistribute_other": "Declarar {{count}} Atacantes"
+    "confirmDistribute_other": "Declarar {{count}} Atacantes",
+    "mustAttackPlayer": "{{creature}} deve atacar {{player}}"
   },
   "fullControl": {
     "label": "Controle",
@@ -574,6 +579,16 @@
     "blockIncompleteAttacker": "{{assigned}} de {{required}} bloqueadores atribuídos",
     "blockIncomplete_one": "{{count}} atacante precisa de outro bloqueador",
     "blockIncomplete_other": "{{count}} atacantes precisam de outro bloqueador",
+    "mustAttackBadge": "Must attack",
+    "mustAttackSatisfiedBadge": "Attacking ✓",
+    "mustBlockBadge": "Must block",
+    "mustBlockSatisfiedBadge": "Blocking ✓",
+    "cantAttackBadge": "Can't attack",
+    "cantBlockBadge": "Can't block",
+    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
+    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
+    "unsatisfiedMustBlock_one": "{{count}} creature must block",
+    "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Atribuir {{amount}} de Dano de Combate",
     "assignDamageSubtitle": "{{name}} — Restante: {{remaining}}",
     "assignDamageButton": "Atribuir Dano",
@@ -1593,6 +1608,10 @@
     "title": "Escolher oponente para confronto",
     "subtitle": "Escolha qual oponente fará confronto com você."
   },
+  "pileOpponent": {
+    "title": "Choose Opponent",
+    "subtitle": "Choose which opponent separates the cards into piles."
+  },
   "assist": {
     "choose": {
       "title": "Choose a Player to Assist",
@@ -1681,6 +1700,13 @@
     "subtitle": "Selecione a opção a resolver.",
     "subtitleBinary": "Escolha uma das duas opções abaixo.",
     "optionFallback": "Opção {{number}}"
+  },
+  "redistributeLifeTotals": {
+    "eyebrow": "Totais de vida",
+    "title": "Redistribuir os totais de vida",
+    "subtitle": "Escolha como redistribuir os totais de vida dos jogadores.",
+    "keepCurrent": "Manter os totais atuais",
+    "playerLife": "{{player}}: {{life}} pontos de vida"
   },
   "combatTax": {
     "eyebrow": "Taxa de Combate",
@@ -1805,6 +1831,16 @@
     "dontShowAgain": "Don’t show again this session",
     "reportTitle": "Stuck decision: {{kind}}",
     "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
+  "mayTriggerAutoChoice": {
+    "listHeader": "Escolhas automáticas",
+    "menuButtonShortActive": "Decidindo automaticamente",
+    "clearAll": "Limpar tudo",
+    "remove": "Remover",
+    "accept": "Sim",
+    "decline": "Não",
+    "sourceFallback": "Efeito",
+    "entryLabel": "{{source}} — {{decision}}"
   },
   "optionalEffect": {
     "sourceFallback": "Efeito",

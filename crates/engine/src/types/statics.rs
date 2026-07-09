@@ -590,6 +590,17 @@ pub enum TriggerCause {
     /// `GameEvent::DamageDealt` whose target is a creature controlled by the
     /// doubler's controller.
     ControlledCreatureDealtDamage,
+    /// CR 601.2 + CR 707.10: Trigger was caused by the doubler's controller
+    /// casting or copying a spell (Veyran, Voice of Duality-class: "If you
+    /// casting or copying an instant or sorcery spell causes ..."). Matches
+    /// `GameEvent::SpellCast` and `GameEvent::SpellCopied` events whose
+    /// controller is the doubler's controller. The `core_types` list narrows
+    /// the spell's type — for Veyran this is `[Instant, Sorcery]`; an empty
+    /// list means any spell.
+    ControllerCastOrCopiedSpell {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+    },
     /// CR 309.4c: Trigger was caused by entering a dungeon room
     /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
     RoomEntered,
@@ -607,6 +618,10 @@ impl fmt::Display for TriggerCause {
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
             TriggerCause::ControlledCreatureDealtDamage => {
                 write!(f, "ControlledCreatureDealtDamage")
+            }
+            TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
+                let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
+                write!(f, "ControllerCastOrCopiedSpell([{}])", names.join(","))
             }
             TriggerCause::RoomEntered => write!(f, "RoomEntered"),
         }
@@ -1729,10 +1744,9 @@ pub enum StaticMode {
     /// Yawgmoth (color = Black). `ManaColor` parameterization admits future
     /// printings for any other single color without enum proliferation.
     ///
-    /// **Scope note**: this static currently affects spell-cast mana costs only.
-    /// Activated-ability mana costs are covered by the same 2024-06-07 K'rrik
-    /// ruling but require a `pending_activation` pause/resume primitive not yet
-    /// built. Deferred to GH issue #600.
+    /// **Scope note**: wired through spell-cast and activated-ability mana payment
+    /// via `effective_shard_requirement` promotion and the shared Phyrexian pause
+    /// infrastructure (`maybe_pause_for_phyrexian_choice`).
     PayLifeAsColoredMana {
         color: ManaColor,
     },

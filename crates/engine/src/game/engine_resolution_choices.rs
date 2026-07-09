@@ -23,6 +23,10 @@ use super::{casting, casting_costs, mana_abilities};
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
     WaitingForWithInlineTriggers(WaitingFor),
+    /// CR 603.3b: observer triggers from a completed search put/shuffle were
+    /// collected into `deferred_triggers` but must not drain until the caller
+    /// receives priority again (issue #5336: Kodama + Nature's Lore).
+    WaitingForWithParkedObservers(WaitingFor),
     ActionResult(ActionResult),
 }
 
@@ -73,10 +77,38 @@ fn batch_or_drain_observer_triggers(
     }
 }
 
+/// CR 603.2 + CR 603.3b + CR 701.23: after a search tutor's put/shuffle
+/// continuation drains, park ETB/dies/discards observers for the next priority
+/// checkpoint instead of dispatching them while the test harness (or UI) may
+/// still be inside the same `SelectCards` action (issue #5336).
+fn park_search_observer_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    events_before_drain: usize,
+) -> ResolutionChoiceOutcome {
+    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+        .iter()
+        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    if !trigger_events.is_empty() {
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+    }
+    // The parent spell already left the stack; clear the stashed resolving entry
+    // so the next priority pass can drain `deferred_triggers`.
+    if state.pending_continuation.is_none()
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        state.resolving_stack_entry = None;
+    }
+    ResolutionChoiceOutcome::WaitingForWithParkedObservers(state.waiting_for.clone())
+}
+
 pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::CastOffer {
@@ -107,6 +139,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ClashChooseOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
             | WaitingFor::DigChoice { .. }
@@ -552,6 +585,39 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
+            WaitingFor::RedistributeLifeTotals { player, options },
+            GameAction::SubmitLifeRedistribution { option_index },
+        ) => {
+            // CR 119.7 + CR 119.8: apply the chosen assignment. Every enumerated
+            // option is already legal because the resolver filtered each receiver.
+            let option = options.get(option_index).ok_or_else(|| {
+                EngineError::InvalidAction(format!(
+                    "Life redistribution option {option_index} out of range"
+                ))
+            })?;
+            let assignment = option.assignment.clone();
+            match effects::life::apply_life_totals_assignment(
+                state,
+                &assignment,
+                player,
+                None,
+                events,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+            {
+                // CR 616.1: a competing replacement installed a choice WaitingFor;
+                // the resume path completes the assignment and continuation.
+                effects::life::LifeAssignmentOutcome::Deferred => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                effects::life::LifeAssignmentOutcome::Applied => {
+                    ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                        state, player, events,
+                    ))
+                }
+            }
+        }
+        (
             WaitingFor::CoinFlipKeepChoice {
                 player,
                 results,
@@ -965,6 +1031,20 @@ pub(super) fn handle_resolution_choice(
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
+                // CR 608.2c + CR 107.1c (issue #1032): reset to `Priority`
+                // BEFORE re-entering the chain, mirroring the `decline`
+                // branch's `finish_with_continuation` reset below and
+                // `handle_optional_effect_choice`'s `set_active_priority`
+                // reset (engine_payment_choices.rs). Without this,
+                // `state.waiting_for` is still the just-answered
+                // `RepeatDecision`, which `waits_for_resolution_choice`
+                // (effects/mod.rs) matches — the ChangeZone/LoseLife
+                // sub-chain following this iteration's RevealTop is then
+                // wrongly deferred into `pending_continuation` (accumulating
+                // there via `append_to_sub_chain`) instead of resolving
+                // immediately, and only drains in one batch when the
+                // controller eventually declines.
+                set_priority(state, player);
                 // Re-resolve one more process pass. `ability` retains
                 // `repeat_until: Some(ControllerChoice)`, so this hits the
                 // `repeat_until` dispatch, runs `resolve_chain_body` once, and
@@ -1588,6 +1668,37 @@ pub(super) fn handle_resolution_choice(
                 },
             )
         }
+        // CR 608.2d + CR 700.3: Controller chose which opponent performs the
+        // partition. Validate the choice and transition to SeparatePilesPartition.
+        (
+            WaitingFor::SeparatePilesChooseOpponent {
+                player: _,
+                candidates,
+                eligible,
+                chooser,
+                chosen_pile_effect,
+                unchosen_pile_effect,
+                source_id,
+            },
+            GameAction::ChoosePileOpponent { opponent },
+        ) => {
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Chosen pile opponent {opponent:?} is not a legal opponent"
+                )));
+            }
+            state.waiting_for = WaitingFor::SeparatePilesPartition {
+                player: opponent,
+                eligible,
+                remaining_subjects: crate::im::Vector::new(),
+                completed: crate::im::Vector::new(),
+                chooser,
+                chosen_pile_effect,
+                unchosen_pile_effect,
+                source_id,
+            };
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         // CR 700.3 + CR 700.3a + CR 101.4: Subject submits their partition;
         // pile B is derived as `eligible \ pile_a`. Advance the subject queue
         // (CR 800.4g — eliminated players were filtered out at resolver
@@ -1603,6 +1714,7 @@ pub(super) fn handle_resolution_choice(
                 mut completed,
                 chooser,
                 chosen_pile_effect,
+                unchosen_pile_effect,
                 source_id,
             },
             GameAction::SubmitPilePartition { pile_a },
@@ -1644,6 +1756,7 @@ pub(super) fn handle_resolution_choice(
                     completed,
                     chooser,
                     chosen_pile_effect,
+                    unchosen_pile_effect: unchosen_pile_effect.clone(),
                     source_id,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -1655,6 +1768,7 @@ pub(super) fn handle_resolution_choice(
                     pending,
                     current,
                     chosen_pile_effect,
+                    unchosen_pile_effect,
                     source_id,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -1672,6 +1786,7 @@ pub(super) fn handle_resolution_choice(
                 mut pending,
                 current,
                 chosen_pile_effect,
+                unchosen_pile_effect,
                 source_id,
             },
             GameAction::ChoosePile { pile },
@@ -1681,19 +1796,34 @@ pub(super) fn handle_resolution_choice(
             // subject's choice or finish. Per-decision resolution matches
             // CR 101.4c ("in any order they choose") — the chooser's
             // submission order IS that order.
-            let _ = effects::separate_piles::apply_pile_effect(
+            effects::separate_piles::apply_pile_effect(
                 state,
                 source_id,
                 &chosen_pile_effect,
-                &[(current, pile)],
+                &[(current.clone(), pile)],
                 events,
-            );
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("pile sub-effect: {e:?}")))?;
+            // CR 608.2c: Apply unchosen pile sub-effect if present.
+            if let Some(ref unchosen_def) = unchosen_pile_effect {
+                effects::separate_piles::apply_unchosen_pile_effect(
+                    state,
+                    source_id,
+                    unchosen_def,
+                    &[(current, pile)],
+                    events,
+                )
+                .map_err(|e| {
+                    EngineError::InvalidAction(format!("unchosen pile sub-effect: {e:?}"))
+                })?;
+            }
             if let Some(next) = pending.pop_front() {
                 state.waiting_for = WaitingFor::SeparatePilesChoice {
                     player,
                     pending,
                     current: next,
                     chosen_pile_effect,
+                    unchosen_pile_effect,
                     source_id,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -2162,15 +2292,19 @@ pub(super) fn handle_resolution_choice(
                 }
                 // CR 609.3 fast-path: found <= primary_count, so ALL chosen go to
                 // the primary destination and the rest is empty. No second prompt.
+                let events_before_drain = events.len();
                 apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
                 set_priority(state, player);
                 effects::drain_pending_continuation(state, events);
-                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    state.waiting_for.clone(),
+                return Ok(park_search_observer_triggers(
+                    state,
+                    events,
+                    events_before_drain,
                 ));
             }
 
             set_priority(state, player);
+            let events_before_drain = events.len();
             // CR 400.7 + CR 608.2c: Count found-set cards exiled from a hand so
             // the shared "That player ... draws a card for each card exiled from
             // their hand this way" rider (The End, Deadly Cover-Up, Test of
@@ -2222,7 +2356,7 @@ pub(super) fn handle_resolution_choice(
                 state.pending_continuation = Some(cont);
             }
             effects::drain_pending_continuation(state, events);
-            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            park_search_observer_triggers(state, events, events_before_drain)
         }
         (
             WaitingFor::SearchPartitionChoice {
@@ -2266,6 +2400,7 @@ pub(super) fn handle_resolution_choice(
                 primary_enter_tapped,
                 rest_destination,
             };
+            let events_before_partition = events.len();
             apply_search_partition(
                 state,
                 &primary_chosen,
@@ -2277,7 +2412,7 @@ pub(super) fn handle_resolution_choice(
             )?;
             set_priority(state, player);
             effects::drain_pending_continuation(state, events);
-            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            park_search_observer_triggers(state, events, events_before_partition)
         }
         (
             WaitingFor::OutsideGameChoice {

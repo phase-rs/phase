@@ -30,7 +30,16 @@ function isNonEmptyString(v: unknown): v is string {
 }
 
 function isValidDeckEntry(v: unknown): boolean {
-  return isObject(v) && typeof v.count === "number" && isNonEmptyString(v.name);
+  // `count` must be a positive integer. `typeof v.count === "number"` alone
+  // admits 0, negatives, fractional, and NaN from untrusted feed JSON — which
+  // then flow into card-total counters and copy-expansion (a 2.5 becomes 3
+  // copies while the displayed total shows 2.5; a 0 becomes a phantom row).
+  return (
+    isObject(v) &&
+    Number.isInteger(v.count) &&
+    (v.count as number) > 0 &&
+    isNonEmptyString(v.name)
+  );
 }
 
 function isValidFeedDeck(v: unknown): v is FeedDeck {

@@ -33,8 +33,12 @@ export interface DeckData {
  * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
+ *
+ * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
+ *      into a MulliganDecisionPhase::BottomCards sub-phase on
+ *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

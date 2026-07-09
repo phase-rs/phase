@@ -126,6 +126,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "EachPlayerCopyChosenSelection",
     "KeepWithinTotalPowerChoice",
     "DistributeAmong",
+    // CR 119.7 + CR 119.8: controller-chosen life-total redistribution permutation
+    // (Reverse the Sands, The Doctor's Tomb) — rendered by LifeRedistributionModal.
+    "RedistributeLifeTotals",
     "MoveCountersDistribution",
     // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) — rendered by
     // MoveCountersDistributionModal in no-destination removal mode.
@@ -147,6 +150,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "RevealUntilKeptChoice",
     "RepeatDecision",
     "VoteChoice",
+    "SeparatePilesChooseOpponent",
     "SeparatePilesPartition",
     "SeparatePilesChoice",
     "ChooseRingBearer",
@@ -169,7 +173,6 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Game lifecycle
     "GameOver",
     "MulliganDecision",
-    "MulliganBottomCards",
     "OpeningHandBottomCards",
     "BetweenGamesSideboard",
     "BetweenGamesChoosePlayDraw",
@@ -234,7 +237,6 @@ export function waitingForReason(
     case "UnlessPayment":
       return { key: "status.reason.payingCost" };
     case "MulliganDecision":
-    case "MulliganBottomCards":
     case "OpeningHandBottomCards":
       return { key: "status.reason.mulligan" };
     case "DiscardToHandSize":

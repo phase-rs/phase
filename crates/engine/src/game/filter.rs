@@ -91,6 +91,9 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: a fixed source-relative object ref (concretized to
+        // SpecificObject before runtime) — never whole-board population.
+        | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
@@ -220,6 +223,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
@@ -304,6 +308,9 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: a fixed source-relative object ref (concretized to
+        // SpecificObject before runtime) — never whole-board population.
+        | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
@@ -444,6 +451,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
@@ -1522,6 +1530,10 @@ fn filter_inner_for_object(
         TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
+        // CR 608.2c: the original (pre-rebind) source object; concretized to
+        // SpecificObject before runtime, so this arm is defense-in-depth and
+        // mirrors SelfRef's source-identity semantics.
+        TargetFilter::OriginalSource => object_id == source_id,
         TargetFilter::SourceOrPaired => state
             .objects
             .get(&source_id)
@@ -2019,6 +2031,9 @@ fn zone_change_filter_inner(
         TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
+        // CR 608.2c: the original (pre-rebind) source object; concretized to
+        // SpecificObject before runtime — mirrors SelfRef's source identity.
+        TargetFilter::OriginalSource => record.object_id == source_id,
         TargetFilter::SourceOrPaired => false,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -2463,6 +2478,9 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
+        // CR 201.5a: source-relative object ref, concretized to SpecificObject
+        // before runtime — inapplicable to a spell-cast history record.
+        | TargetFilter::OriginalSource
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -2770,6 +2788,9 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
+        // CR 201.5a: source-relative object ref, concretized to SpecificObject
+        // before runtime — inapplicable to a spell-cast history record.
+        | TargetFilter::OriginalSource
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -3138,6 +3159,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // permanent — fail closed against the spell-cast snapshot.
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         // CR 201.2: Source-/target-relative name predicates require
@@ -4165,6 +4187,9 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
+        // CR 701.27g: Match transformed permanents (a transforming DFC on the
+        // battlefield with its back face up).
+        FilterProp::Transformed => obj.transformed,
         // CR 115.9c: If the object is a stack entry, ALL of its targets must match
         // the inner filter. Falls back permissive for non-stack objects so trigger
         // matchers remain the primary authority (they validate separately).
@@ -4586,6 +4611,7 @@ fn zone_change_record_matches_property(
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::Foretold
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
@@ -5018,12 +5044,26 @@ fn object_shares_quality_with_reference_filter(
         return event_context_references
             .into_iter()
             .filter_map(|target| match target {
-                TargetRef::Object(reference_id) => state.objects.get(&reference_id),
+                TargetRef::Object(reference_id) => Some(reference_id),
                 TargetRef::Player(_) => None,
             })
-            .any(|reference_obj| {
-                let values =
-                    object_shared_quality_values(reference_obj, quality, &state.all_creature_types);
+            .any(|reference_id| {
+                let values = state
+                    .objects
+                    .get(&reference_id)
+                    .map(|reference_obj| {
+                        object_shared_quality_values(
+                            reference_obj,
+                            quality,
+                            &state.all_creature_types,
+                        )
+                    })
+                    .or_else(|| {
+                        state.lki_cache.get(&reference_id).map(|lki| {
+                            lki_shared_quality_values(lki, quality, &state.all_creature_types)
+                        })
+                    })
+                    .unwrap_or_default();
                 object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
             });
     }
@@ -5768,6 +5808,69 @@ mod tests {
         assert!(matches_target_filter(&state, id, &creature_filter, id));
         assert!(!matches_target_filter(&state, id, &land_filter, id));
         assert!(matches_target_filter(&state, id, &card_filter, id));
+    }
+
+    /// GitHub #4710 (Scourglass) / CR 205.2b: "except for artifacts" must
+    /// exclude an ARTIFACT CREATURE too, not just noncreature artifacts — an
+    /// object with more than one card type satisfies criteria for any of
+    /// them. `Permanent AND NOT Artifact AND NOT Land` (Scourglass's actual
+    /// filter shape) must reject the artifact creature, accept the plain
+    /// creature, and reject the land.
+    #[test]
+    fn non_artifact_type_filter_excludes_artifact_creatures() {
+        let mut state = setup();
+        let artifact_creature = add_creature(&mut state, PlayerId(0), "Ornithopter");
+        state
+            .objects
+            .get_mut(&artifact_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let plain_creature = add_creature(&mut state, PlayerId(0), "Bear");
+        let land_card_id = CardId(state.next_object_id);
+        let land = create_object(
+            &mut state,
+            land_card_id,
+            PlayerId(0),
+            "Forest".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let scourglass_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![
+                TypeFilter::Permanent,
+                TypeFilter::Non(Box::new(TypeFilter::Artifact)),
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
+            controller: None,
+            properties: vec![],
+        });
+
+        assert!(
+            !matches_target_filter(
+                &state,
+                artifact_creature,
+                &scourglass_filter,
+                artifact_creature
+            ),
+            "an artifact creature must be excluded by 'except for artifacts' (CR 205.2b)"
+        );
+        assert!(
+            matches_target_filter(&state, plain_creature, &scourglass_filter, plain_creature),
+            "a plain (non-artifact, non-land) creature must survive"
+        );
+        assert!(
+            !matches_target_filter(&state, land, &scourglass_filter, land),
+            "a land must be excluded by 'except for lands'"
+        );
     }
 
     #[test]
@@ -6733,6 +6836,26 @@ mod tests {
         let filter =
             TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Tapped]));
         assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    // CR 701.27g: `Transformed` matches only permanents whose back face is up.
+    #[test]
+    fn transformed_property_matches_only_transformed() {
+        let mut state = setup();
+        let transformed = add_creature(&mut state, PlayerId(0), "Back Face");
+        let normal = add_creature(&mut state, PlayerId(0), "Front Face");
+        state.objects.get_mut(&transformed).unwrap().transformed = true;
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Transformed]));
+        assert!(
+            matches_target_filter(&state, transformed, &filter, transformed),
+            "a transformed permanent must match"
+        );
+        assert!(
+            !matches_target_filter(&state, normal, &filter, normal),
+            "a non-transformed permanent must not match"
+        );
     }
 
     // CR 702.171b: `IsSaddled` matches only objects with the saddled designation.
@@ -10121,6 +10244,66 @@ mod tests {
             &attacked_with_company,
             &source_ctx,
         ));
+    }
+
+    #[test]
+    fn attacking_defender_matches_source_chosen_player() {
+        // CR 508.1b + CR 613.1: Triarch Stalker / Beckoning Will-o'-Wisp scope
+        // attackers by the source's persisted chosen player. `attacking_defender_
+        // matches` resolves `Some(SourceChosenPlayer)` through the generic
+        // `controller_ref_player` arm, which reads the choice durably persisted on
+        // the source object (`ChosenAttribute::Player`). An attacker attacking the
+        // chosen player matches; one attacking any other player does not.
+        use crate::game::zones::create_object;
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(7);
+        let card_id = CardId(state.next_object_id);
+        let src = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Triarch Stalker".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        // The combat trigger persisted P1 as the chosen player.
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+
+        let source_ctx = SourceContext {
+            id: src,
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+            recipient_id: None,
+        };
+
+        assert!(
+            attacking_defender_matches(
+                &state,
+                &source_ctx,
+                PlayerId(1),
+                Some(&ControllerRef::SourceChosenPlayer),
+            ),
+            "an attacker attacking the persisted chosen player must match"
+        );
+        assert!(
+            !attacking_defender_matches(
+                &state,
+                &source_ctx,
+                PlayerId(0),
+                Some(&ControllerRef::SourceChosenPlayer),
+            ),
+            "an attacker attacking a non-chosen player must not match"
+        );
     }
 
     // ===========================================================================

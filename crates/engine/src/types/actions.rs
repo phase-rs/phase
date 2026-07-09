@@ -4,7 +4,8 @@ use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
-    CounterMoveChoice, CounterRemoveChoice, ShardChoice, YieldScope, YieldTarget,
+    CounterMoveChoice, CounterRemoveChoice, MayTriggerAutoChoiceKey, ShardChoice, YieldScope,
+    YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -166,6 +167,11 @@ pub enum GameAction {
     /// answering a pending `WaitingFor::ClashChooseOpponent`. `opponent` must be
     /// one of that prompt's `candidates`.
     ChooseClashOpponent {
+        opponent: PlayerId,
+    },
+    /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
+    /// to `WaitingFor::SeparatePilesChooseOpponent`.
+    ChoosePileOpponent {
         opponent: PlayerId,
     },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
@@ -335,6 +341,11 @@ pub enum GameAction {
     /// CR 701.55a: Choose one branch of a resolution-time "A or B" instruction.
     ChooseBranch {
         index: usize,
+    },
+    /// CR 119.7 + CR 119.8: Submit one of the engine-enumerated life-total redistribution
+    /// options. `option_index` indexes `WaitingFor::RedistributeLifeTotals.options`.
+    SubmitLifeRedistribution {
+        option_index: usize,
     },
     /// CR 609.7a: Choose a source of damage for a prevention or replacement effect.
     ChooseDamageSource {
@@ -616,6 +627,13 @@ pub enum GameAction {
     SetPriorityYield {
         op: PriorityYieldOp,
     },
+    /// CR 603.5: Update the acting player's stored "don't ask again" auto-choices
+    /// for optional ("may") triggered abilities. Legal in any WaitingFor state and
+    /// routed to the acting player (who may only mutate their own preferences),
+    /// mirroring `SetPriorityYield`. Pure preference propagation.
+    SetMayTriggerAutoChoice {
+        op: MayTriggerAutoChoiceOp,
+    },
     /// CR 510.1c/d: Assign damage from an attacker to its blockers (and optionally
     /// the defending player/PW with trample, plus PW controller with trample-over-PW).
     AssignCombatDamage {
@@ -787,6 +805,17 @@ pub enum PriorityYieldOp {
     Remove {
         target: YieldTarget,
     },
+    ClearAll,
+}
+
+/// CR 603.5: The mutation a `GameAction::SetMayTriggerAutoChoice` performs on the
+/// acting player's stored "don't ask again" auto-choices for optional ("may")
+/// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every stored
+/// auto-choice belonging to the acting player.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MayTriggerAutoChoiceOp {
+    Remove { key: MayTriggerAutoChoiceKey },
     ClearAll,
 }
 
@@ -1376,6 +1405,7 @@ impl GameAction {
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
             | GameAction::ChooseBranch { .. }
+            | GameAction::SubmitLifeRedistribution { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
             | GameAction::RespondToSpliceOffer { .. }
@@ -1406,6 +1436,7 @@ impl GameAction {
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChoosePileOpponent { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
@@ -1413,6 +1444,7 @@ impl GameAction {
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
             | GameAction::SetPriorityYield { .. }
+            | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }

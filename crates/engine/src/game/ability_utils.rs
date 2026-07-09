@@ -1472,6 +1472,16 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             })
             .collect()
     } else if let Effect::Attach { attachment, target } = &validated.effect {
+        // CR 608.2b (phase#4767 review): `attachment`/`target` context-refs
+        // (SelfRef, ParentTarget, ...) don't need their own target slot and
+        // are skipped below — but `validated.targets` can carry MORE entries
+        // than this Attach node's own two operands consume, propagated
+        // through for a downstream sibling in the chain (e.g. a
+        // CreateDelayedTrigger sub-ability reading the same ParentTarget).
+        // Only the entries this node's own filters actually claim get
+        // re-validated here; any remaining, un-claimed entries must pass
+        // through UNCHANGED rather than being silently dropped, or a
+        // sibling relying on them downstream loses its target.
         let mut kept = Vec::new();
         let mut target_iter = validated.targets.iter();
         for (is_attachment, filter) in [(true, attachment), (false, target)] {
@@ -1493,6 +1503,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 kept.push(legal);
             }
         }
+        kept.extend(target_iter.cloned());
         kept
     } else if let Effect::Fight { subject, target } = &validated.effect {
         // CR 608.2b + CR 701.14a: Dual-fighter fights validate each chosen
@@ -1652,6 +1663,41 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 .is_some_and(|f| f.is_context_ref()) =>
             {
                 validated.targets.clone()
+            }
+            // CR 303.4a + CR 608.2b: A plain Aura spell has no separate on-cast
+            // effect — its resolving `Effect` is the `Effect::Unimplemented`
+            // placeholder built in `casting.rs`, so `extract_target_filter_from_effect`
+            // returns `None` and lands here. Its legal targets are defined by its
+            // enchant ability (`Keyword::Enchant`), NOT by the placeholder effect,
+            // and that filter may be zone-scoped (e.g. Animate Dead's "creature
+            // card in a graveyard"). Re-validate against the Enchant filter with
+            // the SAME machinery cast-time targeting uses, so a graveyard-zone host
+            // is not fizzle-filtered by the hardcoded battlefield check below.
+            // Gated on `Effect::Unimplemented` specifically (not on Aura-ness): the
+            // `None` arm also legitimately serves `Effect::Sacrifice`/`UnattachAll`/
+            // `Bounce { selection: AtResolution }`, which must keep the plain
+            // battlefield fizzle-check.
+            None if matches!(validated.effect, Effect::Unimplemented { .. }) => {
+                match crate::game::effects::change_targets::aura_enchant_filter(
+                    state,
+                    validated.source_id,
+                ) {
+                    Some(filter) => targeting::validate_targets_for_ability(
+                        state,
+                        &validated.targets,
+                        &filter,
+                        &validated,
+                    ),
+                    None => validated
+                        .targets
+                        .iter()
+                        .filter(|target| match target {
+                            TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                            TargetRef::Player(_) => true,
+                        })
+                        .cloned()
+                        .collect(),
+                }
             }
             None => validated
                 .targets
@@ -1993,12 +2039,10 @@ fn collect_target_slots(
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        for (is_attachment, filter) in [(true, attachment), (false, target)] {
-            if !attach_side_needs_target_slot(filter, is_attachment) {
-                continue;
-            }
+        collect_attach_attachment_target_slots(state, ability, attachment, acc)?;
+        if attach_host_filter_needs_target_slot(target) {
             let legal_targets =
-                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+                legal_targets_for_ability_filter(state, ability, target, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
@@ -2824,6 +2868,216 @@ fn attach_side_needs_target_slot(filter: &TargetFilter, is_attachment: bool) -> 
     }
 }
 
+/// CR 115.1d: "attach any number of target Equipment" carries a `multi_target`
+/// spec with min 0. Honor it on the attachment operand instead of the single-slot
+/// `optional_targeting` path so the controller can choose zero Equipment.
+fn collect_attach_attachment_target_slots(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment: &TargetFilter,
+    acc: &mut SlotAccumulator,
+) -> Result<(), EngineError> {
+    if !attach_attachment_filter_needs_target_slot(attachment) {
+        return Ok(());
+    }
+    let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, &acc.slots);
+    if legal_targets.is_empty() && !ability.targeting_is_optional() {
+        return Err(EngineError::ActionNotAllowed(
+            "No legal targets available".to_string(),
+        ));
+    }
+    if let Some(spec) = ability.multi_target.as_ref() {
+        let bounds = resolve_multi_target_bounds(state, ability, spec, legal_targets.len())?;
+        for slot_index in 0..bounds.max {
+            acc.push(TargetSelectionSlot {
+                legal_targets: legal_targets.clone(),
+                optional: slot_index >= bounds.min,
+            });
+        }
+    } else {
+        acc.push(TargetSelectionSlot {
+            legal_targets,
+            optional: ability.targeting_is_optional(),
+        });
+    }
+    Ok(())
+}
+
+fn collect_attach_attachment_target_slot_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment: &TargetFilter,
+    specs: &mut Vec<TargetSlotSpec>,
+    next_instance: &mut usize,
+) {
+    if !attach_attachment_filter_needs_target_slot(attachment) {
+        return;
+    }
+    if let Some(spec) = ability.multi_target.as_ref() {
+        let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, &[]);
+        if let Ok(bounds) = resolve_multi_target_bounds(state, ability, spec, legal_targets.len()) {
+            let id = TargetInstanceId(*next_instance);
+            *next_instance += 1;
+            for slot_index in 0..bounds.max {
+                specs.push(TargetSlotSpec {
+                    filter: attachment.clone(),
+                    optional: slot_index >= bounds.min,
+                    instance: id,
+                });
+            }
+        }
+    } else {
+        let id = TargetInstanceId(*next_instance);
+        *next_instance += 1;
+        specs.push(TargetSlotSpec {
+            filter: attachment.clone(),
+            optional: ability.targeting_is_optional(),
+            instance: id,
+        });
+    }
+}
+
+/// Slot bounds for the attachment operand of `Effect::Attach`, mirroring
+/// `collect_attach_attachment_target_slots` so assignment consumes exactly the
+/// surfaced attachment window and does not bleed into a trailing host slot.
+fn attach_attachment_slot_bounds(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment: &TargetFilter,
+) -> Result<Option<MultiTargetBounds>, EngineError> {
+    if !attach_attachment_filter_needs_target_slot(attachment) {
+        return Ok(None);
+    }
+    if let Some(spec) = &ability.multi_target {
+        let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, &[]);
+        let bounds = resolve_multi_target_bounds(state, ability, spec, legal_targets.len())?;
+        Ok(Some(bounds))
+    } else {
+        Ok(Some(MultiTargetBounds {
+            min: usize::from(!ability.targeting_is_optional()),
+            max: 1,
+        }))
+    }
+}
+
+fn assign_attach_attachment_selected_slots(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    attachment: &TargetFilter,
+    selected_slots: &[Option<TargetRef>],
+    next_slot: &mut usize,
+) -> Result<(), EngineError> {
+    let Some(bounds) = attach_attachment_slot_bounds(state, ability, attachment)? else {
+        return Ok(());
+    };
+    let allow_skip = ability.targeting_is_optional();
+    if ability.multi_target.is_some() {
+        let attachment_slot_count = bounds.max;
+        let end_slot = *next_slot + attachment_slot_count;
+        let Some(window) = selected_slots.get(*next_slot..end_slot) else {
+            return Err(EngineError::InvalidAction(
+                "Missing target selection".to_string(),
+            ));
+        };
+        if window.len() < bounds.min
+            || window[..bounds.min.min(window.len())]
+                .iter()
+                .any(Option::is_none)
+        {
+            return Err(EngineError::InvalidAction(
+                "Missing required target".to_string(),
+            ));
+        }
+        ability.targets.extend(window.iter().flatten().cloned());
+        *next_slot = end_slot;
+    } else {
+        let Some(selected_slot) = selected_slots.get(*next_slot) else {
+            return Err(EngineError::InvalidAction(
+                "Missing target selection".to_string(),
+            ));
+        };
+        match selected_slot {
+            Some(target) => ability.targets.push(target.clone()),
+            None if allow_skip => {}
+            None => {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            }
+        }
+        *next_slot += 1;
+    }
+    Ok(())
+}
+
+fn attach_declared_host_slot_reserve(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host: &TargetFilter,
+    targets: &[TargetRef],
+    next_target: usize,
+) -> usize {
+    if !attach_host_filter_needs_target_slot(host) {
+        return 0;
+    }
+    if !ability.optional_targeting {
+        return 1;
+    }
+    let Some(last) = targets.last() else {
+        return 0;
+    };
+    if targets.len() <= next_target {
+        return 0;
+    }
+    let legal_hosts = legal_targets_for_ability_filter(state, ability, host, &[]);
+    usize::from(legal_hosts.contains(last))
+}
+
+fn assign_attach_attachment_declared_targets(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    attachment: &TargetFilter,
+    host: &TargetFilter,
+    targets: &[TargetRef],
+    next_target: &mut usize,
+) -> Result<(), EngineError> {
+    let Some(bounds) = attach_attachment_slot_bounds(state, ability, attachment)? else {
+        return Ok(());
+    };
+    let allow_skip = ability.targeting_is_optional();
+    if ability.multi_target.is_some() {
+        let remaining = targets.len().saturating_sub(*next_target);
+        let host_reserved =
+            attach_declared_host_slot_reserve(state, ability, host, targets, *next_target);
+        let attachment_window = remaining.saturating_sub(host_reserved).min(bounds.max);
+        if remaining.saturating_sub(host_reserved) < bounds.min {
+            return Err(EngineError::InvalidAction(
+                "Missing required target".to_string(),
+            ));
+        }
+        for slot_index in 0..attachment_window {
+            if let Some(target) = targets.get(*next_target) {
+                ability.targets.push(target.clone());
+                *next_target += 1;
+            } else if slot_index < bounds.min {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            } else {
+                break;
+            }
+        }
+    } else if let Some(target) = targets.get(*next_target) {
+        ability.targets.push(target.clone());
+        *next_target += 1;
+    } else if !allow_skip {
+        return Err(EngineError::InvalidAction(
+            "Missing required target".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
 /// carries a `controller` (or `Owned` property) satisfying `pred`. Shared walker
 /// behind `filter_references_target_player` / `filter_references_target_opponent`.
@@ -3507,16 +3761,21 @@ fn collect_target_slot_specs(
             }
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        for (is_attachment, filter) in [(true, attachment), (false, target)] {
-            if attach_side_needs_target_slot(filter, is_attachment) {
-                let id = TargetInstanceId(*next_instance);
-                *next_instance += 1;
-                specs.push(TargetSlotSpec {
-                    filter: filter.clone(),
-                    optional: ability.optional_targeting,
-                    instance: id,
-                });
-            }
+        collect_attach_attachment_target_slot_specs(
+            state,
+            ability,
+            attachment,
+            specs,
+            next_instance,
+        );
+        if attach_host_filter_needs_target_slot(target) {
+            let id = TargetInstanceId(*next_instance);
+            *next_instance += 1;
+            specs.push(TargetSlotSpec {
+                filter: target.clone(),
+                optional: ability.optional_targeting,
+                instance: id,
+            });
         }
     } else if let Effect::CreateDamageReplacement {
         recipient_object_filter,
@@ -5283,16 +5542,24 @@ fn assign_targets_recursive(
     }
 
     if let Effect::Attach { attachment, target } = &ability.effect {
-        for (is_attachment, filter) in [(true, attachment), (false, target)] {
-            if attach_side_needs_target_slot(filter, is_attachment) {
-                if let Some(target) = targets.get(*next_target) {
-                    ability.targets.push(target.clone());
-                    *next_target += 1;
-                } else if !ability.optional_targeting {
-                    return Err(EngineError::InvalidAction(
-                        "Missing required target".to_string(),
-                    ));
-                }
+        let attachment = attachment.clone();
+        let target = target.clone();
+        assign_attach_attachment_declared_targets(
+            state,
+            ability,
+            &attachment,
+            &target,
+            targets,
+            next_target,
+        )?;
+        if attach_host_filter_needs_target_slot(&target) {
+            if let Some(target) = targets.get(*next_target) {
+                ability.targets.push(target.clone());
+                *next_target += 1;
+            } else if !ability.optional_targeting {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
@@ -5547,24 +5814,31 @@ fn assign_selected_slots_recursive(
     }
 
     if let Effect::Attach { attachment, target } = &ability.effect {
-        for (is_attachment, filter) in [(true, attachment), (false, target)] {
-            if attach_side_needs_target_slot(filter, is_attachment) {
-                let Some(selected_slot) = selected_slots.get(*next_slot) else {
+        let attachment = attachment.clone();
+        let target = target.clone();
+        assign_attach_attachment_selected_slots(
+            state,
+            ability,
+            &attachment,
+            selected_slots,
+            next_slot,
+        )?;
+        if attach_host_filter_needs_target_slot(&target) {
+            let Some(selected_slot) = selected_slots.get(*next_slot) else {
+                return Err(EngineError::InvalidAction(
+                    "Missing target selection".to_string(),
+                ));
+            };
+            match selected_slot {
+                Some(target) => ability.targets.push(target.clone()),
+                None if ability.optional_targeting => {}
+                None => {
                     return Err(EngineError::InvalidAction(
-                        "Missing target selection".to_string(),
+                        "Missing required target".to_string(),
                     ));
-                };
-                match selected_slot {
-                    Some(target) => ability.targets.push(target.clone()),
-                    None if ability.optional_targeting => {}
-                    None => {
-                        return Err(EngineError::InvalidAction(
-                            "Missing required target".to_string(),
-                        ));
-                    }
                 }
-                *next_slot += 1;
             }
+            *next_slot += 1;
         }
         if defers_sub_ability_target_selection(&ability.effect) {
             assign_selected_slots_after_deferred_effect(
@@ -6861,6 +7135,49 @@ mod tests {
             ),
             "a delayed-return ParentTarget ability must not fizzle when its \
              snapshotted object is off the battlefield"
+        );
+    }
+
+    /// CR 608.2b (phase-rs/phase#5449 review): an `Effect::Attach` node whose
+    /// `attachment`/`target` are both context-refs (SelfRef/ParentTarget —
+    /// neither needs its own target slot) must not have its `.targets` wiped
+    /// to `[]` when the node carries MORE entries than its own two operands
+    /// consume — those extra entries are propagated through for a downstream
+    /// sibling (e.g. a chained `CreateDelayedTrigger` reading the same
+    /// `ParentTarget`), not this node's own operands, and must survive
+    /// re-validation unchanged.
+    #[test]
+    fn validate_targets_in_chain_attach_preserves_unclaimed_propagated_targets() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let creature = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Attach{SelfRef, ParentTarget} — neither operand needs a slot — but
+        // `.targets` carries the propagated creature id for a downstream
+        // sibling, not for this node's own attachment/target resolution.
+        let ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Object(creature)],
+            "an Attach node's un-claimed propagated targets must pass through \
+             re-validation unchanged, not be dropped just because neither of \
+             this node's own operands needed a target slot"
         );
     }
 
@@ -9912,6 +10229,152 @@ mod tests {
         assert_eq!(
             flatten_targets_in_chain(&ability),
             vec![TargetRef::Player(PlayerId(1))]
+        );
+    }
+
+    /// CR 115.1d + CR 701.3a: variable-count Equipment attachment slots must not
+    /// consume a trailing explicit host target (issue #5339 review).
+    #[test]
+    fn assign_selected_slots_attach_multi_target_preserves_explicit_host() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(1);
+        let equipment_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        let equipment_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Skullclamp".to_string(),
+            Zone::Battlefield,
+        );
+        let host = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [equipment_a, equipment_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+
+        let slots = build_target_slots(&state, &ability).expect("slot build");
+        assert_eq!(
+            slots.len(),
+            3,
+            "two optional Equipment slots plus one required host slot"
+        );
+        assert!(slots[0].optional && slots[1].optional);
+        assert!(!slots[2].optional, "explicit host must stay required");
+
+        assign_selected_slots_in_chain(
+            &state,
+            &mut ability,
+            &[
+                Some(TargetRef::Object(equipment_a)),
+                None,
+                Some(TargetRef::Object(host)),
+            ],
+        )
+        .expect("assign attachment window then host");
+
+        assert_eq!(
+            ability.targets,
+            vec![TargetRef::Object(equipment_a), TargetRef::Object(host),],
+            "host must not be folded into the attachment multi-target window"
+        );
+    }
+
+    /// CR 601.2c: compact declared targets (no per-slot `None` padding) must
+    /// reserve the explicit host on the attachment operand window — mirrors the
+    /// selected-slot path (issue #5339 review).
+    #[test]
+    fn assign_targets_in_chain_attach_compact_declared_preserves_explicit_host() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(1);
+        let equipment_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bonesplitter".to_string(),
+            Zone::Battlefield,
+        );
+        let _equipment_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Skullclamp".to_string(),
+            Zone::Battlefield,
+        );
+        let host = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [equipment_a, _equipment_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+        }
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::unlimited(0));
+
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[TargetRef::Object(equipment_a), TargetRef::Object(host)],
+        )
+        .expect("compact declared targets: one Equipment plus required host");
+
+        assert_eq!(
+            ability.targets,
+            vec![TargetRef::Object(equipment_a), TargetRef::Object(host),],
+            "declared-target path must not consume the host as a second attachment"
         );
     }
 

@@ -47,8 +47,8 @@ use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
     parse_event_context_ref, parse_fight_target, parse_mass_type_union, parse_target,
-    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, resolve_pronoun_target,
-    TargetSyntax,
+    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, parse_word_bounded,
+    resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -770,8 +770,13 @@ pub(super) fn parse_numeric_imperative_ast(
         // base Fixed count to factor × <for-each>.
         // Only upgrades a successfully parsed Fixed count — preserves Fixed(1) when
         // no/unparsed `for each` tail, and keeps a dynamic base unchanged.
+        let remainder = remainder.trim().trim_end_matches('.').trim();
         if let Some(for_each_expr) = parse_for_each_multiplier_prefix(remainder) {
             count = replace_fixed_quantity(count, for_each_expr);
+        } else if let Some(where_x_count) = parse_draw_cards_where_x_tail(remainder) {
+            count = where_x_count;
+        } else if !draw_count_tail_is_complete(remainder) {
+            return None;
         }
         return Some(NumericImperativeAst::Draw { count, up_to });
     }
@@ -1881,6 +1886,12 @@ pub(super) fn parse_targeted_action_ast(
                         enters_under: None,
                         enter_tapped: false,
                         enter_with_counters: vec![],
+                    })
+                } else if origin.is_some() {
+                    Some(TargetedImperativeAst::ReturnToZone {
+                        target,
+                        origin,
+                        destination: Zone::Hand,
                     })
                 } else {
                     Some(TargetedImperativeAst::Return { target, selection })
@@ -3428,6 +3439,50 @@ fn parse_choose_discard_rest_of_hand(text: &str, lower: &str) -> Option<Targeted
     })
 }
 
+/// CR 701.13a + CR 109.5 + CR 608.2c: "choose a[n] <type> they control and
+/// [verb]s it" — the per-actor edict where the chooser both selects and acts on
+/// one of their own permanents (Sothera, the Supervoid: "each opponent chooses a
+/// creature they control and exiles it"). The "each opponent" subject and its
+/// leading verb are already stripped / de-inflected to "choose" by the
+/// player-scope layer, so this operates on the post-"choose " body; the inner
+/// verb keeps its third-person "-s" inflection ("exiles it").
+///
+/// Reparses to the controller-scoped edict ("exile a creature you control",
+/// controller `You`). `You` is CORRECT at parse time: the each-actor driver
+/// rebinds `ability.controller` to each iterated player at runtime
+/// (`set_controller_recursive`), and `FilterContext::from_ability` resolves the
+/// reparsed filter's `ControllerRef::You` to the ITERATING actor — so each actor
+/// exiles from their OWN permanents (CR 109.5). The verb axis is a single
+/// `alt()`, covering the edict class (exile / sacrifice / destroy) without
+/// proliferating recognizers.
+fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    let (_, (_, type_text, _, verb, _, _, _)) = (
+        alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))),
+        take_until::<_, _, OracleError<'_>>(" they control and "),
+        tag::<_, _, OracleError<'_>>(" they control and "),
+        alt((
+            value("exile", tag::<_, _, OracleError<'_>>("exiles")),
+            value("sacrifice", tag("sacrifices")),
+            value("destroy", tag("destroys")),
+        )),
+        tag::<_, _, OracleError<'_>>(" it"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+        eof,
+    )
+        .parse(rest_lower)
+        .ok()?;
+    // Validate the captured phrase is a real object type with no leftover text —
+    // keeps the recognizer precise so it never hijacks unrelated "choose a …"
+    // bodies whose type phrase is junk or carries a trailing predicate.
+    let (filter, filter_rem) = parse_type_phrase(type_text);
+    if !filter_rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some(ChooseImperativeAst::Reparse {
+        text: format!("{verb} a {type_text} you control"),
+    })
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -3502,6 +3557,16 @@ pub(super) fn parse_choose_ast(
         // parser, mirroring `try_parse_proliferate_target`'s
         // "for each kind of counter on " + `parse_target` structure.
         if let Some(ast) = try_parse_choose_counter_on_target(rest) {
+            return Some(ast);
+        }
+
+        // CR 701.13a + CR 109.5 + CR 608.2c: "choose a <type> they control and
+        // [verb]s it" — the per-actor edict (Sothera, the Supervoid). Must
+        // precede `is_choose_as_targeting`, which would otherwise Reparse the
+        // whole conjoined body (parse_effect fails → `Effect::Unimplemented`)
+        // and drop the exile. Operates on `rest_lower` (the "choose " strip has
+        // de-inflected the leading actor verb; the inner "exiles" keeps its -s).
+        if let Some(ast) = try_parse_choose_and_verb_it_edict(rest_lower) {
             return Some(ast);
         }
 
@@ -5148,12 +5213,37 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
     let (target, rest) = parse_target_with_ctx(text, ctx);
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();
-        let lower = trimmed.to_lowercase();
-        if matches!(lower.trim(), "her" | "him") {
+        let lower = trimmed.to_ascii_lowercase();
+        if parse_gendered_attach_self_recipient(lower.trim()).is_ok() {
             return (TargetFilter::SelfRef, &trimmed[lower.len()..]);
+        }
+        if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
+            && attach_neuter_recipient_resolves_via_subject(ctx)
+        {
+            return (resolve_it_pronoun(ctx), &trimmed[lower.len()..]);
         }
     }
     (target, rest)
+}
+
+fn attach_neuter_recipient_resolves_via_subject(ctx: &ParseContext) -> bool {
+    match &ctx.subject {
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => true,
+        Some(_) => !ctx.parent_target_is_chosen,
+        None => !ctx.parent_target_available,
+    }
+}
+
+fn parse_gendered_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(alt((
+        |i| parse_word_bounded(i, "her"),
+        |i| parse_word_bounded(i, "him"),
+    )))
+    .parse(input)
+}
+
+fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(|i| parse_word_bounded(i, "it")).parse(input)
 }
 
 /// CR 608.2c + CR 301.5: Resolve an Attach effect's `attachment` argument.
@@ -7654,6 +7744,89 @@ fn parse_connive_count_expr<'a>(rest_orig: &'a str, lower_rest: &str) -> (Quanti
     (QuantityExpr::Fixed { value: 1 }, rest_orig)
 }
 
+fn parse_draw_cards_where_x_tail(remainder: &str) -> Option<QuantityExpr> {
+    let remainder_lower = remainder.to_ascii_lowercase();
+    let (after_cards_lower, _) = alt((
+        tag::<_, _, OracleError<'_>>("cards"),
+        tag::<_, _, OracleError<'_>>("card"),
+    ))
+    .parse(remainder_lower.as_str())
+    .ok()?;
+    let consumed = remainder_lower.len() - after_cards_lower.len();
+    let after_cards = remainder.get(consumed..)?;
+    let where_tail_lower = after_cards.trim_start().to_ascii_lowercase();
+    let (qty_text_lower, _) = preceded(
+        opt(tag::<_, _, OracleError<'_>>(",")),
+        preceded(space0, tag("where x is ")),
+    )
+    .parse(where_tail_lower.as_str())
+    .ok()?;
+    let consumed_where = where_tail_lower.len() - qty_text_lower.len();
+    let trimmed_after_cards = after_cards.trim_start();
+    let qty_text = trimmed_after_cards.get(consumed_where..)?.trim();
+    let qty_text = terminated(
+        take_until::<_, _, OracleError<'_>>("."),
+        tag::<_, _, OracleError<'_>>("."),
+    )
+    .parse(qty_text)
+    .map_or(qty_text, |(_, sentence)| sentence.trim());
+    parse_where_x_quantity_expression(qty_text)
+}
+
+fn draw_count_tail_is_complete(remainder: &str) -> bool {
+    let remainder_lower = remainder
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_ascii_lowercase();
+    if remainder_lower.is_empty() {
+        return true;
+    }
+    let after_noun = (
+        opt(tag::<_, _, OracleError<'_>>("additional ")),
+        alt((tag("cards"), tag("card"))),
+    )
+        .parse(remainder_lower.as_str())
+        .ok()
+        .map(|(rest, _)| rest.trim_start());
+    if let Some(after_noun) = after_noun {
+        if tag::<_, _, OracleError<'_>>("and proliferate")
+            .parse(after_noun)
+            .is_ok()
+            || preceded(
+                opt(tag::<_, _, OracleError<'_>>(",")),
+                preceded(space0, tag("where x is ")),
+            )
+            .parse(after_noun)
+            .is_ok()
+        {
+            return false;
+        }
+    }
+    let complete = all_consuming((
+        opt(tag::<_, _, OracleError<'_>>("additional ")),
+        alt((tag("cards"), tag("card"))),
+        opt(preceded(
+            opt(tag(",")),
+            preceded(
+                space0,
+                alt((
+                    tag("rounded down"),
+                    tag("rounded up"),
+                    tag("rounded down to the nearest whole number"),
+                    tag("rounded up to the nearest whole number"),
+                )),
+            ),
+        )),
+    ))
+    .parse(remainder_lower.as_str())
+    .is_ok();
+    complete
+        || tag::<_, _, OracleError<'_>>("and proliferate")
+            .parse(remainder_lower.as_str())
+            .is_err()
+}
+
 fn resolve_exile_top_where_x_binding(after_lib: &str, initial_count: QuantityExpr) -> QuantityExpr {
     let trimmed = after_lib
         .trim_start()
@@ -8349,6 +8522,32 @@ pub(super) fn parse_imperative_family_ast(
             player_a: TargetFilter::Player,
             player_b: TargetFilter::Player,
         });
+    }
+
+    // CR 119.7 + CR 119.8: "redistribute any number of players' life totals" (Reverse the
+    // Sands, The Doctor's Tomb) and the bare "redistribute any number of life
+    // totals" (You Live Only Because I Will It — Archenemy scheme). Verb-initial,
+    // but handled here as an anchored whole-phrase production (alongside the
+    // ExchangeLifeTotals sibling above) so the generic "any number of" quantifier
+    // stripping in later dispatch can't fragment the phrase. The reminder text
+    // ("(Each of those players gets one life total back.)" / "(Each affected
+    // player or team gets one of those life totals back.)") is stripped upstream.
+    // The possessive subject ("players'") is an optional axis so the whole class
+    // parses; accept both the ASCII (`players'`) and typographic
+    // (`players\u{2019}`) apostrophe as a single `alt()` axis (compose, don't
+    // enumerate).
+    if all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("redistribute any number of "),
+            opt((tag("players"), alt((tag("'"), tag("\u{2019}"))), tag(" "))),
+            tag("life totals"),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::RedistributeLifeTotals);
     }
 
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
@@ -9829,12 +10028,17 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
     };
 
     // Parse quantity + counter kind from the remaining text.
-    // Patterns: "a poison" / "an experience" / "two rad" / "10 poison"
-    let (count, counter_kind) =
-        if let Ok((kind, _)) = nom_primitives::parse_article.parse(before_counter) {
-            (1u32, kind.trim())
+    // Patterns: "that many poison" / "a poison" / "an experience" / "two rad" / "10 poison"
+    // CR 608.2h: "that many/much <kind> counters" binds the triggering event's
+    // amount (e.g. Etali, Primal Sickness — combat damage → that many poison
+    // counters); the amount is determined once, when the effect is applied.
+    let (count, counter_kind): (QuantityExpr, &str) =
+        if let Ok((rest, qty)) = nom_quantity::parse_that_much_or_many(before_counter) {
+            (QuantityExpr::Ref { qty }, rest.trim())
+        } else if let Ok((kind, _)) = nom_primitives::parse_article.parse(before_counter) {
+            (QuantityExpr::Fixed { value: 1 }, kind.trim())
         } else if let Ok((rest, n)) = nom_primitives::parse_number.parse(before_counter) {
-            (n, rest.trim())
+            (QuantityExpr::Fixed { value: n as i32 }, rest.trim())
         } else {
             return None;
         };
@@ -9845,22 +10049,20 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
         return None;
     }
 
-    // CR 122.1b: Map to typed PlayerCounterKind — reject anything that's an object counter.
-    // Energy counters are NOT included — they use the dedicated GainEnergy effect.
-    let kind = match counter_kind {
-        "poison" => PlayerCounterKind::Poison,
-        "experience" => PlayerCounterKind::Experience,
-        "rad" => PlayerCounterKind::Rad,
-        "ticket" => PlayerCounterKind::Ticket,
-        _ => return None,
-    };
+    // CR 122.1: Map to typed PlayerCounterKind — reject anything that's an object
+    // counter. Energy counters are NOT included (they use the dedicated
+    // GainEnergy effect). Single authority: `nom_primitives::parse_player_counter_kind`,
+    // shared with the oracle_nom threshold rider. `all_consuming` enforces that
+    // the whole kind word is a recognized player counter (so "poisonx" is
+    // rejected rather than matching the "poison" prefix).
+    let (_, kind) = all_consuming(nom_primitives::parse_player_counter_kind)
+        .parse(counter_kind)
+        .ok()?;
 
     let _ = plural; // plural is just grammatical, doesn't affect semantics
     Some(ImperativeFamilyAst::GivePlayerCounter {
         counter_kind: kind,
-        count: QuantityExpr::Fixed {
-            value: count as i32,
-        },
+        count,
     })
 }
 
@@ -10764,6 +10966,9 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b } => {
             Effect::ExchangeLifeTotals { player_a, player_b }
         }
+        // CR 119.7 + CR 119.8: field-less interactive life-total redistribution. The
+        // resolver self-gathers participants, so no target wiring is needed.
+        ImperativeFamilyAst::RedistributeLifeTotals => Effect::RedistributeLifeTotals,
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to
         // static_definitions, where combat.rs checks it.
@@ -12775,30 +12980,68 @@ mod tests {
 
     #[test]
     fn parse_attach_target_equipment_to_self_pronoun() {
-        let input = "attach up to one target Equipment you control to her";
+        for input in [
+            "attach up to one target Equipment you control to her",
+            "attach up to one target Equipment you control to it",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+            let Some(UtilityImperativeAst::Attach {
+                attachment,
+                target,
+                multi_target,
+            }) = result
+            else {
+                panic!("{input}: expected Attach, got {result:?}");
+            };
+            assert_eq!(
+                attachment,
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You)
+                ),
+                "{input}"
+            );
+            assert_eq!(target, TargetFilter::SelfRef, "{input}");
+            assert_eq!(
+                multi_target,
+                Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_attach_recipient_it_preserves_available_parent_target() {
+        let input = "attach up to one target Equipment you control to it";
         let lower = input.to_lowercase();
-        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
-        let Some(UtilityImperativeAst::Attach {
-            attachment,
-            target,
-            multi_target,
-        }) = result
-        else {
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { target, .. }) = result else {
             panic!("{input}: expected Attach, got {result:?}");
         };
-        assert_eq!(
-            attachment,
-            TargetFilter::Typed(
-                TypedFilter::default()
-                    .subtype("Equipment".to_string())
-                    .controller(ControllerRef::You)
-            )
-        );
-        assert_eq!(target, TargetFilter::SelfRef);
-        assert_eq!(
-            multi_target,
-            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
-        );
+        assert_eq!(target, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn parse_attach_recipient_it_preserves_chosen_parent_target_for_self_subject() {
+        let input = "attach up to one target Equipment you control to it";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            parent_target_available: true,
+            parent_target_is_chosen: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { target, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(target, TargetFilter::ParentTarget);
     }
 
     #[test]
@@ -14735,6 +14978,90 @@ mod tests {
         );
     }
 
+    /// CR 608.2h: "get that many <kind> counters" binds the triggering event's
+    /// amount (Etali, Primal Sickness: combat damage → that many poison
+    /// counters). Revert-failing: without the `parse_that_much_or_many` arm the
+    /// count matches neither `parse_article` nor `parse_number`, so
+    /// `try_parse_player_counter` returns None and the effect lowers to
+    /// `Effect::Unimplemented`.
+    #[test]
+    fn parse_player_counter_that_many_binds_event_amount() {
+        match try_parse_player_counter("get that many poison counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Poison);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                ));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Class coverage: the "that many" amount arm generalizes across the whole
+    /// player-counter kind set (experience, not just poison).
+    #[test]
+    fn parse_player_counter_that_many_experience() {
+        match try_parse_player_counter("get that many experience counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Experience);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                ));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Sibling reach-guard: the new that-many arm must not swallow the fixed
+    /// article/number forms — "get a poison counter" still binds Fixed 1 and
+    /// "gets two rad counters" still binds Fixed 2 (proves the fixed arms are
+    /// reached, not short-circuited).
+    #[test]
+    fn parse_player_counter_fixed_arms_unaffected() {
+        match try_parse_player_counter("get a poison counter") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Poison);
+                assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+        match try_parse_player_counter("gets two rad counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Rad);
+                assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Hostile: "+1/+1 counter" is an object counter, not a player counter —
+    /// the that-many arm must not misroute it (the `+`/`-` guard still rejects).
+    #[test]
+    fn parse_player_counter_that_many_rejects_object_counter() {
+        assert!(
+            try_parse_player_counter("gets a +1/+1 counter").is_none(),
+            "Object counter must not parse as a player counter"
+        );
+    }
+
     /// CR 107.17: Each `{TK}` glyph is one ticket counter. "get {tk}{tk}" → 2.
     /// Building-block test: exercises the symbol-counting branch across counts.
     #[test]
@@ -15592,6 +15919,34 @@ mod tests {
             }
             other => panic!("Expected FromTrackedSet, got {other:?}"),
         }
+    }
+
+    // CR 701.13a + CR 109.5: Sothera, the Supervoid's per-actor edict. The
+    // post-strip body ("choose a creature they control and exiles it") must
+    // reparse to the controller-scoped edict "exile a creature you control".
+    #[test]
+    fn parse_choose_creature_they_control_and_exiles_it() {
+        let text = "choose a creature they control and exiles it";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::Reparse { text }) => {
+                assert_eq!(text, "exile a creature you control");
+            }
+            other => panic!("Expected Reparse(\"exile a creature you control\"), got {other:?}"),
+        }
+    }
+
+    // Anti-Unimplemented reach-guard: the reparsed edict text must itself parse
+    // to a real exile effect (not Unimplemented), proving the Reparse produces a
+    // resolvable body rather than silently degrading.
+    #[test]
+    fn choose_and_exiles_it_reparse_body_is_not_unimplemented() {
+        let effect = super::super::parse_effect("exile a creature you control");
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "reparsed edict body must resolve to a real exile effect, got {effect:?}"
+        );
     }
 
     #[test]
@@ -18321,6 +18676,42 @@ mod tests {
             }
             other => panic!("expected Draw imperative, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn draw_rejects_unsplit_proliferate_tail() {
+        let text = "draw a card and proliferate";
+        assert!(
+            parse_numeric_imperative_ast(text, text).is_none(),
+            "draw parser must not swallow an unrelated proliferate tail"
+        );
+    }
+
+    #[test]
+    fn draw_accepts_supported_followup_tails() {
+        for text in [
+            "draw a card and target opponent may draw a card",
+            "draw a card and that opponent discards a card",
+            "draw a card and blight 1",
+            "draw a card and repeat this process",
+            "draw two cards and target opponent discards two cards",
+            "draw x cards and the chosen creatures get +X/+X and gain trample until end of turn, where X is the difference between the chosen creatures' powers",
+            "draw x cards, where X is the number of permanent types among cards in your graveyard",
+        ] {
+            assert!(
+                parse_numeric_imperative_ast(text, &text.to_ascii_lowercase()).is_some(),
+                "draw parser must keep the supported draw head for: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn draw_rejects_unsupported_where_x_tail() {
+        let text = "draw x cards, where x is the mystery total";
+        assert!(
+            parse_numeric_imperative_ast(text, text).is_none(),
+            "draw parser must not accept unsupported where-X quantity tails"
+        );
     }
 
     #[test]

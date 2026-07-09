@@ -37,7 +37,8 @@ use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
-    parse_continuous_modifications, parse_static_line, parse_static_line_multi,
+    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
+    parse_static_line_multi, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
@@ -154,6 +155,26 @@ pub(super) fn try_parse_subject_predicate_ast(
     // power and toughness") cannot be re-derived by `find_predicate_start`.
     if let Some(clause) = try_parse_subject_base_pt_set_clause_ast(text, ctx) {
         return Some(clause);
+    }
+
+    // CR 611.3 + CR 105.2 + CR 305.7: "all <X> become <P> and all <Y> become <Q>"
+    // — a compound-quantified dual-subject become effect (Nightcreep: "all
+    // creatures become black and all lands become Swamps"). Each conjunct carries
+    // its own subject and predicate; must run before `try_parse_subject_become_clause`,
+    // which would claim only the first conjunct and drop the second into the
+    // static description. Sibling of the compound-subject static handlers in
+    // `oracle_static/type_change.rs` (#5219 class).
+    if let Some(clause) = try_parse_compound_all_subjects_become_clause(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability| PredicateAst::Become {
+                effect,
+                duration,
+                sub_ability,
+            },
+            ctx,
+        ));
     }
 
     if let Some(clause) = try_parse_subject_become_clause(text, ctx) {
@@ -574,6 +595,83 @@ fn build_additive_type_continuous_clause(
             target: application.target.clone(),
         },
         duration: Some(Duration::Permanent),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 611.3 + CR 105.2 + CR 305.7: "all `<X>` become `<P>` and all `<Y>` become
+/// `<Q>`" — compound-quantified dual-subject become. Nightcreep is the exemplar:
+/// each conjunct applies its own subject-specific transformation (creatures →
+/// black, lands → Swamp). Declines when fewer than two conjuncts resolve, when
+/// any conjunct lacks a become verb, or when subjects share one predicate
+/// ("all creatures and all lands become Swamps").
+fn try_parse_compound_all_subjects_become_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let conjuncts = peel_compound_all_quantified_conjuncts(text)?;
+    let mut static_abilities = Vec::new();
+    let mut merged_duration = None;
+    let mut merged_target = None;
+
+    for conjunct in conjuncts {
+        let conjunct_lower = conjunct.to_lowercase();
+        let tp = TextPair::new(&conjunct, &conjunct_lower);
+        let (subject_tp, predicate_tp) = tp
+            .split_around(" becomes ")
+            .or_else(|| tp.split_around(" become "))?;
+        let predicate_with_verb = if nom_primitives::scan_contains(&conjunct_lower, " becomes ") {
+            format!("becomes {}", predicate_tp.original.trim())
+        } else {
+            format!("become {}", predicate_tp.original.trim())
+        };
+        let predicate_lower = predicate_with_verb.to_lowercase();
+        alt((tag::<_, _, OracleError<'_>>("become "), tag("becomes ")))
+            .parse(predicate_lower.as_str())
+            .ok()?;
+        let affected = parse_continuous_subject_filter(subject_tp.original.trim())?;
+        let application = SubjectApplication {
+            affected,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        };
+        let clause = build_become_clause(application, &predicate_with_verb, ctx)?;
+        let Effect::GenericEffect {
+            static_abilities: mut defs,
+            duration,
+            target,
+            ..
+        } = clause.effect
+        else {
+            return None;
+        };
+        if merged_duration.is_none() {
+            merged_duration = duration.or(clause.duration);
+        }
+        if merged_target.is_none() {
+            merged_target = target;
+        }
+        static_abilities.append(&mut defs);
+    }
+
+    if static_abilities.len() < 2 {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities,
+            duration: merged_duration.clone(),
+            target: merged_target,
+        },
+        duration: merged_duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -2439,6 +2537,28 @@ pub(super) fn parse_subject_application(
         });
     }
 
+    // CR 608.2k + CR 509.1/509.3d: "the other creature" — the creature on the
+    // opposite side of a compound blocks-or-becomes-blocked pairing (Mammoth
+    // Harness, Venom). Unconditionally ParentTarget (unlike "that creature"):
+    // the antecedent flips per-firing-orientation, which
+    // `blocked_attacker_from_event` already disambiguates from the resolved
+    // event shape, regardless of ctx.subject.
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("the other ").parse(lower.as_str())
+    {
+        let consumed = lower.len() - rest_subject.len();
+        let original_rest = &subject[consumed..];
+        let (filter, rem) = parse_type_phrase(original_rest);
+        if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: Some(TargetFilter::ParentTarget),
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
+    }
+
     // CR 608.2c: "that creature/permanent/land" — anaphoric back-reference to a
     // previously mentioned object in the same effect sequence. Strip "that " and parse
     // the remainder as a type phrase. Covers all "that [type]" patterns generically.
@@ -2927,13 +3047,47 @@ fn try_split_pump_compound(
 
 fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
     let lower = predicate.to_lowercase();
-    let (choice_text, _) = tag::<_, _, OracleError<'_>>("gain your choice of ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
-    let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-    let first = parse_keyword_from_oracle(left.trim())?;
-    let second = parse_keyword_from_oracle(right.trim())?;
+
+    // Shape 1: "gain your choice of X or Y" — an explicit keyword-grant menu.
+    if let Ok((choice_text, _)) =
+        tag::<_, _, OracleError<'_>>("gain your choice of ").parse(lower.as_str())
+    {
+        let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
+        let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
+        let first = parse_keyword_from_oracle(left.trim())?;
+        let second = parse_keyword_from_oracle(right.trim())?;
+        return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
+    }
+
+    // Shape 2: "gain/have protection from X or from the color of your choice"
+    // (Angelic Intervention, Apostle's Blessing, Giver of Runes, Jeweled Spirit,
+    // Razor Barrier). The predicate arrives DECONJUGATED (gains→gain, has→have),
+    // so anchor on the bare forms — never "gains"/"has".
+    // CR 608.2d: a choice offered by a resolving ability is announced as the
+    // effect is applied (choose one protection).
+    // CR 702.16a: protection from [quality] (color, colorless, or card type).
+    let (remainder, _) = alt((
+        tag::<_, _, OracleError<'_>>("gain protection from "),
+        tag("have protection from "),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let (quality_text, duration) = super::strip_trailing_duration(remainder);
+    // GUARDRAIL: split on the literal " or from " (NOT " or "). Splitting on
+    // " or " would leave the right half as "from the color of your choice",
+    // which parse_protection_target's `from `-prefix arm routes to Quality —
+    // silently killing the color choice. When there is no " or from " this is a
+    // single protection grant, so return None and fall through to the existing
+    // continuous-clause behavior.
+    let (_, (left, right)) =
+        nom_primitives::split_once_on(quality_text.trim(), " or from ").ok()?;
+    // The halves are bare qualities (the "protection from " prefix is already
+    // stripped), so map each with parse_protection_target — NOT
+    // parse_keyword_from_oracle, which expects the full "protection from …" form.
+    let first = Keyword::Protection(crate::types::keywords::parse_protection_target(left.trim()));
+    let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
+        right.trim(),
+    ));
     Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
 }
 
@@ -3325,6 +3479,52 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
     (text.to_string(), None)
 }
 
+/// CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): Lower a "become[s] [a[n]] `<basic
+/// land type>`" predicate to its land-subtype modification(s). Non-additive
+/// replaces the object's land subtypes (`SetBasicLandType`, CR 305.7 — the land
+/// gains only the named type's intrinsic mana ability); the "in addition to
+/// {their|its} other types" form retains existing land types and adds the subtype
+/// (`AddSubtype`, CR 205.1b). Composed along its axes — optional article, the
+/// basic-land-type word (singular or plural via `parse_basic_land_type_plural`),
+/// and the optional additive marker. Declines any predicate that does not name
+/// exactly a basic land type (optionally with the additive marker), so non-land
+/// becomes fall through to `parse_animation_spec`.
+fn try_parse_become_basic_land_type_modifications(
+    become_text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = become_text
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_lowercase();
+    let (rest, _) = opt(alt((tag::<_, _, VE>("a "), tag::<_, _, VE>("an "))))
+        .parse(lower.as_str())
+        .ok()?;
+    // Extract the candidate basic-land word with a nom combinator (not manual
+    // scanning), then classify it via the shared `parse_basic_land_type_plural`.
+    let (after, word) = nom::character::complete::alpha1::<_, VE>(rest).ok()?;
+    let land_type = crate::parser::oracle_static::parse_basic_land_type_plural(word)?;
+    let after = after.trim();
+    // CR 205.1b: only a bare type word (replacement) or the "in addition to their/
+    // its other types" additive marker may follow; anything else is a mixed
+    // predicate that must fall through to the animation parser.
+    let additive = if after.is_empty() {
+        false
+    } else if nom_primitives::scan_contains(after, "in addition to") {
+        true
+    } else {
+        return None;
+    };
+    Some(if additive {
+        vec![ContinuousModification::AddSubtype {
+            subtype: land_type.as_subtype_str().to_string(),
+        }]
+    } else {
+        vec![ContinuousModification::SetBasicLandType { land_type }]
+    })
+}
+
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -3380,6 +3580,34 @@ fn build_become_clause(
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
                 .modifications(vec![modification])
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
+    // CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): "become[s] [a] <basic land type>"
+    // (Nightcreep's "all lands become Swamps") is a LAND-subtype change, not a
+    // creature subtype. `parse_animation_spec` below mis-tokenizes the basic-land
+    // word — notably the plural "Swamps" — as a creature subtype (`AddSubtype` +
+    // `RemoveAllSubtypes{Creature}`), so the land never gains the type's intrinsic
+    // mana ability. Intercept it here and emit the correct land-type modification.
+    if let Some(modifications) = try_parse_become_basic_land_type_modifications(become_text) {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
@@ -3572,6 +3800,36 @@ fn build_become_clause(
 
     if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text, ctx) {
         return Some(clause);
+    }
+
+    // CR 205.1a + CR 613.1d + CR 613.1f + CR 613.8a: "becomes a <type> [with
+    // \"<ability>\"] and loses all other card types and abilities" — full
+    // card-type replacement plus ability wipe plus optional ability grant
+    // (Vraska, Betrayal's Sting [-2]). Must intercept before parse_animation_spec,
+    // which bails on the " loses all other card types " tail and would drop both
+    // the type replacement and the granted ability.
+    if let Some(modifications) =
+        super::become_copy_except::parse_becomes_type_loses_all(become_text)
+    {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
     }
 
     let (become_text, name_override) = strip_become_name_override(become_text);
@@ -5456,7 +5714,7 @@ fn add_another_property(filter: TargetFilter) -> TargetFilter {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, ContinuousModification, ControllerRef, Effect, TypeFilter,
+        AbilityKind, BasicLandType, ContinuousModification, ControllerRef, Effect, TypeFilter,
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
@@ -5481,6 +5739,13 @@ mod tests {
         ));
         // Unrelated predicates still fall through (the animation path handles them).
         assert!(try_parse_become_color_modification("a giant lizard").is_none());
+        assert_eq!(
+            try_parse_become_basic_land_type_modifications("Swamps"),
+            Some(vec![ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Swamp,
+            }])
+        );
+        assert!(try_parse_become_basic_land_type_modifications("black").is_none());
     }
 
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"

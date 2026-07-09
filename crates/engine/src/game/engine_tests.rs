@@ -1434,6 +1434,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
         player: PlayerId(0),
         valid_attacker_ids: vec![bombardiers],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        attacker_constraints: Default::default(),
     };
     apply_as_current(
         &mut state,
@@ -2108,7 +2109,8 @@ fn set_priority_yield_add_binds_from_stack_after_token_ceased() {
             player: PlayerId(0),
             target: crate::types::game_state::YieldTarget::ThisObject {
                 source_id: source,
-                incarnation: 4,
+                incarnation: Some(4),
+                trigger_description: None,
             },
         }],
         "Add must bind the incarnation latched on the on-stack trigger",
@@ -2146,13 +2148,21 @@ fn set_priority_yield_add_no_op_without_matching_stack_entry() {
     );
 }
 
-/// CR 400.7 None-boundary: a `ThisObject` add on a trigger with no latched
-/// incarnation no-ops, while an `AllCopies` add on the same trigger still stores.
+/// G6 (CR 400.7): a `ThisObject` add on a trigger with no latched incarnation
+/// (a synthetic/delayed game-rule trigger) now STORES a `None`-incarnation yield
+/// through the real `SetPriorityYield` pipeline and that yield matches its own
+/// trigger — previously this add was a silent no-op. An `AllCopies` add on the
+/// same trigger also stores.
 #[test]
-fn set_priority_yield_this_object_none_incarnation_no_ops_but_all_copies_works() {
+fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(0); // synthetic game-rule trigger source
     push_token_trigger(&mut state, source, PlayerId(0), None, Some(CardId(77)));
+    let entry = state
+        .stack
+        .back()
+        .cloned()
+        .expect("reach-guard: the synthetic trigger is on the stack");
 
     apply(
         &mut state,
@@ -2165,11 +2175,24 @@ fn set_priority_yield_this_object_none_incarnation_no_ops_but_all_copies_works()
         },
     )
     .expect("legal");
+    assert_eq!(
+        state.priority_yields,
+        vec![crate::types::game_state::PriorityYield {
+            player: PlayerId(0),
+            target: crate::types::game_state::YieldTarget::ThisObject {
+                source_id: source,
+                incarnation: None,
+                trigger_description: None,
+            },
+        }],
+        "G6: ThisObject add must latch a None-incarnation yield, not no-op"
+    );
     assert!(
-        state.priority_yields.is_empty(),
-        "ThisObject add must no-op when the trigger latched no incarnation"
+        state.is_priority_yielded(PlayerId(0), &entry),
+        "G6: the None-incarnation latch must match its own synthetic trigger"
     );
 
+    state.clear_priority_yields(PlayerId(0));
     apply(
         &mut state,
         PlayerId(0),
@@ -2226,6 +2249,133 @@ fn set_priority_yield_accepted_from_non_priority_actor() {
     );
 }
 
+// --- GameAction::SetMayTriggerAutoChoice (CR 603.5) ---
+
+/// Builds a `MayTriggerAutoChoiceKey` for `player` scoped to `source` with a
+/// printed-trigger origin (index 0), matching the shape the resolution pipeline
+/// latches for an optional ("may") triggered ability.
+fn may_trigger_key(
+    player: PlayerId,
+    source: ObjectId,
+) -> crate::types::game_state::MayTriggerAutoChoiceKey {
+    crate::types::game_state::MayTriggerAutoChoiceKey {
+        player,
+        source_id: source,
+        origin: crate::types::game_state::MayTriggerOrigin::Printed { trigger_index: 0 },
+    }
+}
+
+/// CR 603.5: `SetMayTriggerAutoChoice { Remove }` dispatched through the real
+/// `apply()` pipeline revokes the acting player's own stored auto-choice. The
+/// action is exempt from the priority-holder gate (a preference mutation), so a
+/// non-priority actor may still edit their own preferences.
+#[test]
+fn set_may_trigger_auto_choice_remove_revokes_actor_choice() {
+    use crate::types::actions::MayTriggerAutoChoiceOp;
+    use crate::types::game_state::AutoMayChoice;
+
+    let mut state = setup_game_at_main_phase();
+    let source = ObjectId(500);
+    let key = may_trigger_key(PlayerId(0), source);
+    state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+    assert_eq!(state.may_trigger_auto_choices.len(), 1);
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetMayTriggerAutoChoice {
+            op: MayTriggerAutoChoiceOp::Remove { key },
+        },
+    )
+    .expect("SetMayTriggerAutoChoice is legal in any state");
+
+    assert!(
+        state.may_trigger_auto_choices.is_empty(),
+        "Remove revokes the actor's stored auto-choice"
+    );
+}
+
+/// CR 603.5: `SetMayTriggerAutoChoice { ClearAll }` is actor-scoped — a player
+/// may only clear THEIR OWN stored auto-choices, never another player's. Drives
+/// the real `apply()` pipeline; reverting the actor-scoping in the handler (e.g.
+/// clearing by a client-supplied player) would drop P1's record and fail the
+/// surviving-record assertion.
+#[test]
+fn set_may_trigger_auto_choice_clear_all_is_actor_scoped() {
+    use crate::types::actions::MayTriggerAutoChoiceOp;
+    use crate::types::game_state::AutoMayChoice;
+
+    let mut state = setup_game_at_main_phase();
+    let p0_key = may_trigger_key(PlayerId(0), ObjectId(500));
+    let p0_key2 = may_trigger_key(PlayerId(0), ObjectId(501));
+    let p1_key = may_trigger_key(PlayerId(1), ObjectId(600));
+    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(p0_key2, AutoMayChoice::Decline);
+    state.set_may_trigger_auto_choice(p1_key, AutoMayChoice::Accept);
+    assert_eq!(state.may_trigger_auto_choices.len(), 3);
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetMayTriggerAutoChoice {
+            op: MayTriggerAutoChoiceOp::ClearAll,
+        },
+    )
+    .expect("SetMayTriggerAutoChoice is legal in any state");
+
+    assert_eq!(
+        state.may_trigger_auto_choices.len(),
+        1,
+        "ClearAll drops only the acting player's auto-choices"
+    );
+    assert_eq!(
+        state.may_trigger_auto_choices[0].key.player,
+        PlayerId(1),
+        "another player's auto-choice survives an actor's ClearAll"
+    );
+}
+
+/// CR 603.5: actor scoping on `Remove` — the handler binds the removal to the
+/// acting player, ignoring the payload's key player. A malicious P1 cannot
+/// revoke P0's stored auto-choice by naming P0's key. Reverting the
+/// `player: actor` override would let P1 delete P0's record and fail the
+/// survives assertion. A reach-guard proves the auth gate is otherwise live.
+#[test]
+fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
+    use crate::types::actions::MayTriggerAutoChoiceOp;
+    use crate::types::game_state::AutoMayChoice;
+
+    let mut state = setup_game_at_main_phase();
+    let source = ObjectId(500);
+    let p0_key = may_trigger_key(PlayerId(0), source);
+    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+
+    // Reach-guard: a non-exempt action from P1 in P0's priority window errors,
+    // proving the auth gate is live (so the exemption below is what lets P1 act).
+    let unauthorized = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+    assert!(
+        matches!(unauthorized, Err(EngineError::WrongPlayer)),
+        "a non-priority player cannot pass priority (proves the auth gate is live)"
+    );
+
+    // P1 names P0's exact key, but the handler rebinds removal to the actor (P1),
+    // so nothing P0 owns is touched.
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetMayTriggerAutoChoice {
+            op: MayTriggerAutoChoiceOp::Remove { key: p0_key },
+        },
+    )
+    .expect("SetMayTriggerAutoChoice is exempt from the priority-holder gate");
+
+    assert_eq!(
+        state.may_trigger_auto_choice(&p0_key),
+        Some(AutoMayChoice::Accept),
+        "P0's stored auto-choice survives P1's attempt to remove it"
+    );
+}
+
 /// CR 117.3d: an `UntilEndOfTurn` auto-pass session normally ends (Finish) when
 /// an opponent-controlled trigger tops the stack, so the player can respond.
 /// A matching yield keeps the session auto-passing (Pass) through that trigger;
@@ -2256,7 +2406,8 @@ fn until_end_of_turn_yielded_opponent_top_passes_not_finishes() {
         PlayerId(0),
         crate::types::game_state::YieldTarget::ThisObject {
             source_id: source,
-            incarnation: 4,
+            incarnation: Some(4),
+            trigger_description: None,
         },
     );
     assert!(
@@ -2359,6 +2510,7 @@ fn concede_owner_of_waiting_for_advances_state() {
         player: PlayerId(1),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        attacker_constraints: Default::default(),
     };
 
     let result = apply_as_current(
@@ -5701,6 +5853,7 @@ fn setup_tempest_hawk_attack(library_hawk_ids: &[u64]) -> (GameState, ObjectId, 
         player: PlayerId(0),
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        attacker_constraints: Default::default(),
     };
 
     apply_as_current(

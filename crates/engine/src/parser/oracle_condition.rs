@@ -91,9 +91,22 @@ fn parse_connector_split(text: &str, connector: &str) -> Option<Vec<ParsedCondit
     }
     fragments
         .into_iter()
-        .map(parse_condition_text)
+        .map(parse_condition_fragment_text)
         .collect::<Option<Vec<_>>>()
         .filter(|v| v.len() >= 2)
+}
+
+fn parse_condition_fragment_text(text: &str) -> Option<ParsedCondition> {
+    parse_condition_text(strip_leading_condition_fragment_marker(text))
+}
+
+fn strip_leading_condition_fragment_marker(text: &str) -> &str {
+    let text = text.trim();
+    if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("if "), tag("only if "))).parse(text) {
+        rest.trim()
+    } else {
+        text
+    }
 }
 
 fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
@@ -312,6 +325,8 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
         tag::<_, _, OracleError<'_>>("this "),
         tag("enchanted "),
         tag("from your "),
+        tag("in "),
+        tag("on "),
         tag("~'s "),
         tag("~ "),
     ))
@@ -1393,6 +1408,7 @@ mod tests {
     use crate::types::ability::{
         ControllerRef, CountScope, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
     };
+    use crate::types::card_type::Supertype;
 
     /// CR 508.1a: "you attacked with a/an <filter>[ this turn]" parses to a
     /// filtered `YouAttackedWithAtLeast { count: 1 }`, both with and without the
@@ -1647,6 +1663,12 @@ mod tests {
         );
         assert_eq!(
             parse_restriction_condition("From your graveyard"),
+            Some(ParsedCondition::SourceInZone {
+                zone: Zone::Graveyard
+            }),
+        );
+        assert_eq!(
+            parse_restriction_condition("in your graveyard"),
             Some(ParsedCondition::SourceInZone {
                 zone: Zone::Graveyard
             }),
@@ -1939,6 +1961,53 @@ mod tests {
                 if conditions.len() == 2
                     && matches!(conditions[0], ParsedCondition::YouAttackedThisTurn)
                     && matches!(conditions[1], ParsedCondition::YouGainedLifeThisTurn)
+        ));
+    }
+
+    #[test]
+    fn parses_compound_or_if_restriction_fragments() {
+        let parsed =
+            parse_restriction_condition("~ entered this turn or if you control a basic land");
+        let Some(ParsedCondition::Or { conditions }) = parsed else {
+            panic!("expected compound Or, got {parsed:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            conditions[0],
+            ParsedCondition::SourceEnteredThisTurn
+        ));
+        match &conditions[1] {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::HasSupertype { value } if *value == Supertype::Basic)));
+            }
+            other => panic!("expected ObjectCount basic land condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compound_source_zone_shorthand() {
+        let parsed = parse_restriction_condition("~ is on the battlefield or in your graveyard");
+        assert!(matches!(
+            parsed,
+            Some(ParsedCondition::Or { ref conditions })
+                if conditions.len() == 2
+                    && matches!(conditions[0], ParsedCondition::SourceInZone { zone: Zone::Battlefield })
+                    && matches!(conditions[1], ParsedCondition::SourceInZone { zone: Zone::Graveyard })
         ));
     }
 

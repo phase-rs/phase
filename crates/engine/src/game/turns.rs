@@ -587,6 +587,117 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     }
 }
 
+/// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
+/// projection. Slot 0 is the current live turn representative; later slots are
+/// the next turns that would actually begin after extra turns, skipped turns,
+/// shared-team turns, and controlled-turn cleanup are considered.
+pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId> {
+    if max_slots == 0 {
+        return Vec::new();
+    }
+
+    let mut scratch = state.clone();
+    let mut slots = vec![super::topology::normalize_shared_turn_recipient(
+        &scratch,
+        scratch.active_player,
+    )];
+    let skip_budget: usize = scratch
+        .turns_to_skip
+        .iter()
+        .map(|&count| count as usize)
+        .sum();
+    let attempt_cap = max_slots
+        .saturating_add(skip_budget)
+        .saturating_add(scratch.extra_turns.len())
+        .saturating_add(scratch.scheduled_turn_controls.len().saturating_mul(2))
+        .saturating_add(16);
+    let mut attempts = 0usize;
+
+    while slots.len() < max_slots && attempts < attempt_cap {
+        attempts += 1;
+
+        let completed_player = scratch.active_player;
+        let completed_turn_key =
+            super::topology::normalize_shared_turn_recipient(&scratch, completed_player);
+        if scratch.turn_decision_controller.is_some() {
+            let completed_controller = scratch.turn_decision_controller;
+            let mut grant_extra_turn_after = false;
+            // CR 614.10a + CR 723.1: "next turn" control releases when that
+            // controlled turn is complete; any granted follow-up extra turn is
+            // scheduled before the next turn is selected.
+            while let Some(idx) = scratch
+                .scheduled_turn_controls
+                .iter()
+                .position(|scheduled| {
+                    scheduled.window == ControlWindow::NextTurn
+                        && scheduled.target_player == completed_turn_key
+                })
+            {
+                let entry = scratch.scheduled_turn_controls.remove(idx);
+                if Some(entry.controller) == completed_controller {
+                    grant_extra_turn_after |= entry.grant_extra_turn_after;
+                }
+            }
+            if grant_extra_turn_after {
+                scratch.extra_turns.push(completed_player);
+            }
+            scratch.turn_decision_controller = None;
+        }
+
+        scratch.turn_number += 1;
+
+        // CR 500.7: extra turns are LIFO; otherwise walk current turn order.
+        let is_extra_turn = if let Some(extra_turn_player) = scratch.extra_turns.pop() {
+            scratch.active_player =
+                super::topology::normalize_shared_turn_recipient(&scratch, extra_turn_player);
+            true
+        } else {
+            scratch.active_player =
+                super::topology::next_turn_representative(&scratch, scratch.active_player);
+            false
+        };
+
+        // CR 614.10: a skipped turn never emits a display slot. Leave the
+        // cursor on the skipped would-be active player so the next attempt
+        // mirrors `start_next_turn` recursion.
+        let skip_player =
+            super::topology::normalize_shared_turn_recipient(&scratch, scratch.active_player);
+        let idx = skip_player.0 as usize;
+        if idx < scratch.turns_to_skip.len() && scratch.turns_to_skip[idx] > 0 {
+            scratch.turns_to_skip[idx] -= 1;
+            continue;
+        }
+
+        // CR 614.1b + CR 614.10: condition-gated skip replacements can prevent
+        // the turn before it starts. This is a read-only probe; no replacement
+        // state or event log is mutated for the source state.
+        if replacement::begin_turn_would_be_prevented(
+            &scratch,
+            scratch.active_player,
+            is_extra_turn,
+        ) {
+            continue;
+        }
+
+        slots.push(scratch.active_player);
+
+        // CR 723.1: activate a full-turn control only after a non-skipped turn
+        // actually begins. Newest matching scheduled control wins.
+        let active_turn_key =
+            super::topology::normalize_shared_turn_recipient(&scratch, scratch.active_player);
+        scratch.turn_decision_controller = scratch
+            .scheduled_turn_controls
+            .iter()
+            .rfind(|scheduled| {
+                scheduled.window == ControlWindow::NextTurn
+                    && scheduled.target_player == active_turn_key
+            })
+            .map(|scheduled| scheduled.controller);
+    }
+
+    slots
+}
+
 /// Begin the next player's turn (CR 500.1 / CR 101.4 seat order).
 pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 805.4b: defensively drop any stale draw-step queue entries. The
@@ -2338,10 +2449,15 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 508.1: Active player declares attackers as a turn-based action.
                 let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
                 let valid_attack_targets = super::combat::get_valid_attack_targets(state);
+                let attacker_constraints = super::combat::attacker_constraints_for_active_player(
+                    state,
+                    &valid_attacker_ids,
+                );
                 return WaitingFor::DeclareAttackers {
                     player: state.active_player,
                     valid_attacker_ids,
                     valid_attack_targets,
+                    attacker_constraints,
                 };
             }
             Phase::DeclareBlockers => {
@@ -2364,11 +2480,17 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
                     let block_requirements =
                         super::combat::block_requirements_for_player(state, defending);
+                    let blocker_constraints = super::combat::blocker_constraints_for_player(
+                        state,
+                        defending,
+                        &valid_block_targets,
+                    );
                     return WaitingFor::DeclareBlockers {
                         player: defending,
                         valid_blocker_ids,
                         valid_block_targets,
                         block_requirements,
+                        blocker_constraints,
                     };
                 } else {
                     // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.
@@ -4429,6 +4551,29 @@ mod tests {
         Arc::make_mut(&mut obj.base_static_definitions).push(def);
     }
 
+    /// CR 502.3 + CR 611.3a: Install a real-parsed Winter-Orb-shaped conditional
+    /// max-untap cap on `source_id`, with the given tapped state. Sourced from the
+    /// real parser output on Winter Orb's verbatim Oracle text so the test drives
+    /// the actual dispatch fix (not a hand-built `StaticDefinition`).
+    fn install_conditional_max_untap_static(
+        state: &mut GameState,
+        source_id: ObjectId,
+        tapped: bool,
+    ) {
+        use crate::types::card_type::CoreType;
+        let defs = crate::parser::oracle_static::parse_static_line_multi(
+            "As long as this artifact is untapped, players can't untap more than one land during their untap steps.",
+        );
+        let obj = state.objects.get_mut(&source_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        obj.tapped = tapped;
+        for def in &defs {
+            obj.static_definitions.push(def.clone());
+        }
+        Arc::make_mut(&mut obj.base_static_definitions).extend(defs);
+    }
+
     fn create_tapped_creature(state: &mut GameState, card_id: u64, name: &str) -> ObjectId {
         use crate::types::card_type::CoreType;
         let id = create_object(
@@ -4532,6 +4677,120 @@ mod tests {
 
         assert!(prompt.is_none(), "no cap means nothing to prompt");
         assert_eq!(scans, 0, "bail short-circuits before any whole-board scan");
+    }
+
+    /// CR 502.3 + CR 611.3a: Winter Orb's cap is gated on the artifact's OWN
+    /// tapped state. Drives the fix through the real `active_static_definitions`
+    /// condition gate (not just `parse_static_line`) — while Winter Orb is
+    /// TAPPED the cap must be inactive (both lands untap); while UNTAPPED the cap
+    /// of one land must force the bounded subset-selection prompt over two tapped
+    /// lands. Discriminating: before this fix Winter Orb parsed to a no-op
+    /// Continuous, so `max_untap_restrictions` would never contain this cap at all,
+    /// regardless of tapped state.
+    #[test]
+    fn winter_orb_max_untap_cap_gated_by_own_tapped_state() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let winter_orb = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Winter Orb".to_string(),
+            Zone::Battlefield,
+        );
+        install_conditional_max_untap_static(&mut state, winter_orb, true);
+
+        let land_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Land A".to_string(),
+            Zone::Battlefield,
+        );
+        let land_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Land B".to_string(),
+            Zone::Battlefield,
+        );
+        for land in [land_a, land_b] {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+            obj.tapped = true;
+        }
+
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            max_untap_restrictions(&state).is_empty(),
+            "cap must be inactive while Winter Orb is tapped"
+        );
+        assert!(
+            max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new()).is_none(),
+            "no cap => no subset prompt while tapped"
+        );
+
+        state.objects.get_mut(&winter_orb).unwrap().tapped = false;
+        crate::game::layers::evaluate_layers(&mut state);
+        let restrictions = max_untap_restrictions(&state);
+        assert_eq!(
+            restrictions.len(),
+            1,
+            "cap must be active while Winter Orb is untapped"
+        );
+        assert_eq!(
+            restrictions[0].1, 1,
+            "Winter Orb caps untapping at one land"
+        );
+
+        let (mut group, max) = max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new())
+            .expect("two tapped lands exceed the cap of one while Winter Orb is untapped");
+        assert_eq!(max, 1);
+        group.sort_by_key(|id| id.0);
+        let mut expected = vec![land_a, land_b];
+        expected.sort_by_key(|id| id.0);
+        assert_eq!(
+            group, expected,
+            "both tapped lands are offered for the bounded selection"
+        );
+    }
+
+    /// CR 502.3 + CR 611.3a: Multi-authority proof — the tapped-state gate binds
+    /// to EACH Winter Orb's own source_id, not a shared flag. One tapped, one
+    /// untapped: only the untapped one's cap contributes to `max_untap_restrictions`.
+    #[test]
+    fn two_winter_orbs_gate_independently_on_own_tapped_state() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let tapped_orb = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Winter Orb A".to_string(),
+            Zone::Battlefield,
+        );
+        install_conditional_max_untap_static(&mut state, tapped_orb, true);
+        let untapped_orb = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Winter Orb B".to_string(),
+            Zone::Battlefield,
+        );
+        install_conditional_max_untap_static(&mut state, untapped_orb, false);
+
+        crate::game::layers::evaluate_layers(&mut state);
+        let restrictions = max_untap_restrictions(&state);
+        assert_eq!(
+            restrictions.len(),
+            1,
+            "only the untapped Winter Orb's cap must be active, got {restrictions:?}"
+        );
     }
 
     /// CR 502.3: With a Smoke-class cap of one creature and two tapped
@@ -5099,6 +5358,87 @@ mod tests {
         assert!(!state.objects[&mine_a].tapped);
         assert!(!state.objects[&mine_b].tapped);
         assert!(!state.objects[&seedborn].tapped);
+    }
+
+    /// CR 502.3 + CR 611.3a + CR 604.1: Quest for Renewal — the untap-during-
+    /// each-other-player's-untap-step static is gated by a live counter-threshold
+    /// condition ("as long as there are four or more quest counters on this
+    /// enchantment"). The runtime already honors `def.condition` via
+    /// `active_static_definitions`/`evaluate_condition`; this proves the parsed
+    /// `HasCounters` condition drives the Seedborn untap pass. PAIRED, non-
+    /// vacuous: 2 counters keeps creatures tapped (negative), 4 counters untaps
+    /// them (positive reach guard).
+    #[test]
+    fn quest_for_renewal_counter_gated_seedborn_untap() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = setup();
+        state.active_player = PlayerId(1); // Opponent's untap step.
+
+        let quest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quest for Renewal".to_string(),
+            Zone::Battlefield,
+        );
+        // Install the Seedborn untap static gated on the quest-counter threshold,
+        // exactly as the parser lowers Quest for Renewal's static line.
+        let def = StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ))
+            .condition(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("quest".to_string())),
+                minimum: 4,
+                maximum: None,
+            });
+        {
+            let obj = state.objects.get_mut(&quest).unwrap();
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        let mine = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        mark_as_creature(&mut state, mine);
+        state.objects.get_mut(&mine).unwrap().tapped = true;
+
+        // Negative: only 2 quest counters — condition fails, creature stays tapped.
+        state
+            .objects
+            .get_mut(&quest)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("quest".to_string()), 2);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            state.objects[&mine].tapped,
+            "below threshold (2 < 4): the untap static must not fire"
+        );
+
+        // Positive reach guard: 4 quest counters — condition holds, creature untaps.
+        state
+            .objects
+            .get_mut(&quest)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("quest".to_string()), 4);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            !state.objects[&mine].tapped,
+            "at threshold (4 >= 4): the untap static must untap the controller's creature"
+        );
     }
 
     #[test]
@@ -7321,6 +7661,127 @@ mod tests {
         assert_eq!(state.turn_decision_controller, None);
         assert_eq!(state.priority_player, PlayerId(1));
         assert!(state.scheduled_turn_controls.is_empty());
+    }
+
+    #[test]
+    fn projected_turn_order_tracks_normal_and_reversed_multiplayer_order() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+
+        assert_eq!(
+            projected_turn_order(&state, 4),
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)]
+        );
+
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+
+        assert_eq!(
+            projected_turn_order(&state, 4),
+            vec![PlayerId(0), PlayerId(3), PlayerId(2), PlayerId(1)]
+        );
+    }
+
+    #[test]
+    fn projected_turn_order_skips_turn_counter_without_mutating_original() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.turns_to_skip[1] = 1;
+
+        let projected = projected_turn_order(&state, 3);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(0), PlayerId(2), PlayerId(3)],
+            "P1's skipped turn must not emit a display slot"
+        );
+        assert_eq!(
+            state.turns_to_skip[1], 1,
+            "projection must not consume the source state's skip counter"
+        );
+    }
+
+    #[test]
+    fn projected_turn_order_begin_turn_replacement_skips_extra_turn_cursor() {
+        use crate::types::ability::ReplacementCondition;
+        use crate::types::identifiers::ObjectId;
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.extra_turns.push(PlayerId(2));
+        install_begin_turn_skip_permanent(
+            &mut state,
+            ObjectId(100),
+            PlayerId(1),
+            Some(ReplacementCondition::OnlyExtraTurn),
+        );
+
+        let projected = projected_turn_order(&state, 2);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(0), PlayerId(3)],
+            "P2's prevented extra turn leaves the cursor on P2, so the next natural slot is P3"
+        );
+        assert_eq!(
+            state.extra_turns,
+            vec![PlayerId(2)],
+            "projection must not pop the source state's queued extra turn"
+        );
+        assert!(
+            state.pending_replacement.is_none(),
+            "read-only projection must not park a replacement choice"
+        );
+    }
+
+    #[test]
+    fn projected_turn_order_controlled_turn_completion_enqueues_extra_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: PlayerId(1),
+                controller: PlayerId(2),
+                grant_extra_turn_after: true,
+                window: ControlWindow::NextTurn,
+            });
+
+        let projected = projected_turn_order(&state, 2);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(1), PlayerId(1)],
+            "the controller's promised extra turn for P1 appears before natural order resumes"
+        );
+        assert!(state.extra_turns.is_empty());
+        assert_eq!(state.scheduled_turn_controls.len(), 1);
+        assert_eq!(state.turn_decision_controller, Some(PlayerId(2)));
+    }
+
+    #[test]
+    fn projected_turn_order_activates_scheduled_control_then_releases_it() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(0);
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: PlayerId(1),
+                controller: PlayerId(2),
+                grant_extra_turn_after: true,
+                window: ControlWindow::NextTurn,
+            });
+
+        let projected = projected_turn_order(&state, 3);
+
+        assert_eq!(
+            projected,
+            vec![PlayerId(0), PlayerId(1), PlayerId(1)],
+            "scheduled control must bind to P1's natural turn, then grant P1 the follow-up extra turn"
+        );
+        assert!(state.extra_turns.is_empty());
+        assert_eq!(state.scheduled_turn_controls.len(), 1);
+        assert_eq!(state.turn_decision_controller, None);
     }
 
     #[test]

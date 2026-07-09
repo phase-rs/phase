@@ -133,22 +133,35 @@ pub async fn p2p_backup_store(
     }
 }
 
+/// Query params for `GET /p2p-draft-backup/:code`.
+#[derive(Deserialize)]
+pub struct P2pBackupGetQuery {
+    pub host_peer_id: String,
+}
+
 /// GET /p2p-draft-backup/:code — Retrieve a P2P draft backup.
 pub async fn p2p_backup_get(
     State(app_state): State<AppState>,
     Path(code): Path<String>,
+    Query(query): Query<P2pBackupGetQuery>,
 ) -> impl IntoResponse {
     if !is_valid_draft_code(&code) {
         return (StatusCode::BAD_REQUEST, "Invalid draft code").into_response();
     }
+    if let Err(reason) = validate_p2p_backup_host_peer_id(&query.host_peer_id) {
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
     match app_state.game_db.load_p2p_backup(&code) {
-        Ok(Some((host_peer_id, snapshot_json, updated_at))) => {
+        Ok(Some((existing_peer, snapshot_json, updated_at))) => {
+            if guard_p2p_backup_overwrite(&existing_peer, &query.host_peer_id).is_err() {
+                return (StatusCode::NOT_FOUND, "No backup found").into_response();
+            }
             let snapshot_json = match redact_p2p_backup_snapshot_secrets(&snapshot_json) {
                 Ok(json) => json,
                 Err(reason) => return (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response(),
             };
             Json(serde_json::json!({
-                "host_peer_id": host_peer_id,
+                "host_peer_id": existing_peer,
                 "snapshot_json": snapshot_json,
                 "updated_at": updated_at,
             }))

@@ -930,8 +930,15 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
             }
         }
         Effect::SeparateIntoPiles {
-            chosen_pile_effect, ..
-        } => walk_ability_def(chosen_pile_effect, out),
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            walk_ability_def(chosen_pile_effect, out);
+            if let Some(unchosen) = unchosen_pile_effect {
+                walk_ability_def(unchosen, out);
+            }
+        }
         Effect::RevealFromHand { on_decline, .. } => {
             if let Some(sub) = on_decline {
                 walk_ability_def(sub, out);
@@ -1137,6 +1144,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -2877,6 +2885,8 @@ mod tests {
             object_filter: TargetFilter::Any,
             chooser: PlayerScope::Controller,
             chosen_pile_effect: Box::new(conjure_ability("piles", Zone::Hand)),
+            pile_source: crate::types::ability::PileSource::Battlefield,
+            unchosen_pile_effect: None,
         };
         walk_effect(&piles, &mut names);
 

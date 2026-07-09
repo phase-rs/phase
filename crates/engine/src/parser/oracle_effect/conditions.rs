@@ -12,6 +12,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition::{
     inject_controller_you, parse_cast_using_teamwork_phrase, parse_spell_target_superlative_suffix,
+    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -1331,6 +1332,76 @@ fn parse_its_a_card_type_gate_body<'a>(
         ),
         after_type,
     ))
+}
+
+/// CR 608.2c + CR 301.5b + CR 701.3a: "If it's a[n] &lt;subtype&gt;, [you may] attach
+/// it to ~" follow-up on a just-put permanent (The Invincible Iron Man: "put an
+/// artifact card from your hand onto the battlefield. If it's an Equipment,
+/// attach it to ~"). The bare-"it" anaphor (CR 608.2c) binds to the moved card,
+/// and "~" (CR 201.5) is the ability's own source. Recognized as a UNIT so the
+/// generic "it's a [subtype]" condition arm can't mis-key the type gate to the
+/// ability's injected parent target (the source, not the moved card) or emit a
+/// self-attach `ParentTarget`/`ParentTarget` (an Equipment can't equip itself,
+/// CR 301.5c).
+///
+/// Emits the supported `ZoneChangedThisWay` + `Attach` forward_result idiom: the
+/// condition gates on the moved card's type (read from `last_zone_changed_ids`,
+/// independent of the target slot); the attach makes the moved card (`SelfRef`,
+/// rebound to the forwarded object at resolution) the attachment and the source
+/// (`ParentTarget`, the injected original source) the host. Only the
+/// source-as-host recipient ("~") is in scope; typed hosts remain an honest gap.
+/// Returns `(condition, attach_effect, attach_is_optional)`.
+pub(super) fn try_parse_moved_card_subtype_attach_followup(
+    text: &str,
+) -> Option<(AbilityCondition, Effect, bool)> {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim();
+    // Leading anaphoric gate: "if it's a "/"if it's an ".
+    let (after_gate, _) = alt((
+        tag::<_, _, OracleError<'_>>("if it's a "),
+        tag("if it's an "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    // Split the subtype phrase from the "attach ..." body on the first comma.
+    let (_, (subtype_phrase, body)) = nom_primitives::split_once_on(after_gate, ", ").ok()?;
+    // Require a pure subtype gate (Equipment/Aura/Fortification, ...): the type
+    // phrase must consume fully and reference at least one CR 205.3 subtype.
+    let (filter, leftover) = parse_type_phrase(subtype_phrase);
+    if !leftover.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(typed) = &filter else {
+        return None;
+    };
+    if !typed
+        .type_filters
+        .iter()
+        .any(type_filter_references_subtype)
+    {
+        return None;
+    }
+    // Body: "[you may ]attach it to ~[.]" — only the source host ("~") is in scope.
+    let (after_may, is_optional) = opt(tag::<_, _, OracleError<'_>>("you may "))
+        .parse(body)
+        .map(|(rest, matched)| (rest, matched.is_some()))
+        .unwrap_or((body, false));
+    let (after_attach, _) = tag::<_, _, OracleError<'_>>("attach it to ")
+        .parse(after_may)
+        .ok()?;
+    let (after_source, _) = tag::<_, _, OracleError<'_>>("~").parse(after_attach).ok()?;
+    let (after_dot, _) = opt(tag::<_, _, OracleError<'_>>("."))
+        .parse(after_source)
+        .ok()?;
+    if !after_dot.trim().is_empty() {
+        return None;
+    }
+    let condition = AbilityCondition::ZoneChangedThisWay { filter };
+    let attach = Effect::Attach {
+        attachment: TargetFilter::SelfRef,
+        target: TargetFilter::ParentTarget,
+    };
+    Some((condition, attach, is_optional))
 }
 
 pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
@@ -3205,6 +3276,11 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     }
 
     if let Some(condition) = parse_target_color_condition_text(text) {
+        return Some(condition);
+    }
+
+    let lower = text.to_ascii_lowercase();
+    if let Some(condition) = parse_cost_paid_object_matches_filter_condition(lower.as_str()) {
         return Some(condition);
     }
 
@@ -5602,6 +5678,9 @@ fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<Abilit
     if let Some(condition) = parse_cost_paid_object_subject_verb_form(lower) {
         return Some(condition);
     }
+    if let Some(condition) = parse_cost_paid_object_possessive_pt_comparison(lower) {
+        return Some(condition);
+    }
     parse_cost_paid_object_definite_noun_form(lower)
 }
 
@@ -5707,6 +5786,38 @@ fn parse_cost_paid_object_definite_noun_form(lower: &str) -> Option<AbilityCondi
     })
 }
 
+fn parse_cost_paid_object_possessive_pt_comparison(lower: &str) -> Option<AbilityCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the ").parse(lower).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("discarded "),
+        tag("sacrificed "),
+        tag("exiled "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, noun_filter) = parse_cost_paid_object_possessive_noun_prefix(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("'s ").parse(rest).ok()?;
+    let (rest, stat) = parse_reflexive_pt_stat(rest).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("was "), tag("is ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, (comparator, value)) = parse_threshold_with_exactly(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(noun_filter).properties(vec![
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            },
+        ])),
+    })
+}
+
 /// Predicate result for a definite-noun form's property clause. Property
 /// predicates (color-set, status such as suspected) land on
 /// `TypedFilter::properties`; type-or-subtype predicates land on
@@ -5740,6 +5851,38 @@ fn parse_cost_paid_object_noun_prefix(input: &str) -> Option<(&str, TypeFilter)>
         value(TypeFilter::Planeswalker, tag("planeswalker ")),
         value(TypeFilter::Permanent, tag("permanent ")),
         value(TypeFilter::Card, tag("card ")),
+    ))
+    .parse(input)
+    .ok()
+}
+
+/// Possessive sibling of [`parse_cost_paid_object_noun_prefix`]: matches the
+/// noun immediately before `"'s "` in forms like "the sacrificed creature's
+/// toughness was 4 or greater".
+fn parse_cost_paid_object_possessive_noun_prefix(input: &str) -> Option<(&str, TypeFilter)> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            terminated(tag::<_, _, OracleError<'_>>("creature"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Artifact,
+            terminated(tag("artifact"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Enchantment,
+            terminated(tag("enchantment"), peek(tag("'s "))),
+        ),
+        value(TypeFilter::Land, terminated(tag("land"), peek(tag("'s ")))),
+        value(
+            TypeFilter::Planeswalker,
+            terminated(tag("planeswalker"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Permanent,
+            terminated(tag("permanent"), peek(tag("'s "))),
+        ),
+        value(TypeFilter::Card, terminated(tag("card"), peek(tag("'s ")))),
     ))
     .parse(input)
     .ok()
@@ -6120,12 +6263,13 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
     ))
 }
 
-/// CR 608.2c: "[effect] if at least one <filter> was <verb> this way" — the
-/// trailing (suffix) form of the prior-effect outcome gate. CR 608.2c states
-/// later text on a card may reference an earlier instruction in the same
-/// effect; here "this way" refers to the set of objects affected by the
-/// immediately-preceding instruction, and the condition fires when that set
-/// contains at least one object matching `<filter>`. Kaya, Orzhov Usurper's
+/// CR 608.2c + CR 400.7j: "[effect] if at least one <filter> was <verb> this
+/// way" — the trailing (suffix) form of the prior-effect outcome gate. Later
+/// text may reference an earlier instruction in the same effect, and objects
+/// moved to public zones remain findable. Here "this way" refers to the set of
+/// objects affected by the immediately-preceding instruction, and the condition
+/// fires when that set contains at least one object matching `<filter>`. Kaya,
+/// Orzhov Usurper's
 /// +1 ("Exile up to two target
 /// cards from a single graveyard. You gain 2 life if at least one creature
 /// card was exiled this way.") is the motivating case.
@@ -6135,9 +6279,21 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
 /// article), the type/subtype filter, both tenses, the verb set, and the
 /// negation flag (`wasn't`/`isn't`). Requiring an empty remainder keeps this
 /// matcher from firing on partial overlaps with longer condition phrases.
+///
+/// Both grammatical voices of the same event are recognized here so the leading
+/// (`if …, [effect]`) and suffix (`[effect] if …`) forms produce identical
+/// `ZoneChangedThisWay` conditions:
+///   - passive: `a Cave (is|was) put onto the battlefield this way` —
+///     `parse_zone_changed_this_way_clause`
+///   - active: `you put a Cave onto the battlefield this way` —
+///     `parse_you_put_onto_battlefield_this_way_clause` (Spelunking's ETB
+///     rider "If you put a Cave onto the battlefield this way, you gain 4 life";
+///     unlocks the whole "if you put a [type] onto the battlefield this way,
+///     [bonus]" fetch/ramp payoff class).
 fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
-    let (rest, (filter, negated)) =
-        crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(lower).ok()?;
+    let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(lower)
+        .or_else(|_| parse_you_put_onto_battlefield_this_way_clause(lower))
+        .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -7347,6 +7503,63 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 400.7j: Spelunking's ETB rider — "If you put a Cave onto
+    /// the battlefield this way, you gain 4 life." CR 400.7j lets the rider find
+    /// the Cave the preceding put-land instruction moved to the battlefield (a
+    /// public zone). The leading `if`
+    /// form of the active-voice put-onto-battlefield gate must lower through
+    /// `strip_leading_general_conditional` to `ZoneChangedThisWay { Cave }` —
+    /// not drop to `condition: null` (which fires the `Condition_If` swallow
+    /// detector and marks the whole ETB chain unsupported). Unlocks the
+    /// "if you put a [type] onto the battlefield this way, [bonus]" rider class.
+    #[test]
+    fn leading_you_put_a_cave_onto_battlefield_spelunking() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If you put a Cave onto the battlefield this way, you gain 4 life.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "you gain 4 life.");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Cave"))
+                    ),
+                    "expected Subtype Cave, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Cave filter, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: The suffix form of the same active-voice gate — "[effect] if
+    /// you put a [type] onto the battlefield this way" — routes through
+    /// `parse_outcome_this_way_condition` to the identical `ZoneChangedThisWay`
+    /// condition, so leading and trailing phrasings stay in lockstep.
+    #[test]
+    fn outcome_you_put_a_creature_onto_battlefield_active_voice() {
+        let condition =
+            parse_outcome_this_way_condition("you put a creature onto the battlefield this way")
+                .expect("active-voice put gate must lower to ZoneChangedThisWay");
+        let AbilityCondition::ZoneChangedThisWay { filter } = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Creature)),
+                    "expected Creature type filter, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Creature filter, got {other:?}"),
+        }
+    }
+
     /// CR 603.12 + CR 701.9a: "When you discard a card this way, [body]" — the
     /// reflexive gate created by a preceding "discard a card" instruction
     /// (Talion's Messenger, The Ancient One). The bare "a card" form parses to a
@@ -8375,6 +8588,65 @@ mod tests {
         let (prop, use_lki) = single_prop(&cond);
         assert_eq!(*prop, FilterProp::WasDealtDamageThisTurn);
         assert!(use_lki, "past-tense look-back must use LKI per CR 400.7");
+    }
+
+    /// Issue #4796 (CR 608.2c + CR 301.5b): "if it's a[n] <subtype>, attach it
+    /// to ~" recognizer — The Invincible Iron Man's Equipment self-attach
+    /// follow-up. Emits `ZoneChangedThisWay{Equipment}` + `Attach{SelfRef,
+    /// ParentTarget}` (moved card is the attachment, source is the host), not a
+    /// self-attach and not a wrong-subject `TargetMatchesFilter`.
+    #[test]
+    fn moved_card_subtype_attach_followup_equipment_to_source() {
+        let (cond, effect, is_optional) =
+            try_parse_moved_card_subtype_attach_followup("if it's an equipment, attach it to ~.")
+                .expect("Iron Man Equipment attach follow-up must be recognized");
+        assert!(!is_optional, "the attach itself is mandatory once gated");
+        match cond {
+            AbilityCondition::ZoneChangedThisWay { filter } => match filter {
+                TargetFilter::Typed(t) => assert!(
+                    t.type_filters.iter().any(|f| matches!(
+                        f,
+                        TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment")
+                    )),
+                    "expected Equipment subtype gate, got {:?}",
+                    t.type_filters
+                ),
+                other => panic!("expected Typed Equipment filter, got {other:?}"),
+            },
+            other => panic!("expected ZoneChangedThisWay condition, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                effect,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::ParentTarget,
+                }
+            ),
+            "moved card must be the attachment (SelfRef) and the source the host (ParentTarget), got {effect:?}"
+        );
+    }
+
+    /// The recognizer is scoped to the "attach it to ~" self-host body and to
+    /// CR 205.3 subtype gates: it declines non-attach bodies, core-type gates,
+    /// and typed (non-source) hosts so those fall through to the generic path.
+    #[test]
+    fn moved_card_subtype_attach_followup_declines_out_of_scope() {
+        // No "attach it to ~" body (reveal/scry-style follow-up).
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's an equipment, you draw a card."
+        )
+        .is_none());
+        // Core type, not a CR 205.3 subtype.
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's a creature, attach it to ~."
+        )
+        .is_none());
+        // Typed host (not the source "~") is an honest gap.
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's an equipment, attach it to a creature you control."
+        )
+        .is_none());
     }
 
     /// CR 608.2c: Faller's Faithful "that creature wasn't dealt damage this turn"

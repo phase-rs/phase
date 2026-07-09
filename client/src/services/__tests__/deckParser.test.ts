@@ -52,6 +52,34 @@ Deck
     ]);
   });
 
+  it('parses MTGA printing lines with a lowercase (Scryfall-style) set code', () => {
+    // Several exporters emit lowercase set codes. The set/number must be parsed
+    // out as a sourcePrinting, not swallowed into the card name.
+    const result = detectAndParseDeck('1 Lightning Bolt (2xm) 123');
+
+    expect(result.main).toEqual([
+      {
+        count: 1,
+        name: 'Lightning Bolt',
+        sourcePrinting: { setCode: '2xm', collectorNumber: '123' },
+      },
+    ]);
+  });
+
+  it('parses lowercase and uppercase set codes to the same result', () => {
+    const lower = detectAndParseDeck('2 Counterspell (mh2) 267').main;
+    const upper = detectAndParseDeck('2 Counterspell (MH2) 267').main;
+
+    expect(lower).toEqual(upper);
+    expect(lower).toEqual([
+      {
+        count: 2,
+        name: 'Counterspell',
+        sourcePrinting: { setCode: 'mh2', collectorNumber: '267' },
+      },
+    ]);
+  });
+
   it('parses [Main] and [Sideboard] sections', () => {
     const content = `[Main]
 4 Lightning Bolt

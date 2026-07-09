@@ -68,15 +68,16 @@
 
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::char;
-use nom::combinator::{opt, value};
+use nom::character::complete::{char, space1};
+use nom::combinator::{eof, opt, peek, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
+use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
@@ -245,7 +246,124 @@ fn parse_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)
     Some((remainder, modifications))
 }
 
-/// CR 707.9b + CR 707.2: "his/her/its name is ~" — emit a `SetName` override
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CopyNamePossessive {
+    Its,
+    Her,
+    His,
+    Their,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CopyNameBoundary {
+    ContinuationAfterConnector(usize),
+    PunctuationOrEof,
+}
+
+pub(super) fn parse_copy_name_is_prefix(
+    input: &str,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, CopyNamePossessive> {
+    alt((
+        value(CopyNamePossessive::Its, tag("its name is ")),
+        value(CopyNamePossessive::Her, tag("her name is ")),
+        value(CopyNamePossessive::His, tag("his name is ")),
+        value(CopyNamePossessive::Their, tag("their name is ")),
+    ))
+    .parse(input)
+}
+
+fn parse_bare_pronoun_boundary(
+    input: &str,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            value((), space1),
+            value((), tag(",")),
+            value((), tag(".")),
+            value((), eof),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_copy_name_continuation_subject(
+    input: &str,
+    possessive: CopyNamePossessive,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, ()> {
+    match possessive {
+        CopyNamePossessive::Its => value(
+            (),
+            alt((
+                value((), tag("it's")),
+                value((), tag("it\u{2019}s")),
+                value((), (tag("it"), peek(parse_bare_pronoun_boundary))),
+            )),
+        )
+        .parse(input),
+        CopyNamePossessive::Her => value(
+            (),
+            alt((
+                value((), tag("she's")),
+                value((), tag("she\u{2019}s")),
+                value((), (tag("she"), peek(parse_bare_pronoun_boundary))),
+            )),
+        )
+        .parse(input),
+        CopyNamePossessive::His => value(
+            (),
+            alt((
+                value((), tag("he's")),
+                value((), tag("he\u{2019}s")),
+                value((), (tag("he"), peek(parse_bare_pronoun_boundary))),
+            )),
+        )
+        .parse(input),
+        CopyNamePossessive::Their => value(
+            (),
+            alt((
+                value((), tag("they're")),
+                value((), tag("they\u{2019}re")),
+                value((), tag("they are")),
+                value((), (tag("they"), peek(parse_bare_pronoun_boundary))),
+            )),
+        )
+        .parse(input),
+    }
+}
+
+pub(super) fn parse_copy_name_continuation_boundary(
+    input: &str,
+    possessive: CopyNamePossessive,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, CopyNameBoundary> {
+    alt((
+        value(
+            CopyNameBoundary::ContinuationAfterConnector(5),
+            (
+                tag(" and "),
+                peek(|i| parse_copy_name_continuation_subject(i, possessive)),
+            ),
+        ),
+        value(
+            CopyNameBoundary::ContinuationAfterConnector(2),
+            (
+                tag(", "),
+                peek(|i| parse_copy_name_continuation_subject(i, possessive)),
+            ),
+        ),
+        value(
+            CopyNameBoundary::PunctuationOrEof,
+            peek(alt((
+                value((), tag(",")),
+                value((), tag(".")),
+                value((), eof),
+            ))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 707.9b + CR 707.2: "his/her/its/their name is ~" — emit a `SetName` override
 /// keyed to the original card name. The `~` here is the self-ref sentinel
 /// inserted by `normalize_card_name_refs`; we don't need to peel the card's
 /// literal name because the suffix text was produced from the already-
@@ -264,17 +382,12 @@ fn parse_name_override<'a>(
     if card_name.is_empty() {
         return None;
     }
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("his name is "),
-        tag("her name is "),
-        tag("its name is "),
-    ))
-    .parse(input)
-    .ok()?;
+    let (rest, possessive) = parse_copy_name_is_prefix(input).ok()?;
     // Accept "~" (normalised self-ref) as the name target. This keeps the
     // parser strict — "except its name is Whatever" should only emit SetName
     // when the name is the card's own (which is what normalisation produces).
     let (rest, _) = tag::<_, _, OracleError<'_>>("~").parse(rest).ok()?;
+    parse_copy_name_continuation_boundary(rest, possessive).ok()?;
     Some((
         rest,
         ContinuousModification::SetName {
@@ -785,6 +898,109 @@ pub(super) fn parse_its_a_type_loses_others(
     result.append(&mut modifications);
     result.extend(ability_mods);
     Some((rest, result))
+}
+
+/// CR 205.1a + CR 613.1d + CR 613.1f + CR 613.8a: "<article> <type words> [with
+/// \"<ability>\"] and loses all other card types and abilities" — the
+/// full-replacement animation used by "<subject> becomes …" effects that both
+/// replace the card-type set AND wipe every ability.
+///
+/// Vraska, Betrayal's Sting [-2] is the canonical member: "Target creature
+/// becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana
+/// of any color\" and loses all other card types and abilities." (`build_become_clause`
+/// strips the "becomes " verb, so this receives "a Treasure artifact with …".)
+///
+/// Distinct from [`parse_its_a_type_loses_others`] (the copy-except form): that
+/// path uses the "it's a" contraction and loses only *card types*; this path is
+/// reached from the become-animation dispatch and also loses *abilities*, so it
+/// emits a `RemoveAllAbilities` before the granted ability.
+///
+/// The produced modification set is ordered per CR 613.7a (a single effect's
+/// modifications apply in written order):
+///   1. `SetCardTypes[named core types]` — Layer 4 (CR 613.1d + CR 205.1a):
+///      replaces the core card-type set, satisfying "loses all other card
+///      types", and drops the correlated subtypes of removed types.
+///   2. `RemoveAllSubtypes{Creature}` + `RemoveAllSubtypes{Artifact}` — clear a
+///      pre-existing Artifact Creature's creature and artifact subtypes so only
+///      the newly added subtype survives. MUST precede the `AddSubtype` (removals
+///      after the add would wipe it).
+///   3. `AddSubtype` per named subtype (e.g. Treasure).
+///   4. `RemoveAllAbilities` — Layer 6 (CR 613.1f): "loses all abilities".
+///   5. Granted ability modifications from the quoted `with "…"` clause, ordered
+///      AFTER the removal (CR 613.8a: the grant depends on the removal, so the
+///      removal is applied first and the grant survives).
+///
+/// Returns `None` unless the "and loses all other card types and abilities"
+/// signal is present, terminates the sentence, and at least one core type is
+/// named.
+/// Consume a leading "a "/"an " article. Named (not an inline closure) so the
+/// `nom_on_lower` bridge's higher-ranked lifetime bound is satisfied.
+fn parse_leading_article(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("a "), tag("an ")))).parse(input)
+}
+
+pub(super) fn parse_becomes_type_loses_all(
+    become_text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    // Oracle text after normalization is ASCII, so the lowercase view is
+    // byte-length aligned with the original — safe for the bridge split helpers,
+    // and the original case is preserved for the quoted-ability parse.
+    let lower = become_text.to_lowercase();
+
+    // Leading article "a "/"an ".
+    let (_, after_article) = nom_on_lower(become_text, &lower, parse_leading_article)?;
+    let after_article_lower = &lower[become_text.len() - after_article.len()..];
+
+    // CR 205.1a + CR 613.1f: the replacement signal. The head before it is the
+    // "<type words> [with \"<ability>\"]" phrase.
+    let signal = " and loses all other card types and abilities";
+    let (head, tail) = split_once_on_lower(after_article, after_article_lower, signal)?;
+    // The signal must terminate the sentence (only a trailing period may follow).
+    if !tail.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    // CR 707.9a: peel an optional `with "<ability>"` clause off the head before
+    // the type list so its text is never mistaken for type words. Only the
+    // quoted form is granted; a non-quoted `with` clause yields no ability mods.
+    let head_lower = head.to_lowercase();
+    let (type_text, ability_mods) = match split_once_on_lower(head, &head_lower, " with ") {
+        Some((types, after_with)) => (types, parse_quoted_ability_modifications(after_with)),
+        None => (head, Vec::new()),
+    };
+
+    // CR 205.1b: classify each type word. Core types form the replacement set;
+    // everything else is an added subtype.
+    let mut core_types = Vec::new();
+    let mut subtype_mods = Vec::new();
+    for word in type_text.split_whitespace() {
+        let canonical = canonicalize_subtype_name(word);
+        if let Ok(core_type) = CoreType::from_str(&canonical) {
+            core_types.push(core_type);
+        } else {
+            subtype_mods.push(ContinuousModification::AddSubtype { subtype: canonical });
+        }
+    }
+    // "loses all other card types" is a card-type statement — with no named core
+    // type there is nothing to replace the set with.
+    if core_types.is_empty() {
+        return None;
+    }
+
+    // CR 613.7a: modifications from one effect apply in written order; removals
+    // MUST precede AddSubtype so the added subtype survives.
+    let mut result = vec![ContinuousModification::SetCardTypes { core_types }];
+    result.push(ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    });
+    result.push(ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Artifact,
+    });
+    result.append(&mut subtype_mods);
+    // CR 613.1f + CR 613.8a: "loses all abilities" ordered before the grant.
+    result.push(ContinuousModification::RemoveAllAbilities);
+    result.extend(ability_mods);
+    Some(result)
 }
 
 /// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
@@ -1346,6 +1562,98 @@ mod tests {
             vec![ContinuousModification::SetName {
                 name: "Test Card".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn their_name_override_emits_set_name() {
+        let (_, mods) = parse_except_clause(
+            ", except their name is ~",
+            "Mirror Pair",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::SetName {
+                name: "Mirror Pair".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn name_override_boundaries_keep_pronoun_continuations() {
+        let mut ctx = ParseContext {
+            current_trigger_index: Some(7),
+            ..Default::default()
+        };
+        for (text, card_name) in [
+            (", except its name is ~ and it has this ability", "Its Card"),
+            (
+                ", except her name is ~ and she has this ability",
+                "Her Card",
+            ),
+            (", except his name is ~ and he has this ability", "His Card"),
+            (
+                ", except their name is ~ and they have this ability",
+                "Their Card",
+            ),
+        ] {
+            let (_, mods) = parse_except_clause(text, card_name, &ctx).unwrap();
+            assert!(
+                mods.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::SetName { name } if name == card_name
+                )),
+                "missing SetName for {text}; got {mods:?}"
+            );
+            assert!(
+                mods.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::RetainPrintedTriggerFromSource {
+                        source_trigger_index: 7
+                    }
+                )),
+                "missing retain-this-ability for {text}; got {mods:?}"
+            );
+        }
+        ctx.current_trigger_index = None;
+    }
+
+    #[test]
+    fn name_override_accepts_punctuation_and_eof_boundaries() {
+        for text in [", except its name is ~.", ", except its name is ~"] {
+            let (_, mods) =
+                parse_except_clause(text, "Boundary Card", &ParseContext::default()).unwrap();
+            assert_eq!(
+                mods,
+                vec![ContinuousModification::SetName {
+                    name: "Boundary Card".to_string(),
+                }],
+                "unexpected mods for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn name_override_rejects_short_self_suffix_without_boundary() {
+        let (_, mods) = parse_except_clause(
+            ", except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types",
+            "Mishra, Eminent One",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetName { name } if name == "Mishra, Eminent One"
+            )),
+            "short-self suffix must not be accepted as exact self-name override; got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "trailing copy exception body should still parse after rejecting name override; got {mods:?}"
         );
     }
 

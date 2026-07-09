@@ -11,7 +11,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } from "../adapter/types";
+import type { DeckCardCount, GameFormat, MatchConfig, ObjectId, SerializedAbilityCost } from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -34,6 +34,8 @@ import { DebugLibraryViewer } from "../components/chrome/DebugLibraryViewer.tsx"
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
+import { AttackRequirementBadges } from "../components/combat/AttackRequirementBadges.tsx";
+import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
@@ -41,6 +43,7 @@ import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
+import { MayTriggerAutoChoiceList } from "../components/board/MayTriggerAutoChoiceList.tsx";
 import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
@@ -71,6 +74,7 @@ import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
 import { OptionalCostModalContent } from "../components/modal/OptionalCostModal.tsx";
 import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchModal.tsx";
+import { LifeRedistributionModal } from "../components/modal/LifeRedistributionModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
@@ -80,6 +84,7 @@ import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
+import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -95,7 +100,6 @@ import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
-import { CompanionZone } from "../components/zone/CompanionZone.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import {
   PreferencesModal,
@@ -139,9 +143,16 @@ import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
+import {
+  abilityChoiceLabel,
+  formatAbilityCost,
+  loyaltyBadge,
+  stripLoyaltyCostPrefix,
+} from "../viewmodel/costLabel.ts";
+import { ManaFontIcon } from "../components/icons/ManaFontIcon.tsx";
 import {
   getCastableZoneViewerTarget,
+  getBoardChoiceView,
   getOpponentIds,
   getSeatCount,
   getWaitingForObjectChoiceIds,
@@ -151,6 +162,7 @@ import {
   type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
+import { GAME_Z_LAYER } from "../constants/ui.ts";
 
 type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
@@ -839,6 +851,10 @@ function GamePageContent({
   // Card-report picker is valid in a live, participating game (never spectate).
   const canReportCard = gameState != null && !isSpectatorMode;
   const canActForWaitingState = useCanActForWaitingState();
+  const boardChoiceLayerActive = useMemo(() => {
+    const choice = getBoardChoiceView(waitingFor, objects);
+    return canActForWaitingState && choice?.player === playerId;
+  }, [canActForWaitingState, objects, playerId, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
@@ -848,7 +864,6 @@ function GamePageContent({
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
-  const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
@@ -1268,9 +1283,12 @@ function GamePageContent({
 
       <DebugModeBanner />
 
-      {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand */}
+      {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand.
+          Board choices lift the grid above normal HUD rails, but must stay below
+          DialogHost/TargetingOverlay so confirm controls are not hidden behind
+          the player hand. Keep this ordering in GAME_Z_LAYER. */}
       <div
-        className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
+        className={`relative ${boardChoiceLayerActive && !isReconnecting ? GAME_Z_LAYER.boardChoiceGrid : GAME_Z_LAYER.board} grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
           gridTemplateRows,
@@ -1378,12 +1396,6 @@ function GamePageContent({
               />
             </div>
           </DraggableWidget>
-          <div
-            className="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
-            style={playerZoneRailStyle}
-          >
-            <CompanionZone playerId={perspectivePlayerId} />
-          </div>
         </div>
       </div>
 
@@ -1412,6 +1424,7 @@ function GamePageContent({
             </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
+              <MayTriggerAutoChoiceList />
               <FullControlToggle className="w-full" />
             </div>
           </div>
@@ -1439,6 +1452,9 @@ function GamePageContent({
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
+                {/* CR 603.5: standing "don't ask again" auto-choice summary chip,
+                    beside the priority-yield chip (self-hides when none stand). */}
+                <MayTriggerAutoChoiceList />
                 <FullControlToggle />
               </div>
               <ActionButton />
@@ -1466,7 +1482,6 @@ function GamePageContent({
         onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
-        debugInteractionMode={debugInteractionMode}
         debugClickModeButtonVisible={debugClickModeButtonVisible}
         onToggleDebugClickModeButtonVisible={toggleDebugClickModeButtonVisible}
         showReportCard={canReportCard}
@@ -1494,7 +1509,7 @@ function GamePageContent({
       {opponentDisconnected && !pauseReason && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60" />
-          <div className="relative z-10 w-full max-w-sm rounded-[24px] border border-yellow-400/30 bg-[#0b1020]/96 p-6 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
+          <div className="relative z-10 w-full max-w-sm rounded-[12px] border border-yellow-400/30 bg-[#0b1020] p-6 text-center shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
             <h2 className="mb-2 text-lg font-bold text-yellow-400">
               {t("gamePage.opponentDisconnected.title")}
             </h2>
@@ -1645,6 +1660,13 @@ function GamePageContent({
           to attackers that carry a minimum-blocker requirement. */}
       <BlockRequirementBadges />
 
+      {/* Per-creature must-attack / can't-attack and must-block / can't-block
+          badges (CR 508.1c/d, CR 509.1b/c). Each self-gates: renders nothing
+          unless the local player is at the matching declare step and the engine
+          supplied constraints. Display-only. */}
+      <AttackRequirementBadges />
+      <BlockerConstraintBadges />
+
       {/* Card preview overlay. Owns its own inspect-state subscriptions so a
           hover doesn't re-render GamePageContent (and the whole battlefield). */}
       <GameCardPreview />
@@ -1673,6 +1695,7 @@ function GamePageContent({
         <BattleProtectorModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
+        <PileOpponentModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />
@@ -1680,6 +1703,7 @@ function GamePageContent({
         <PermanentTypeSlotModal />
         <ModeChoiceModal />
         <ChooseOneOfBranchModal />
+        <LifeRedistributionModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
         <SpellbookDraftModal />
@@ -1810,6 +1834,24 @@ function GamePageContent({
             (e) => e.player === playerId,
           );
           if (!entry) return null;
+          // CR 103.5b: bottoming is folded into the MulliganDecision variant as
+          // a per-entry BottomCards sub-phase resolved at this player's own
+          // declare point.
+          if (entry.phase.type === "BottomCards") {
+            return (
+              <MulliganBottomCardsPrompt
+                playerId={entry.player}
+                count={entry.phase.count}
+                openingHandBottom={false}
+                excludedCardId={
+                  entry.phase.then.type === "UseSerumPowder"
+                    ? entry.phase.then.object_id
+                    : undefined
+                }
+                onChoose={handleBottomCards}
+              />
+            );
+          }
           return (
             <MulliganDecisionPrompt
               playerId={entry.player}
@@ -1833,8 +1875,7 @@ function GamePageContent({
           </div>
         )}
 
-      {(waitingFor?.type === "MulliganBottomCards" ||
-        waitingFor?.type === "OpeningHandBottomCards") &&
+      {waitingFor?.type === "OpeningHandBottomCards" &&
         (() => {
           const entry = waitingFor.data.pending.find(
             (e) => e.player === playerId,
@@ -1844,7 +1885,7 @@ function GamePageContent({
             <MulliganBottomCardsPrompt
               playerId={entry.player}
               count={entry.count}
-              openingHandBottom={waitingFor.type === "OpeningHandBottomCards"}
+              openingHandBottom
               onChoose={handleBottomCards}
             />
           );
@@ -1957,6 +1998,10 @@ interface MulliganBottomCardsPromptProps {
   playerId: number;
   count: number;
   openingHandBottom?: boolean;
+  // CR 103.5b: when this bottom obligation completes into UseSerumPowder, the
+  // earmarked Powder object must stay in hand to be exiled by its own effect,
+  // so it is not selectable as a bottomed card (the engine rejects it too).
+  excludedCardId?: ObjectId;
   onChoose: (id: string) => void;
 }
 
@@ -2005,7 +2050,7 @@ function MulliganPanel({
           animate={{ opacity: 1, scale: 1, ...slideTransform }}
           transition={{ duration: 0.24, ease: "easeOut" }}
         >
-          <div className="flex w-full flex-col overflow-hidden rounded-[14px] lg:rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md">
+          <div className="flex w-full flex-col overflow-hidden rounded-[12px] border border-white/10 bg-[#0b1020] shadow-[0_18px_48px_rgba(0,0,0,0.48)]">
             <div className="modal-header-compact border-b border-white/10">
               <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500">
                 {eyebrow}
@@ -2326,6 +2371,7 @@ function MulliganBottomCardsPrompt({
   playerId,
   count,
   openingHandBottom = false,
+  excludedCardId,
   onChoose,
 }: MulliganBottomCardsPromptProps) {
   const { t } = useTranslation("game");
@@ -2349,7 +2395,13 @@ function MulliganBottomCardsPrompt({
 
   if (!player || !objects) return null;
 
-  const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
+  // CR 103.5b: the earmarked Serum Powder object stays in hand to be exiled by
+  // its own effect, so it is excluded from the selectable bottom-cards set (the
+  // engine rejects any selection containing it).
+  const handObjects = player.hand
+    .filter((id) => id !== excludedCardId)
+    .map((id) => objects[id])
+    .filter(Boolean);
   const isReady = selectedCardIds.length === count;
 
   const handleConfirm = () => {
@@ -2617,7 +2669,7 @@ function GameOverScreen({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="relative z-10 mt-6 rounded-[20px] border border-white/10 bg-black/18 px-5 py-4 text-center backdrop-blur-md"
+            className="relative z-10 mt-6 rounded-[10px] border border-white/10 bg-slate-950/82 px-5 py-4 text-center"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
@@ -2656,7 +2708,7 @@ function GameOverScreen({
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
-            className="relative z-10 mt-8 flex w-full max-w-[min(28rem,calc(100vw-2rem))] flex-col gap-3 rounded-[22px] border border-white/10 bg-[#0b1020]/82 p-2 shadow-[0_20px_48px_rgba(0,0,0,0.38)] backdrop-blur-md sm:w-auto sm:max-w-fit sm:flex-row sm:items-center sm:justify-center"
+            className="relative z-10 mt-8 flex w-full max-w-[min(28rem,calc(100vw-2rem))] flex-col gap-3 rounded-[10px] border border-white/10 bg-[#0b1020] p-2 shadow-[0_12px_32px_rgba(0,0,0,0.38)] sm:w-auto sm:max-w-fit sm:flex-row sm:items-center sm:justify-center"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15, duration: 0.3 }}
@@ -2790,6 +2842,29 @@ function AbilityChoiceModal() {
           objects,
           webSlingingCosts,
         );
+        // CR 606.1: prefix a loyalty badge for planeswalker ability costs,
+        // reading the structured Loyalty cost (never parsing the label string).
+        const ability =
+          action.type === "ActivateAbility"
+            ? obj.abilities[action.data.ability_index]
+            : undefined;
+        const badge = loyaltyBadge(ability?.cost);
+        if (badge) {
+          return {
+            id: String(i),
+            label: stripLoyaltyCostPrefix(label),
+            description,
+            // No `size`: mana-font scales the loyalty glyph off the parent's
+            // font-size (font-size:1.5em), so it inherits the option row size.
+            icon: (
+              <ManaFontIcon
+                iconClass={badge.iconClasses}
+                fallbackText={badge.text}
+                label={badge.text}
+              />
+            ),
+          };
+        }
         return { id: String(i), label, description };
       })}
       onChoose={(id) => {

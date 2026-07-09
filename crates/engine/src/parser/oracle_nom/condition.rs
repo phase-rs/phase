@@ -7,7 +7,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::character::complete::multispace1;
-use nom::combinator::{map, opt, value};
+use nom::combinator::{eof, map, opt, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -26,8 +26,8 @@ use crate::types::ability::{
     AbilityCondition, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
     CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
     DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter, ZoneRef,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -94,6 +94,11 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // wins over the fixed-N "its power is N or greater" combinator inside
         // that group (which only matches numeric thresholds).
         parse_subject_property_superlative_comparison,
+        // CR 608.2c: Effect-resolution gates like Abzan Beastmaster's "if you
+        // control the creature with the greatest toughness or tied for the
+        // greatest toughness" are player-control predicates over an implicit
+        // creature aggregate population.
+        parse_you_control_superlative_object_condition,
         // CR 208.1 + CR 603.4 + CR 603.10a: "it had power greater than ~'s power"
         // — triggering object's LKI stat vs the source's stat (Drizzt Do'Urden).
         // Placed before `parse_source_state_conditions` so the "it had <stat>"
@@ -106,7 +111,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_you_have_conditions,
         parse_that_player_has_conditions,
         parse_there_are_conditions,
-        // CR 201.2 + CR 603.4: Named-pair MUST precede the generic compound
+        // CR 201.2: Named-control clauses MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
         parse_control_named_pair,
@@ -557,10 +562,26 @@ fn parse_compound_control_presence(input: &str) -> OracleResult<'_, StaticCondit
     ))
 }
 
-/// CR 201.2 + CR 603.4: Parse "you control [type] named [Name1] and [Name2]"
-/// as a conjunction of two single-named presence checks. Each named card is its
-/// own control predicate; the AND in the source phrase joins the two names, not
-/// the type word.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlNamedConnector {
+    And,
+    Or,
+}
+
+impl ControlNamedConnector {
+    fn combine(self, conditions: Vec<StaticCondition>) -> StaticCondition {
+        match self {
+            Self::And => StaticCondition::And { conditions },
+            Self::Or => StaticCondition::Or { conditions },
+        }
+    }
+}
+
+/// CR 201.2: Parse "you control [type] named [Name1] and [Name2]",
+/// serial lists such as "[Name1], [Name2], and [Name3]", and repeated typed
+/// members such as "[Name1] or a [type] named [Name2]" as joined single-named
+/// presence checks. Each named card is its own control predicate; the connector
+/// in the source phrase joins the named objects, not the type word.
 ///
 /// Empires cycle canonical: Scepter of Empires' "if you control artifacts named
 /// Crown of Empires and Throne of Empires" — semantically requires you control
@@ -569,6 +590,8 @@ fn parse_compound_control_presence(input: &str) -> OracleResult<'_, StaticCondit
 /// "you control" twice and joins distinct typed filters); here the bare type
 /// word is shared across both names.
 ///
+/// CR 201.2: Named-card conditions compare game objects by their English card
+/// names.
 /// Must precede `parse_compound_control_presence` so the trailing " and "
 /// is bound to the names list, not interpreted as a second `you control` clause.
 fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -576,54 +599,341 @@ fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
     // Split on " named " — the type-phrase head precedes it, the names list follows.
     let (after_named, type_text) = take_until(" named ").parse(rest)?;
     let (after_named, _) = tag(" named ").parse(after_named)?;
-    let (filter_base, type_remainder) = parse_type_phrase(type_text);
-    if matches!(filter_base, TargetFilter::Any) || !type_remainder.trim().is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
+    let filter_base = parse_control_named_type_filter(type_text, input)?;
     // Strip any FilterProp::Named that parse_type_phrase may have attached so the
     // synthesized per-name conjuncts carry exactly one Named property each.
     let filter_base = strip_filter_named_property(filter_base);
-    // First name extends to " and "; second name extends to end-of-clause
-    // (period or end of input). Both use take_until-style scanning to avoid
-    // string-method dispatch.
-    let (after_first_name, first_name) = take_until(" and ").parse(after_named)?;
-    let (after_first_name, _) = tag(" and ").parse(after_first_name)?;
-    // Second name: stop at period or end. parse_until_clause_end consumes the
-    // remainder up to a sentence boundary so trailing punctuation does not bleed
-    // into the captured name.
-    let (rest_after_pair, second_name) = parse_until_clause_end(after_first_name)?;
-    let first_name = first_name.trim();
-    let second_name = second_name.trim();
-    if first_name.is_empty() || second_name.is_empty() {
+    let (rest_after_pair, (filters, connector)) =
+        parse_control_named_pair_members(after_named, &filter_base)?;
+    let conditions = filters
+        .into_iter()
+        .map(|filter| StaticCondition::IsPresent {
+            filter: Some(inject_controller_you(filter)),
+        })
+        .collect();
+    Ok((rest_after_pair, connector.combine(conditions)))
+}
+
+fn parse_control_named_type_filter<'a>(
+    type_text: &'a str,
+    error_input: &'a str,
+) -> Result<TargetFilter, nom::Err<OracleError<'a>>> {
+    let (filter, type_remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) || !type_remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(filter)
+}
+
+/// CR 201.2: Repeated named-card members each identify a separate named object.
+fn parse_control_named_pair_members<'a>(
+    input: &'a str,
+    filter_base: &TargetFilter,
+) -> OracleResult<'a, (Vec<TargetFilter>, ControlNamedConnector)> {
+    if let Some((mut rest, first_name, connector)) =
+        find_repeated_typed_control_named_connector(input)
+    {
+        let first_name = first_name.trim();
+        if first_name.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        let mut filters = vec![with_named_property(filter_base.clone(), first_name)];
+        loop {
+            let (next_rest, (next_filter, next_connector)) =
+                parse_control_named_typed_member(rest)?;
+            filters.push(next_filter);
+            match next_connector {
+                Some(found_connector) if found_connector == connector => {
+                    rest = next_rest;
+                }
+                Some(_) => {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::Fail,
+                    )));
+                }
+                None => return Ok((next_rest, (filters, connector))),
+            }
+        }
+    }
+
+    parse_shared_type_control_named_pair(input, filter_base)
+}
+
+/// CR 201.2: A repeated typed "named" clause starts a new named object instead
+/// of extending the previous card name.
+fn find_repeated_typed_control_named_connector(
+    input: &str,
+) -> Option<(&str, &str, ControlNamedConnector)> {
+    let mut best: Option<(usize, &str, &str, ControlNamedConnector)> = None;
+    for (connector_tag, connector) in [
+        (" and ", ControlNamedConnector::And),
+        (" or ", ControlNamedConnector::Or),
+    ] {
+        let mut cursor = input;
+        while let Ok((after_connector, before_connector)) =
+            take_until::<_, _, OracleError<'_>>(connector_tag).parse(cursor)
+        {
+            let candidate_index = input.len() - cursor.len() + before_connector.len();
+            let right = &after_connector[connector_tag.len()..];
+            if parse_control_named_typed_member_head(right).is_ok() {
+                let first_name = input[..candidate_index].trim();
+                if !first_name.is_empty()
+                    && best
+                        .as_ref()
+                        .is_none_or(|(best_index, ..)| candidate_index < *best_index)
+                {
+                    best = Some((candidate_index, right, first_name, connector));
+                }
+            }
+            cursor = right;
+        }
+    }
+    best.map(|(_, rest, first_name, connector)| (rest, first_name, connector))
+}
+
+fn parse_control_named_typed_member_head(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (after_named, type_text) = take_until(" named ").parse(input)?;
+    let (after_named, _) = tag(" named ").parse(after_named)?;
+    let filter_base = parse_control_named_type_filter(type_text, input)?;
+    Ok((after_named, filter_base))
+}
+
+fn parse_control_named_typed_member(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, Option<ControlNamedConnector>)> {
+    let (after_named, filter_base) = parse_control_named_typed_member_head(input)?;
+    let (rest, name, next_connector) = if let Some((rest, name, connector)) =
+        find_repeated_typed_control_named_connector(after_named)
+    {
+        (rest, name, Some(connector))
+    } else {
+        let (rest, name) = parse_control_named_final_name(after_named)?;
+        (rest, name, None)
+    };
+    let name = name.trim();
+    if name.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
-    let first_filter = with_named_property(filter_base.clone(), first_name);
-    let second_filter = with_named_property(filter_base, second_name);
-    let first = StaticCondition::IsPresent {
-        filter: Some(inject_controller_you(first_filter)),
-    };
-    let second = StaticCondition::IsPresent {
-        filter: Some(inject_controller_you(second_filter)),
-    };
     Ok((
-        rest_after_pair,
-        StaticCondition::And {
-            conditions: vec![first, second],
-        },
+        rest,
+        (with_named_property(filter_base, name), next_connector),
     ))
 }
 
-/// Consume bytes up to a clause boundary (period, comma, or end of input).
-/// Returns the captured slice and the remainder positioned at the boundary.
-fn parse_until_clause_end(input: &str) -> OracleResult<'_, &str> {
-    use nom::bytes::complete::take_till;
-    take_till(|c| c == '.' || c == ',').parse(input)
+fn parse_shared_type_control_named_pair<'a>(
+    input: &'a str,
+    filter_base: &TargetFilter,
+) -> OracleResult<'a, (Vec<TargetFilter>, ControlNamedConnector)> {
+    let (rest_after_list, names_text) = parse_control_named_final_name(input)?;
+    let (names, connector) = parse_shared_control_named_list(input, names_text)?;
+    let filters = names
+        .into_iter()
+        .map(|name| with_named_property(filter_base.clone(), name))
+        .collect();
+    Ok((rest_after_list, (filters, connector)))
+}
+
+fn parse_shared_control_named_list<'a>(
+    error_input: &'a str,
+    names_text: &'a str,
+) -> Result<(Vec<&'a str>, ControlNamedConnector), nom::Err<OracleError<'a>>> {
+    let Some((connector_index, connector_len, connector, serial_comma)) =
+        find_shared_control_named_final_connector(names_text)
+    else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    let before_final = names_text[..connector_index].trim();
+    let final_name = names_text[connector_index + connector_len..].trim();
+    if before_final.is_empty() || final_name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let mut names = if serial_comma {
+        parse_shared_control_named_comma_members(error_input, before_final)?
+    } else {
+        vec![before_final]
+    };
+    names.push(final_name);
+    if names.len() < 2 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((names, connector))
+}
+
+fn find_shared_control_named_final_connector(
+    input: &str,
+) -> Option<(usize, usize, ControlNamedConnector, bool)> {
+    let mut best: Option<(usize, usize, ControlNamedConnector, bool)> = None;
+    for (connector_tag, connector, serial_comma) in [
+        (", and ", ControlNamedConnector::And, true),
+        (", or ", ControlNamedConnector::Or, true),
+        (" and ", ControlNamedConnector::And, false),
+        (" or ", ControlNamedConnector::Or, false),
+    ] {
+        let mut cursor = input;
+        while let Ok((after_connector, before_connector)) =
+            take_until::<_, _, OracleError<'_>>(connector_tag).parse(cursor)
+        {
+            let candidate_index = input.len() - cursor.len() + before_connector.len();
+            let overlaps_serial_comma = !serial_comma
+                && input[..candidate_index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| ch == ',');
+            if !overlaps_serial_comma
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_index, ..)| candidate_index > *best_index)
+            {
+                best = Some((
+                    candidate_index,
+                    connector_tag.len(),
+                    connector,
+                    serial_comma,
+                ));
+            }
+            cursor = &after_connector[connector_tag.len()..];
+        }
+    }
+    best
+}
+
+fn parse_shared_control_named_comma_members<'a>(
+    error_input: &'a str,
+    input: &'a str,
+) -> Result<Vec<&'a str>, nom::Err<OracleError<'a>>> {
+    let mut names = Vec::new();
+    let mut remaining = input;
+    while let Ok((after_comma, before_comma)) =
+        take_until::<_, _, OracleError<'_>>(", ").parse(remaining)
+    {
+        let name = before_comma.trim();
+        if name.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                error_input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        names.push(name);
+        remaining = &after_comma[", ".len()..];
+    }
+    let final_name = remaining.trim();
+    if final_name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    names.push(final_name);
+    if names.len() < 2 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            error_input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(names)
+}
+
+/// Consume a named-card member up to a guarded condition boundary. Bare commas
+/// stay inside the name so legendary names such as "Guan Yu, Sainted Warrior"
+/// survive, while a comma followed by an effect lead remains available to the
+/// caller as the condition terminator.
+///
+/// CR 201.2: Card names may include punctuation, so punctuation alone is not a
+/// safe name boundary.
+/// CR 603.4: In an intervening-if trigger, the comma-prefixed effect clause
+/// remains outside the condition.
+fn parse_control_named_final_name(input: &str) -> OracleResult<'_, &str> {
+    let mut remaining = input;
+    while !remaining.is_empty() {
+        if parse_control_named_condition_terminator(remaining).is_ok() {
+            let consumed = input.len() - remaining.len();
+            return Ok((remaining, input[..consumed].trim()));
+        }
+        let mut chars = remaining.char_indices();
+        let _ = chars.next();
+        remaining = match chars.next() {
+            Some((idx, _)) => &remaining[idx..],
+            None => "",
+        };
+    }
+    Ok(("", input.trim()))
+}
+
+fn parse_control_named_condition_terminator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), tag(".")),
+        value((), (tag(", "), parse_control_named_condition_effect_lead)),
+    ))
+    .parse(input)
+}
+
+fn parse_control_named_condition_effect_lead(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), eof),
+        parse_control_named_condition_action_lead,
+        parse_control_named_condition_subject_lead,
+    ))
+    .parse(input)
+}
+
+fn parse_control_named_condition_action_lead(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), tag("instead")),
+        value((), tag("then")),
+        value((), tag("do")),
+        value((), tag("draw")),
+        value((), tag("create")),
+        value((), tag("put")),
+        value((), tag("sacrifice")),
+        value((), tag("transform")),
+        value((), tag("add ")),
+        value((), tag("exile ")),
+        value((), tag("destroy ")),
+        value((), tag("return ")),
+        value((), tag("discard ")),
+        value((), tag("choose ")),
+    ))
+    .parse(input)
+}
+
+fn parse_control_named_condition_subject_lead(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), tag("you ")),
+        value((), tag("target ")),
+        value((), tag("it ")),
+        value((), tag("its ")),
+        value((), tag("their ")),
+        value((), tag("each ")),
+        value((), tag("all ")),
+    ))
+    .parse(input)
 }
 
 /// Append a `FilterProp::Named { name }` to a typed filter. Used by
@@ -2291,7 +2601,8 @@ pub(crate) fn parse_superlative_comparator_phrase(
     .parse(input)
 }
 
-/// Parse the optional "or is tied for [greatest|lowest] [property]" tail.
+/// Parse the optional "or is tied for [greatest|lowest] [property]" /
+/// "or tied for the [greatest|lowest] [property]" tail.
 /// Presence relaxes strict GT/LT to GE/LE. The matched superlative and
 /// property must agree with the leading clause. The shared trailing
 /// "among <filter>" is parsed by the caller.
@@ -2308,9 +2619,14 @@ fn parse_optional_tied_for_tail(
         AggregateFunction::Sum => Comparator::GT,
     };
     // The leading clause may end here (no "or is tied for" tail) — return GT/LT.
-    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or is tied for ").parse(input) else {
+    let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" or is tied for "),
+        tag(" or tied for "),
+    ))
+    .parse(input) else {
         return Ok((input, strict_comparator));
     };
+    let (rest, _) = opt(tag("the ")).parse(rest)?;
     // Match the same superlative as the leading clause.
     let (rest, tied_aggregate) = parse_superlative_adjective(rest)?;
     if tied_aggregate != aggregate {
@@ -2335,6 +2651,78 @@ fn parse_optional_tied_for_tail(
         other => other,
     };
     Ok((rest, relaxed))
+}
+
+/// CR 608.2c + CR 109.4: Parse a player-control superlative gate such as
+/// "you control the creature with the greatest toughness or tied for the
+/// greatest toughness" or "you control a creature with the greatest power
+/// among creatures on the battlefield". This is not source-relative: the
+/// player controls at least one creature whose P/T is tied for the table-wide
+/// maximum/minimum.
+fn parse_you_control_superlative_object_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, _) = alt((tag("the "), tag("a "))).parse(rest)?;
+    let (rest, object_filter) = value(
+        TargetFilter::Typed(TypedFilter::creature()),
+        tag("creature"),
+    )
+    .parse(rest)?;
+    let (rest, _) = tag(" with the ").parse(rest)?;
+    let (rest, aggregate) = parse_superlative_adjective(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, property) = parse_property_keyword(rest)?;
+    let (rest, _) = parse_optional_tied_for_tail(rest, aggregate, property)?;
+    let comparator = match aggregate {
+        AggregateFunction::Max => Comparator::GE,
+        AggregateFunction::Min => Comparator::LE,
+        AggregateFunction::Sum => return Err(oracle_err(rest)),
+    };
+    let (rest, population_filter) =
+        if let Ok((among_rest, _)) = tag::<_, _, OracleError<'_>>(" among ").parse(rest) {
+            let (filter, remainder) = parse_type_phrase(among_rest);
+            if matches!(filter, TargetFilter::Any) {
+                return Err(oracle_err(remainder));
+            }
+            let consumed = among_rest.len() - remainder.len();
+            (&among_rest[consumed..], filter)
+        } else {
+            (rest, object_filter.clone())
+        };
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+
+    let stat = match property {
+        ObjectProperty::Power => PtStat::Power,
+        ObjectProperty::Toughness => PtStat::Toughness,
+        ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
+            return Err(oracle_err(rest));
+        }
+    };
+    let controlled_filter = add_filter_property(
+        inject_controller_you(object_filter.clone()),
+        FilterProp::PtComparison {
+            stat,
+            scope: PtValueScope::Current,
+            comparator,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: aggregate,
+                    property,
+                    filter: population_filter,
+                },
+            },
+        },
+    );
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ObjectCount {
+                filter: controlled_filter,
+            },
+            1,
+        ),
+    ))
 }
 
 /// Build the `StaticCondition::QuantityComparison` for a superlative-comparison
@@ -2912,6 +3300,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_no_opponent_controls_a,
         // "your opponents control no [type]" → Not(IsPresent { Opponent })
         parse_your_opponents_control_no,
+        // "a player controls no [type]" → QuantityComparison(EQ, ControlledByEachPlayer{Min}, 0)
+        parse_a_player_controls_no,
         // CR 702: "a creature you control has <keyword>" — subject-first
         // presence check (Odric, Lunarch Marshal). Grouped into the control
         // family so the parent dispatcher's `alt` arity stays within bounds.
@@ -3566,6 +3956,43 @@ fn parse_no_opponent_controls_a(input: &str) -> OracleResult<'_, StaticCondition
                 filter: Some(filter),
             }),
         },
+    ))
+}
+
+/// CR 603.4 + CR 608.2c: Parse "a player controls no [type]" → an existential
+/// zero-control check over every player. Sothera, the Supervoid's end-step
+/// intervening-if ("if a player controls no creatures, ...").
+///
+/// Emits a `QuantityComparison` whose LHS is
+/// `ControlledByEachPlayer { aggregate: Min }` compared `EQ 0`: the minimum
+/// per-player controlled count is zero exactly when SOME player controls none
+/// of the matching permanents. This is deliberately NOT a `Not(IsPresent)` form
+/// — that would assert "no matching permanent exists on the battlefield at all",
+/// the wrong rule (the you / opponents `control no` arms above use it because
+/// their scope is a single fixed controller). The filter is intentionally
+/// controller-less: the resolver (`game::quantity`, `ControlledByEachPlayer`
+/// arm) gates each candidate on `obj.controller == p.id`, enforcing the "they
+/// control" semantics per iterated player (CR 109.5).
+fn parse_a_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a player controls no ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = input.len() - remainder.len();
+    Ok((
+        &input[consumed..],
+        make_quantity_comparison(
+            QuantityRef::ControlledByEachPlayer {
+                filter,
+                aggregate: AggregateFunction::Min,
+            },
+            Comparator::EQ,
+            0,
+        ),
     ))
 }
 
@@ -4355,6 +4782,7 @@ fn parse_youve_spell_history_condition(input: &str) -> OracleResult<'_, StaticCo
     alt((
         parse_cast_spell_count_this_turn,
         |input| parse_another_spell_cast_this_turn(input, 2),
+        parse_cast_repeated_named_spells_this_turn,
         parse_cast_one_spell_this_turn,
         // "you've cast another spell this turn" → SpellsCastThisTurn >= 2
         value(
@@ -5598,12 +6026,102 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
             ),
         ));
     }
+    if let Ok((rest, condition)) = parse_repeated_named_spells_this_turn(rest) {
+        return Ok((rest, condition));
+    }
     parse_one_spell_this_turn_after_cast(rest)
 }
 
 fn parse_cast_one_spell_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("cast ").parse(input)?;
     parse_one_spell_this_turn_after_cast(rest)
+}
+
+fn parse_cast_repeated_named_spells_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("cast ").parse(input)?;
+    parse_repeated_named_spells_this_turn(rest)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpellHistoryConnector {
+    And,
+    Or,
+}
+
+/// CR 201.2 + CR 608.2c: A repeated named-spell condition names two separate
+/// cast-history predicates, not one card name containing the second
+/// "a spell named ..." item.
+fn parse_repeated_named_spells_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (first_filter, connector)) = parse_named_spell_history_item_with_connector(input)?;
+    let (rest, second_filter) = parse_named_spell_history_final_item(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    let conditions = vec![
+        make_named_spell_history_condition(first_filter),
+        make_named_spell_history_condition(second_filter),
+    ];
+    let condition = match connector {
+        SpellHistoryConnector::And => StaticCondition::And { conditions },
+        SpellHistoryConnector::Or => StaticCondition::Or { conditions },
+    };
+    Ok((rest, condition))
+}
+
+fn parse_named_spell_history_item_with_connector(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, SpellHistoryConnector)> {
+    let (rest, _) = parse_article(input)?;
+    let (rest, _) = tag("spell named ").parse(rest)?;
+    let (rest, (name, connector)) = alt((
+        map(
+            (take_until(" and a spell named "), tag(" and ")),
+            |(name, _)| (name, SpellHistoryConnector::And),
+        ),
+        map(
+            (take_until(" or a spell named "), tag(" or ")),
+            |(name, _)| (name, SpellHistoryConnector::Or),
+        ),
+        map(
+            (take_until(" and/or a spell named "), tag(" and/or ")),
+            |(name, _)| (name, SpellHistoryConnector::Or),
+        ),
+    ))
+    .parse(rest)?;
+    Ok((rest, (named_spell_history_filter(input, name)?, connector)))
+}
+
+fn parse_named_spell_history_final_item(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = parse_article(input)?;
+    let (rest, _) = tag("spell named ").parse(rest)?;
+    let (rest, name) = take_until(" this turn").parse(rest)?;
+    named_spell_history_filter(input, name).map(|filter| (rest, filter))
+}
+
+fn named_spell_history_filter<'a>(
+    input: &'a str,
+    name: &str,
+) -> Result<TargetFilter, nom::Err<OracleError<'a>>> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(TargetFilter::Typed(TypedFilter::card().properties(vec![
+        FilterProp::Named {
+            name: name.to_string(),
+        },
+    ])))
+}
+
+fn make_named_spell_history_condition(filter: TargetFilter) -> StaticCondition {
+    make_quantity_ge(
+        QuantityRef::SpellsCastThisTurn {
+            scope: CountScope::Controller,
+            filter: Some(filter),
+        },
+        1,
+    )
 }
 
 fn parse_one_spell_this_turn_after_cast(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -6296,29 +6814,60 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let had_enter_suffix = "enter the battlefield under your control this turn";
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you had ").parse(input) {
+        // "you had N or more [type] enter ..." (counted threshold, GE) — the
+        // "you had" auxiliary reads the present-tense "enter" surface. Falls
+        // back to the singular "you had a/an/another [type] enter ..." form.
+        if let Ok(result) = parse_or_more_entered_count(rest, had_enter_suffix) {
+            return Ok(result);
+        }
         return parse_entered_this_turn_subject(rest, had_enter_suffix, 1);
     }
 
     // Branch 1: "N or more [type] entered..."
-    if let Ok((after_n, n)) = parse_number(input) {
-        let after_n = after_n.trim_start();
-        if let Ok((type_and_rest, _)) = tag::<_, _, OracleError<'_>>("or more ").parse(after_n) {
-            if let Ok((rest, type_text)) =
-                take_until::<_, _, OracleError<'_>>(entered_suffix).parse(type_and_rest)
-            {
-                let (rest, _) = tag(entered_suffix).parse(rest)?;
-                let (filter, _) = parse_type_phrase(type_text.trim());
-                let filter = inject_controller_you(filter);
-                return Ok((
-                    rest,
-                    make_quantity_ge(QuantityRef::EnteredThisTurn { filter }, n),
-                ));
-            }
-        }
+    if let Ok(result) = parse_or_more_entered_count(input, entered_suffix) {
+        return Ok(result);
     }
 
     // Branch 2: "a/an/another [type] entered..."
     parse_entered_this_turn_subject(input, entered_suffix, 1)
+}
+
+/// CR 403.3 + CR 608.2h: Parse "N or more [type] <suffix>" into a GE threshold
+/// on the this-turn battlefield-entry count. Shared by the bare past-tense
+/// surface ("N or more creatures entered the battlefield under your control
+/// this turn") and the "you had"-auxiliary present-tense surface ("you had N
+/// or more creatures enter the battlefield under your control this turn", e.g.
+/// Park Heights Pegasus) — both denote the same this-turn entry tally, so the
+/// count and suffix are the only axes that vary.
+///
+/// Uses `QuantityRef::BattlefieldEntriesThisTurn` (the `battlefield_entries_
+/// this_turn` snapshot authority) rather than the live-board `EnteredThisTurn`:
+/// a permanent that entered under your control this turn still counts after it
+/// has left the battlefield (died, was bounced, or sacrificed) before the
+/// condition resolves, because "entered ... this turn" is a historical event,
+/// not a current-board population read. `PlayerScope::Controller` scopes the
+/// tally to entries under the ability controller's control (the runtime keys
+/// on `record.controller`), so the type filter carries no controller of its
+/// own — mirroring the `who had N or more ... enter` for-each authority.
+fn parse_or_more_entered_count<'a>(
+    input: &'a str,
+    suffix: &'static str,
+) -> OracleResult<'a, StaticCondition> {
+    let (after_n, n) = parse_number(input)?;
+    let (type_and_rest, _) = tag("or more ").parse(after_n.trim_start())?;
+    let (rest, type_text) = take_until(suffix).parse(type_and_rest)?;
+    let (rest, _) = tag(suffix).parse(rest)?;
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter,
+            },
+            n,
+        ),
+    ))
 }
 
 fn parse_entered_this_turn_subject<'a>(
@@ -9054,7 +9603,7 @@ mod tests {
 
     #[test]
     fn test_you_control_named_pair() {
-        // CR 201.2 + CR 603.4: Scepter of Empires class — "you control [type]
+        // CR 201.2: Scepter of Empires class — "you control [type]
         // named [Name1] and [Name2]" requires both named cards under your
         // control, lowered to And { IsPresent(Named X1), IsPresent(Named X2) }.
         let (rest, c) = parse_inner_condition(
@@ -9096,6 +9645,159 @@ mod tests {
                 }
             }
             other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn you_control_shared_type_named_serial_list() {
+        // Helm of Kaldra class: one shared type applies to every named member in
+        // a serial list, not only the first two names.
+        let (rest, c) = parse_inner_condition(
+            "you control equipment named helm of kaldra, sword of kaldra, and shield of kaldra",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = c else {
+            panic!("expected And(IsPresent, IsPresent, IsPresent)");
+        };
+        assert_eq!(conditions.len(), 3);
+        assert_eq!(
+            named_presence_names(&conditions),
+            vec!["helm of kaldra", "sword of kaldra", "shield of kaldra"]
+        );
+        for cond in &conditions {
+            let tf = typed_presence(cond);
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Equipment".to_string())),
+                "expected Equipment subtype in {tf:?}"
+            );
+            assert!(tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
+        }
+    }
+
+    #[test]
+    fn you_control_named_pair_stops_before_add_effect() {
+        // Tower Worker class: the control condition ends before the mana effect.
+        let (rest, c) = parse_inner_condition(
+            "you control creatures named mine worker and power plant worker, add {c}{c}{c} instead",
+        )
+        .unwrap();
+        assert_eq!(rest, ", add {c}{c}{c} instead");
+        let StaticCondition::And { conditions } = c else {
+            panic!("expected And(IsPresent, IsPresent)");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(
+            named_presence_names(&conditions),
+            vec!["mine worker", "power plant worker"]
+        );
+        for cond in &conditions {
+            let tf = typed_presence(cond);
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
+        }
+    }
+
+    #[test]
+    fn you_control_repeated_typed_named_pair_with_and() {
+        // High Marshal Arguel class: the second "a land named ..." clause
+        // carries its own type and must not be folded into the enchantment name.
+        let (rest, c) = parse_inner_condition(
+            "you control an enchantment named arguel's blood fast and a land named temple of aclazotz",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = c else {
+            panic!("expected And(IsPresent, IsPresent)");
+        };
+        assert_eq!(conditions.len(), 2);
+        let first = typed_presence(&conditions[0]);
+        assert!(first.type_filters.contains(&TypeFilter::Enchantment));
+        assert_eq!(first.controller, Some(ControllerRef::You));
+        assert!(first
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Named { name } if name == "arguel's blood fast")));
+        assert!(first
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
+        let second = typed_presence(&conditions[1]);
+        assert!(second.type_filters.contains(&TypeFilter::Land));
+        assert_eq!(second.controller, Some(ControllerRef::You));
+        assert!(second
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Named { name } if name == "temple of aclazotz")));
+        assert!(second
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)));
+    }
+
+    #[test]
+    fn you_control_repeated_typed_named_pair_with_or_preserves_commas() {
+        // Liu Bei class: repeated "a permanent named ..." clauses are a
+        // disjunction, and card-name commas are part of the literal names.
+        let (rest, c) = parse_inner_condition(
+            "you control a permanent named guan yu, sainted warrior or a permanent named zhang fei, fierce warrior",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::Or { conditions } = c else {
+            panic!("expected Or(IsPresent, IsPresent)");
+        };
+        assert_eq!(conditions.len(), 2);
+        let names: Vec<&str> = conditions
+            .iter()
+            .map(|cond| {
+                let tf = typed_presence(cond);
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.iter().any(
+                    |p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)
+                ));
+                tf.properties.iter().find_map(|p| match p {
+                    FilterProp::Named { name } => Some(name.as_str()),
+                    _ => None,
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .expect("both disjuncts must have a Named property");
+        assert_eq!(
+            names,
+            vec!["guan yu, sainted warrior", "zhang fei, fierce warrior"]
+        );
+    }
+
+    #[test]
+    fn control_named_final_name_stops_before_common_effect_leads() {
+        for tail in [
+            ", exile it",
+            ", destroy target artifact",
+            ", return it to its owner's hand",
+            ", discard a card",
+            ", it gains flying",
+            ", its controller draws a card",
+            ", their controller draws a card",
+            ", each opponent loses 1 life",
+            ", all creatures get +1/+1",
+            ", choose one",
+            ", add {c}{c}{c}",
+        ] {
+            let input = format!("throne of empires{tail}");
+            let (rest, name) = parse_control_named_final_name(&input).unwrap();
+            assert_eq!(name, "throne of empires");
+            assert_eq!(rest, tail);
         }
     }
 
@@ -9703,6 +10405,57 @@ mod tests {
         let (rest, c) = parse_inner_condition("you control no creatures").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::Not { .. }));
+    }
+
+    // CR 603.4 + CR 109.5: Sothera, the Supervoid's end-step intervening-if. The
+    // existential "a player controls no creatures" must emit a QuantityComparison
+    // over ControlledByEachPlayer{Min} EQ 0 with a CONTROLLER-LESS filter — NOT
+    // the Not(IsPresent) form the you / opponents `control no` arms use (those
+    // assert no such permanent exists at all; this asserts some player has none).
+    #[test]
+    fn test_a_player_controls_no_creatures() {
+        let (rest, c) = parse_inner_condition("a player controls no creatures").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ControlledByEachPlayer {
+                                filter,
+                                aggregate: AggregateFunction::Min,
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {
+                // The filter must be controller-less: the resolver enforces
+                // "they control" via obj.controller == p.id (quantity.rs). A
+                // controller clause here would double-scope and zero the min.
+                match filter {
+                    TargetFilter::Typed(tf) => assert!(
+                        tf.controller.is_none(),
+                        "ControlledByEachPlayer filter must be controller-less, got {:?}",
+                        tf.controller
+                    ),
+                    other => panic!("expected Typed(creature) filter, got {other:?}"),
+                }
+            }
+            other => panic!(
+                "expected QuantityComparison(ControlledByEachPlayer{{Min}} EQ 0), got {other:?}"
+            ),
+        }
+    }
+
+    // Negative guard: the single-controller "you control no X" form must remain
+    // Not(IsPresent) — the new existential arm must not hijack it.
+    #[test]
+    fn test_you_control_no_is_not_quantity_comparison() {
+        let (_, c) = parse_inner_condition("you control no creatures").unwrap();
+        assert!(
+            matches!(c, StaticCondition::Not { .. }),
+            "you-scoped 'control no' must stay Not(IsPresent), got {c:?}"
+        );
     }
 
     #[test]
@@ -10322,6 +11075,9 @@ mod tests {
 
     #[test]
     fn test_entered_this_turn_count() {
+        // The counted "N or more [type] entered ... this turn" surface reads the
+        // battlefield-entry snapshot (entries that later left still count), not
+        // the live-board `EnteredThisTurn` population.
         let (rest, c) = parse_inner_condition(
             "two or more creatures entered the battlefield under your control this turn",
         )
@@ -10331,12 +11087,16 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::EnteredThisTurn { .. },
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player: PlayerScope::Controller,
+                                ..
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
             } => {}
-            other => panic!("expected EnteredThisTurn GE 2, got {other:?}"),
+            other => panic!("expected BattlefieldEntriesThisTurn GE 2, got {other:?}"),
         }
     }
 
@@ -10413,6 +11173,39 @@ mod tests {
                 assert!(filter.properties.contains(&FilterProp::Another));
             }
             other => panic!("expected another creature EnteredThisTurn GE 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_had_two_or_more_enter_this_turn() {
+        // Park Heights Pegasus: "... draw a card if you had two or more creatures
+        // enter the battlefield under your control this turn." The counted "N or
+        // more" threshold under the "you had" auxiliary must yield GE 2, not the
+        // singular GE 1 the article-only path produced (which dropped the count).
+        let (rest, c) = parse_inner_condition(
+            "you had two or more creatures enter the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player: PlayerScope::Controller,
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {
+                // "under your control" is scoped by PlayerScope::Controller (the
+                // runtime keys on record.controller), so the type filter itself
+                // carries only the creature type, no controller.
+                assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected creatures BattlefieldEntriesThisTurn GE 2, got {other:?}"),
         }
     }
 
@@ -10806,6 +11599,22 @@ mod tests {
             } => tf,
             other => panic!("expected typed IsPresent, got {other:?}"),
         }
+    }
+
+    fn named_presence_names(conditions: &[StaticCondition]) -> Vec<&str> {
+        conditions
+            .iter()
+            .map(|cond| {
+                typed_presence(cond)
+                    .properties
+                    .iter()
+                    .find_map(|p| match p {
+                        FilterProp::Named { name } => Some(name.as_str()),
+                        _ => None,
+                    })
+            })
+            .collect::<Option<Vec<_>>>()
+            .expect("all conditions must have a Named property")
     }
 
     fn typed_presence_under_not(condition: &StaticCondition) -> &TypedFilter {
@@ -12504,6 +13313,39 @@ mod tests {
                 )));
             }
             other => panic!("expected compound SpellsCastThisTurn condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn youve_cast_repeated_named_spells_this_turn_is_compound() {
+        let (rest, c) = parse_inner_condition(
+            "you've cast a spell named peer through depths and a spell named reach through mists this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                for expected_name in ["peer through depths", "reach through mists"] {
+                    assert!(
+                        conditions.iter().any(|condition| matches!(
+                            condition,
+                            StaticCondition::QuantityComparison {
+                                lhs: QuantityExpr::Ref {
+                                    qty: QuantityRef::SpellsCastThisTurn {
+                                        scope: CountScope::Controller,
+                                        filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                                    },
+                                },
+                                comparator: Comparator::GE,
+                                rhs: QuantityExpr::Fixed { value: 1 },
+                            } if properties.iter().any(|prop| matches!(prop, FilterProp::Named { name } if name == expected_name))
+                        )),
+                        "missing named-spell predicate for {expected_name}: {conditions:?}"
+                    );
+                }
+            }
+            other => panic!("expected compound named-spell condition, got {other:?}"),
         }
     }
 
@@ -15459,6 +16301,124 @@ mod tests {
                 assert_eq!(comparator, Comparator::GE);
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: Abzan Beastmaster's resolve-time gate is an existential
+    /// controlled-creature check against the table-wide greatest toughness.
+    #[test]
+    fn parse_inner_condition_you_control_creature_tied_for_greatest_toughness() {
+        let (rest, c) = parse_inner_condition(
+            "you control the creature with the greatest toughness or tied for the greatest toughness.",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                let has_table_wide_toughness_max = tf.properties.iter().any(|prop| {
+                    let FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
+                        value:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::Aggregate {
+                                        function: AggregateFunction::Max,
+                                        property: ObjectProperty::Toughness,
+                                        filter: TargetFilter::Typed(population),
+                                    },
+                            },
+                    } = prop
+                    else {
+                        return false;
+                    };
+                    population.type_filters == vec![TypeFilter::Creature]
+                        && population.controller.is_none()
+                });
+                assert!(
+                    has_table_wide_toughness_max,
+                    "expected table-wide toughness max comparison, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected controlled creature ObjectCount gate, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: Primal Empathy / Eomer wording carries an explicit aggregate
+    /// population ("among creatures on the battlefield") rather than Abzan
+    /// Beastmaster's implicit creature population.
+    #[test]
+    fn parse_inner_condition_you_control_creature_with_greatest_power_among_battlefield() {
+        let (rest, c) = parse_inner_condition(
+            "you control a creature with the greatest power among creatures on the battlefield.",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "must fully consume, leftover: {rest:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                let has_battlefield_power_max = tf.properties.iter().any(|prop| {
+                    let FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
+                        value:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::Aggregate {
+                                        function: AggregateFunction::Max,
+                                        property: ObjectProperty::Power,
+                                        filter: TargetFilter::Typed(population),
+                                    },
+                            },
+                    } = prop
+                    else {
+                        return false;
+                    };
+                    population.type_filters == vec![TypeFilter::Creature]
+                        && population.properties.iter().any(|prop| {
+                            matches!(
+                                prop,
+                                FilterProp::InZone {
+                                    zone: Zone::Battlefield
+                                }
+                            )
+                        })
+                });
+                assert!(
+                    has_battlefield_power_max,
+                    "expected battlefield power max comparison, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected controlled creature ObjectCount gate, got {other:?}"),
         }
     }
 

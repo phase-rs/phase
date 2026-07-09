@@ -12,6 +12,8 @@ import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
 import { useBlockRequirements } from "../combat/useBlockRequirements.ts";
+import { useAttackRequirements } from "../combat/useAttackRequirements.ts";
+import { useBlockerConstraints } from "../combat/useBlockerConstraints.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
@@ -80,6 +82,9 @@ export function ActionButton() {
     () => Array.from(blockRequirements.values()).filter((r) => r.status === "incomplete").length,
     [blockRequirements],
   );
+  // CR 508.1c/d + CR 509.1c: engine-provided must-attack / must-block gating.
+  const { unsatisfiedMustAttackCount } = useAttackRequirements();
+  const { unsatisfiedMustBlockCount } = useBlockerConstraints();
 
   const canCompanionToHand = useGameStore((s) =>
     s.legalActions.some((a) => a.type === "CompanionToHand"),
@@ -264,7 +269,7 @@ export function ActionButton() {
   const idle = mode === "hidden" && !isEndingTurn;
   const blocked = idle || actionBlocked;
   const panelClassName =
-    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[22px] border border-white/10 bg-slate-950/72 p-2 shadow-[0_24px_64px_rgba(15,23,42,0.52)] backdrop-blur-xl max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:flex-col max-lg:portrait:flex-nowrap max-lg:portrait:gap-1 max-lg:portrait:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[14px]";
+    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[10px] border border-white/10 bg-slate-950/92 p-2 shadow-[0_12px_32px_rgba(15,23,42,0.45)] max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:flex-col max-lg:portrait:flex-nowrap max-lg:portrait:gap-1 max-lg:portrait:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[8px]";
   const primaryButtonClass = "min-w-[10.5rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
   const secondaryButtonClass = "min-w-[8rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
 
@@ -288,22 +293,27 @@ export function ActionButton() {
             </button>
             {selectedAttackers.length > 0 ? (
               <button
-                disabled={actionBlocked}
+                disabled={actionBlocked || unsatisfiedMustAttackCount > 0}
                 onClick={handleConfirmAttackers}
-                className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked || unsatisfiedMustAttackCount > 0, className: primaryButtonClass })}
               >
                 {t("actionButton.confirmAttackers", { count: selectedAttackers.length })}
               </button>
             ) : (
               <button
-                disabled={actionBlocked}
+                disabled={actionBlocked || unsatisfiedMustAttackCount > 0}
                 onClick={() => handleSkipConfirm("attackers")}
-                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked || unsatisfiedMustAttackCount > 0, className: primaryButtonClass })}
               >
                 {skipArmed === "attackers"
                   ? t("actionButton.attackWithNoneConfirm")
                   : t("actionButton.attackWithNone")}
               </button>
+            )}
+            {unsatisfiedMustAttackCount > 0 && (
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-rose-300/30 bg-rose-950/95 px-4 py-2 text-sm font-medium text-rose-100 shadow-lg">
+                {t("combat.unsatisfiedMustAttack", { count: unsatisfiedMustAttackCount })}
+              </div>
             )}
           </>
         )}
@@ -313,9 +323,9 @@ export function ActionButton() {
             {blockerAssignments.size > 0 ? (
               <>
                 <button
-                  disabled={actionBlocked || incompleteBlockCount > 0}
+                  disabled={actionBlocked || incompleteBlockCount > 0 || unsatisfiedMustBlockCount > 0}
                   onClick={handleConfirmBlockers}
-                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked || incompleteBlockCount > 0, className: primaryButtonClass })}
+                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked || incompleteBlockCount > 0 || unsatisfiedMustBlockCount > 0, className: primaryButtonClass })}
                 >
                   {t("actionButton.confirmBlockers", { count: blockerAssignments.size })}
                 </button>
@@ -329,9 +339,9 @@ export function ActionButton() {
               </>
             ) : (
               <button
-                disabled={actionBlocked}
+                disabled={actionBlocked || unsatisfiedMustBlockCount > 0}
                 onClick={() => handleSkipConfirm("blockers")}
-                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked || unsatisfiedMustBlockCount > 0, className: primaryButtonClass })}
               >
                 {skipArmed === "blockers"
                   ? t("actionButton.blockWithNoneConfirm")
@@ -339,13 +349,18 @@ export function ActionButton() {
               </button>
             )}
             {pendingBlocker !== null && (
-              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-cyan-300/25 bg-cyan-950/80 px-4 py-2 text-sm font-medium text-cyan-100 shadow-lg backdrop-blur-xl">
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-cyan-300/25 bg-cyan-950/95 px-4 py-2 text-sm font-medium text-cyan-100 shadow-lg">
                 {t("actionButton.selectAttackerForBlocker")}
               </div>
             )}
             {pendingBlocker === null && incompleteBlockCount > 0 && (
-              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-amber-300/30 bg-amber-950/85 px-4 py-2 text-sm font-medium text-amber-100 shadow-lg backdrop-blur-xl">
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-amber-300/30 bg-amber-950/95 px-4 py-2 text-sm font-medium text-amber-100 shadow-lg">
                 {t("combat.blockIncomplete", { count: incompleteBlockCount })}
+              </div>
+            )}
+            {pendingBlocker === null && incompleteBlockCount === 0 && unsatisfiedMustBlockCount > 0 && (
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-rose-300/30 bg-rose-950/95 px-4 py-2 text-sm font-medium text-rose-100 shadow-lg">
+                {t("combat.unsatisfiedMustBlock", { count: unsatisfiedMustBlockCount })}
               </div>
             )}
           </>
@@ -491,6 +506,9 @@ export function ActionButton() {
         <AttackTargetPicker
           validTargets={validAttackTargets}
           selectedAttackers={selectedAttackers}
+          attackerConstraints={
+            waitingFor?.type === "DeclareAttackers" ? waitingFor.data.attacker_constraints : undefined
+          }
           onConfirm={handleTargetPickerConfirm}
           onCancel={() => setShowTargetPicker(false)}
         />
