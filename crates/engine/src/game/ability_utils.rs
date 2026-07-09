@@ -1472,16 +1472,16 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             })
             .collect()
     } else if let Effect::Attach { attachment, target } = &validated.effect {
-        // NOTE (phase#4767): both SelfRef and ParentTarget are excluded from needing
-        // a target slot here, so `kept` can end up `[]` for an Attach node whose
-        // chain is otherwise target-less end-to-end — harmless today only because
-        // stack.rs's `!original_targets.is_empty()` gate then routes such chains
-        // through the unvalidated branch instead of calling this function at all
-        // (confirmed for the reanimator-Aura Attach shape: Animate Dead / Dance of
-        // the Dead). A future chain combining Attach with a genuinely-targeted
-        // sibling node would need this branch to preserve rather than drop live
-        // SelfRef/ParentTarget entries — flag for separate review if that pattern
-        // arises.
+        // CR 608.2b (phase#4767 review): `attachment`/`target` context-refs
+        // (SelfRef, ParentTarget, ...) don't need their own target slot and
+        // are skipped below — but `validated.targets` can carry MORE entries
+        // than this Attach node's own two operands consume, propagated
+        // through for a downstream sibling in the chain (e.g. a
+        // CreateDelayedTrigger sub-ability reading the same ParentTarget).
+        // Only the entries this node's own filters actually claim get
+        // re-validated here; any remaining, un-claimed entries must pass
+        // through UNCHANGED rather than being silently dropped, or a
+        // sibling relying on them downstream loses its target.
         let mut kept = Vec::new();
         let mut target_iter = validated.targets.iter();
         for (is_attachment, filter) in [(true, attachment), (false, target)] {
@@ -1503,6 +1503,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 kept.push(legal);
             }
         }
+        kept.extend(target_iter.cloned());
         kept
     } else if let Effect::Fight { subject, target } = &validated.effect {
         // CR 608.2b + CR 701.14a: Dual-fighter fights validate each chosen
@@ -7134,6 +7135,49 @@ mod tests {
             ),
             "a delayed-return ParentTarget ability must not fizzle when its \
              snapshotted object is off the battlefield"
+        );
+    }
+
+    /// CR 608.2b (phase-rs/phase#5449 review): an `Effect::Attach` node whose
+    /// `attachment`/`target` are both context-refs (SelfRef/ParentTarget —
+    /// neither needs its own target slot) must not have its `.targets` wiped
+    /// to `[]` when the node carries MORE entries than its own two operands
+    /// consume — those extra entries are propagated through for a downstream
+    /// sibling (e.g. a chained `CreateDelayedTrigger` reading the same
+    /// `ParentTarget`), not this node's own operands, and must survive
+    /// re-validation unchanged.
+    #[test]
+    fn validate_targets_in_chain_attach_preserves_unclaimed_propagated_targets() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let creature = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Attach{SelfRef, ParentTarget} — neither operand needs a slot — but
+        // `.targets` carries the propagated creature id for a downstream
+        // sibling, not for this node's own attachment/target resolution.
+        let ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Object(creature)],
+            "an Attach node's un-claimed propagated targets must pass through \
+             re-validation unchanged, not be dropped just because neither of \
+             this node's own operands needed a target slot"
         );
     }
 

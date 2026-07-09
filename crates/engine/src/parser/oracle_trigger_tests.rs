@@ -627,6 +627,62 @@ fn trigger_etb_self_from_anywhere_other_than_graveyard_or_exile() {
     assert!(def.execute.is_some());
 }
 
+// CR 603.4 (phase-rs/phase#5449 review regression): a conjunctive
+// intervening-if ("if it's on the battlefield AND you control 9 or fewer
+// creatures named ~, roll a 20-sided die.") must not be corrupted by the
+// simple pattern table's "if it's on the battlefield" entry (added for the
+// reanimator-Aura class in the same PR) matching only the leading half and
+// feeding the residual "and you control..." text into effect parsing.
+// `try_extract_simple_condition` now requires the matched phrase to be
+// immediately followed by a clause boundary (`,`/`.`/end), so a compound
+// condition like this one correctly declines the simple-table match and
+// falls through — the RollDie effect must parse fully intact, with no
+// stray fragment leaking from the un-consumed condition tail.
+#[test]
+fn trigger_conjunctive_battlefield_condition_does_not_corrupt_roll_die_effect() {
+    let def = parse_trigger_line(
+        "When this creature enters from anywhere other than a graveyard or exile, \
+             if it's on the battlefield and you control 9 or fewer creatures named \
+             \"Name Sticker\" Goblin, roll a 20-sided die.",
+        "\"Name Sticker\" Goblin",
+    );
+    let Some(execute) = &def.execute else {
+        panic!("expected a RollDie execute ability, got None");
+    };
+    assert_eq!(
+        *execute.effect,
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 20,
+            results: vec![],
+            modifier: None,
+        },
+        "the conjunctive condition's residual \"and you control...\" text must not \
+         leak into the effect body and corrupt the RollDie parse"
+    );
+}
+
+// Sibling: Animate Dead's own genuine (non-conjunctive) "if it's on the
+// battlefield" condition, immediately followed by a comma, must still match
+// the simple-table entry — the boundary check must not be so strict that it
+// breaks the reanimator-Aura class this entry exists for.
+#[test]
+fn trigger_bare_battlefield_condition_still_matches_simple_table() {
+    let def = parse_trigger_line(
+        "When this Aura enters, if it's on the battlefield, it loses \
+             \"enchant creature card in a graveyard\" and gains \"enchant creature \
+             put onto the battlefield with this Aura.\" Return enchanted creature \
+             card to the battlefield under your control and attach this Aura to it. \
+             When this Aura leaves the battlefield, that creature's controller \
+             sacrifices it.",
+        "Animate Dead",
+    );
+    assert!(
+        def.execute.is_some(),
+        "the reanimator-Aura ETB effect must still parse via the whole-body recognizer"
+    );
+}
+
 /// CR 603.10a + CR 603.4 (issue #4521): Kishla Skimmer — "Whenever a card
 /// leaves your graveyard during your turn, draw a card. This ability
 /// triggers only once each turn." The singular leaves-a-graveyard form must

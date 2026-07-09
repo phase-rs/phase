@@ -5578,6 +5578,16 @@ fn try_extract_cast_variant_paid_condition(
 ///
 /// For source-referential conditions that cannot be `StaticCondition`s and don't need
 /// dynamic parsing — just a fixed pattern mapping to a fixed `TriggerCondition`.
+///
+/// CR 603.4 + CR 608.2c: a pattern here must match the WHOLE condition clause,
+/// not just a prefix of it — a conjunctive condition ("if it's on the
+/// battlefield and you control 9 or fewer creatures, ...", "Name Sticker"
+/// Goblin) has its own composite meaning that this table cannot express.
+/// Matching only the leading half and treating the residual "and ..." text as
+/// part of the effect body silently corrupts the trigger (phase-rs/phase#5449
+/// review). Require the match to be immediately followed by a clause boundary
+/// (`,`/`.`/end of string) so a conjunctive form falls through to the general
+/// condition parser instead.
 fn try_extract_simple_condition(
     tp: &TextPair<'_>,
     text: &str,
@@ -5585,6 +5595,11 @@ fn try_extract_simple_condition(
 ) -> Option<(String, Option<TriggerCondition>)> {
     for (pattern, condition) in patterns {
         if let Some(pos) = tp.find(pattern) {
+            let after = &tp.lower[pos + pattern.len()..];
+            let is_whole_clause = after.is_empty() || after.starts_with([',', '.']);
+            if !is_whole_clause {
+                continue;
+            }
             return Some((
                 strip_condition_clause(text, pos, pattern.len()),
                 Some(condition.clone()),
