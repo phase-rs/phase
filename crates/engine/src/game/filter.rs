@@ -91,6 +91,9 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: a fixed source-relative object ref (concretized to
+        // SpecificObject before runtime) — never whole-board population.
+        | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
@@ -304,6 +307,9 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: a fixed source-relative object ref (concretized to
+        // SpecificObject before runtime) — never whole-board population.
+        | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
@@ -1522,6 +1528,10 @@ fn filter_inner_for_object(
         TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
+        // CR 608.2c: the original (pre-rebind) source object; concretized to
+        // SpecificObject before runtime, so this arm is defense-in-depth and
+        // mirrors SelfRef's source-identity semantics.
+        TargetFilter::OriginalSource => object_id == source_id,
         TargetFilter::SourceOrPaired => state
             .objects
             .get(&source_id)
@@ -2019,6 +2029,9 @@ fn zone_change_filter_inner(
         TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
+        // CR 608.2c: the original (pre-rebind) source object; concretized to
+        // SpecificObject before runtime — mirrors SelfRef's source identity.
+        TargetFilter::OriginalSource => record.object_id == source_id,
         TargetFilter::SourceOrPaired => false,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -2463,6 +2476,9 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
+        // CR 201.5a: source-relative object ref, concretized to SpecificObject
+        // before runtime — inapplicable to a spell-cast history record.
+        | TargetFilter::OriginalSource
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -2770,6 +2786,9 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
+        // CR 201.5a: source-relative object ref, concretized to SpecificObject
+        // before runtime — inapplicable to a spell-cast history record.
+        | TargetFilter::OriginalSource
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired

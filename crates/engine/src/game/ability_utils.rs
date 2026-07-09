@@ -1472,6 +1472,16 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             })
             .collect()
     } else if let Effect::Attach { attachment, target } = &validated.effect {
+        // NOTE (phase#4767): both SelfRef and ParentTarget are excluded from needing
+        // a target slot here, so `kept` can end up `[]` for an Attach node whose
+        // chain is otherwise target-less end-to-end — harmless today only because
+        // stack.rs's `!original_targets.is_empty()` gate then routes such chains
+        // through the unvalidated branch instead of calling this function at all
+        // (confirmed for the reanimator-Aura Attach shape: Animate Dead / Dance of
+        // the Dead). A future chain combining Attach with a genuinely-targeted
+        // sibling node would need this branch to preserve rather than drop live
+        // SelfRef/ParentTarget entries — flag for separate review if that pattern
+        // arises.
         let mut kept = Vec::new();
         let mut target_iter = validated.targets.iter();
         for (is_attachment, filter) in [(true, attachment), (false, target)] {
@@ -1652,6 +1662,41 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 .is_some_and(|f| f.is_context_ref()) =>
             {
                 validated.targets.clone()
+            }
+            // CR 303.4a + CR 608.2b: A plain Aura spell has no separate on-cast
+            // effect — its resolving `Effect` is the `Effect::Unimplemented`
+            // placeholder built in `casting.rs`, so `extract_target_filter_from_effect`
+            // returns `None` and lands here. Its legal targets are defined by its
+            // enchant ability (`Keyword::Enchant`), NOT by the placeholder effect,
+            // and that filter may be zone-scoped (e.g. Animate Dead's "creature
+            // card in a graveyard"). Re-validate against the Enchant filter with
+            // the SAME machinery cast-time targeting uses, so a graveyard-zone host
+            // is not fizzle-filtered by the hardcoded battlefield check below.
+            // Gated on `Effect::Unimplemented` specifically (not on Aura-ness): the
+            // `None` arm also legitimately serves `Effect::Sacrifice`/`UnattachAll`/
+            // `Bounce { selection: AtResolution }`, which must keep the plain
+            // battlefield fizzle-check.
+            None if matches!(validated.effect, Effect::Unimplemented { .. }) => {
+                match crate::game::effects::change_targets::aura_enchant_filter(
+                    state,
+                    validated.source_id,
+                ) {
+                    Some(filter) => targeting::validate_targets_for_ability(
+                        state,
+                        &validated.targets,
+                        &filter,
+                        &validated,
+                    ),
+                    None => validated
+                        .targets
+                        .iter()
+                        .filter(|target| match target {
+                            TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                            TargetRef::Player(_) => true,
+                        })
+                        .cloned()
+                        .collect(),
+                }
             }
             None => validated
                 .targets

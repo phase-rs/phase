@@ -10,7 +10,7 @@ use nom::Parser;
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
     try_parse_each_player_copy_chosen, try_parse_exile_top_each_library_with_collection_counter,
-    try_parse_grant_graveyard_keyword_to_target,
+    try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
@@ -1170,6 +1170,17 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // `parse_effect_chain_ir` fallthrough so an unparsed shape stays an
                 // honest Unimplemented rather than misparsing.
                 try_parse_each_player_copy_chosen(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
+            .or_else(|| {
+                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
+                // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
+                // "it loses ... and gains ...", return/put the enchanted creature
+                // card to the battlefield under your control, attach the Aura to
+                // it, and register the leaves-battlefield sacrifice. Fail-closed:
+                // declines unless the entire body matches, so a deviating card
+                // stays an honest Unimplemented rather than misparsing.
+                try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
@@ -4213,6 +4224,21 @@ fn extract_if_condition_with_card_name(
             // CR 508.1 / CR 603.4: attacking state.
             ("if it's attacking", TriggerCondition::SourceIsAttacking),
             ("if it is attacking", TriggerCondition::SourceIsAttacking),
+            // CR 113.6b: source-scoped "if it's on the battlefield" — the ETB
+            // trigger's own source (a reanimator Aura: Animate Dead / Dance of
+            // the Dead) resolves only while it is still on the battlefield.
+            (
+                "if it's on the battlefield",
+                TriggerCondition::SourceInZone {
+                    zone: Zone::Battlefield,
+                },
+            ),
+            (
+                "if it is on the battlefield",
+                TriggerCondition::SourceInZone {
+                    zone: Zone::Battlefield,
+                },
+            ),
             // CR 508.1 + CR 603.4: source-scoped "if ~ attacked this turn" —
             // the trigger resolves only if the ability's own source creature
             // declared as an attacker this turn (Riders of the Mark, Taigam,

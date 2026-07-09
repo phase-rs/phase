@@ -11366,6 +11366,196 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
     Some(AbilityDefinition::new(kind, effect))
 }
 
+/// CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: Whole-body, fail-closed recognizer
+/// for the reanimator-Aura ETB effect shared by Animate Dead and Dance of the Dead.
+/// The chain it builds implements a reanimation instruction (CR 608.2c), a layer-6
+/// keyword swap (CR 613.1f), an attach (CR 701.3a), and a delayed sacrifice
+/// (CR 701.21a). Note: CR 303.4f does NOT apply — the Aura is not entering the
+/// battlefield "by a means other than resolving as an Aura spell"; it resolved
+/// normally and this triggered ability then specifies the object to enchant.
+///
+/// By the time this runs, the trigger condition ("When ~ enters") and the
+/// intervening-if ("if it's on the battlefield, ") have already been peeled by
+/// `oracle_trigger`, and every "this Aura" self-reference has been normalized to
+/// `~`. The remaining effect body (character-for-character, lowercased) is:
+///
+/// ```text
+/// it loses "enchant <...>" and gains "enchant <...>" <verb> enchanted creature
+/// card <destination> under your control and attach ~ to it. when ~ leaves the
+/// battlefield, that creature's controller sacrifices it
+/// ```
+///
+/// where `<verb>` is `return `/`put ` and `<destination>` is ` to the battlefield`
+/// (untapped) or ` onto the battlefield tapped`. The quoted keyword swap is
+/// structurally fixed for this card class, so the two quoted spans are only shape-
+/// checked ("both present, both open with `enchant`") — never semantically parsed —
+/// and a fixed `RemoveKeyword`/`AddKeyword` pair is always emitted.
+///
+/// Returns the fully-constructed 4-node effect chain directly, bypassing the
+/// per-clause chunker. Declines (returns `None`) unless the ENTIRE body matches,
+/// so any card whose text deviates stays an honest `Effect::Unimplemented`.
+///
+/// See `build_reanimator_aura_etb_chain` for why each node uses the anaphor it
+/// does (source-rebind interplay with `ChangeZone { forward_result: true }`).
+pub(crate) fn try_parse_reanimator_aura_etb_effect(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let stripped = super::oracle_util::strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+    let tap_state =
+        super::oracle_nom::bridge::nom_parse_lower(&lower, parse_reanimator_aura_etb_body)?;
+    Some(build_reanimator_aura_etb_chain(kind, tap_state))
+}
+
+/// Shape-check one `"enchant <...>"` quoted keyword-grant span, discarding its
+/// content. The swap is fixed for the card class, so only the opening `enchant`
+/// and the balanced quotes are verified.
+fn parse_quoted_enchant_clause(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag("\"enchant ").parse(i)?;
+    let (i, _) = take_until("\"").parse(i)?;
+    let (i, _) = tag("\"").parse(i)?;
+    Ok((i, ()))
+}
+
+/// Consume the whole reanimator-Aura body, returning the entry tap state derived
+/// from the destination phrase. `all_consuming` (via trailing `eof`) makes it
+/// fail-closed: a partial match yields no chain.
+fn parse_reanimator_aura_etb_body(i: &str) -> OracleResult<'_, crate::types::zones::EtbTapState> {
+    use crate::types::zones::EtbTapState;
+    let (i, _) = tag("it loses ").parse(i)?;
+    let (i, _) = parse_quoted_enchant_clause(i)?;
+    let (i, _) = tag(" and gains ").parse(i)?;
+    let (i, _) = parse_quoted_enchant_clause(i)?;
+    let (i, _) = space1.parse(i)?;
+    // CR 608.2c: verb axis — follow the written instruction; "return" (from
+    // graveyard) vs "put" (Dance of the Dead) both move the creature card.
+    let (i, _) = alt((tag("return "), tag("put "))).parse(i)?;
+    let (i, _) = tag("enchanted creature card").parse(i)?;
+    // CR 614.1 / CR 110.5b: destination axis carries the sole variable — entry tap state.
+    let (i, tap) = alt((
+        value(EtbTapState::Unspecified, tag(" to the battlefield")),
+        value(EtbTapState::Tapped, tag(" onto the battlefield tapped")),
+    ))
+    .parse(i)?;
+    let (i, _) = tag(
+        " under your control and attach ~ to it. when ~ leaves the battlefield, \
+         that creature's controller sacrifices it",
+    )
+    .parse(i)?;
+    let (i, _) = multispace0.parse(i)?;
+    let (i, _) = eof.parse(i)?;
+    Ok((i, tap))
+}
+
+/// Build the reanimator-Aura ETB effect chain (see `try_parse_reanimator_aura_etb_effect`).
+///
+/// Structure — ChangeZone at the ROOT, with the other three nodes nested
+/// progressively deeper — is a deliberate source-rebind choice:
+///
+/// * `ChangeZone { forward_result: true }` returns the enchanted creature card and
+///   rebinds the sub-chain's `source_id` to that creature, so trailing anaphora
+///   bind to it. It is the ONLY forwarding node in the chain.
+/// * `GenericEffect` is ChangeZone's direct sub, so its `source_id` IS rebound to
+///   the creature. Its keyword-swap static must therefore reference the Aura via
+///   `TargetFilter::OriginalSource` (concretized to the pre-rebind source in
+///   `effects/mod.rs`'s forward_result block), NOT `SelfRef`.
+/// * `Attach` is `GenericEffect`'s sub, not `ChangeZone`'s. Because `GenericEffect`
+///   itself never sets `forward_result`, this hop forwards no objects, so Attach's
+///   `source_id` is never rebound — `attachment: SelfRef` correctly stays the Aura.
+///   `target: ParentTarget` binds to the creature via `.targets` propagation
+///   (CR 701.3a: the Aura attaches to the reanimated creature — the #4767 bug).
+/// * `CreateDelayedTrigger` likewise keeps `SelfRef` (never rebound) so the
+///   leaves-battlefield condition watches the Aura, and its `Sacrifice { ParentTarget }`
+///   snapshots the creature at delayed-trigger creation time (CR 701.21a /
+///   CR 603.7c: "that creature's controller sacrifices it").
+fn build_reanimator_aura_etb_chain(
+    kind: AbilityKind,
+    tap_state: crate::types::zones::EtbTapState,
+) -> AbilityDefinition {
+    // CR 701.21a + CR 603.7c: "When ~ leaves the battlefield, that creature's
+    // controller sacrifices it." — delayed leaves-battlefield sacrifice of the
+    // reanimated creature (ParentTarget, snapshotted at creation).
+    let sacrifice = AbilityDefinition::new(
+        kind,
+        Effect::Sacrifice {
+            target: TargetFilter::ParentTarget,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    let delayed = AbilityDefinition::new(
+        kind,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SelfRef,
+            },
+            effect: Box::new(sacrifice),
+            uses_tracked_set: false,
+        },
+    );
+    // CR 701.3a + CR 701.3b: "attach ~ to it" — the Aura (SelfRef, unrebound at
+    // this hop) attaches to the reanimated creature (ParentTarget).
+    let attach = AbilityDefinition::new(
+        kind,
+        Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::ParentTarget,
+        },
+    )
+    .sub_ability(delayed);
+    // CR 613.1f + CR 611.2a: the Aura's own keyword swap ("it loses ... and
+    // gains ...") is a layer-6 ability-removing/adding continuous effect (CR
+    // 613.1f) with no stated duration, so it lasts until end of game (CR 611.2a).
+    // `OriginalSource` references the Aura even though this node's
+    // source_id is rebound to the creature by the parent ChangeZone's
+    // forward_result. `duration: None` — an unstated-duration continuous grant.
+    let generic = AbilityDefinition::new(
+        kind,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::OriginalSource)
+                .modifications(vec![
+                    ContinuousModification::RemoveKeyword {
+                        keyword: Keyword::Enchant(TargetFilter::Any),
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Enchant(TargetFilter::ParentTarget),
+                    },
+                ])],
+            duration: None,
+            target: None,
+        },
+    )
+    .sub_ability(attach);
+    // CR 608.2c + CR 400.7: ROOT — return/put the enchanted creature card to the
+    // battlefield under the caster's control (follow the instruction, CR 608.2c).
+    // The card becomes a NEW object on arrival (CR 400.7), which is why
+    // `forward_result` rebinds the sub-chain source to the reanimated creature;
+    // set explicitly (not by auto-detection).
+    let mut root = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::AttachedTo,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: Some(ControllerRef::You),
+            enter_tapped: tap_state,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(generic);
+    root.forward_result = true;
+    root
+}
+
 /// The two equalization verbs Balance / Restore Balance / Balancing Act use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EqualizeVerb {

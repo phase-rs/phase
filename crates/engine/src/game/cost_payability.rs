@@ -98,6 +98,8 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::Owner
         // CR 201.5a: a granter self-ref carries no pitch-bound X.
         | TargetFilter::GrantingObject
+        // CR 608.2c: source-relative object ref carries no pitch-bound X.
+        | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -174,6 +176,8 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::Owner
         // CR 201.5a: no pitch-bound X constraint to relax.
         | TargetFilter::GrantingObject
+        // CR 608.2c: source-relative object ref — nothing to relax.
+        | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => filter.clone(),
     }
 }

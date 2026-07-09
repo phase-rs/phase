@@ -4444,6 +4444,33 @@ pub enum TargetFilter {
     /// (parent's target's controller) and `PostReplacementSourceController`
     /// (replacement-context source's controller).
     OriginalController,
+    /// CR 613.1f + CR 608.2c: Resolves to the ability's *original*, pre-rebind
+    /// source identity — the object that put this ability on the stack — even
+    /// inside a `ChangeZone { forward_result: true }` sub-ability chain where
+    /// the runtime has rebound `ResolvedAbility::source_id` to the just-moved
+    /// object.
+    ///
+    /// Motivation (reanimator-Aura class: Animate Dead / Dance of the Dead):
+    /// the ETB effect returns the enchanted creature card to the battlefield
+    /// via `ChangeZone { forward_result: true }`, which rebinds `source_id` to
+    /// the reanimated creature so trailing `SelfRef`/`ParentTarget` anaphora
+    /// (the attach, the leaves-battlefield sacrifice) bind to that creature.
+    /// But the same effect ALSO rewrites the Aura's OWN enchant restriction
+    /// ("it loses \"enchant creature card in a graveyard\" and gains \"enchant
+    /// creature put onto the battlefield with this Aura\""). That keyword swap
+    /// must reference the Aura itself (the original source), not the rebound
+    /// creature — CR 613.1f governs this layer-6 keyword swap of the Aura's own
+    /// enchant ability (defined per CR 303.4a), and CR 608.2c requires reading
+    /// the whole sentence to bind each anaphor to its true referent at resolution.
+    ///
+    /// Never persisted as a `ResolvedAbility` field: it is concretized eagerly,
+    /// in place, to `SpecificObject { id }` in the `forward_result` block of
+    /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
+    /// the about-to-be-mutated sub-ability clone coexist.
+    ///
+    /// Distinct from `SelfRef` (rebound to the moved object under
+    /// `forward_result`) and from `OriginalController` (a player reference).
+    OriginalSource,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's
     /// controller draws cards equal to the damage prevented this way" (Swans of
@@ -12819,6 +12846,10 @@ impl TargetFilter {
                 | TargetFilter::SourceOrPaired
                 | TargetFilter::Controller
                 | TargetFilter::OriginalController
+                // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
+                // resolved (concretized to SpecificObject) during resolution, never
+                // declared as a player-chosen target slot.
+                | TargetFilter::OriginalSource
                 | TargetFilter::ScopedPlayer
                 | TargetFilter::TriggeringSpellController
                 | TargetFilter::TriggeringSpellOwner

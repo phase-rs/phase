@@ -357,7 +357,20 @@ pub fn resolve(
         // they control. The primary fix is that Sacrifice no longer creates
         // target slots (see extract_target_filter_from_effect), but if this
         // path is ever reached, enforce controller ownership.
-        if obj.controller != ability.controller {
+        //
+        // CR 701.21a: "To sacrifice a permanent, its controller moves it..." — for an
+        // explicit anaphoric target (ParentTarget/ParentTargetSlot, e.g. Animate
+        // Dead's "that creature's controller sacrifices it"), the acting player is
+        // the object's OWN current controller, unconditionally, even if control
+        // changed since the ability (e.g. a delayed leaves-battlefield trigger) was
+        // created. The equality check below remains a valid defense-in-depth guard
+        // for every OTHER filter shape reaching this path.
+        if obj.controller != ability.controller
+            && !matches!(
+                filter,
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            )
+        {
             continue;
         }
 

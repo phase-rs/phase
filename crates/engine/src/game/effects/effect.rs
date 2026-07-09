@@ -570,6 +570,30 @@ fn snapshot_transient_modifications(
                     value: resolve_quantity_with_targets(state, value, ability),
                 }
             }
+            // CR 613.1f + CR 608.2c: the reanimator-Aura's granted Enchant restriction
+            // ("enchant creature put onto the battlefield with this Aura") is a layer-6
+            // ability grant (CR 613.1f) whose anaphoric ParentTarget must bind to the
+            // SPECIFIC creature just reanimated (CR 608.2c: read the whole sentence and
+            // bind each anaphor to its referent), not stay a live/unresolved
+            // ParentTarget reference — concretize it once, here, the same way dynamic
+            // P/T values are concretized above.
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Enchant(filter),
+            } if matches!(
+                filter,
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            ) =>
+            {
+                let ids =
+                    crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Enchant(
+                        ids.first()
+                            .map(|id| TargetFilter::SpecificObject { id: *id })
+                            .unwrap_or_else(|| filter.clone()),
+                    ),
+                }
+            }
             _ => modification.clone(),
         })
         .collect()

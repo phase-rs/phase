@@ -22152,3 +22152,223 @@ fn opponent_attacks_you_with_two_or_more_dinosaurs_carries_type_filter() {
         ),
     }
 }
+
+// --- phase#4767: reanimator-Aura ETB whole-body recognizer (Animate Dead / Dance of the Dead) ---
+
+/// Verbatim Oracle text (Scryfall, 2026-07). The `enter_tapped` axis is the sole
+/// difference in the trigger sentence: "Return ... to the battlefield" (Animate
+/// Dead) vs. "Put ... onto the battlefield tapped" (Dance of the Dead).
+const ANIMATE_DEAD_ORACLE: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
+
+const DANCE_OF_THE_DEAD_ORACLE: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Put enchanted creature card onto the battlefield tapped under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets +1/+1 and doesn't untap during its controller's untap step.\nAt the beginning of the upkeep of enchanted creature's controller, that player may pay {1}{B}. If the player does, untap that creature.";
+
+/// SHAPE test — assert the reanimator-Aura ETB trigger lowers to the exact 4-node
+/// chain (ChangeZone -> GenericEffect -> Attach -> CreateDelayedTrigger) with the
+/// field values the runtime source-rebind mechanism depends on. Runtime behavior
+/// is exercised separately in `casting_tests.rs`; this pins parser structure only.
+fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::zones::Zone;
+    let parsed = parse_oracle_text(
+        oracle,
+        card_name,
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let etb = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| {
+            panic!(
+                "{card_name}: expected an enters-battlefield trigger, got {:?}",
+                parsed.triggers
+            )
+        });
+    let root = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: Enters trigger has no execute body"));
+
+    // Zero Unimplemented anywhere in the chain (fail-closed recognizer honesty).
+    fn assert_no_unimplemented(def: &AbilityDefinition, card_name: &str) {
+        assert!(
+            !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{card_name}: unexpected Effect::Unimplemented in chain: {:?}",
+            def.effect
+        );
+        if let Some(sub) = def.sub_ability.as_deref() {
+            assert_no_unimplemented(sub, card_name);
+        }
+        if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+            assert_no_unimplemented(effect, card_name);
+        }
+    }
+    assert_no_unimplemented(root, card_name);
+
+    // Node 1: ChangeZone at the root, forward_result set explicitly.
+    assert!(
+        root.forward_result,
+        "{card_name}: root ChangeZone must set forward_result",
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_tapped,
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!(
+            "{card_name}: expected root Effect::ChangeZone, got {:?}",
+            root.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard), "{card_name}: origin");
+    assert_eq!(*destination, Zone::Battlefield, "{card_name}: destination");
+    assert_eq!(
+        *target,
+        TargetFilter::AttachedTo,
+        "{card_name}: ChangeZone target"
+    );
+    assert_eq!(
+        *enters_under,
+        Some(ControllerRef::You),
+        "{card_name}: enters_under"
+    );
+    assert_eq!(
+        enter_tapped.is_tapped(),
+        expect_tapped,
+        "{card_name}: enter_tapped state ({enter_tapped:?})",
+    );
+
+    // Node 2: GenericEffect keyword swap referencing OriginalSource, no duration.
+    let generic = root
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: ChangeZone has no GenericEffect sub"));
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = generic.effect.as_ref()
+    else {
+        panic!(
+            "{card_name}: expected GenericEffect, got {:?}",
+            generic.effect
+        );
+    };
+    assert_eq!(
+        *duration, None,
+        "{card_name}: keyword-swap grant has no stated duration"
+    );
+    assert_eq!(
+        static_abilities.len(),
+        1,
+        "{card_name}: one keyword-swap static"
+    );
+    let sd = &static_abilities[0];
+    assert_eq!(
+        sd.affected,
+        Some(TargetFilter::OriginalSource),
+        "{card_name}: keyword swap must target OriginalSource (the Aura), not SelfRef",
+    );
+    assert_eq!(
+        sd.modifications,
+        vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Enchant(TargetFilter::Any),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::ParentTarget),
+            },
+        ],
+        "{card_name}: keyword swap modifications",
+    );
+
+    // Node 3: Attach — SelfRef (the Aura) onto ParentTarget (the reanimated creature).
+    let attach = generic
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: GenericEffect has no Attach sub"));
+    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+        panic!("{card_name}: expected Attach, got {:?}", attach.effect);
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::SelfRef,
+        "{card_name}: attach attachment"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "{card_name}: attach host"
+    );
+
+    // Node 4: CreateDelayedTrigger — WhenLeavesPlayFiltered{SelfRef} -> Sacrifice{ParentTarget}.
+    let delayed = attach
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: Attach has no CreateDelayedTrigger sub"));
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect,
+        uses_tracked_set,
+    } = delayed.effect.as_ref()
+    else {
+        panic!(
+            "{card_name}: expected CreateDelayedTrigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert!(
+        !uses_tracked_set,
+        "{card_name}: delayed trigger uses no tracked set"
+    );
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::WhenLeavesPlayFiltered {
+            filter: TargetFilter::SelfRef,
+        },
+        "{card_name}: delayed leaves-battlefield condition on the Aura (SelfRef)",
+    );
+    let Effect::Sacrifice { target, count, .. } = effect.effect.as_ref() else {
+        panic!("{card_name}: expected Sacrifice, got {:?}", effect.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "{card_name}: sacrifice targets the creature"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "{card_name}: sacrifice count"
+    );
+    assert!(
+        delayed.sub_ability.is_none(),
+        "{card_name}: chain ends at the delayed trigger"
+    );
+}
+
+#[test]
+fn animate_dead_etb_lowers_to_reanimator_chain_untapped_4767() {
+    assert_reanimator_chain(
+        ANIMATE_DEAD_ORACLE,
+        "Animate Dead",
+        /* expect_tapped */ false,
+    );
+}
+
+#[test]
+fn dance_of_the_dead_etb_lowers_to_reanimator_chain_tapped_4767() {
+    // Dance of the Dead's extra clauses (P/T rider, upkeep untap) must not
+    // prevent the isomorphic tapped chain from lowering.
+    assert_reanimator_chain(
+        DANCE_OF_THE_DEAD_ORACLE,
+        "Dance of the Dead",
+        /* expect_tapped */ true,
+    );
+}
