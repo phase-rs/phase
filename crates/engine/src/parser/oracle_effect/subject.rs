@@ -1288,11 +1288,158 @@ fn try_parse_source_and_other_restriction_clause(
     })
 }
 
+/// Issue #5412: "`<X>` and `<Y>`[ and `<Z>`...] target player|opponent
+/// controls don't/doesn't untap during {their|that player's} next untap
+/// step" — the compound-subject sibling of the single-subject "don't/doesn't
+/// untap" restriction the generic split at the bottom of
+/// `try_parse_subject_restriction_clause` already handles completely
+/// (Misstep: "Creatures target player controls don't untap..."; Mana Vapors:
+/// "Lands target player controls don't untap..."). Exhaustion ("Creatures and
+/// lands target opponent controls...") and Icebreaker Kraken ("...artifacts
+/// and creatures target opponent controls...") strict-fail today because the
+/// generic split resolves the WHOLE subject through one
+/// `parse_subject_application` call, and that single call does not reliably
+/// resolve a compound "`<X>` and `<Y>`" noun phrase to the `Or`-combined
+/// filter the same call shape already produces for other controller suffixes
+/// (e.g. "your opponents control" — see `artifacts_and_creatures_your_opponents_control`
+/// in `oracle_target.rs`). This dispatcher sidesteps whatever the exact break
+/// point is by resolving each conjunct independently through the SAME
+/// per-conjunct call shape already proven correct for Misstep/Mana Vapors,
+/// then `Or`-combining — mirroring the compound-subject dispatcher family
+/// established by `parse_compound_all_subjects_type_change` (#5219) and its
+/// siblings in `oracle_static/type_change.rs`.
+///
+/// Must run before the generic `" can't "/" cannot "/" doesn't untap"/
+/// " don't untap"` split at the bottom of `try_parse_subject_restriction_clause`:
+/// that split would otherwise claim the FULL compound subject in one
+/// `parse_subject_application` call. The 2+-conjunct requirement in
+/// `parse_compound_target_controller_filter` is the guard that keeps
+/// single-subject lines (Misstep, Mana Vapors) falling through unchanged to
+/// that generic path.
+fn try_parse_compound_target_controller_cant_untap(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // CR 502.3: locate the "don't untap"/"doesn't untap" marker at a word
+    // boundary, wherever it sits in the line (not just a leading position) —
+    // mirrors the word-boundary-scan idiom `embedded_restriction_duration`
+    // already uses for an interior duration marker.
+    let (before, _, after) = nom_primitives::scan_preceded(lower.as_str(), |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("don't untap"),
+            tag("doesn't untap"),
+        ))
+        .parse(i)
+    })?;
+    // Scope this dispatcher to exactly the untap-restriction predicate class
+    // (CR 502.3's "next untap step" marker) so it never claims an unrelated
+    // compound-subject "X and Y ... verb" effect.
+    if !nom_primitives::scan_contains(after, "next untap step") {
+        return None;
+    }
+    // `to_lowercase()` is byte-length preserving for this ASCII grammar
+    // (established idiom — see `parse_target_with_disjunctive_restriction`),
+    // so `before`'s length maps directly back onto `text`.
+    let subject = text[..before.len()].trim();
+    let predicate = text[before.len()..].trim();
+
+    let affected = parse_compound_target_controller_filter(subject, ctx)?;
+    let application = SubjectApplication {
+        affected,
+        target: None,
+        multi_target: None,
+        inherits_parent: false,
+        is_optional: false,
+    };
+    build_restriction_clause(application, predicate)
+}
+
+/// Split a compound "`<X>` and `<Y>`[, and `<Z>`...] target player|opponent
+/// controls" subject into an `Or` of per-conjunct filters. The shared
+/// "target player controls"/"target opponent controls" suffix is printed
+/// only once, trailing the LAST conjunct; every earlier conjunct is a bare
+/// type noun. Each conjunct (reconstructed with the shared suffix) is
+/// resolved through `parse_subject_application` — the exact same call shape
+/// already proven correct for the single-subject siblings Misstep/Mana
+/// Vapors — so no controller-suffix grammar is duplicated here. Requires 2+
+/// conjuncts and the suffix to terminate the subject exactly; returns `None`
+/// otherwise so single-subject and non-matching lines fall through to the
+/// generic restriction split.
+fn parse_compound_target_controller_filter(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    let lower = subject.to_lowercase();
+    let mut conjuncts: Vec<&str> = Vec::new();
+    if lower.contains(',') {
+        // CR 611.3 Oxford-comma N-way list ("X, Y, and Z") — both known
+        // member cards (Exhaustion, Icebreaker Kraken) are bare 2-way and hit
+        // the `else` branch below, but MTG's own templating convention uses
+        // an Oxford comma for any 3+-item list, so a future 3-way member of
+        // this class needs this form, not a bare repeated " and ". Mirrors
+        // `parse_oxford_object_conjuncts` (oracle_static/evasion.rs, #5384 /
+        // Shalai, Voice of Plenty): split repeatedly on ", ", then strip an
+        // optional Oxford "and " connector from the final segment.
+        let mut remaining: &str = lower.as_str();
+        while let Ok((_, (item, rest))) = nom_primitives::split_once_on(remaining, ", ") {
+            conjuncts.push(item.trim());
+            remaining = rest;
+        }
+        let (last, _) = opt(tag::<_, _, OracleError<'_>>("and "))
+            .parse(remaining.trim())
+            .ok()?;
+        conjuncts.push(last.trim());
+    } else {
+        // Bare "X and Y" — the form both known member cards use.
+        let mut remaining: &str = lower.as_str();
+        while let Ok((_, (conjunct, rest))) = nom_primitives::split_once_on(remaining, " and ") {
+            conjuncts.push(conjunct.trim());
+            remaining = rest;
+        }
+        conjuncts.push(remaining.trim());
+    }
+    if conjuncts.len() < 2 {
+        return None;
+    }
+
+    let last = conjuncts.pop()?;
+    let (last_head, suffix, last_trailing) = nom_primitives::scan_preceded(last, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("target player controls"),
+            tag("target opponent controls"),
+        ))
+        .parse(i)
+    })?;
+    if !last_trailing.trim().is_empty() {
+        return None;
+    }
+
+    let mut filters = Vec::with_capacity(conjuncts.len() + 1);
+    for conjunct in conjuncts {
+        let reconstructed = format!("{conjunct} {suffix}");
+        filters.push(parse_subject_application(&reconstructed, ctx)?.affected);
+    }
+    let reconstructed_last = format!("{} {suffix}", last_head.trim());
+    filters.push(parse_subject_application(&reconstructed_last, ctx)?.affected);
+
+    Some(TargetFilter::Or { filters })
+}
+
 fn try_parse_subject_restriction_clause(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     if let Some(clause) = try_parse_combat_tax_effect_clause(text) {
+        return Some(clause);
+    }
+
+    // CR 502.3 + CR 611.3: compound-subject "don't/doesn't untap" restriction
+    // (issue #5412, #5219-class dispatcher) — see
+    // `try_parse_compound_target_controller_cant_untap`'s doc comment for the
+    // full rationale. Must precede the generic split below, which would
+    // otherwise claim the full compound subject in one call.
+    if let Some(clause) = try_parse_compound_target_controller_cant_untap(text, ctx) {
         return Some(clause);
     }
 
@@ -6736,6 +6883,267 @@ mod tests {
                 mode: StaticMode::CantUntap
             }
         )));
+    }
+
+    /// Issue #5412: Exhaustion's verbatim printed text — the compound-subject
+    /// sibling of `chosen_creature_doesnt_untap_builds_cant_untap_restriction`
+    /// above. Both type words share the single `TargetOpponent` controller
+    /// suffix and must land in one `Or`-combined `affected` filter under a
+    /// single `CantUntap` static, not two separate statics or a strict-fail.
+    #[test]
+    fn exhaustion_compound_subject_cant_untap() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Creatures and lands target opponent controls don't untap during their next untap step.",
+            &mut ctx,
+        )
+        .expect("Exhaustion's compound-subject untap restriction should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(target, None);
+        assert_eq!(
+            duration,
+            Some(Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::Controller,
+            })
+        );
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::CantUntap);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    ),
+                ],
+            })
+        );
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantUntap
+            }
+        )));
+    }
+
+    /// Issue #5412: Icebreaker Kraken's ETB predicate tail uses the
+    /// "that player's next untap step" pronoun form (Exhaustion uses "their")
+    /// and a different pair of core types (artifacts/creatures). Confirms the
+    /// compound dispatcher is parameterized on the type words and pronoun
+    /// form, not hardcoded to Exhaustion's exact wording.
+    #[test]
+    fn icebreaker_kraken_compound_subject_cant_untap() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "artifacts and creatures target opponent controls don't untap during that player's next untap step.",
+            &mut ctx,
+        )
+        .expect("Icebreaker Kraken's compound-subject untap restriction should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(
+            duration,
+            Some(Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::Controller,
+            })
+        );
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::CantUntap);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .controller(ControllerRef::TargetOpponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    ),
+                ],
+            })
+        );
+    }
+
+    /// Issue #5412 regression guard: the new compound dispatcher must decline
+    /// single-subject lines so Misstep/Mana Vapors keep routing through the
+    /// pre-existing generic split unchanged.
+    #[test]
+    fn single_subject_cant_untap_unchanged_by_compound_dispatcher() {
+        let mut ctx = ParseContext::default();
+        assert!(
+            try_parse_compound_target_controller_cant_untap(
+                "Creatures target player controls don't untap during that player's next untap step.",
+                &mut ctx,
+            )
+            .is_none(),
+            "Misstep's single-subject text must not be claimed by the compound dispatcher"
+        );
+        assert!(
+            try_parse_compound_target_controller_cant_untap(
+                "Lands target player controls don't untap during their next untap step.",
+                &mut ctx,
+            )
+            .is_none(),
+            "Mana Vapors' single-subject text must not be claimed by the compound dispatcher"
+        );
+
+        // Paired positive reach-guard: both still resolve correctly end-to-end
+        // via `try_parse_subject_restriction_clause`'s generic path.
+        for text in [
+            "Creatures target player controls don't untap during that player's next untap step.",
+            "Lands target player controls don't untap during their next untap step.",
+        ] {
+            let clause = try_parse_subject_restriction_clause(text, &mut ctx)
+                .expect("single-subject untap restriction should still parse via the generic path");
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = clause.effect
+            else {
+                panic!("expected GenericEffect restriction, got unexpected effect for {text:?}");
+            };
+            assert_eq!(static_abilities[0].mode, StaticMode::CantUntap);
+        }
+    }
+
+    /// Issue #5412 hostile fixture: a compound subject sharing the SAME
+    /// "target player/opponent controls" suffix but a non-untap predicate
+    /// must NOT be claimed by this dispatcher (CR 502.3's "next untap step"
+    /// gate is load-bearing, not the conjunct-count check alone). Paired with
+    /// a positive reach-guard on the subject-splitter sub-function so the
+    /// decline is provably due to the predicate gate, not a vacuous failure
+    /// upstream (e.g. a broken conjunct split).
+    #[test]
+    fn compound_subject_non_untap_predicate_declines() {
+        let mut ctx = ParseContext::default();
+
+        // Positive reach-guard: the SAME compound subject, in isolation,
+        // still splits correctly.
+        let affected = parse_compound_target_controller_filter(
+            "Creatures and lands target opponent controls",
+            &mut ctx,
+        )
+        .expect("compound subject split must succeed independently of the predicate gate");
+        assert_eq!(
+            affected,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    ),
+                ],
+            }
+        );
+
+        // The full dispatcher must decline a non-untap predicate on the same subject.
+        assert!(
+            try_parse_compound_target_controller_cant_untap(
+                "Creatures and lands target opponent controls get -1/-1 until end of turn.",
+                &mut ctx,
+            )
+            .is_none(),
+            "non-untap compound predicate must not be claimed by the untap-restriction dispatcher"
+        );
+    }
+
+    /// Issue #5412 scope-matrix coverage: the sibling `ControllerRef::TargetPlayer`
+    /// variant in compound form (no real printed card needed — the dispatcher
+    /// is variant-agnostic since it delegates to `parse_subject_application`
+    /// per conjunct, which already handles both `TargetPlayer` and
+    /// `TargetOpponent` for the single-subject case).
+    #[test]
+    fn compound_subject_target_player_controls_variant() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Creatures and lands target player controls don't untap during their next untap step.",
+            &mut ctx,
+        )
+        .expect("target-player compound variant should parse");
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = clause.effect
+        else {
+            panic!("expected GenericEffect restriction");
+        };
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetPlayer)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetPlayer)
+                    ),
+                ],
+            })
+        );
+    }
+
+    /// Building-block coverage (no printed 3-way member of this class exists
+    /// yet): a hypothetical Oxford-comma 3-way list must split into 3
+    /// disjuncts, not glue the earlier comma-separated items into one
+    /// malformed conjunct. MTG's own templating convention uses an Oxford
+    /// comma for any 3+-item list (see Shalai, Voice of Plenty), so this is
+    /// the realistic shape a future 3-way member would take — not a bare
+    /// repeated " and " with no commas.
+    #[test]
+    fn compound_subject_three_way_oxford_comma_list() {
+        let mut ctx = ParseContext::default();
+        let affected = parse_compound_target_controller_filter(
+            "Artifacts, creatures, and lands target opponent controls",
+            &mut ctx,
+        )
+        .expect("Oxford-comma 3-way compound subject should split into 3 disjuncts");
+        assert_eq!(
+            affected,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .controller(ControllerRef::TargetOpponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    ),
+                ],
+            }
+        );
     }
 
     /// CR 702.26a + CR 101.2 + CR 611.2b: "It can't phase in for as long as ~

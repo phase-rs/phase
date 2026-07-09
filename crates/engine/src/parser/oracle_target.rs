@@ -11044,6 +11044,39 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
+    /// Diagnostic for issue #5412 (Exhaustion / Icebreaker Kraken): does the
+    /// general compound-core-type-Or splitter (the `TYPE_SEPARATORS` recursion
+    /// + `distribute_controller_to_or`) already handle the "target player/
+    /// opponent controls" controller-suffix family the same way it already
+    /// handles "your opponents control" (see `artifacts_and_creatures_
+    /// your_opponents_control` below)? If this passes, the compound-subject
+    /// gap for issue #5412 is NOT in this general splitter and the dedicated
+    /// dispatcher added in `oracle_effect/subject.rs` can call `parse_target`
+    /// once on the whole compound subject rather than per-conjunct.
+    #[test]
+    fn compound_creatures_and_lands_target_opponent_controls() {
+        let (f, rest) = parse_type_phrase("creatures and lands target opponent controls");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "expected 2 disjuncts, got {filters:?}");
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+            }
+            other => panic!("expected Or filter, got {other:?}"),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
     #[test]
     fn artifacts_and_creatures_your_opponents_control() {
         let (f, rest) = parse_type_phrase("artifacts and creatures your opponents control");
