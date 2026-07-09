@@ -14,6 +14,7 @@ mod ark_of_hunger_play_from_graveyard_751;
 mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
 mod athreos_god_of_passage_targeted_opponent_unless_pay;
+mod attack_qualifier_stack_conditions;
 mod auntie_ool_minus_one_counter_trigger;
 mod aura_graft_enchant_restriction;
 mod aura_on_player;

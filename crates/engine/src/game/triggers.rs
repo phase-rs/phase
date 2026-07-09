@@ -899,15 +899,22 @@ fn collect_matching_triggers_inner(
                     .first()
                     .cloned()
                     .expect("trigger event batch is never empty");
-                if let Some(ref condition) = trig_def.condition {
-                    if !check_trigger_condition(
-                        state,
-                        condition,
-                        controller,
-                        Some(obj_id),
-                        Some(&trigger_event),
-                    ) {
-                        continue;
+                // Batched triggers already check their fire-time condition in
+                // `matching_batched_trigger_events` against the full candidate
+                // event before it is reduced to the resolution context. Rechecking
+                // here would make event-count qualifiers read the narrowed context
+                // instead of the declaration that caused the trigger.
+                if !trig_def.batched {
+                    if let Some(ref condition) = trig_def.condition {
+                        if !check_trigger_condition(
+                            state,
+                            condition,
+                            controller,
+                            Some(obj_id),
+                            Some(&trigger_event),
+                        ) {
+                            continue;
+                        }
                     }
                 }
                 // CR 603.2c: For batched triggers, stash the filtered subject
@@ -942,7 +949,10 @@ fn collect_matching_triggers_inner(
                     pending: PendingTrigger {
                         source_id: obj_id,
                         controller,
-                        condition: trig_def.condition.clone(),
+                        condition: trig_def
+                            .condition
+                            .as_ref()
+                            .and_then(|condition| stack_condition_for_trigger(trig_def, condition)),
                         ability: pending_ability,
                         timestamp,
                         target_constraints: trig_def
@@ -6197,18 +6207,33 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
-        // CR 508.1a + CR 603.2c: Count co-attackers excluding the source creature.
+        // CR 506.5 + CR 508.1m + CR 603.2c: Count co-attackers excluding the
+        // matched attacking creature. Attack matchers narrow ordinary Attacks
+        // trigger events to one attacker; observer triggers (HYDRA
+        // Infiltration) use that event attacker, while source-creature triggers
+        // (Training) fall back to the trigger source.
         // CR 702.149a: when `filter` is present, only co-attackers matching it
         // count (e.g. Training's "another creature with power greater than this
-        // creature's power"); the filter is resolved with the source creature as
-        // its source object so power-relative comparisons read the source.
+        // creature's power"); the filter is resolved with the trigger source as
+        // its source object so source-relative comparisons read the source, not
+        // the excluded attacker.
         TriggerCondition::MinCoAttackers { minimum, filter } => {
             state.combat.as_ref().is_some_and(|combat| {
+                let excluded_attacker = match trigger_event {
+                    Some(GameEvent::AttackersDeclared { attacker_ids, .. })
+                        if attacker_ids.len() == 1 =>
+                    {
+                        attacker_ids.first().copied()
+                    }
+                    _ => source_id,
+                }
+                .unwrap_or(ObjectId(0));
+                let filter_source_id = source_id.unwrap_or(ObjectId(0));
                 let co_attacker_count = combat
                     .attackers
                     .iter()
                     .filter(|a| {
-                        a.object_id != source_id.unwrap_or(ObjectId(0))
+                        a.object_id != excluded_attacker
                             && state
                                 .objects
                                 .get(&a.object_id)
@@ -6218,7 +6243,7 @@ pub(crate) fn check_trigger_condition(
                                     state,
                                     a.object_id,
                                     f,
-                                    source_id.unwrap_or(ObjectId(0)),
+                                    filter_source_id,
                                 )
                             })
                     })
@@ -7091,8 +7116,24 @@ fn attackers_declared_count(
             let triggering_player = attacker_ids
                 .iter()
                 .find_map(|id| state.objects.get(id).map(|o| o.controller));
+            let declared_attacker_ids: Vec<ObjectId> = state
+                .combat
+                .as_ref()
+                .filter(|combat| !combat.attackers.is_empty())
+                .map(|combat| {
+                    combat
+                        .attackers
+                        .iter()
+                        .map(|attacker| attacker.object_id)
+                        .collect()
+                })
+                .unwrap_or_else(|| attacker_ids.to_vec());
 
-            attacker_ids
+            // CR 508.1 + CR 603.2c: The trigger event may be narrowed to a
+            // representative attacker so the ability gets the right defending
+            // player/source context, but "attacks with N creatures" counts the
+            // attack declaration as a whole.
+            declared_attacker_ids
                 .iter()
                 .filter(|id| {
                     let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
@@ -7193,6 +7234,95 @@ fn attack_target_matches_controller_scope(
             .and_then(|object| object.protector())
             .is_some_and(player_matches),
         _ => false,
+    }
+}
+
+fn attack_target_filters_compatible(
+    trigger_filter: &AttackTargetFilter,
+    condition_filter: &AttackTargetFilter,
+) -> bool {
+    matches!(
+        (trigger_filter, condition_filter),
+        (AttackTargetFilter::Player, AttackTargetFilter::Player)
+            | (
+                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker
+            )
+            | (AttackTargetFilter::Battle, AttackTargetFilter::Battle)
+            | (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker
+                    | AttackTargetFilter::Player
+                    | AttackTargetFilter::Planeswalker
+            )
+            | (
+                AttackTargetFilter::Player | AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker
+            )
+    )
+}
+
+fn trigger_mode_uses_attack_declaration_count(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::YouAttack
+            | TriggerMode::Attacks
+            | TriggerMode::AttackersDeclared
+            | TriggerMode::AttackersDeclaredOneTarget
+    )
+}
+
+fn condition_is_attack_event_only(
+    trigger: &TriggerDefinition,
+    condition: &TriggerCondition,
+) -> bool {
+    match condition {
+        TriggerCondition::MinCoAttackers { .. } => matches!(trigger.mode, TriggerMode::Attacks),
+        TriggerCondition::Not { condition } => {
+            matches!(condition.as_ref(), TriggerCondition::MinCoAttackers { .. })
+                && matches!(trigger.mode, TriggerMode::Attacks)
+        }
+        TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            crate::types::ability::AttackersDeclaredCountSubject::Controller { .. } => {
+                trigger_mode_uses_attack_declaration_count(&trigger.mode)
+            }
+            crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
+                attacked, ..
+            } => trigger
+                .attack_target_filter
+                .as_ref()
+                .is_some_and(|trigger_filter| {
+                    attack_target_filters_compatible(trigger_filter, attacked)
+                }),
+        },
+        _ => false,
+    }
+}
+
+fn stack_condition_for_trigger(
+    trigger: &TriggerDefinition,
+    condition: &TriggerCondition,
+) -> Option<TriggerCondition> {
+    if condition_is_attack_event_only(trigger, condition) {
+        return None;
+    }
+
+    match condition {
+        TriggerCondition::And { conditions } => {
+            let mut remaining: Vec<TriggerCondition> = conditions
+                .iter()
+                .filter_map(|child| stack_condition_for_trigger(trigger, child))
+                .collect();
+            match remaining.len() {
+                0 => None,
+                1 => remaining.pop(),
+                _ => Some(TriggerCondition::And {
+                    conditions: remaining,
+                }),
+            }
+        }
+        TriggerCondition::Or { .. } => Some(condition.clone()),
+        _ => Some(condition.clone()),
     }
 }
 
@@ -8402,6 +8532,301 @@ pub mod tests {
         assert!(
             !eval(None, PlayerId(0)),
             "CR 702.149a/CR 603.2c: the source itself is excluded from the co-attacker count"
+        );
+    }
+
+    fn min_co_attackers_condition() -> TriggerCondition {
+        TriggerCondition::MinCoAttackers {
+            minimum: 1,
+            filter: None,
+        }
+    }
+
+    fn controller_attack_count_condition(
+        comparator: Comparator,
+        count: u32,
+        filter: Option<TargetFilter>,
+    ) -> TriggerCondition {
+        TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::TriggeringPlayer,
+                filter,
+            },
+            comparator,
+            count,
+        }
+    }
+
+    fn attack_target_count_condition(attacked: AttackTargetFilter) -> TriggerCondition {
+        TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 2,
+        }
+    }
+
+    #[test]
+    fn stack_condition_strips_min_co_attackers_only_for_attacks() {
+        let attacks = make_trigger(TriggerMode::Attacks);
+        let non_attacks = make_trigger(TriggerMode::SpellCast);
+        let condition = min_co_attackers_condition();
+        let negated = TriggerCondition::Not {
+            condition: Box::new(condition.clone()),
+        };
+
+        assert_eq!(stack_condition_for_trigger(&attacks, &condition), None);
+        assert_eq!(stack_condition_for_trigger(&attacks, &negated), None);
+        assert_eq!(
+            stack_condition_for_trigger(&non_attacks, &condition),
+            Some(condition.clone())
+        );
+        assert_eq!(
+            stack_condition_for_trigger(&non_attacks, &negated),
+            Some(negated)
+        );
+    }
+
+    #[test]
+    fn stack_condition_strips_controller_attack_counts_for_attack_declaration_modes() {
+        let typed_creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        let conditions = [
+            controller_attack_count_condition(Comparator::GE, 2, None),
+            controller_attack_count_condition(Comparator::EQ, 3, None),
+            controller_attack_count_condition(Comparator::EQ, 1, Some(typed_creature_filter)),
+        ];
+
+        for mode in [
+            TriggerMode::YouAttack,
+            TriggerMode::Attacks,
+            TriggerMode::AttackersDeclared,
+            TriggerMode::AttackersDeclaredOneTarget,
+        ] {
+            let trigger = make_trigger(mode.clone());
+            for condition in &conditions {
+                assert_eq!(
+                    stack_condition_for_trigger(&trigger, condition),
+                    None,
+                    "{mode:?} controller attack-count qualifier must be event-only: {condition:?}"
+                );
+            }
+        }
+
+        let non_attack_trigger = make_trigger(TriggerMode::SpellCast);
+        let condition = controller_attack_count_condition(Comparator::GE, 2, None);
+        assert_eq!(
+            stack_condition_for_trigger(&non_attack_trigger, &condition),
+            Some(condition)
+        );
+    }
+
+    #[test]
+    fn stack_condition_strips_attack_target_counts_only_for_compatible_attack_target_filters() {
+        for (trigger_filter, condition_filter) in [
+            (AttackTargetFilter::Player, AttackTargetFilter::Player),
+            (
+                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker,
+            ),
+            (AttackTargetFilter::Battle, AttackTargetFilter::Battle),
+            (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::Player,
+            ),
+            (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::Planeswalker,
+            ),
+            (
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker,
+            ),
+            (
+                AttackTargetFilter::Player,
+                AttackTargetFilter::PlayerOrPlaneswalker,
+            ),
+            (
+                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::PlayerOrPlaneswalker,
+            ),
+        ] {
+            let mut trigger = make_trigger(TriggerMode::YouAttack);
+            trigger.attack_target_filter = Some(trigger_filter.clone());
+            let condition = attack_target_count_condition(condition_filter.clone());
+            assert_eq!(
+                stack_condition_for_trigger(&trigger, &condition),
+                None,
+                "{trigger_filter:?} must be compatible with {condition_filter:?}"
+            );
+        }
+
+        let mut mismatched = make_trigger(TriggerMode::YouAttack);
+        mismatched.attack_target_filter = Some(AttackTargetFilter::Player);
+        let battle_condition = attack_target_count_condition(AttackTargetFilter::Battle);
+        assert_eq!(
+            stack_condition_for_trigger(&mismatched, &battle_condition),
+            Some(battle_condition)
+        );
+
+        let no_filter = make_trigger(TriggerMode::YouAttack);
+        let player_condition = attack_target_count_condition(AttackTargetFilter::Player);
+        assert_eq!(
+            stack_condition_for_trigger(&no_filter, &player_condition),
+            Some(player_condition)
+        );
+    }
+
+    #[test]
+    fn stack_condition_reduces_and_conditions_but_preserves_or_conditions() {
+        let trigger = make_trigger(TriggerMode::Attacks);
+        let event_only = min_co_attackers_condition();
+        let persistent = TriggerCondition::SourceIsTapped;
+        let and_condition = TriggerCondition::And {
+            conditions: vec![event_only.clone(), persistent.clone()],
+        };
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &and_condition),
+            Some(persistent)
+        );
+
+        let all_event_only = TriggerCondition::And {
+            conditions: vec![
+                event_only.clone(),
+                TriggerCondition::Not {
+                    condition: Box::new(event_only.clone()),
+                },
+            ],
+        };
+        assert_eq!(stack_condition_for_trigger(&trigger, &all_event_only), None);
+
+        let or_condition = TriggerCondition::Or {
+            conditions: vec![event_only, TriggerCondition::SourceIsTapped],
+        };
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &or_condition),
+            Some(or_condition)
+        );
+    }
+
+    #[test]
+    fn min_co_attackers_observer_excludes_matched_attacker_not_source() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let observer = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "HYDRA Infiltration".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = make_creature(&mut state, PlayerId(0), "Solo Attacker", 2, 2);
+        let condition = min_co_attackers_condition();
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+        };
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..CombatState::default()
+        });
+
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(observer),
+                Some(&event),
+            ),
+            "lone matched attacker must count zero co-attackers even when the trigger source is an observer"
+        );
+
+        let other = make_creature(&mut state, PlayerId(0), "Second Attacker", 2, 2);
+        if let Some(combat) = &mut state.combat {
+            combat.attackers.push(AttackerInfo::new(
+                other,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+        }
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(observer),
+                Some(&event),
+            ),
+            "the second same-controller attacker must count as one co-attacker"
+        );
+    }
+
+    #[test]
+    fn min_co_attackers_filter_uses_source_while_excluding_matched_attacker() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Source Creature", 4, 4);
+        let matched_attacker = make_creature(&mut state, PlayerId(0), "Matched Attacker", 2, 2);
+        let weaker_than_source = make_creature(&mut state, PlayerId(0), "3 Power Ally", 3, 3);
+        let stronger_than_source = make_creature(&mut state, PlayerId(0), "5 Power Ally", 5, 5);
+        let condition = TriggerCondition::MinCoAttackers {
+            minimum: 1,
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::PowerGTSource]),
+            )),
+        };
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![matched_attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(matched_attacker, AttackTarget::Player(PlayerId(1)))],
+        };
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(
+                    matched_attacker,
+                    AttackTarget::Player(PlayerId(1)),
+                    PlayerId(1),
+                ),
+                AttackerInfo::new(
+                    weaker_than_source,
+                    AttackTarget::Player(PlayerId(1)),
+                    PlayerId(1),
+                ),
+            ],
+            ..CombatState::default()
+        });
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event),
+            ),
+            "3-power co-attacker is greater than the matched attacker but not greater than the 4-power source"
+        );
+
+        if let Some(combat) = &mut state.combat {
+            combat.attackers[1] = AttackerInfo::new(
+                stronger_than_source,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            );
+        }
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event),),
+            "5-power co-attacker must satisfy PowerGTSource against the 4-power source"
         );
     }
 

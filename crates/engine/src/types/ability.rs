@@ -16838,15 +16838,17 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
-    /// CR 508.1a: "Whenever ~ and at least N other creatures attack".
-    /// True when combat is active and at least `minimum` other creatures
-    /// controlled by the same player are also attacking.
+    /// CR 506.5 + CR 508.1m: "Whenever [a creature] attacks alone" /
+    /// "Whenever ~ and at least N other creatures attack". True when combat is
+    /// active and at least `minimum` other creatures controlled by the same
+    /// player are also attacking.
     ///
     /// `filter` optionally narrows which co-attackers count toward `minimum`
-    /// (the source creature is always excluded). `None` counts every
-    /// same-controller co-attacker (Exalted's "attacks alone" check); `Some(f)`
-    /// counts only co-attackers matching `f`, resolved via
-    /// `target_filter_matches_object` with the source creature as the filter's
+    /// (the matched attacking creature is excluded; source-creature triggers
+    /// fall back to the source when no narrowed attack event is available).
+    /// `None` counts every same-controller co-attacker ("attacks alone" checks);
+    /// `Some(f)` counts only co-attackers matching `f`, resolved via
+    /// `target_filter_matches_object` with the trigger source as the filter's
     /// source object. CR 702.149a (Training) uses
     /// `Some(creature with power > source power)` so only a higher-power
     /// co-attacker satisfies the trigger.
