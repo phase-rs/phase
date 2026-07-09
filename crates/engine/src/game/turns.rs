@@ -2449,10 +2449,15 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 508.1: Active player declares attackers as a turn-based action.
                 let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
                 let valid_attack_targets = super::combat::get_valid_attack_targets(state);
+                let attacker_constraints = super::combat::attacker_constraints_for_active_player(
+                    state,
+                    &valid_attacker_ids,
+                );
                 return WaitingFor::DeclareAttackers {
                     player: state.active_player,
                     valid_attacker_ids,
                     valid_attack_targets,
+                    attacker_constraints,
                 };
             }
             Phase::DeclareBlockers => {
@@ -2475,11 +2480,17 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
                     let block_requirements =
                         super::combat::block_requirements_for_player(state, defending);
+                    let blocker_constraints = super::combat::blocker_constraints_for_player(
+                        state,
+                        defending,
+                        &valid_block_targets,
+                    );
                     return WaitingFor::DeclareBlockers {
                         player: defending,
                         valid_blocker_ids,
                         valid_block_targets,
                         block_requirements,
+                        blocker_constraints,
                     };
                 } else {
                     // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.

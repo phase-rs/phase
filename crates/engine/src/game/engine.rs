@@ -5,12 +5,12 @@ use thiserror::Error;
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
-use crate::types::actions::{GameAction, PriorityYieldOp};
+use crate::types::actions::{GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp};
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
-    CostResume, GameState, LandPlayRecord, PayCostKind, RetargetScope, StackEntry, StackEntryKind,
-    WaitingFor,
+    CostResume, GameState, LandPlayRecord, MayTriggerAutoChoiceKey, PayCostKind, RetargetScope,
+    StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -453,6 +453,7 @@ fn check_actor_authorization(
         action,
         GameAction::SetPhaseStops { .. }
             | GameAction::SetPriorityYield { .. }
+            | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
@@ -1167,6 +1168,32 @@ fn apply_action(
             }
             PriorityYieldOp::ClearAll => {
                 state.clear_priority_yields(actor);
+            }
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // CR 603.5: SetMayTriggerAutoChoice propagates the actor's stored "don't ask
+    // again" auto-choices for optional ("may") triggers. Pure preference state,
+    // routed by `actor`, and — like SetPriorityYield — handled before the
+    // loop-ring / auto-pass teardown so it is a legal any-state mutation. Actor
+    // scoping is enforced by overriding the key's player with `actor`, so a
+    // player can only mutate their own preferences regardless of the payload.
+    if let GameAction::SetMayTriggerAutoChoice { op } = &action {
+        match op {
+            MayTriggerAutoChoiceOp::Remove { key } => {
+                let actor_key = MayTriggerAutoChoiceKey {
+                    player: actor,
+                    ..*key
+                };
+                state.remove_may_trigger_auto_choice(&actor_key);
+            }
+            MayTriggerAutoChoiceOp::ClearAll => {
+                state.clear_may_trigger_auto_choices(actor);
             }
         }
         return Ok(ActionResult {

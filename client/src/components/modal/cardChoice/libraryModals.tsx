@@ -7,6 +7,7 @@ import { CardImage } from "../../card/CardImage";
 import { objectImageProps } from "../../../services/cardImageLookup";
 import { useGameStore } from "../../../stores/gameStore";
 import { useGameDispatch } from "../../../hooks/useGameDispatch";
+import { useHorizontalScroll } from "../../../hooks/useHorizontalScroll.ts";
 import { useInspectHoverProps } from "../../../hooks/useInspectHoverProps";
 import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "../ChoiceOverlay";
 import { CHOICE_CARD_IMAGE_CLASS } from "./shared";
@@ -39,6 +40,7 @@ export function ReorderableTopChoice({
   const hoverProps = useInspectHoverProps();
   const [order, setOrder] = useState<ObjectId[]>(cards);
   const [restSet, setRestSet] = useState<Set<ObjectId>>(new Set());
+  const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
 
   const toggleRest = useCallback((id: ObjectId) => {
     setRestSet((prev) => {
@@ -78,14 +80,16 @@ export function ReorderableTopChoice({
       maxWidthClassName={overlayWidthClassName}
       footer={<ConfirmButton onClick={handleConfirm} />}
     >
-      <Reorder.Group
-        as="div"
-        axis="x"
-        values={order}
-        onReorder={setOrder}
-        className="mx-auto flex min-h-0 flex-1 items-center justify-center gap-2 overflow-x-auto px-1 py-2 lg:gap-3"
-      >
-        {order.map((id) => {
+      <div ref={scrollRef} className="flex min-h-0 flex-1 overflow-x-auto">
+        <Reorder.Group
+          as="div"
+          axis="x"
+          values={order}
+          onReorder={setOrder}
+          layoutScroll
+          className="mx-auto flex w-max items-center gap-2 px-1 py-2 lg:gap-3"
+        >
+          {order.map((id) => {
           const obj = objects[id];
           if (!obj) return null;
           const isRest = restSet.has(id);
@@ -128,7 +132,8 @@ export function ReorderableTopChoice({
             </Reorder.Item>
           );
         })}
-      </Reorder.Group>
+        </Reorder.Group>
+      </div>
       <p className="mt-1 shrink-0 text-center text-xs text-slate-400">{reorderHint}</p>
     </ChoiceOverlay>
   );

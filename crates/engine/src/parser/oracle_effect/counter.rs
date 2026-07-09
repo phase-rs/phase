@@ -779,15 +779,9 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // amount is the info the rider reads from the prevented event at resolution.
     // Resolves to `EventContextAmount`, matching the `PutCounter` "that many"
     // path used by the Vigor / Phyrexian Hydra cohort.
-    let (count, rest) = if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
-        value((), alt((tag("that many "), tag("that much ")))).parse(i)
-    }) {
-        (
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            },
-            rest.trim_start(),
-        )
+    let (count, rest) = if let Ok((rest, qty)) = nom_quantity::parse_that_much_or_many(after_remove)
+    {
+        (QuantityExpr::Ref { qty }, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("all ")).parse(i)
     }) {

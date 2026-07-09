@@ -21806,6 +21806,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // Boggart Prankster trigger: Whenever you attack, target attacking
@@ -22512,6 +22513,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                attacker_constraints: Default::default(),
             };
 
             // The Kratos-like commander carries the trigger but does not attack.
@@ -22599,6 +22601,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                attacker_constraints: Default::default(),
             };
 
             let source = make_creature(&mut state, PlayerId(0), "Subject Source", 1, 1);
@@ -22885,6 +22888,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // The Tenth Doctor — attacking creature carrying the Allons-y! trigger.
@@ -23130,6 +23134,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // Raph & Mikey on P0's battlefield, carrying its real Attacks trigger.
@@ -23283,6 +23288,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         // CR 104.3c: stock both libraries so neither player decks out while the

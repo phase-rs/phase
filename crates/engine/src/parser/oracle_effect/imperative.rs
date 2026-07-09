@@ -10028,12 +10028,17 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
     };
 
     // Parse quantity + counter kind from the remaining text.
-    // Patterns: "a poison" / "an experience" / "two rad" / "10 poison"
-    let (count, counter_kind) =
-        if let Ok((kind, _)) = nom_primitives::parse_article.parse(before_counter) {
-            (1u32, kind.trim())
+    // Patterns: "that many poison" / "a poison" / "an experience" / "two rad" / "10 poison"
+    // CR 608.2h: "that many/much <kind> counters" binds the triggering event's
+    // amount (e.g. Etali, Primal Sickness — combat damage → that many poison
+    // counters); the amount is determined once, when the effect is applied.
+    let (count, counter_kind): (QuantityExpr, &str) =
+        if let Ok((rest, qty)) = nom_quantity::parse_that_much_or_many(before_counter) {
+            (QuantityExpr::Ref { qty }, rest.trim())
+        } else if let Ok((kind, _)) = nom_primitives::parse_article.parse(before_counter) {
+            (QuantityExpr::Fixed { value: 1 }, kind.trim())
         } else if let Ok((rest, n)) = nom_primitives::parse_number.parse(before_counter) {
-            (n, rest.trim())
+            (QuantityExpr::Fixed { value: n as i32 }, rest.trim())
         } else {
             return None;
         };
@@ -10057,9 +10062,7 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
     let _ = plural; // plural is just grammatical, doesn't affect semantics
     Some(ImperativeFamilyAst::GivePlayerCounter {
         counter_kind: kind,
-        count: QuantityExpr::Fixed {
-            value: count as i32,
-        },
+        count,
     })
 }
 
@@ -14972,6 +14975,90 @@ mod tests {
         assert!(
             result.is_none(),
             "Should NOT parse unknown counter type as player counter"
+        );
+    }
+
+    /// CR 608.2h: "get that many <kind> counters" binds the triggering event's
+    /// amount (Etali, Primal Sickness: combat damage → that many poison
+    /// counters). Revert-failing: without the `parse_that_much_or_many` arm the
+    /// count matches neither `parse_article` nor `parse_number`, so
+    /// `try_parse_player_counter` returns None and the effect lowers to
+    /// `Effect::Unimplemented`.
+    #[test]
+    fn parse_player_counter_that_many_binds_event_amount() {
+        match try_parse_player_counter("get that many poison counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Poison);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                ));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Class coverage: the "that many" amount arm generalizes across the whole
+    /// player-counter kind set (experience, not just poison).
+    #[test]
+    fn parse_player_counter_that_many_experience() {
+        match try_parse_player_counter("get that many experience counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Experience);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                ));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Sibling reach-guard: the new that-many arm must not swallow the fixed
+    /// article/number forms — "get a poison counter" still binds Fixed 1 and
+    /// "gets two rad counters" still binds Fixed 2 (proves the fixed arms are
+    /// reached, not short-circuited).
+    #[test]
+    fn parse_player_counter_fixed_arms_unaffected() {
+        match try_parse_player_counter("get a poison counter") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Poison);
+                assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+        match try_parse_player_counter("gets two rad counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Rad);
+                assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Hostile: "+1/+1 counter" is an object counter, not a player counter —
+    /// the that-many arm must not misroute it (the `+`/`-` guard still rejects).
+    #[test]
+    fn parse_player_counter_that_many_rejects_object_counter() {
+        assert!(
+            try_parse_player_counter("gets a +1/+1 counter").is_none(),
+            "Object counter must not parse as a player counter"
         );
     }
 

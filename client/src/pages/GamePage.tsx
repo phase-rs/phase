@@ -34,6 +34,8 @@ import { DebugLibraryViewer } from "../components/chrome/DebugLibraryViewer.tsx"
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
+import { AttackRequirementBadges } from "../components/combat/AttackRequirementBadges.tsx";
+import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
@@ -41,6 +43,7 @@ import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
+import { MayTriggerAutoChoiceList } from "../components/board/MayTriggerAutoChoiceList.tsx";
 import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
@@ -96,7 +99,6 @@ import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
-import { CompanionZone } from "../components/zone/CompanionZone.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import {
   PreferencesModal,
@@ -1393,12 +1395,6 @@ function GamePageContent({
               />
             </div>
           </DraggableWidget>
-          <div
-            className="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
-            style={playerZoneRailStyle}
-          >
-            <CompanionZone playerId={perspectivePlayerId} />
-          </div>
         </div>
       </div>
 
@@ -1427,6 +1423,7 @@ function GamePageContent({
             </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
+              <MayTriggerAutoChoiceList />
               <FullControlToggle className="w-full" />
             </div>
           </div>
@@ -1454,6 +1451,9 @@ function GamePageContent({
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
+                {/* CR 603.5: standing "don't ask again" auto-choice summary chip,
+                    beside the priority-yield chip (self-hides when none stand). */}
+                <MayTriggerAutoChoiceList />
                 <FullControlToggle />
               </div>
               <ActionButton />
@@ -1658,6 +1658,13 @@ function GamePageContent({
           Self-gates: renders nothing unless the local player is assigning blockers
           to attackers that carry a minimum-blocker requirement. */}
       <BlockRequirementBadges />
+
+      {/* Per-creature must-attack / can't-attack and must-block / can't-block
+          badges (CR 508.1c/d, CR 509.1b/c). Each self-gates: renders nothing
+          unless the local player is at the matching declare step and the engine
+          supplied constraints. Display-only. */}
+      <AttackRequirementBadges />
+      <BlockerConstraintBadges />
 
       {/* Card preview overlay. Owns its own inspect-state subscriptions so a
           hover doesn't re-render GamePageContent (and the whole battlefield). */}
