@@ -2539,7 +2539,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // subject-predicate clause start — the same guarantee as the "it <verb>" arms
     // above — so split it here. Without the split the conjunct is fed to the
     // imperative-only `parse_imperative_effect`, which has no subject-predicate
-    // path and fails it closed to `Effect::Unimplemented { name: "he" }`.
+    // path and fails it closed to an unimplemented effect named for the pronoun.
     // Splitting routes it through `parse_clause_ast`, where
     // `parse_subject_application` maps "he"/"she" to `SelfRef`
     // (subject.rs `matches!(lower, "he" | "she")`). The pronoun axis is composed
@@ -10728,7 +10728,7 @@ mod tests {
     /// same guarantee as the singular "it <verb>" arms. Machine Man, Model X-51:
     /// "put a +1/+1 counter on ~ and he gains flying until end of turn". Without
     /// the split the conjunct falls to the imperative-only path and fails closed
-    /// to `Effect::Unimplemented { name: "he" }`. The verb set mirrors the
+    /// to an unimplemented effect named for the pronoun. The verb set mirrors the
     /// singular "it" arms (continuous gains/gets/has/loses + restriction
     /// doesn't/can't/cannot), NOT the plural "they" arm (which excludes P/T
     /// "get" for its conditional-rider path).
