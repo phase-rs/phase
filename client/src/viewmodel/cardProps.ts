@@ -3,8 +3,14 @@ import { isChangeling } from "./keywordProps";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
 export const FACE_DOWN_CARD_NAME = "Face-down card";
-/** Convert a small integer (1–5) to a Roman numeral string. */
-export function toRoman(n: number): string { return ROMAN[n] ?? String(n); }
+/** Convert a small integer (1–5) to a Roman numeral string. Values outside the
+ *  table fall back to the arabic numeral for a positive integer, or "" for a
+ *  non-positive / non-integer input — so a missing/NaN class level renders blank
+ *  rather than the literal string "undefined"/"NaN" (`ROMAN[undefined]` is
+ *  `undefined`, and the old `?? String(n)` stringified it onto the card badge). */
+export function toRoman(n: number): string {
+  return ROMAN[n] ?? (Number.isInteger(n) && n > 0 ? String(n) : "");
+}
 
 export interface CardViewProps {
   id: ObjectId;
