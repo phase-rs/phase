@@ -1334,6 +1334,76 @@ fn parse_its_a_card_type_gate_body<'a>(
     ))
 }
 
+/// CR 608.2c + CR 301.5b + CR 701.3a: "If it's a[n] &lt;subtype&gt;, [you may] attach
+/// it to ~" follow-up on a just-put permanent (The Invincible Iron Man: "put an
+/// artifact card from your hand onto the battlefield. If it's an Equipment,
+/// attach it to ~"). The bare-"it" anaphor (CR 608.2c) binds to the moved card,
+/// and "~" (CR 201.5) is the ability's own source. Recognized as a UNIT so the
+/// generic "it's a [subtype]" condition arm can't mis-key the type gate to the
+/// ability's injected parent target (the source, not the moved card) or emit a
+/// self-attach `ParentTarget`/`ParentTarget` (an Equipment can't equip itself,
+/// CR 301.5c).
+///
+/// Emits the supported `ZoneChangedThisWay` + `Attach` forward_result idiom: the
+/// condition gates on the moved card's type (read from `last_zone_changed_ids`,
+/// independent of the target slot); the attach makes the moved card (`SelfRef`,
+/// rebound to the forwarded object at resolution) the attachment and the source
+/// (`ParentTarget`, the injected original source) the host. Only the
+/// source-as-host recipient ("~") is in scope; typed hosts remain an honest gap.
+/// Returns `(condition, attach_effect, attach_is_optional)`.
+pub(super) fn try_parse_moved_card_subtype_attach_followup(
+    text: &str,
+) -> Option<(AbilityCondition, Effect, bool)> {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim();
+    // Leading anaphoric gate: "if it's a "/"if it's an ".
+    let (after_gate, _) = alt((
+        tag::<_, _, OracleError<'_>>("if it's a "),
+        tag("if it's an "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    // Split the subtype phrase from the "attach ..." body on the first comma.
+    let (_, (subtype_phrase, body)) = nom_primitives::split_once_on(after_gate, ", ").ok()?;
+    // Require a pure subtype gate (Equipment/Aura/Fortification, ...): the type
+    // phrase must consume fully and reference at least one CR 205.3 subtype.
+    let (filter, leftover) = parse_type_phrase(subtype_phrase);
+    if !leftover.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(typed) = &filter else {
+        return None;
+    };
+    if !typed
+        .type_filters
+        .iter()
+        .any(type_filter_references_subtype)
+    {
+        return None;
+    }
+    // Body: "[you may ]attach it to ~[.]" — only the source host ("~") is in scope.
+    let (after_may, is_optional) = opt(tag::<_, _, OracleError<'_>>("you may "))
+        .parse(body)
+        .map(|(rest, matched)| (rest, matched.is_some()))
+        .unwrap_or((body, false));
+    let (after_attach, _) = tag::<_, _, OracleError<'_>>("attach it to ")
+        .parse(after_may)
+        .ok()?;
+    let (after_source, _) = tag::<_, _, OracleError<'_>>("~").parse(after_attach).ok()?;
+    let (after_dot, _) = opt(tag::<_, _, OracleError<'_>>("."))
+        .parse(after_source)
+        .ok()?;
+    if !after_dot.trim().is_empty() {
+        return None;
+    }
+    let condition = AbilityCondition::ZoneChangedThisWay { filter };
+    let attach = Effect::Attach {
+        attachment: TargetFilter::SelfRef,
+        target: TargetFilter::ParentTarget,
+    };
+    Some((condition, attach, is_optional))
+}
+
 pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     if let Some((condition, remainder)) = parse_if_revealed_card_type_conditional(text) {
         return (Some(condition), remainder);
@@ -8518,6 +8588,65 @@ mod tests {
         let (prop, use_lki) = single_prop(&cond);
         assert_eq!(*prop, FilterProp::WasDealtDamageThisTurn);
         assert!(use_lki, "past-tense look-back must use LKI per CR 400.7");
+    }
+
+    /// Issue #4796 (CR 608.2c + CR 301.5b): "if it's a[n] <subtype>, attach it
+    /// to ~" recognizer — The Invincible Iron Man's Equipment self-attach
+    /// follow-up. Emits `ZoneChangedThisWay{Equipment}` + `Attach{SelfRef,
+    /// ParentTarget}` (moved card is the attachment, source is the host), not a
+    /// self-attach and not a wrong-subject `TargetMatchesFilter`.
+    #[test]
+    fn moved_card_subtype_attach_followup_equipment_to_source() {
+        let (cond, effect, is_optional) =
+            try_parse_moved_card_subtype_attach_followup("if it's an equipment, attach it to ~.")
+                .expect("Iron Man Equipment attach follow-up must be recognized");
+        assert!(!is_optional, "the attach itself is mandatory once gated");
+        match cond {
+            AbilityCondition::ZoneChangedThisWay { filter } => match filter {
+                TargetFilter::Typed(t) => assert!(
+                    t.type_filters.iter().any(|f| matches!(
+                        f,
+                        TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment")
+                    )),
+                    "expected Equipment subtype gate, got {:?}",
+                    t.type_filters
+                ),
+                other => panic!("expected Typed Equipment filter, got {other:?}"),
+            },
+            other => panic!("expected ZoneChangedThisWay condition, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                effect,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::ParentTarget,
+                }
+            ),
+            "moved card must be the attachment (SelfRef) and the source the host (ParentTarget), got {effect:?}"
+        );
+    }
+
+    /// The recognizer is scoped to the "attach it to ~" self-host body and to
+    /// CR 205.3 subtype gates: it declines non-attach bodies, core-type gates,
+    /// and typed (non-source) hosts so those fall through to the generic path.
+    #[test]
+    fn moved_card_subtype_attach_followup_declines_out_of_scope() {
+        // No "attach it to ~" body (reveal/scry-style follow-up).
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's an equipment, you draw a card."
+        )
+        .is_none());
+        // Core type, not a CR 205.3 subtype.
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's a creature, attach it to ~."
+        )
+        .is_none());
+        // Typed host (not the source "~") is an honest gap.
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's an equipment, attach it to a creature you control."
+        )
+        .is_none());
     }
 
     /// CR 608.2c: Faller's Faithful "that creature wasn't dealt damage this turn"
