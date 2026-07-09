@@ -2434,20 +2434,43 @@ pub(crate) fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilt
             // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
         )),
-        // CR 305.7: "All <basic land type> are <type>" (Conversion, Glaciers:
-        // "All Mountains are Plains"). The subject is every permanent with the
-        // named basic land subtype; the SetBasicLandType predicate is applied by
-        // the caller. Composes over all five basic land types, not one card.
-        other => {
-            let type_word = opt(tag::<_, _, OracleError<'_>>("all "))
-                .parse(other)
-                .map(|(rest, _)| rest.trim())
-                .unwrap_or(other);
-            parse_basic_land_type_plural(type_word).map(|basic| {
-                TargetFilter::Typed(TypedFilter::land().subtype(basic.as_subtype_str().to_string()))
-            })
-        }
+        // CR 305.6 + CR 305.7: "[all] <basic land type>[s] [you control]" — every
+        // permanent with the named basic land subtype (Conversion, Glaciers "All
+        // Mountains are Plains"), optionally narrowed to the static's controller
+        // (Ambush Commander "Forests you control ..."). Composes over all five basic
+        // land types and both controller scopes, not one card.
+        other => parse_basic_land_type_subject_scoped(other),
     }
+}
+
+/// CR 305.6 + CR 109.5: resolve a plural basic-land-type subject that carries an
+/// optional leading `all ` and an optional trailing ` you control` controller
+/// scope — `Forests`, `all Mountains`, `Forests you control` (Ambush Commander).
+/// The type word is resolved by [`parse_basic_land_type_plural`]; the trailing
+/// controller clause is peeled with nom (`take_until` + `tag`) so the
+/// controller-scoped form reuses the same type grammar as its unscoped sibling
+/// instead of needing its own dispatch arm (CR 109.5: `you` on a static ability's
+/// object refers to that object's controller).
+fn parse_basic_land_type_subject_scoped(subject: &str) -> Option<TargetFilter> {
+    let type_word = opt(tag::<_, _, OracleError<'_>>("all "))
+        .parse(subject)
+        .map(|(rest, _)| rest.trim())
+        .unwrap_or(subject);
+    let (type_word, controller) = match all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" you control"),
+        tag(" you control"),
+    ))
+    .parse(type_word)
+    {
+        Ok((_, head)) => (head, Some(ControllerRef::You)),
+        Err(_) => (type_word, None),
+    };
+    let basic = parse_basic_land_type_plural(type_word)?;
+    let mut filter = TypedFilter::land().subtype(basic.as_subtype_str().to_string());
+    if let Some(controller) = controller {
+        filter = filter.controller(controller);
+    }
+    Some(TargetFilter::Typed(filter))
 }
 
 /// CR 702.73a + CR 205.3 + CR 604.3 + CR 613.1d: Parse "[subject] {is|are}
