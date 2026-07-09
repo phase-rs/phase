@@ -23800,6 +23800,45 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 608.2c + CR 301.5b + CR 701.3a: "put a permanent onto the battlefield.
+        // If it's a[n] <subtype>, attach it to ~" (The Invincible Iron Man). The
+        // moved card is the attachment and the ability's source is the host.
+        // Recognized as a UNIT — guarded on a preceding battlefield-put so it can't
+        // hijack reveal/scry-context "if it's a[n] X, ..." clauses — so the generic
+        // conditional cascade below can't mis-key the type gate to the injected
+        // parent target or emit an illegal self-attach. Sequential-clause assembly
+        // folds this into the put's `sub_ability`; `rewire_result_anchored_subchain`
+        // then re-affirms `forward_result` (moved card -> Attach source; original
+        // source -> injected target).
+        let prev_moves_to_battlefield = clauses
+            .iter()
+            .rev()
+            .find(|c| !c.absorbed_by_followup)
+            .is_some_and(|c| {
+                matches!(
+                    &c.parsed.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        ..
+                    } | Effect::Dig {
+                        destination: Some(Zone::Battlefield),
+                        ..
+                    }
+                )
+            });
+        if prev_moves_to_battlefield {
+            if let Some((condition, attach, is_optional)) =
+                try_parse_moved_card_subtype_attach_followup(normalized_text)
+            {
+                let mut clause = meld_single_clause(attach, normalized_text);
+                clause.boundary = chunk.boundary_after;
+                clause.condition = Some(condition);
+                clause.is_optional = is_optional;
+                clauses.push(clause);
+                continue;
+            }
+        }
+
         // CR 118.9: Alternative-cost rider — "[If you cast a spell
         // this way,] pay <ability-cost> rather than paying its mana cost."
         // This is a *modifier* on the previous chain entry's `CastFromZone`
