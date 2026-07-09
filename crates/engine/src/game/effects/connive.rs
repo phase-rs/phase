@@ -9,7 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{AppliedReplacementKey, CounterPlacement, ProposedEvent};
 use crate::types::zones::Zone;
 
 /// CR 701.50a: Connive — draw N cards, then discard N cards. For each nonland
@@ -63,7 +63,7 @@ pub(crate) fn propose_connive(
     state: &mut GameState,
     conniver_id: ObjectId,
     count: u32,
-    applied: HashSet<ReplacementId>,
+    applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let proposed = ProposedEvent::Connive {

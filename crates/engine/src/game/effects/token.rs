@@ -8,18 +8,18 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
-    Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
-    EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
+    Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DelayedTrigger, GameState, PendingCopyTokenBatch, PendingCounterPostAction,
-    PendingEffectResolutionEvent,
+    PendingEffectResolutionEvent, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
@@ -29,7 +29,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenSpec};
 use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 
 // ── Token script parser ─────────────────────────────────────────────────
 
@@ -1044,6 +1044,276 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
     // TargetFilter::LastCreated (e.g., Job select, suspect).
     state.last_created_token_ids = created_ids;
     true
+}
+
+pub(crate) fn reserve_liminal_token_object(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: String,
+) -> (ObjectId, GameObject) {
+    let id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    (
+        id,
+        GameObject::new(id, CardId(0), owner, name, Zone::Battlefield),
+    )
+}
+
+pub(crate) fn apply_copiable_values_to_liminal_object(
+    object: &mut GameObject,
+    values: &CopiableValues,
+    display_source: DisplaySource,
+    printed_ref: Option<crate::types::card::PrintedCardRef>,
+    token_image_ref: Option<crate::types::card::TokenImageRef>,
+) {
+    object.display_source = display_source;
+    object.printed_ref = printed_ref.clone();
+    object.base_printed_ref = printed_ref;
+    object.token_image_ref = token_image_ref;
+    object.name = values.name.clone();
+    object.base_name = values.name.clone();
+    object.mana_cost = values.mana_cost.clone();
+    object.base_mana_cost = values.mana_cost.clone();
+    object.base_color = values.color.clone();
+    object.color = values.color.clone();
+    object.base_card_types = values.card_types.clone();
+    object.card_types = values.card_types.clone();
+    object.base_power = values.power;
+    object.power = values.power;
+    object.base_toughness = values.toughness;
+    object.toughness = values.toughness;
+    object.base_loyalty = values.loyalty;
+    object.loyalty = values.loyalty;
+    object.base_keywords = values.keywords.clone();
+    object.keywords = values.keywords.clone();
+    object.base_abilities = Arc::clone(&values.abilities);
+    object.abilities = Arc::clone(&values.abilities);
+    object.base_trigger_definitions = Arc::clone(&values.trigger_definitions);
+    object.trigger_definitions = Arc::clone(&values.trigger_definitions).into();
+    object.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
+    object.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
+    object.base_static_definitions = Arc::clone(&values.static_definitions);
+    object.static_definitions = Arc::clone(&values.static_definitions).into();
+    object.base_characteristics_initialized = true;
+}
+
+pub(crate) fn commit_liminal_token_entry(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    commit_liminal_token_entry_with_event_emission(state, event, events, true)
+}
+
+pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    if !commit_liminal_token_entry(state, event, events) {
+        return false;
+    }
+    continue_liminal_copy_token_batch(state, continuation, events)
+}
+
+#[derive(Clone)]
+struct LiminalCopyTokenContinuation {
+    owner: PlayerId,
+    copy: Box<CopyTokenSpec>,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(CounterType, u32)>,
+    remaining_count: u32,
+}
+
+fn liminal_copy_token_continuation_for_event(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<LiminalCopyTokenContinuation> {
+    let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
+        return None;
+    };
+    let entry = state.liminal_entries.get(entry_ref)?;
+    let copy = entry.copy_resume.clone()?;
+    Some(LiminalCopyTokenContinuation {
+        owner: entry.object.owner,
+        copy,
+        enter_tapped: entry.enter_tapped,
+        enter_with_counters: entry.enter_with_counters.clone(),
+        remaining_count: entry.remaining_count,
+    })
+}
+
+fn continue_liminal_copy_token_batch(
+    state: &mut GameState,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+        pending.created_ids = state.last_created_token_ids.clone();
+    }
+    let Some(continuation) = continuation else {
+        if state.pending_copy_token_resolution.is_some() {
+            super::token_copy::drain_pending_copy_token_resolution(state, events);
+        }
+        return !state.pending_copy_token_resolution.is_some()
+            || matches!(state.waiting_for, WaitingFor::Priority { .. });
+    };
+    if continuation.remaining_count > 0 {
+        let initial_created_ids = state.last_created_token_ids.clone();
+        let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
+            state,
+            continuation.owner,
+            *continuation.copy,
+            continuation.enter_tapped,
+            continuation.enter_with_counters,
+            continuation.remaining_count,
+            initial_created_ids,
+            events,
+        );
+        state.last_created_token_ids = status.created_ids;
+        if matches!(
+            status.completion,
+            super::token_copy::CopyTokenApplyCompletion::Paused
+        ) {
+            return false;
+        }
+    }
+    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+        pending.created_ids = state.last_created_token_ids.clone();
+    }
+    if state.pending_copy_token_resolution.is_some() {
+        super::token_copy::drain_pending_copy_token_resolution(state, events);
+    }
+    !state.pending_copy_token_resolution.is_some()
+        || matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+pub(crate) fn commit_liminal_token_entry_with_event_emission(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    emit_entry_events: bool,
+) -> bool {
+    let ProposedEvent::TokenEntry {
+        entry_ref,
+        enter_tapped,
+        enter_with_counters,
+        ..
+    } = event
+    else {
+        return true;
+    };
+    let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
+        return true;
+    };
+    entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
+    let owner = entry.object.owner;
+    state.objects.insert(entry_ref, entry.object);
+    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+
+    for (counter_type, counter_count) in enter_with_counters
+        .iter()
+        .chain(entry.enter_with_counters.iter())
+    {
+        if *counter_count > 0
+            && !super::counters::add_counter_with_replacement(
+                state,
+                owner,
+                entry_ref,
+                counter_type.clone(),
+                *counter_count,
+                events,
+            )
+        {
+            state.last_created_token_ids = entry.created_ids.clone();
+            return false;
+        }
+    }
+
+    if entry.copy_resume.is_some() {
+        super::token_copy::finalize_copied_token(state, entry.source_id, entry_ref);
+        inject_predefined_token_abilities(state, entry_ref);
+    } else {
+        inject_resolved_token_abilities(state, entry_ref);
+    }
+    crate::game::layers::mark_layers_entered(state, entry_ref);
+    crate::game::restrictions::record_battlefield_entry(state, entry_ref);
+    crate::game::restrictions::record_token_created(state, entry_ref);
+
+    if entry.enters_attacking {
+        crate::game::combat::enter_attacking(state, entry_ref, entry.source_id, entry.controller);
+    }
+    if let Some(host) = entry.attach_to {
+        match host {
+            AttachTarget::Object(id) => {
+                super::attach::attach_to(state, entry_ref, id);
+            }
+            AttachTarget::Player(pid) => {
+                super::attach::attach_to_player(state, entry_ref, pid);
+            }
+        };
+    }
+
+    if emit_entry_events {
+        push_committed_token_entry_events(
+            state,
+            entry_ref,
+            entry.name.clone(),
+            entry.source_id,
+            events,
+        );
+    }
+    if matches!(entry.sacrifice_at, Some(Duration::UntilEndOfCombat)) {
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat,
+            },
+            ability: ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+                vec![TargetRef::Object(entry_ref)],
+                entry.source_id,
+                entry.controller,
+            ),
+            controller: entry.controller,
+            source_id: entry.source_id,
+            one_shot: true,
+        });
+    }
+
+    entry.created_ids.push(entry_ref);
+    state.last_created_token_ids = entry.created_ids;
+    true
+}
+
+pub(crate) fn push_committed_token_entry_events(
+    state: &GameState,
+    object_id: ObjectId,
+    name: String,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(token) = state.objects.get(&object_id) {
+        let zone_change_record = token.snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+        events.push(GameEvent::ZoneChanged {
+            object_id,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(zone_change_record),
+        });
+    }
+    events.push(GameEvent::TokenCreated {
+        object_id,
+        name,
+        source_id,
+    });
 }
 
 // ── Layer B: token-handler batch purity gate (Tier 3) ────────────────────

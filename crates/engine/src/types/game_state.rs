@@ -28,7 +28,9 @@ use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndMan
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::{Phase, PhaseStop, TurnDirection};
 use super::player::{Player, PlayerCounterKind, PlayerId};
-use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
+use super::proposed_event::{
+    AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec,
+};
 use super::replacements::ReplacementEvent;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -1337,7 +1339,7 @@ pub struct PendingChooseOneOf {
     /// CR 614.5 + CR 616.1f: replacement effects already applied to the event
     /// that produced this queued branch choice.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub replacement_applied: HashSet<ReplacementId>,
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub remaining_players: Vec<PlayerId>,
 }
 
@@ -1783,6 +1785,11 @@ pub enum PendingCounterPostAction {
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
+    },
+    EmitCommittedCopyTokenEntry {
+        object_id: ObjectId,
+        name: String,
+        source_id: ObjectId,
     },
     ClearPendingEtbCounters {
         object_id: ObjectId,
@@ -3682,7 +3689,7 @@ pub enum WaitingFor {
         /// CR 614.5 + CR 616.1f: replacement effects already applied to the
         /// event that produced this choice.
         #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-        replacement_applied: HashSet<ReplacementId>,
+        replacement_applied: HashSet<AppliedReplacementKey>,
         /// Players still to face the same choice in APNAP order (CR 701.55d).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining_players: Vec<PlayerId>,
@@ -6371,6 +6378,30 @@ pub struct ResolvingTriggerContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiminalEntry {
+    pub object: GameObject,
+    pub name: String,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub enters_attacking: bool,
+    pub attach_to: Option<AttachTarget>,
+    pub sacrifice_at: Option<Duration>,
+    pub remaining_count: u32,
+    pub created_ids: Vec<ObjectId>,
+    pub copy_resume: Option<Box<CopyTokenSpec>>,
+    pub spec_resume: Option<Box<TokenSpec>>,
+    pub enter_tapped: EtbTapState,
+    pub enter_with_counters: Vec<(CounterType, u32)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingLiminalEntryResume {
+    pub source_id: ObjectId,
+    pub player: PlayerId,
+    pub event: ProposedEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
     pub active_player: PlayerId,
@@ -6431,6 +6462,10 @@ pub struct GameState {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub liminal_entries: HashMap<ObjectId, LiminalEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_liminal_entry_resume: Option<PendingLiminalEntryResume>,
     /// CR 614.12a: set by `continue_replacement` when an optional `MayCost`
     /// accept's payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with multiple eligible lands). It re-parks the
@@ -6480,7 +6515,7 @@ pub struct GameState {
     /// CR 614.5 + CR 616.1f: replacement identities already applied to the
     /// event that produced a deferred post-replacement continuation.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub post_replacement_applied: HashSet<ReplacementId>,
+    pub post_replacement_applied: HashSet<AppliedReplacementKey>,
 
     /// CR 615.5 + CR 609.7: Source object of the *prevented event itself*
     /// (e.g. the damage dealer in a damage-prevention replacement) — distinct
@@ -6523,7 +6558,7 @@ pub struct GameState {
     /// replacement (issue #4886).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_token_choice_applied:
-        Option<std::collections::HashSet<crate::types::proposed_event::ReplacementId>>,
+        Option<std::collections::HashSet<crate::types::proposed_event::AppliedReplacementKey>>,
 
     /// CR 701.50a + CR 614.5 + CR 616.1f: deferred connive link of a connive
     /// replacement whose leading draw parked a replacement-ordering choice. See
@@ -8154,7 +8189,7 @@ pub struct GameState {
     /// rider exactly once (CR 615.13). Always `None` at every `apply()`
     /// boundary, so it is excluded from serialization and structural equality.
     #[serde(skip)]
-    pub combat_prevention_tally: Option<HashMap<ReplacementId, i32>>,
+    pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -8215,7 +8250,7 @@ pub struct TransientContinuousEffect {
 pub struct PendingConniveReentry {
     pub conniver: ObjectId,
     pub count: u32,
-    pub applied: HashSet<ReplacementId>,
+    pub applied: HashSet<AppliedReplacementKey>,
 }
 
 /// CR 121.6b + CR 609.3: See the doc comment on `GameState::pending_multi_draw`.
@@ -8672,6 +8707,8 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            liminal_entries: HashMap::new(),
+            pending_liminal_entry_resume: None,
             replacement_may_cost_paused: false,
             post_replacement_continuation: None,
             legacy_post_replacement_effect: None,

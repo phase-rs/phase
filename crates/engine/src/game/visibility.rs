@@ -31,6 +31,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // server-side randomness or session restore.
     filtered.rng_seed = 0;
     filtered.rng = <rand_chacha::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0);
+    filtered.liminal_entries.clear();
+    filtered.pending_liminal_entry_resume = None;
 
     let can_view_private_for_player = |player: PlayerId| {
         player == viewer
@@ -1325,6 +1327,56 @@ mod tests {
 
         // The authoritative source state is untouched by filtering.
         assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+    }
+
+    #[test]
+    fn liminal_entry_state_serializes_but_is_filtered_from_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let entry_ref = ObjectId(99);
+        state.liminal_entries.insert(
+            entry_ref,
+            crate::types::game_state::LiminalEntry {
+                object: crate::game::game_object::GameObject::new(
+                    entry_ref,
+                    CardId(99),
+                    PlayerId(0),
+                    "Liminal Token".to_string(),
+                    Zone::Battlefield,
+                ),
+                name: "Liminal Token".to_string(),
+                source_id: ObjectId(1),
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+            },
+        );
+        state.pending_liminal_entry_resume =
+            Some(crate::types::game_state::PendingLiminalEntryResume {
+                source_id: entry_ref,
+                player: PlayerId(0),
+                event: crate::types::proposed_event::ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    applied: std::collections::HashSet::new(),
+                },
+            });
+
+        let serialized = serde_json::to_string(&state).unwrap();
+        let restored: GameState = serde_json::from_str(&serialized).unwrap();
+        assert!(restored.liminal_entries.contains_key(&entry_ref));
+        assert!(restored.pending_liminal_entry_resume.is_some());
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(filtered.liminal_entries.is_empty());
+        assert!(filtered.pending_liminal_entry_resume.is_none());
     }
 
     #[test]

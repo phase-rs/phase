@@ -1323,7 +1323,9 @@ mod tranche4_draw_pipeline_tests {
         // Drive the apply path with the rid PRE-SEEDED into the Draw event's
         // applied set — modelling a def that already fired at the Draw level.
         let mut applied = std::collections::HashSet::new();
-        applied.insert(rid);
+        applied.insert(crate::types::proposed_event::AppliedReplacementKey::object(
+            rid.source, rid.index,
+        ));
         let mut events = Vec::new();
         apply_draw_after_replacement(
             &mut state,

@@ -12,7 +12,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::zones::Zone;
 
 /// Outcome of a discard attempt routed through the replacement pipeline.
@@ -33,7 +33,7 @@ pub(crate) enum DiscardOutcome {
 /// having been discarded this turn, so stamp that marker only when the card
 /// actually reaches the graveyard.
 ///
-/// `applied` carries the `HashSet<ReplacementId>` from the outer Discard pass so
+/// `applied` carries the `HashSet<AppliedReplacementKey>` from the outer Discard pass so
 /// re-proposing the inner `ZoneChange` does not re-run Discard-level definitions
 /// (madness) that already applied — this mirrors `discard_applier`'s lowering.
 pub(crate) fn complete_discard_to_graveyard(
@@ -41,7 +41,7 @@ pub(crate) fn complete_discard_to_graveyard(
     object_id: ObjectId,
     player_id: PlayerId,
     source_id: Option<ObjectId>,
-    applied: HashSet<crate::types::ReplacementId>,
+    applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> DiscardOutcome {
     // CR 614.6 + CR 701.9a: lower the accepted discard to an inner hand →

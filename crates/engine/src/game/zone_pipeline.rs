@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
@@ -83,7 +83,7 @@ pub enum ZoneChangeCause {
     /// — because `Draw` is the only producer; every other cause would carry a
     /// dead empty set. Built only by [`ZoneMoveRequest::draw`].
     Draw {
-        seed_applied: HashSet<ReplacementId>,
+        seed_applied: HashSet<AppliedReplacementKey>,
     },
     // ---- exempt causes: pipeline-internal, replacement consult skipped ----
     /// CR 601.2a: "the player first moves that card ... to the stack" — part of
@@ -249,7 +249,7 @@ impl ZoneMoveRequest {
     /// outer `ReplacementEvent::Draw` pass's applied set so the inner `Moved`
     /// consult does not double-apply a def that already fired at draw level
     /// (CR 614.5, PLAN Risk #5).
-    pub fn draw(object_id: ObjectId, seed_applied: HashSet<ReplacementId>) -> Self {
+    pub fn draw(object_id: ObjectId, seed_applied: HashSet<AppliedReplacementKey>) -> Self {
         Self {
             object_id,
             to: Zone::Hand,
@@ -422,7 +422,7 @@ impl ApprovedZoneChange {
     /// The third mint path (PLAN §6.2): seal an event that has already completed
     /// a full replacement pass OUTSIDE this module — the outer Destroy /
     /// Sacrifice / Discard pass lowers into a `ZoneChange` carrying its
-    /// `applied: HashSet<ReplacementId>`. Legal ONLY on `ZoneChange` payloads;
+    /// `applied: HashSet<AppliedReplacementKey>`. Legal ONLY on `ZoneChange` payloads;
     /// returns `Err(event)` for anything else so the caller can fall back.
     /// Re-proposing such an event through `move_object` would discard `applied`
     /// and double-apply Moved definitions / redo CR 616.1 ordering.

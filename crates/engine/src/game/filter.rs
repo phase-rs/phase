@@ -1166,6 +1166,22 @@ pub fn matches_target_filter_on_battlefield_entry(
         ProposedEvent::ZoneChange { object_id, to, .. } if *to == Zone::Battlefield => {
             matches_target_filter(state, *object_id, filter, ctx)
         }
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+                filter_inner_for_object(
+                    state,
+                    &entry.object,
+                    *entry_ref,
+                    filter,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    ctx.ability,
+                    ctx.recipient_id,
+                    ctx.scoped_iteration_player,
+                    ControllerLookup::LiveOrLki,
+                )
+            })
+        }
         ProposedEvent::CreateToken {
             owner,
             spec,

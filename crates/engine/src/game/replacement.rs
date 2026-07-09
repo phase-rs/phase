@@ -24,7 +24,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CounterMoveStage, CounterPlacement, EtbTapState, ProposedEvent, ReplacementId,
+    AppliedReplacementKey, CounterMoveStage, CounterPlacement, EtbTapState, ProposedEvent,
+    ReplacementId,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -228,7 +229,7 @@ fn apply_compleated_replacement(
             count,
             mut applied,
         } if object_id == rid.source => {
-            applied.insert(rid);
+            applied.insert(AppliedReplacementKey::object(rid.source, rid.index));
             if let Some(obj) = state.objects.get_mut(&rid.source) {
                 obj.phyrexian_life_paid = 0;
             }
@@ -268,7 +269,7 @@ fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
     source: ObjectId,
-    applied: HashSet<ReplacementId>,
+    applied: HashSet<AppliedReplacementKey>,
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
 ) {
@@ -399,12 +400,7 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     let (accept_desc, decline_desc) = p
                         .candidates
                         .first()
-                        .and_then(|rid| {
-                            state
-                                .objects
-                                .get(&rid.source)
-                                .and_then(|obj| obj.replacement_definitions.get(rid.index))
-                        })
+                        .and_then(|rid| replacement_definition_for_id(state, *rid))
                         .map(|repl| match &repl.mode {
                             ReplacementMode::MayCost { cost, .. } => {
                                 (replacement_cost_description(cost), "Decline".to_string())
@@ -930,7 +926,7 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
         ProposedEvent::ZoneChange {
             to: Zone::Battlefield,
             ..
-        } | ProposedEvent::CreateToken { .. }
+        } | ProposedEvent::TokenEntry { .. }
     )
 }
 
@@ -943,8 +939,14 @@ fn change_zone_applier(
     ApplyResult::Modified(event)
 }
 
-fn moved_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::ZoneChange { .. })
+fn moved_matcher(event: &ProposedEvent, source: ObjectId, _state: &GameState) -> bool {
+    match event {
+        ProposedEvent::ZoneChange { .. } => true,
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            source != ObjectId(0) && *entry_ref == source
+        }
+        _ => false,
+    }
 }
 
 fn moved_applier(
@@ -1346,6 +1348,7 @@ fn damage_done_applier(
             .map(|repl| repl.shield_kind)
     };
 
+    let applied_key = AppliedReplacementKey::for_event(&event, rid);
     if let Some(ShieldKind::Prevention { amount }) = shield_kind {
         if let ProposedEvent::Damage {
             source_id,
@@ -1386,7 +1389,7 @@ fn damage_done_applier(
                     // `rid`. The single rider firing happens post-batch in
                     // `combat_damage.rs` against the summed total.
                     if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                        *tally.entry(rid).or_insert(0) += prevented_amount as i32;
+                        *tally.entry(applied_key).or_insert(0) += prevented_amount as i32;
                         accumulated_in_batch = true;
                     }
                 }
@@ -1713,7 +1716,9 @@ fn apply_shield_counter_replacement(
             // combat damage dealt to the permanent in the batch. Defer counter
             // removal until the post-batch aggregation fires exactly once.
             if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                *tally.entry(rid).or_insert(0) += amount as i32;
+                *tally
+                    .entry(AppliedReplacementKey::for_event(&event, rid))
+                    .or_insert(0) += amount as i32;
                 return Err(ApplyResult::Prevented);
             }
 
@@ -1870,7 +1875,7 @@ fn draw_replacement_count(
 // --- 4b. Scry ---
 
 // CR 614.6: A replacement effect applies only once to a given event. The
-// `applied: HashSet<ReplacementId>` carried in the event prevents the
+// `applied: HashSet<AppliedReplacementKey>` carried in the event prevents the
 // pipeline from re-entering the same effect on the modified event.
 fn scry_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Scry { count, .. } if *count > 0)
@@ -2857,7 +2862,7 @@ fn create_token_applier(
             // Chatterfang-class replacement too so it cannot re-fire on its own
             // appended batch.
             let mut applied_on_extra = applied.clone();
-            applied_on_extra.insert(rid);
+            applied_on_extra.insert(AppliedReplacementKey::object(rid.source, rid.index));
             // CR 614.1c: The appended batch is a separate event — it does not
             // inherit an `enter_tapped` override applied to the primary batch.
             // The appended spec's own `tapped` field (from the parser) governs
@@ -2920,7 +2925,7 @@ fn create_token_applier(
                 // replacements that already applied to the primary event from
                 // re-applying to the recursive extra event.
                 let mut applied_on_extra = applied.clone();
-                applied_on_extra.insert(rid);
+                applied_on_extra.insert(AppliedReplacementKey::object(rid.source, rid.index));
                 let extra_proposed = ProposedEvent::CreateToken {
                     owner,
                     spec: Box::new(extra),
@@ -3126,7 +3131,7 @@ fn apply_empty_mana_pool_replacement(
         }
     }
 
-    applied.insert(rid);
+    applied.insert(AppliedReplacementKey::step_end_mana(rid.index));
     Ok(ProposedEvent::EmptyManaPool {
         player_id,
         units,
@@ -3375,7 +3380,7 @@ fn dealt_damage_applier(
 // --- 17. Mill ---
 
 // CR 614.6: A replacement effect applies only once to a given event. The
-// `applied: HashSet<ReplacementId>` carried in the event prevents the
+// `applied: HashSet<AppliedReplacementKey>` carried in the event prevents the
 // pipeline from re-entering the same effect on the modified event.
 fn mill_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(
@@ -4442,7 +4447,10 @@ fn apply_state_level_gates(
     // CR 614.1d: valid_card filter — the event's affected object must match.
     if let Some(ref filter) = repl_def.valid_card {
         let ctx = FilterContext::from_source_with_controller(source, source_controller);
-        let matches = if repl_def.event == ReplacementEvent::ChangeZone {
+        let matches = if repl_def.event == ReplacementEvent::ChangeZone
+            || (matches!(event, ProposedEvent::TokenEntry { .. })
+                && repl_def.event == ReplacementEvent::Moved)
+        {
             matches_target_filter_on_battlefield_entry(state, event, filter, &ctx)
         } else {
             event
@@ -4458,8 +4466,11 @@ fn apply_state_level_gates(
     if let Some(ref dest_zone) = repl_def.destination_zone {
         let matches_dest = match event {
             ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
-            ProposedEvent::CreateToken { .. } => {
-                repl_def.event == ReplacementEvent::ChangeZone && *dest_zone == Zone::Battlefield
+            ProposedEvent::TokenEntry { .. } => {
+                matches!(
+                    repl_def.event,
+                    ReplacementEvent::ChangeZone | ReplacementEvent::Moved
+                ) && *dest_zone == Zone::Battlefield
             }
             _ => false,
         };
@@ -4569,7 +4580,10 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
         },
         ProposedEvent::CreateToken { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::CreateToken);
+        }
+        ProposedEvent::TokenEntry { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::ChangeZone);
+            push_replacement_event_key(&mut keys, ReplacementEvent::Moved);
         }
         ProposedEvent::Discard { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::Discard);
@@ -4607,7 +4621,11 @@ fn object_replacement_candidate_applies(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     rid: ReplacementId,
 ) -> bool {
-    let Some(obj) = state.objects.get(&rid.source) else {
+    let liminal_obj = state
+        .liminal_entries
+        .get(&rid.source)
+        .map(|entry| &entry.object);
+    let Some(obj) = state.objects.get(&rid.source).or(liminal_obj) else {
         return false;
     };
     let Some(repl_def) = obj.replacement_definitions.get(rid.index) else {
@@ -4621,6 +4639,7 @@ fn object_replacement_candidate_applies(
             to: Zone::Battlefield,
             ..
         } => Some(*object_id),
+        ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
         _ => None,
     };
     let discarding_object_id = match event {
@@ -4639,7 +4658,8 @@ fn object_replacement_candidate_applies(
     };
 
     let zones_to_scan = [Zone::Battlefield, Zone::Command];
-    let in_scanned_zone = zones_to_scan.contains(&obj.zone);
+    let is_liminal_source = state.liminal_entries.contains_key(&obj.id);
+    let in_scanned_zone = !is_liminal_source && zones_to_scan.contains(&obj.zone);
     let is_entering = entering_object_id == Some(obj.id);
     let is_being_discarded = discarding_object_id == Some(obj.id);
     let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
@@ -4710,6 +4730,21 @@ fn object_replacement_candidate_applies(
     {
         return false;
     }
+    if is_liminal_source {
+        if rid.source == ObjectId(0)
+            || entering_object_id != Some(obj.id)
+            || repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
+        {
+            return false;
+        }
+        if repl_def.event == ReplacementEvent::Moved
+            && repl_def
+                .destination_zone
+                .is_some_and(|zone| zone != Zone::Battlefield)
+        {
+            return false;
+        }
+    }
     if event.already_applied(&rid) {
         return false;
     }
@@ -4723,7 +4758,10 @@ fn object_replacement_candidate_applies(
 
     if let Some(ref filter) = repl_def.valid_card {
         let ctx = FilterContext::from_source_with_controller(obj.id, replacement_player);
-        let matches = if repl_def.event == ReplacementEvent::ChangeZone {
+        let matches = if repl_def.event == ReplacementEvent::ChangeZone
+            || (matches!(event, ProposedEvent::TokenEntry { .. })
+                && repl_def.event == ReplacementEvent::Moved)
+        {
             matches_target_filter_on_battlefield_entry(state, event, filter, &ctx)
         } else {
             event
@@ -4741,6 +4779,12 @@ fn object_replacement_candidate_applies(
             ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
             ProposedEvent::CreateToken { .. } => {
                 repl_def.event == ReplacementEvent::ChangeZone && *dest_zone == Zone::Battlefield
+            }
+            ProposedEvent::TokenEntry { .. } => {
+                matches!(
+                    repl_def.event,
+                    ReplacementEvent::ChangeZone | ReplacementEvent::Moved
+                ) && *dest_zone == Zone::Battlefield
             }
             _ => false,
         };
@@ -4982,7 +5026,7 @@ fn legacy_object_replacement_candidates(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
-    super::functioning_abilities::active_replacements(state)
+    let mut candidates: Vec<_> = super::functioning_abilities::active_replacements(state)
         .filter_map(|(index, obj, _)| {
             let rid = ReplacementId {
                 source: obj.id,
@@ -4990,7 +5034,27 @@ fn legacy_object_replacement_candidates(
             };
             object_replacement_candidate_applies(state, event, registry, rid).then_some(rid)
         })
-        .collect()
+        .collect();
+    if let ProposedEvent::TokenEntry { entry_ref, .. } = event {
+        if let Some(entry) = state.liminal_entries.get(entry_ref) {
+            candidates.extend(
+                entry
+                    .object
+                    .replacement_definitions
+                    .iter_all()
+                    .enumerate()
+                    .filter_map(|(index, _)| {
+                        let rid = ReplacementId {
+                            source: *entry_ref,
+                            index,
+                        };
+                        object_replacement_candidate_applies(state, event, registry, rid)
+                            .then_some(rid)
+                    }),
+            );
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -5012,13 +5076,33 @@ fn indexed_object_replacement_candidates_from_index(
     entries.sort_by_key(|entry| entry.ordinal);
     entries.dedup_by_key(|entry| entry.id);
 
-    let candidates: Vec<ReplacementId> = entries
+    let mut candidates: Vec<ReplacementId> = entries
         .into_iter()
         .filter_map(|entry| {
             object_replacement_candidate_applies(state, event, registry, entry.id)
                 .then_some(entry.id)
         })
         .collect();
+
+    if let ProposedEvent::TokenEntry { entry_ref, .. } = event {
+        if let Some(entry) = state.liminal_entries.get(entry_ref) {
+            candidates.extend(
+                entry
+                    .object
+                    .replacement_definitions
+                    .iter_all()
+                    .enumerate()
+                    .filter_map(|(index, _)| {
+                        let rid = ReplacementId {
+                            source: *entry_ref,
+                            index,
+                        };
+                        object_replacement_candidate_applies(state, event, registry, rid)
+                            .then_some(rid)
+                    }),
+            );
+        }
+    }
 
     candidates
 }
@@ -5499,6 +5583,7 @@ fn extract_etb_counters_from_effect(
                     to: Zone::Battlefield,
                     ..
                 } => Some(*object_id),
+                ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
                 _ => None,
             };
             let ctx = crate::game::quantity::QuantityContext {
@@ -5752,6 +5837,7 @@ pub(super) fn current_self_enter_replacement_modifiers(
 fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
     match event {
         ProposedEvent::ZoneChange { enter_tapped, .. } => Some(enter_tapped.resolve(false)),
+        ProposedEvent::TokenEntry { enter_tapped, .. } => Some(enter_tapped.resolve(false)),
         ProposedEvent::CreateToken {
             spec, enter_tapped, ..
         } => Some(enter_tapped.resolve(spec.tapped)),
@@ -5762,6 +5848,10 @@ fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
 fn battlefield_entry_counters(event: &ProposedEvent) -> Option<&Vec<(CounterType, u32)>> {
     match event {
         ProposedEvent::ZoneChange {
+            enter_with_counters,
+            ..
+        } => Some(enter_with_counters),
+        ProposedEvent::TokenEntry {
             enter_with_counters,
             ..
         } => Some(enter_with_counters),
@@ -5883,6 +5973,12 @@ fn apply_single_replacement(
         state
             .objects
             .get(&rid.source)
+            .or_else(|| {
+                state
+                    .liminal_entries
+                    .get(&rid.source)
+                    .map(|entry| &entry.object)
+            })
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
 
@@ -6163,6 +6259,10 @@ fn apply_single_replacement(
                 if !modifiers.etb_counters.is_empty() {
                     match &mut new_event {
                         ProposedEvent::ZoneChange {
+                            enter_with_counters,
+                            ..
+                        } => enter_with_counters.extend(modifiers.etb_counters.iter().cloned()),
+                        ProposedEvent::TokenEntry {
                             enter_with_counters,
                             ..
                         } => enter_with_counters.extend(modifiers.etb_counters.iter().cloned()),
@@ -6640,16 +6740,28 @@ fn is_counter_placement_event(event: &ProposedEvent) -> bool {
 
 fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
     candidates.iter().any(|rid| {
-        state
-            .objects
-            .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
-            .is_some_and(|def| {
-                def.event == ReplacementEvent::AddCounter
-                    && def.quantity_modification == Some(QuantityModification::Prevent)
-                    && !replacement_mode_is_optional(&def.mode)
-            })
+        replacement_definition_for_id(state, *rid).is_some_and(|def| {
+            def.event == ReplacementEvent::AddCounter
+                && def.quantity_modification == Some(QuantityModification::Prevent)
+                && !replacement_mode_is_optional(&def.mode)
+        })
     })
+}
+
+fn replacement_definition_for_id(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<&ReplacementDefinition> {
+    state
+        .objects
+        .get(&rid.source)
+        .or_else(|| {
+            state
+                .liminal_entries
+                .get(&rid.source)
+                .map(|entry| &entry.object)
+        })
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
 }
 
 fn pipeline_loop(
@@ -6685,10 +6797,7 @@ fn pipeline_loop(
             let rid = candidates[0];
 
             // Check if this single candidate is Optional — if so, present as a choice
-            let is_optional = state
-                .objects
-                .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            let is_optional = replacement_definition_for_id(state, rid)
                 .map(|repl| replacement_mode_is_optional(&repl.mode))
                 .unwrap_or(false);
 
@@ -6816,7 +6925,10 @@ pub(crate) fn replace_combat_damage_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     proposed: Vec<ProposedEvent>,
-) -> (Vec<Option<ProposedEvent>>, HashMap<ReplacementId, i32>) {
+) -> (
+    Vec<Option<ProposedEvent>>,
+    HashMap<AppliedReplacementKey, i32>,
+) {
     let registry = replacement_registry();
 
     // CR 510.2: Activate the batch tally so the applier aggregates per shield.
@@ -6899,10 +7011,7 @@ fn continue_replacement_impl(
         proposed.mark_applied(rid);
 
         // Extract the accept/decline effects before applying
-        let (accept_effect, decline_effect, may_cost) = state
-            .objects
-            .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        let (accept_effect, decline_effect, may_cost) = replacement_definition_for_id(state, rid)
             .map(|repl| {
                 let accept = repl.execute.clone();
                 let decline = replacement_mode_decline_cloned(&repl.mode);
@@ -7093,12 +7202,12 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{DamageRecord, ManaSpentSourceSnapshot};
+    use crate::types::game_state::{DamageRecord, LiminalEntry, ManaSpentSourceSnapshot};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::{EtbTapState, TokenSpec};
+    use crate::types::proposed_event::{AppliedReplacementKey, EtbTapState, TokenSpec};
     use crate::types::replacements::ReplacementEvent;
     use std::collections::HashSet;
 
@@ -7459,14 +7568,12 @@ mod tests {
             indexed_replacement_consults() > 0,
             "production replace_event path must consult indexed object candidates"
         );
-        assert!(event.applied_set().contains(&ReplacementId {
-            source: ObjectId(10),
-            index: 0,
-        }));
-        assert!(!event.applied_set().contains(&ReplacementId {
-            source: ObjectId(11),
-            index: 0,
-        }));
+        assert!(event
+            .applied_set()
+            .contains(&AppliedReplacementKey::object(ObjectId(10), 0)));
+        assert!(!event
+            .applied_set()
+            .contains(&AppliedReplacementKey::object(ObjectId(11), 0)));
     }
 
     #[test]
@@ -7495,10 +7602,9 @@ mod tests {
             indexed_replacement_consults() > 0,
             "production replace_event path must consult indexed object candidates"
         );
-        assert!(event.applied_set().contains(&ReplacementId {
-            source: ObjectId(10),
-            index: 0,
-        }));
+        assert!(event
+            .applied_set()
+            .contains(&AppliedReplacementKey::object(ObjectId(10), 0)));
     }
 
     #[test]
@@ -7548,14 +7654,12 @@ mod tests {
             indexed_replacement_consults() > 0,
             "production replace_event path must consult indexed object candidates"
         );
-        assert!(event.applied_set().contains(&ReplacementId {
-            source: ObjectId(10),
-            index: 0,
-        }));
-        assert!(!event.applied_set().contains(&ReplacementId {
-            source: ObjectId(11),
-            index: 0,
-        }));
+        assert!(event
+            .applied_set()
+            .contains(&AppliedReplacementKey::object(ObjectId(10), 0)));
+        assert!(!event
+            .applied_set()
+            .contains(&AppliedReplacementKey::object(ObjectId(11), 0)));
     }
 
     #[test]
@@ -7599,14 +7703,12 @@ mod tests {
             indexed_replacement_consults() > 0,
             "production replace_event path must consult indexed object candidates"
         );
-        assert!(event.applied_set().contains(&ReplacementId {
-            source: ObjectId(10),
-            index: 0,
-        }));
-        assert!(!event.applied_set().contains(&ReplacementId {
-            source: ObjectId(11),
-            index: 0,
-        }));
+        assert!(event
+            .applied_set()
+            .contains(&AppliedReplacementKey::object(ObjectId(10), 0)));
+        assert!(!event
+            .applied_set()
+            .contains(&AppliedReplacementKey::object(ObjectId(11), 0)));
     }
 
     #[test]
@@ -7724,6 +7826,77 @@ mod tests {
     }
 
     #[test]
+    fn token_entry_matches_liminal_self_moved_replacement_only() {
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Battlefield,
+            vec![make_repl(ReplacementEvent::Moved).valid_card(TargetFilter::Any)],
+        );
+        let entry_ref = ObjectId(20);
+        let mut liminal = GameObject::new(
+            entry_ref,
+            CardId(0),
+            PlayerId(0),
+            "Liminal Copy".to_string(),
+            Zone::Battlefield,
+        );
+        liminal
+            .replacement_definitions
+            .push(tap_self_moved_replacement());
+        state.liminal_entries.insert(
+            entry_ref,
+            LiminalEntry {
+                object: liminal,
+                name: "Liminal Copy".to_string(),
+                source_id: ObjectId(999),
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+            },
+        );
+        assert!(!state.objects.contains_key(&entry_ref));
+        assert!(!state.battlefield.iter().any(|id| *id == entry_ref));
+
+        let mut events = Vec::new();
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::TokenEntry {
+                entry_ref,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                applied: HashSet::new(),
+            },
+            &mut events,
+        );
+
+        let ReplacementResult::Execute(event @ ProposedEvent::TokenEntry { enter_tapped, .. }) =
+            result
+        else {
+            panic!("expected TokenEntry execute, got {result:?}");
+        };
+        assert_eq!(enter_tapped, EtbTapState::Tapped);
+        assert!(
+            event
+                .applied_set()
+                .contains(&AppliedReplacementKey::object(entry_ref, 0)),
+            "liminal object's own SelfRef Moved replacement should apply"
+        );
+        assert!(
+            !event
+                .applied_set()
+                .contains(&AppliedReplacementKey::object(ObjectId(10), 0)),
+            "external Moved replacement must not see TokenEntry"
+        );
+    }
+
+    #[test]
     fn replacement_event_key_taxonomy_matches_supported_proposed_events() {
         let token_event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -7791,9 +7964,15 @@ mod tests {
                 },
                 vec![ReplacementEvent::AddCounter],
             ),
+            (token_event, vec![ReplacementEvent::CreateToken]),
             (
-                token_event,
-                vec![ReplacementEvent::CreateToken, ReplacementEvent::ChangeZone],
+                ProposedEvent::TokenEntry {
+                    entry_ref: ObjectId(77),
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    applied: HashSet::new(),
+                },
+                vec![ReplacementEvent::ChangeZone, ReplacementEvent::Moved],
             ),
             (
                 ProposedEvent::Draw {

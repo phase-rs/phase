@@ -22,7 +22,7 @@ use super::mana::{
 };
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
-use super::proposed_event::ReplacementId;
+use super::proposed_event::AppliedReplacementKey;
 use super::replacements::ReplacementEvent;
 use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::stickers::{AppliedSticker, StickerKind};
@@ -18457,7 +18457,7 @@ pub struct ReplacementDefinition {
     /// is *not already present* in the proposed event's `TokenSpec.subtypes`
     /// is emitted as an additional `CreateToken` event via the same recursive
     /// `replace_event` path Chatterfang uses, preserving CR 616.1 ordering
-    /// and idempotence (the `applied: HashSet<ReplacementId>` set on each
+    /// and idempotence (the `applied: HashSet<AppliedReplacementKey>` set on each
     /// spawned event blocks re-application of the same Manufactor).
     ///
     /// Distinct from `additional_token_spec` (which always appends): this
@@ -19399,7 +19399,7 @@ pub struct ResolvedAbility {
     /// replacement's ChooseOneOf branch creates the substitute token), that event
     /// must inherit this set so the same replacement cannot apply to itself again.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub replacement_applied: HashSet<ReplacementId>,
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
     /// CR 608.2c: How this ability links to its parent when present as a
     /// `sub_ability`. Copied through from the originating `AbilityDefinition`.
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
@@ -19622,7 +19622,7 @@ impl ResolvedAbility {
 
     /// CR 614.5 + CR 616.1f: Carry replacement application identity through a
     /// post-replacement continuation and any branch/sub-chain it resolves.
-    pub fn set_replacement_applied_recursive(&mut self, applied: HashSet<ReplacementId>) {
+    pub fn set_replacement_applied_recursive(&mut self, applied: HashSet<AppliedReplacementKey>) {
         self.replacement_applied = applied.clone();
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.set_replacement_applied_recursive(applied.clone());

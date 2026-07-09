@@ -752,7 +752,7 @@ mod tests {
 
         // CR 615.5: fire the rider once against the aggregate prevented amount.
         let (rid, &prevented) = tally.iter().next().unwrap();
-        let runtime = state.pending_damage_replacements[rid.index]
+        let runtime = state.pending_damage_replacements[rid.index()]
             .runtime_execute
             .clone()
             .unwrap();

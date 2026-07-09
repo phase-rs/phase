@@ -579,6 +579,22 @@ fn apply_pending_counter_post_action(
             remaining_modifications,
             events,
         ),
+        PendingCounterPostAction::EmitCommittedCopyTokenEntry {
+            object_id,
+            name,
+            source_id,
+        } => {
+            super::token::push_committed_token_entry_events(
+                state, object_id, name, source_id, events,
+            );
+            if !state.last_created_token_ids.contains(&object_id) {
+                state.last_created_token_ids.push(object_id);
+            }
+            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+                pending.created_ids = state.last_created_token_ids.clone();
+            }
+            true
+        }
         PendingCounterPostAction::ClearPendingEtbCounters { object_id } => {
             state
                 .pending_etb_counters

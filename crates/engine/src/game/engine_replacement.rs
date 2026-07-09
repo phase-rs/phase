@@ -9,11 +9,11 @@ use crate::types::ability::{
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{AppliedReplacementKey, CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -245,6 +245,33 @@ pub(super) fn handle_replacement_choice(
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
+                }
+                event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
+                    if state.post_replacement_continuation.is_some() {
+                        if let Some(waiting_for) = apply_pending_post_replacement_effect(
+                            state,
+                            Some(entry_ref),
+                            None,
+                            Some(ReplacementEvent::Moved),
+                            events,
+                        ) {
+                            state.pending_liminal_entry_resume =
+                                Some(crate::types::game_state::PendingLiminalEntryResume {
+                                    source_id: entry_ref,
+                                    player: waiting_for
+                                        .acting_player()
+                                        .unwrap_or(state.active_player),
+                                    event,
+                                });
+                            state.waiting_for = waiting_for;
+                            return Ok(state.waiting_for.clone());
+                        }
+                    }
+                    if !crate::game::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
+                        state, event, events,
+                    ) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 120.3 + CR 120.4b: Damage accepted after replacement choice — apply via the
                 // shared helper so wither/infect/planeswalker/excess/lifelink paths match
@@ -1069,6 +1096,161 @@ pub(super) fn handle_copy_target_choice(
         }
     };
 
+    if state.liminal_entries.contains_key(&source_id) {
+        let Some(resume) = state.pending_liminal_entry_resume.take() else {
+            return Err(EngineError::InvalidAction(
+                "Missing liminal entry resume".to_string(),
+            ));
+        };
+        if resume.source_id != source_id || resume.player != player {
+            return Err(EngineError::InvalidAction(
+                "Mismatched liminal entry resume".to_string(),
+            ));
+        }
+        let ability = copy_effect_for_source(state, source_id)
+            .map(|effect_def| {
+                build_resolved_from_def_with_targets(
+                    effect_def,
+                    source_id,
+                    player,
+                    vec![TargetRef::Object(target_id)],
+                )
+            })
+            .unwrap_or_else(|| {
+                ResolvedAbility::new(
+                    Effect::BecomeCopy {
+                        target: TargetFilter::Any,
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: Vec::new(),
+                    },
+                    vec![TargetRef::Object(target_id)],
+                    source_id,
+                    player,
+                )
+            });
+        let entry_events = state
+            .liminal_entries
+            .get(&source_id)
+            .map(|entry| (entry.name.clone(), entry.source_id));
+        let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
+            entry.copy_resume.as_ref().and_then(|copy| {
+                (entry.remaining_count > 0).then(|| {
+                    (
+                        entry.object.owner,
+                        copy.clone(),
+                        entry.enter_tapped,
+                        entry.enter_with_counters.clone(),
+                        entry.remaining_count,
+                    )
+                })
+            })
+        });
+        let copy_token_exceptions = state.liminal_entries.get(&source_id).and_then(|entry| {
+            entry.copy_resume.as_ref().map(|copy| {
+                (
+                    entry.controller,
+                    copy.extra_keywords.clone(),
+                    copy.additional_modifications.clone(),
+                )
+            })
+        });
+        if !super::effects::token::commit_liminal_token_entry_with_event_emission(
+            state,
+            resume.event,
+            events,
+            false,
+        ) {
+            return Ok(state.waiting_for.clone());
+        }
+        let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+        if let Some((controller, extra_keywords, mut modifications)) = copy_token_exceptions {
+            modifications.extend(extra_keywords.into_iter().map(|keyword| {
+                crate::types::ability::ContinuousModification::AddKeyword { keyword }
+            }));
+            if !modifications.is_empty() {
+                state.add_transient_continuous_effect(
+                    source_id,
+                    controller,
+                    crate::types::ability::Duration::Permanent,
+                    TargetFilter::SpecificObject { id: source_id },
+                    modifications,
+                    None,
+                );
+            }
+        }
+        let mut counter_pause_post_actions = Vec::new();
+        if let Some((name, event_source_id)) = entry_events.clone() {
+            counter_pause_post_actions.push(
+                PendingCounterPostAction::EmitCommittedCopyTokenEntry {
+                    object_id: source_id,
+                    name,
+                    source_id: event_source_id,
+                },
+            );
+        }
+        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
+            copy_continuation.clone()
+        {
+            counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
+                owner,
+                copy,
+                enter_tapped,
+                enter_with_counters,
+                remaining_count,
+            });
+        }
+        if let Some(waiting_for) =
+            finish_copy_target_choice_entry(state, source_id, events, counter_pause_post_actions)?
+        {
+            return Ok(waiting_for);
+        }
+        if let Some((name, event_source_id)) = entry_events {
+            super::effects::token::push_committed_token_entry_events(
+                state,
+                source_id,
+                name,
+                event_source_id,
+                events,
+            );
+        }
+        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
+            copy_continuation
+        {
+            let initial_created_ids = state.last_created_token_ids.clone();
+            let status =
+                super::effects::token_copy::apply_copy_token_after_replacement_with_created_ids(
+                    state,
+                    owner,
+                    *copy,
+                    enter_tapped,
+                    enter_with_counters,
+                    remaining_count,
+                    initial_created_ids,
+                    events,
+                );
+            match status.completion {
+                super::effects::token_copy::CopyTokenApplyCompletion::Completed => {
+                    state.last_created_token_ids = status.created_ids;
+                }
+                super::effects::token_copy::CopyTokenApplyCompletion::Paused => {
+                    state.last_created_token_ids = status.created_ids;
+                    return Ok(state.waiting_for.clone());
+                }
+            }
+        }
+        if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+            pending.created_ids = state.last_created_token_ids.clone();
+        }
+        super::effects::token_copy::drain_pending_copy_token_resolution(state, events);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
+        return Ok(WaitingFor::Priority {
+            player: state.active_player,
+        });
+    }
+
     let ability = copy_effect_for_source(state, source_id)
         .map(|effect_def| {
             build_resolved_from_def_with_targets(
@@ -1092,6 +1274,22 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    if let Some(waiting_for) =
+        finish_copy_target_choice_entry(state, source_id, events, Vec::new())?
+    {
+        return Ok(waiting_for);
+    }
+    Ok(WaitingFor::Priority {
+        player: state.active_player,
+    })
+}
+
+fn finish_copy_target_choice_entry(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+    counter_pause_post_actions: Vec<PendingCounterPostAction>,
+) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
     crate::game::layers::mark_layers_full(state);
@@ -1104,7 +1302,11 @@ pub(super) fn handle_copy_target_choice(
         }
     }
     if !apply_etb_counters(state, source_id, &enter_modifiers.counters, events) {
-        return Ok(state.waiting_for.clone());
+        super::effects::counters::append_pending_counter_post_actions(
+            state,
+            counter_pause_post_actions,
+        );
+        return Ok(Some(state.waiting_for.clone()));
     }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
@@ -1122,7 +1324,7 @@ pub(super) fn handle_copy_target_choice(
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
     if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
-        return Ok(waiting_for);
+        return Ok(Some(waiting_for));
     }
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
@@ -1130,12 +1332,10 @@ pub(super) fn handle_copy_target_choice(
     if state.pending_batch_deliveries.is_some() {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return Ok(state.waiting_for.clone());
+            return Ok(Some(state.waiting_for.clone()));
         }
     }
-    Ok(WaitingFor::Priority {
-        player: state.active_player,
-    })
+    Ok(None)
 }
 
 /// CR 603.2 + CR 614.12a: Replay the deferred battlefield-entry `ZoneChanged`
@@ -1219,6 +1419,17 @@ pub(super) fn replay_deferred_entry_events(
 }
 
 fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&AbilityDefinition> {
+    if let Some(entry) = state.liminal_entries.get(&source_id) {
+        return entry
+            .object
+            .replacement_definitions
+            .iter_all()
+            .filter_map(|replacement| replacement.execute.as_deref())
+            .find_map(|effect_def| {
+                super::replacement::EventModifiers::first_non_modifier_ability(Some(effect_def))
+                    .filter(|real| matches!(&*real.effect, Effect::BecomeCopy { .. }))
+            });
+    }
     state.objects.get(&source_id)?;
     // CR 702.26b + CR 114.4: `active_replacements` filters out phased-out /
     // non-emblem command-zone sources.
@@ -1246,7 +1457,7 @@ pub(super) fn apply_post_replacement_effect(
     object_id: Option<ObjectId>,
     spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     event: Option<&ReplacementEvent>,
-    replacement_applied: HashSet<ReplacementId>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let (source_id, controller) = object_id
@@ -1254,6 +1465,12 @@ pub(super) fn apply_post_replacement_effect(
             state
                 .objects
                 .get(&obj_id)
+                .or_else(|| {
+                    state
+                        .liminal_entries
+                        .get(&obj_id)
+                        .map(|entry| &entry.object)
+                })
                 .map(|obj| (obj_id, super::replacement::replacement_source_player(obj)))
         })
         .unwrap_or((ObjectId(0), state.active_player));
@@ -1335,7 +1552,7 @@ pub(super) fn apply_post_replacement_effect(
     }
 }
 
-pub(super) fn apply_pending_post_replacement_effect(
+pub(crate) fn apply_pending_post_replacement_effect(
     state: &mut GameState,
     object_id: Option<ObjectId>,
     spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
@@ -1492,7 +1709,7 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
 fn apply_post_replacement_resolved_effect(
     state: &mut GameState,
     resolved: &ResolvedAbility,
-    replacement_applied: HashSet<ReplacementId>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let mut resolved = resolved.clone();
@@ -3371,7 +3588,9 @@ mod tests {
     fn token_choice_applied_seed_survives_intervening_continuation_drain() {
         use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
         use crate::types::card_type::CoreType;
-        use crate::types::proposed_event::{ReplacementId, TokenCharacteristics, TokenSpec};
+        use crate::types::proposed_event::{
+            AppliedReplacementKey, ReplacementId, TokenCharacteristics, TokenSpec,
+        };
 
         let mut state = GameState::new_two_player(42);
         let jinnie_source = ObjectId(state.next_object_id);
@@ -3381,7 +3600,10 @@ mod tests {
             index: 0,
         };
         let mut seed = std::collections::HashSet::new();
-        seed.insert(jinnie_rid);
+        seed.insert(AppliedReplacementKey::object(
+            jinnie_rid.source,
+            jinnie_rid.index,
+        ));
         // Simulate the originating token-choice continuation being mid-drain:
         // its applied set is live so substitute-token proposals pre-mark Jinnie.
         state.post_replacement_token_choice_applied = Some(seed.clone());
@@ -3463,7 +3685,7 @@ mod tests {
             proposed
                 .applied_set()
                 .iter()
-                .any(|rid| rid.source == jinnie_source),
+                .any(|rid| rid.source() == jinnie_source),
             "substitute token proposal must inherit the originating replacement id from the live seed"
         );
     }
@@ -3689,7 +3911,10 @@ mod tests {
             index: 0,
         };
         let mut seed = std::collections::HashSet::new();
-        seed.insert(jinnie_rid);
+        seed.insert(AppliedReplacementKey::object(
+            jinnie_rid.source,
+            jinnie_rid.index,
+        ));
         state.post_replacement_token_choice_applied = Some(seed.clone());
 
         // A repeat-until ability whose body would propose further tokens if

@@ -714,7 +714,7 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
-    use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
+    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -1104,10 +1104,9 @@ mod tests {
         // seed, owned by this same abandoned continuation, must be abandoned
         // alongside its siblings — this field was added after the teardown
         // block below was written and was missed until this regression.
-        state.post_replacement_token_choice_applied = Some(HashSet::from([ReplacementId {
-            source: o,
-            index: 0,
-        }]));
+        state.post_replacement_token_choice_applied = Some(HashSet::from([
+            crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
+        ]));
         state.pending_connive_reentry = Some(PendingConniveReentry {
             conniver: o,
             count: 1,

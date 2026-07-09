@@ -12,7 +12,7 @@ use crate::types::game_state::{CombatDamageAssignmentMode, DamageSlot, GameState
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
@@ -1058,15 +1058,16 @@ pub(crate) fn apply_combat_damage(
 /// the whole batch total.
 fn fire_combat_prevention_riders(
     state: &mut GameState,
-    prevention_tally: &std::collections::HashMap<crate::types::proposed_event::ReplacementId, i32>,
+    prevention_tally: &std::collections::HashMap<AppliedReplacementKey, i32>,
     events: &mut Vec<GameEvent>,
 ) {
-    for (rid, &total_prevented) in prevention_tally {
+    for (key, &total_prevented) in prevention_tally {
+        let rid = key.as_replacement_id();
         if total_prevented <= 0 {
             continue;
         }
 
-        if replacement::is_shield_counter_damage_replacement(*rid) {
+        if replacement::is_shield_counter_damage_replacement(rid) {
             replacement::consume_shield_counter(state, rid.source, events);
             events.push(GameEvent::DamagePrevented {
                 source_id: rid.source,

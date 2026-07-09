@@ -9,7 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ReplacementId;
+use crate::types::proposed_event::AppliedReplacementKey;
 
 /// CR 701.55a-b + CR 608.2d: Prompt the instructed player to choose one
 /// branch at resolution. The branch itself is not pre-validated for
@@ -67,7 +67,7 @@ pub(crate) struct PromptRequest {
     pub branches: Vec<AbilityDefinition>,
     pub parent_targets: Vec<TargetRef>,
     pub context: crate::types::ability::SpellContext,
-    pub replacement_applied: HashSet<ReplacementId>,
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub players: Vec<PlayerId>,
 }
 
@@ -131,7 +131,7 @@ pub(crate) struct BranchSelection {
     pub branches: Vec<AbilityDefinition>,
     pub parent_targets: Vec<TargetRef>,
     pub context: crate::types::ability::SpellContext,
-    pub replacement_applied: HashSet<ReplacementId>,
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub remaining_players: Vec<PlayerId>,
     pub index: usize,
 }
