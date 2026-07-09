@@ -572,6 +572,7 @@ mod sin_spiras_punishment_repeat;
 mod skullwinder_chosen_opponent;
 mod slaughter_the_strong_total_power_4380;
 mod sliver_static_grants;
+mod sothera_supervoid_edict_reanimate;
 mod specialize_runtime;
 mod spellstutter_sprite_counter_with_x;
 mod spikeshell_harrier_speed_superlative;
