@@ -13856,6 +13856,14 @@ fn origin_zones_except(excluded: &[Zone]) -> Vec<Zone> {
 }
 
 fn parse_cast_type_list_filter(type_phrase: &str) -> (TargetFilter, &str) {
+    if nom_primitives::scan_contains(type_phrase, ", ") && parse_subtype(type_phrase).is_some() {
+        if let Some((filter, remainder)) = parse_subtype_or_list_insensitive_prefix(type_phrase) {
+            if matches!(&filter, TargetFilter::Or { filters } if filters.len() >= 2) {
+                return (filter, remainder);
+            }
+        }
+    }
+
     let (filter, remainder) = parse_type_phrase(type_phrase);
     if matches!(&filter, TargetFilter::Or { filters } if filters.len() >= 2) {
         return (filter, remainder);
