@@ -2922,8 +2922,16 @@ pub fn parse_type_phrase_with_ctx<'a>(
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
-    } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("exiled with ~").parse(remaining_exiled)
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("exiled with ~"),
+        // CR 607.2 + CR 406.6: "exiled with it" — the anaphoric "it" names the
+        // source object, identical linked-exile semantics to "exiled with ~"
+        // (Sothera, the Supervoid: "a creature card exiled with it"). The
+        // "exiled with this <type>" arm above already claimed the demonstrative
+        // form, so "it" is the disjoint pronoun variant.
+        tag("exiled with it"),
+    ))
+    .parse(remaining_exiled)
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
@@ -10523,6 +10531,40 @@ mod tests {
                 ],
             }
         );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn creature_card_exiled_with_it_produces_and_filter() {
+        // CR 607.2 + CR 406.6: Sothera, the Supervoid's descriptor form (no
+        // "target" keyword, anaphoric "it") — "put a creature card exiled with
+        // it onto the battlefield". Must compose the typed filter with the
+        // exile-link constraint identically to the "exiled with ~" form; without
+        // the "exiled with it" arm the suffix is dropped and the target degrades
+        // to a bare battlefield "creature card".
+        let (f, rest) = parse_target("a creature card exiled with it");
+        assert_eq!(
+            f,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+            "expected And{{Typed(creature), ExiledBySource}}, got {f:?} — the \
+             ExiledBySource leg (the revert-failing assertion) restricts \
+             reanimation to the source's OWN linked-exile pool"
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn bare_card_exiled_with_it_unaffected_by_typed_arm() {
+        // Sibling guard: the untyped "card exiled with it" form (handled by the
+        // top-of-function plural/each-card block) still yields bare
+        // ExiledBySource — the new typed arm must not perturb it.
+        let (f, rest) = parse_target("card exiled with it");
+        assert_eq!(f, TargetFilter::ExiledBySource);
         assert_eq!(rest.trim(), "");
     }
 

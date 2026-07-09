@@ -3849,18 +3849,21 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
     static_definitions: &[StaticDefinition],
 ) -> Vec<ActiveCombatAssignmentRuleEffect> {
     let mut effects = Vec::new();
-    let source_zone = state.objects.get(&source_id).map(|o| o.zone);
+    let Some(source_obj) = state.objects.get(&source_id) else {
+        return effects;
+    };
 
     for def in static_definitions {
         if def.mode != StaticMode::Continuous {
             continue;
         }
 
-        if !def.active_zones.is_empty() {
-            let Some(zone) = source_zone else { continue };
-            if !def.active_zones.contains(&zone) {
-                continue;
-            }
+        // CR 113.6 + CR 113.6b: shared zone-of-function gate, matching
+        // `active_static_definitions`. Combat-assignment-rule effects are
+        // `StaticMode::Continuous`-only (checked above), so the CR 113.6g
+        // stack exception is irrelevant here.
+        if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
+            continue;
         }
 
         let retained_condition = if let Some(condition) = &def.condition {
@@ -5466,14 +5469,17 @@ pub(crate) fn compute_current_copiable_values(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::scenario::GameScenario;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario_db::GameScenarioDbExt;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        CountScope, Duration, Effect, FilterProp, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-        PtValueScope, QuantityExpr, QuantityRef, SacrificeCost, StaticCondition, StaticDefinition,
-        TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        CountScope, Duration, Effect, FilterProp, ManaProduction, ObjectScope, PlayerFilter,
+        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SacrificeCost,
+        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -5548,6 +5554,115 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    /// A bare non-creature Treasure token permanent (CR 111.1: `is_token`; CR 111.6:
+    /// carries the Artifact card type and Treasure subtype). No intrinsic abilities —
+    /// so any activated mana ability it ends up with came from a layer-6 grant.
+    fn make_treasure_token(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_token = true;
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Treasure".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// CR 111.1 + CR 111.6 + CR 109.5: Jaheira, Friend of the Forest grants
+    /// "{T}: Add {G}." to "Tokens you control" — every token permanent its controller
+    /// controls, regardless of card type. A non-creature Treasure token must acquire the
+    /// mana ability after layer evaluation (revert-failing reach-guard); a non-token
+    /// creature and an opponent's identical token must not. Reverting the token-descriptor
+    /// parser arm regresses the affected filter to creature tokens only, dropping the grant
+    /// on the Treasure token.
+    #[test]
+    fn jaheira_grants_mana_ability_to_noncreature_tokens_you_control() {
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        sc.add_real_card(P0, "Jaheira, Friend of the Forest", Zone::Battlefield, db);
+
+        let p0_treasure = make_treasure_token(&mut sc.state, P0);
+        // Non-token creature under the same controller — hostile to the token property.
+        let p0_creature = make_creature(&mut sc.state, "Bear", 2, 2, P0);
+        // Identical Treasure token under the opponent — hostile to the controller scope.
+        let p1_treasure = make_treasure_token(&mut sc.state, P1);
+
+        evaluate_layers(&mut sc.state);
+
+        let has_green_tap_mana = |state: &GameState, id: ObjectId| {
+            state.objects.get(&id).unwrap().abilities.iter().any(|a| {
+                a.kind == AbilityKind::Activated
+                    && matches!(a.cost, Some(AbilityCost::Tap))
+                    && matches!(
+                        &*a.effect,
+                        Effect::Mana {
+                            produced: ManaProduction::Fixed { colors, .. },
+                            ..
+                        } if colors.contains(&ManaColor::Green)
+                    )
+            })
+        };
+
+        assert!(
+            has_green_tap_mana(&sc.state, p0_treasure),
+            "a non-creature Treasure token you control must gain Jaheira's \"{{T}}: Add {{G}}\" ability"
+        );
+        assert!(
+            !has_green_tap_mana(&sc.state, p0_creature),
+            "a non-token creature must NOT gain the token-scoped grant"
+        );
+        assert!(
+            !has_green_tap_mana(&sc.state, p1_treasure),
+            "an opponent's token must NOT gain the controller-scoped grant"
+        );
+    }
+
+    /// CR 608.2c: The player-control superlative gate evaluates at
+    /// resolution across all creatures on the battlefield.
+    #[test]
+    fn you_control_creature_tied_for_greatest_toughness_condition_evaluates_table_wide() {
+        let (rest, condition) = parse_inner_condition(
+            "you control the creature with the greatest toughness or tied for the greatest toughness.",
+        )
+        .expect("Abzan Beastmaster condition should parse");
+        assert!(
+            rest.is_empty(),
+            "condition must fully consume, leftover: {rest:?}"
+        );
+
+        let mut state = setup();
+        let source = make_creature(&mut state, "Abzan Beastmaster", 2, 1, PlayerId(0));
+        make_creature(&mut state, "Controlled Bear", 2, 2, PlayerId(0));
+        make_creature(&mut state, "Opponent Wall", 0, 5, PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should be false when only an opponent controls the greatest toughness"
+        );
+
+        make_creature(&mut state, "Controlled Wall", 0, 5, PlayerId(0));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should be true when you control a creature tied for greatest toughness"
+        );
+
+        make_creature(&mut state, "Opponent Colossus", 0, 6, PlayerId(1));
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !evaluate_condition_for_test(&state, &condition, PlayerId(0), source),
+            "condition should become false when an opponent controls the sole greatest toughness"
+        );
     }
 
     #[test]
@@ -6049,6 +6164,71 @@ mod tests {
             target.assigns_damage_from_toughness,
             "post-layer rule effect must match the target after layer 7c toughness changes"
         );
+    }
+
+    /// CR 113.6 + CR 113.6b + CR 613.11: combat-assignment rule effects use the
+    /// same zone-of-function gate as other statics. A graveyard object can be
+    /// visited by the static-source gather because it has some other
+    /// opt-in-zone static; an empty-`active_zones` combat-assignment static on
+    /// that same object still defaults to battlefield-only and must not leak.
+    #[test]
+    fn combat_assignment_rule_effects_respect_zone_of_function_active_zones() {
+        fn add_graveyard_source(state: &mut GameState, combat_active_zones: Vec<Zone>) -> ObjectId {
+            let source_id = create_object(
+                state,
+                CardId(0),
+                PlayerId(0),
+                "Graveyard Combat Rule Source".to_string(),
+                Zone::Graveyard,
+            );
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+                    .active_zones(combat_active_zones),
+            );
+            state.players[0].graveyard.push_back(source_id);
+            source_id
+        }
+
+        {
+            let mut state = setup();
+            let _source_id = add_graveyard_source(&mut state, vec![]);
+            let target_id = make_creature(&mut state, "Battlefield Bear", 2, 3, PlayerId(0));
+
+            evaluate_layers(&mut state);
+
+            assert!(
+                !state.objects[&target_id].assigns_damage_from_toughness,
+                "empty active_zones defaults to battlefield-only and must not \
+                 leak a combat-assignment rule from the graveyard"
+            );
+        }
+
+        {
+            let mut state = setup();
+            let _source_id = add_graveyard_source(&mut state, vec![Zone::Graveyard]);
+            let target_id = make_creature(&mut state, "Battlefield Bear", 2, 3, PlayerId(0));
+
+            evaluate_layers(&mut state);
+
+            assert!(
+                state.objects[&target_id].assigns_damage_from_toughness,
+                "a combat-assignment rule that explicitly opts into the \
+                 graveyard still functions from the graveyard"
+            );
+        }
     }
 
     /// Helper: creatures you control filter

@@ -295,10 +295,16 @@ export function CardChoiceModal() {
       return null;
     case "AssignCombatDamage":
       if (!canActForWaitingState) return null;
-      return <DamageAssignmentModal data={waitingFor.data} />;
+      // Per-prompt key: sequential trample attackers (e.g. many creatures under
+      // Stonehoof Chieftain) produce back-to-back AssignCombatDamage prompts of
+      // the same type. Without a key React reuses the instance, so its internal
+      // `submitted` guard stays true and later prompts render nothing.
+      return <DamageAssignmentModal key={waitingFor.data.attacker_id} data={waitingFor.data} />;
     case "AssignBlockerDamage":
       if (!canActForWaitingState) return null;
-      return <BlockerDamageAssignmentModal data={waitingFor.data} />;
+      return (
+        <BlockerDamageAssignmentModal key={waitingFor.data.blocker_id} data={waitingFor.data} />
+      );
     case "DistributeAmong":
       if (!canActForWaitingState) return null;
       return <DistributeAmongModal data={waitingFor.data} />;

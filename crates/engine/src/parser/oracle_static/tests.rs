@@ -386,6 +386,103 @@ fn compound_subject_keyword_static_declines_flying_compound() {
     );
 }
 
+/// CR 702.11a + CR 702.11b + CR 611.3a: Shalai, Voice of Plenty — "You,
+/// planeswalkers you control, and other creatures you control have hexproof."
+/// The Oxford-comma N-item form of the compound-subject keyword splitter: the
+/// object half is an `Or` of two independently-resolved conjuncts (planeswalkers
+/// you control; other creatures you control — Shalai herself excluded by
+/// "other"), and the player half grants the controller `StaticMode::Hexproof`.
+#[test]
+fn compound_subject_keyword_static_splits_shalai_three_way() {
+    use crate::types::keywords::Keyword;
+
+    let defs = parse_static_line_multi(
+        "You, planeswalkers you control, and other creatures you control have hexproof.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected object Continuous + player Hexproof, got {defs:?}"
+    );
+
+    let object_def = &defs[0];
+    assert_eq!(object_def.mode, StaticMode::Continuous);
+    match &object_def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 2, "expected a 2-way Or, got {filters:#?}");
+            assert!(
+                filters.contains(&TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You)
+                )),
+                "must include planeswalkers you control: {filters:#?}"
+            );
+            assert!(
+                filters.contains(&TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another])
+                )),
+                "must include other creatures you control: {filters:#?}"
+            );
+        }
+        other => panic!("object-half affected must be a 2-way Or, got {other:?}"),
+    }
+    assert_eq!(
+        object_def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }],
+    );
+
+    let player_def = &defs[1];
+    assert_eq!(player_def.mode, StaticMode::Hexproof);
+    assert_eq!(
+        player_def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        )),
+    );
+    assert!(
+        player_def.modifications.is_empty(),
+        "player Hexproof mode carries no AddKeyword mods, got {:?}",
+        player_def.modifications
+    );
+}
+
+/// Negative/boundary: an Oxford-list conjunct that can't be resolved must fail
+/// the WHOLE line closed (strict-fail), never silently drop the bad disjunct
+/// and emit a narrower-than-printed hexproof grant.
+#[test]
+fn compound_subject_keyword_static_declines_oxford_list_unresolvable_conjunct() {
+    let defs = parse_static_line_multi(
+        "You, blorptastic wobbling nonsense, and other creatures you control have hexproof.",
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::Hexproof | StaticMode::Shroud)),
+        "an unresolvable conjunct must not yield a partial hexproof grant, got {defs:?}"
+    );
+}
+
+/// General arity check: the Oxford-comma splitter is not hard-coded to exactly
+/// two object conjuncts (Shalai's arity) — a synthetic four-item list must
+/// split into a 3-way object Or the same way a three-item list splits into 2-way.
+#[test]
+fn compound_subject_keyword_static_splits_four_item_oxford_list() {
+    let defs = parse_static_line_multi(
+        "You, artifacts you control, enchantments you control, and lands you control have shroud.",
+    );
+    assert_eq!(defs.len(), 2, "expected two defs, got {defs:?}");
+    match &defs[0].affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 3, "expected a 3-way Or, got {filters:#?}");
+        }
+        other => panic!("object-half affected must be a 3-way Or, got {other:?}"),
+    }
+    assert_eq!(defs[1].mode, StaticMode::Shroud);
+}
+
 // CR 611.3a + CR 604.3 + CR 613.4a: Angry Mob — a two-clause turn-window CDA. "During
 // your turn, ~'s power and toughness are each equal to 2 plus the number of
 // Swamps your opponents control. During turns other than yours, ~'s power and
@@ -519,6 +616,41 @@ fn static_ignore_hexproof_without_ward_emits_single_static() {
     );
     assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
     assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    // CR 609.4: no "you control" qualifier → unrestricted bypass (any player).
+    assert_eq!(
+        defs[0].bypass_beneficiary, None,
+        "the unqualified Nowhere to Run form must leave the bypass unrestricted"
+    );
+}
+
+/// CR 702.11e / CR 609.4: Glaring Spotlight — "Creatures your opponents control
+/// with hexproof can be the targets of spells and abilities YOU CONTROL as
+/// though they didn't have hexproof." The "you control" qualifier between
+/// "spells and abilities" and "as though" is semantically load-bearing: it
+/// restricts the bypass beneficiary to the static controller
+/// (`bypass_beneficiary = Some(You)`), unlike the unqualified Nowhere to Run
+/// form (any player). Still one `IgnoreHexproof` scoped to opponents' creatures.
+#[test]
+fn static_ignore_hexproof_with_you_control_qualifier() {
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control with hexproof can be the targets of spells and abilities you control as though they didn't have hexproof.",
+    );
+    assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    assert_eq!(
+        defs[0].bypass_beneficiary,
+        Some(ControllerRef::You),
+        "the 'you control' qualifier must restrict the bypass to the controller, got {:?}",
+        defs[0].bypass_beneficiary
+    );
+    assert!(
+        matches!(
+            defs[0].affected,
+            Some(TargetFilter::Typed(ref tf)) if tf.controller == Some(ControllerRef::Opponent)
+        ),
+        "must scope the bypass to opponents' creatures, got {:?}",
+        defs[0].affected
+    );
 }
 
 /// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
@@ -1562,6 +1694,44 @@ fn self_untap_during_each_other_untap_step_bender_waterskin() {
         assert_eq!(def.mode, StaticMode::UntapsDuringEachOtherPlayersUntapStep);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     }
+}
+
+/// CR 502.3 + CR 611.3a: Quest for Renewal — the inverted "As long as
+/// <condition>, untap all creatures you control during each other player's
+/// untap step" static. The comma-split rewrite formerly fell through to an
+/// empty `Continuous` fallback (a runtime no-op); the inverted-block wiring now
+/// routes the isolated effect slice through the shared Seedborn detector and
+/// re-attaches the counter-threshold condition. REVERT GUARD: without the fix
+/// `def.mode` is `StaticMode::Continuous`, not
+/// `UntapsDuringEachOtherPlayersUntapStep`.
+#[test]
+fn quest_for_renewal_inverted_conditional_seedborn_untap() {
+    let def = parse_static_line(
+        "As long as there are four or more quest counters on this enchantment, untap all creatures you control during each other player's untap step.",
+    )
+    .expect("static def for Quest for Renewal");
+    assert_eq!(def.mode, StaticMode::UntapsDuringEachOtherPlayersUntapStep);
+    // Affected: creatures you control.
+    match def.affected {
+        Some(TargetFilter::Typed(ref tf)) => {
+            assert_eq!(
+                tf.controller,
+                Some(crate::types::ability::ControllerRef::You)
+            );
+        }
+        ref other => panic!("expected Typed(you-control) affected filter, got {other:?}"),
+    }
+    // Condition: four or more quest counters on the source enchantment.
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::HasCounters {
+            counters: crate::types::counter::CounterMatch::OfType(CounterType::Generic(
+                "quest".to_string()
+            )),
+            minimum: 4,
+            maximum: None,
+        })
+    );
 }
 
 /// CR 509.1b: Copper Carapace — "Equipped creature gets +2/+2 and can't block."
@@ -3850,6 +4020,40 @@ fn compound_subject_land_type_change_single_subject_falls_through() {
             land_type: BasicLandType::Plains,
         }]
     );
+}
+
+// CR 611.3: shared `peel_compound_all_quantified_conjuncts` authority — the
+// `" and all "` seam splits quantified compound subjects for static and effect
+// handlers (#5219 / #5377 class).
+#[test]
+fn peel_compound_all_quantified_conjuncts_splits_animation_subject() {
+    use super::static_helpers::peel_compound_all_quantified_conjuncts;
+
+    let conjuncts = peel_compound_all_quantified_conjuncts("All Forests and all Saprolings")
+        .expect("Life and Limb subject must peel");
+    assert_eq!(conjuncts.len(), 2);
+    assert_eq!(conjuncts[0], "All Forests");
+    assert_eq!(conjuncts[1], "all Saprolings");
+}
+
+#[test]
+fn peel_compound_all_quantified_conjuncts_splits_become_effect() {
+    use super::static_helpers::peel_compound_all_quantified_conjuncts;
+
+    let conjuncts = peel_compound_all_quantified_conjuncts(
+        "all creatures become black and all lands become Swamps",
+    )
+    .expect("Nightcreep must peel");
+    assert_eq!(conjuncts.len(), 2);
+    assert_eq!(conjuncts[0], "all creatures become black");
+    assert_eq!(conjuncts[1], "all lands become Swamps");
+}
+
+#[test]
+fn peel_compound_all_quantified_conjuncts_single_quantifier_declines() {
+    use super::static_helpers::peel_compound_all_quantified_conjuncts;
+
+    assert!(peel_compound_all_quantified_conjuncts("All Mountains are Plains").is_none());
 }
 
 #[test]
@@ -8787,6 +8991,10 @@ fn static_max_untap_one_creature() {
             max: 1,
         }
     );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
+    );
 }
 
 // CR 502.3: Damping Field / Imi Statue — artifact form.
@@ -8801,6 +9009,10 @@ fn static_max_untap_one_artifact() {
             filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             max: 1,
         }
+    );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
     );
 }
 
@@ -8822,6 +9034,64 @@ fn static_max_untap_one_nonbasic_land() {
             ])),
             max: 1,
         }
+    );
+    assert!(
+        def.condition.is_none(),
+        "unconditional family must carry no condition"
+    );
+}
+
+// CR 502.3 + CR 611.3a: Winter Orb. Verbatim Oracle text (Scryfall). Discriminating:
+// before this fix, parsed to a no-op Continuous with modifications: [] (the
+// effect was silently dropped).
+#[test]
+fn static_max_untap_winter_orb_conditional() {
+    let def = parse_static_line(
+        "As long as this artifact is untapped, players can't untap more than one land during their untap steps.",
+    )
+    .expect("Winter Orb must parse to a static definition");
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land()),
+            max: 1,
+        },
+        "Winter Orb must cap untapping at one land, not fall through to a no-op Continuous"
+    );
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped) ('as long as untapped'), got {:?}",
+        def.condition
+    );
+}
+
+// CR 502.3 + CR 611.3a: Static Orb — same template, N=2, "permanents" (no
+// subtype restriction). Verbatim Oracle text (Scryfall).
+#[test]
+fn static_max_untap_static_orb_conditional() {
+    let def = parse_static_line(
+        "As long as this artifact is untapped, players can't untap more than two permanents during their untap steps.",
+    )
+    .expect("Static Orb must parse to a static definition");
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::permanent()),
+            max: 2,
+        }
+    );
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(StaticCondition::Not { condition })
+                if matches!(condition.as_ref(), StaticCondition::SourceIsTapped)
+        ),
+        "expected Not(SourceIsTapped), got {:?}",
+        def.condition
     );
 }
 
@@ -9064,6 +9334,96 @@ fn static_enchanted_land_has_quoted_ability() {
         assert_eq!(definition.kind, AbilityKind::Activated);
         assert!(definition.cost.is_some());
     }
+}
+
+// CR 111.1 + CR 111.6 + CR 109.5: Jaheira, Friend of the Forest — "Tokens you
+// control have "{T}: Add {G}."" The affected filter must span ANY token permanent
+// (token-ness is an object property, CR 111.1, and a token can be any card type,
+// CR 111.6), not just creature tokens. Reverting the token-descriptor arm regresses
+// `affected` to `Typed(["Creature", {Subtype: "Token"}], You)`, which excludes
+// Treasure/Clue/Food tokens — this assertion flips.
+#[test]
+fn tokens_you_control_grant_spans_all_token_permanents() {
+    let def = parse_static_line("Tokens you control have \"{T}: Add {G}.\"").unwrap();
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You)
+        )),
+        "\"Tokens you control\" must match any token permanent, not just creature tokens: {:?}",
+        def.affected
+    );
+    let grant = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted \"{T}: Add {G}\" mana ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert_eq!(definition.kind, AbilityKind::Activated);
+    assert!(
+        matches!(&*definition.effect, Effect::Mana { .. }),
+        "granted ability must be a mana ability: {:?}",
+        definition.effect
+    );
+}
+
+// CR 111.6: "Creature tokens you control" reaches the same token-descriptor arm
+// via the optional "creature " prefix, narrowing to creature tokens only.
+#[test]
+fn creature_tokens_you_control_narrows_to_creature_token_property() {
+    let def = parse_static_line("Creature tokens you control have \"{T}: Add {G}.\"").unwrap();
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You)
+        )),
+        "\"Creature tokens you control\" must narrow to creature tokens: {:?}",
+        def.affected
+    );
+}
+
+// CR 111.1 + CR 109.5: the sibling `parse_continuous_subject_filter` seam (reached when a
+// timing prefix like "During your turn," is stripped before the subject is parsed) must
+// resolve "Tokens you control" through the same token-property arm, not the capitalized
+// subtype fallback. Reverting the `typed_you_control_descriptor_filter` arm regresses this
+// affected filter to creature tokens only.
+#[test]
+fn during_your_turn_tokens_you_control_uses_token_property_seam() {
+    let def = parse_static_line("During your turn, Tokens you control get +1/+1.").unwrap();
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You)
+        )),
+        "the parse_continuous_subject_filter seam must also span all token permanents: {:?}",
+        def.affected
+    );
+}
+
+// Negative over-fire guard: a non-token subject must NOT acquire `FilterProp::Token`.
+// "Artifacts you control" resolves to the core Artifact type, never the token arm.
+#[test]
+fn non_token_you_control_subject_has_no_token_property() {
+    let def = parse_static_line("Artifacts you control have \"{T}: Add {G}.\"").unwrap();
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected a Typed affected filter, got {:?}", def.affected);
+    };
+    assert!(
+        !tf.properties.contains(&FilterProp::Token),
+        "a non-token subject must not gain FilterProp::Token: {tf:?}"
+    );
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "\"Artifacts you control\" must resolve to the Artifact core type: {tf:?}"
+    );
 }
 
 #[test]
@@ -9371,6 +9731,190 @@ fn static_creatures_attacking_you_get_pump() {
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddPower { value: -1 }));
+}
+
+#[test]
+fn static_creatures_attacking_last_chosen_player_scope() {
+    // CR 508.1b + CR 613.1: Triarch Stalker / Beckoning Will-o'-Wisp scope the
+    // attacking axis by the source's persisted chosen player. Both "the last
+    // chosen player" and the shorter "the chosen player" phrasing map to
+    // `ControllerRef::SourceChosenPlayer`, reusing the same `FilterProp::Attacking`
+    // + `parse_continuous_gets_has` path as the you/opponents/enchanted scopes.
+    let menace =
+        parse_static_line("Creatures attacking the last chosen player have menace.").unwrap();
+    assert_eq!(menace.mode, StaticMode::Continuous);
+    assert_eq!(
+        menace.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+    assert!(menace
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Menace,
+        }));
+
+    let pump = parse_static_line("Creatures attacking the last chosen player get +1/+0.").unwrap();
+    assert_eq!(
+        pump.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+    assert!(pump
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+
+    // Shorter "the chosen player" phrasing resolves to the same scope.
+    let short = parse_static_line("Creatures attacking the chosen player have menace.").unwrap();
+    assert_eq!(
+        short.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer)
+            }]
+        ),))
+    );
+}
+
+#[test]
+fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
+    // CR 613.1 + CR 608.2c: the combat trigger "choose an opponent" must persist
+    // its choice durably (as `ChosenAttribute::Player`) BECAUSE a separate
+    // continuous static reads it via `ControllerRef::SourceChosenPlayer`. The
+    // `reconcile_persisted_player_choice_for_source_chosen_ref` pass flips the
+    // choice's `persist` to true when such a reference is present.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "Targeting Relay — At the beginning of combat on your turn, choose an opponent.\nCreatures attacking the last chosen player have menace.",
+        "Triarch Stalker",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Necron".to_string()],
+    );
+
+    // The static reads the source's persisted chosen player.
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer),
+            })
+        )),
+        "static must scope attackers by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    // The combat trigger's opponent choice must persist so the static can read it.
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "choose an opponent must persist when a SourceChosenPlayer static reads it, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn choose_opponent_without_source_chosen_reference_does_not_persist() {
+    // Targeted-pass regression: a "choose an opponent" trigger whose choice is
+    // consumed WITHIN the same resolution (Ruhan — the forced attack reads the
+    // resolution-scoped `ChosenPlayer { index }`) carries no durable
+    // `SourceChosenPlayer` reference, so the reconcile pass must leave it
+    // `persist: false`.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, choose an opponent at random. ~ attacks that player this combat if able.",
+        "Ruhan of the Fomori",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: false,
+                ..
+            }
+        ),
+        "a same-resolution opponent choice must NOT be flipped to persist, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn choose_persists_when_only_a_trigger_reads_the_chosen_player() {
+    // CR 613.1 + CR 503.1a: the durable `SourceChosenPlayer` reference can live in
+    // a TRIGGER (a phase trigger scoped to "the chosen player's upkeep", plus its
+    // effect targeting that player) rather than a static or activated ability. The
+    // reconcile pass must scan triggers as READERS, not only as writers, so the
+    // preceding "choose an opponent" is flipped to persist. LOAD-BEARING
+    // REGRESSION: without the `result.triggers` reader scan the choose stays
+    // `persist: false` and the chosen player is lost after the choice resolves.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "When this artifact enters the battlefield, choose an opponent.\nAt the beginning of the chosen player's upkeep, this artifact deals 1 damage to that player.",
+        "Chosen-Player Rack",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    // Sanity: the reference lives only in the phase trigger's `valid_target`.
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|t| t.valid_target == Some(TargetFilter::SourceChosenPlayer)),
+        "expected a phase trigger scoped to SourceChosenPlayer, got {:?}",
+        parsed.triggers
+    );
+    // The ETB choose must be flipped to persist by the trigger-reader scan.
+    let choose = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find(|a| matches!(&*a.effect, Effect::Choose { .. }))
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "a choose read only by a trigger must still persist, got {:?}",
+        choose.effect
+    );
 }
 
 #[test]
@@ -15432,6 +15976,25 @@ fn pronoun_is_a_noncreature_type_replacement_is_not_land_specific() {
     );
 }
 
+// Follow-up to #5305: nom P/T remainder combinator for parse_enchanted_is_type.
+#[test]
+fn parse_pt_mod_with_remainder_consumes_base_pt_and_returns_clause_tail() {
+    let (rest, (p, t)) = super::grammar::parse_pt_mod_with_remainder("0/4 and loses all abilities")
+        .expect("unsigned base P/T + trailing clause");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), "and loses all abilities");
+
+    let (rest, (p, t)) =
+        super::grammar::parse_pt_mod_with_remainder("0/4.").expect("trailing period only");
+    assert_eq!((p, t), (0, 4));
+    assert_eq!(rest.trim(), ".");
+
+    let (rest, (p, t)) =
+        super::grammar::parse_pt_mod_with_remainder("0/4").expect("bare base P/T with no tail");
+    assert_eq!((p, t), (0, 4));
+    assert!(rest.trim().is_empty());
+}
+
 // Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land
 // with "{T}: Add {C}" and loses all other card types and abilities." Must become
 // a colorless land (SetCardTypes + SetColor), lose its own abilities
@@ -18290,6 +18853,122 @@ fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
         tail_gapped,
         "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
         result.abilities
+    );
+}
+
+// CR 611.3 + CR 607.2d + CR 205.1b + issue #5246: Rukarumel, Biologist — the
+// compound-subject chosen-type static. The modeled sentence must produce an
+// additive AddChosenSubtype{CreatureType} static whose affected set is the `Or`
+// union of the two "you control" conjuncts.
+#[test]
+fn parser_shape_rukarumel_compound_subject_chosen_type_static() {
+    let def = parse_static_line(
+        "Slivers you control and nontoken creatures you control are the chosen type in addition to their other creature types.",
+    )
+    .expect("Rukarumel's compound-subject chosen-type static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }],
+        "additive chosen-creature-type only (no RemoveAllSubtypes)"
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => assert_eq!(
+            filters.len(),
+            2,
+            "affected must be the Or union of both you-control conjuncts: {filters:?}"
+        ),
+        other => panic!("expected an Or of 2 subject filters, got {other:?}"),
+    }
+}
+
+// Issue #5246: full Rukarumel oracle. The compound-subject additive static must be
+// present AND the trailing "The same is true for ..." (non-battlefield-zone)
+// sentence must surface as an Unimplemented residual — mirroring Arcane
+// Adaptation / Maskwood Nexus, not collapsing the whole line into a strict-fail.
+#[test]
+fn parse_rukarumel_full_oracle_adds_compound_static_and_gaps_tail() {
+    let oracle = "As Rukarumel enters, choose a creature type.\nSlivers you control and nontoken creatures you control are the chosen type in addition to their other creature types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 1/1 colorless Sliver creature token.";
+    let result = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Rukarumel, Biologist",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let has_compound_static = result.statics.iter().any(|def| {
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() >= 2)
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                })
+            && !def
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
+    });
+    assert!(
+        has_compound_static,
+        "Rukarumel must produce the compound-subject additive static: {:?}",
+        result.statics
+    );
+    let tail_gapped = result.abilities.iter().any(|ability| {
+        matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
+                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
+                if frag.contains("creature spells you control")
+        )
+    });
+    assert!(
+        tail_gapped,
+        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        result.abilities
+    );
+}
+
+// Issue #5246 (no-regression): a single-subject chosen-type line must stay with
+// `parse_arcane_adaptation_chosen_type_static` — the compound handler declines it
+// (its affected set is a plain Typed filter, not an `Or`).
+#[test]
+fn single_subject_chosen_type_static_not_hijacked_by_compound_handler() {
+    let def = parse_static_line(
+        "Creatures you control are the chosen type in addition to their other types.",
+    )
+    .expect("single-subject Arcane Adaptation line must still parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            }),
+        "single-subject additive static must be produced"
+    );
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::Or { .. })),
+        "single subject must not be widened into an Or: {:?}",
+        def.affected
+    );
+}
+
+// Issue #5246 (decline): a compound subject with a non-additive (CR 205.1a SET)
+// predicate — no "in addition to ..." — must NOT be claimed by the additive
+// compound handler (there is no compound SET printing to over-fit).
+#[test]
+fn compound_chosen_type_static_declines_non_additive_predicate() {
+    let def = parse_static_line("Slivers you control and Zombies you control are the chosen type.");
+    let is_additive_compound = def.as_ref().is_some_and(|d| {
+        matches!(d.affected, Some(TargetFilter::Or { .. }))
+            && d.modifications
+                == vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }]
+    });
+    assert!(
+        !is_additive_compound,
+        "non-additive compound must not be claimed as an additive chosen-type static: {def:?}"
     );
 }
 

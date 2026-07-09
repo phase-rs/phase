@@ -170,11 +170,11 @@ fn find_legal_targets_with_context(
 
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) || is_any_other_target {
-        add_players(state, &mut targets, source_id);
+        add_players(state, &mut targets, source_id, source_controller);
     }
 
     if let TargetFilter::SpecificPlayer { id } = filter {
-        add_specific_player(state, &mut targets, *id, source_id);
+        add_specific_player(state, &mut targets, *id, source_id, source_controller);
         return targets;
     }
 
@@ -204,7 +204,10 @@ fn find_legal_targets_with_context(
                 // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof,
                 // shroud, and protection exclude illegal player targets.
                 if super::static_abilities::player_cannot_be_targeted_by(
-                    state, player.id, source_id,
+                    state,
+                    player.id,
+                    source_id,
+                    source_controller,
                 ) {
                     continue;
                 }
@@ -1037,11 +1040,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             // the trigger, not an intervening triggered ability above it.
             extract_source_from_event(event).map(TargetRef::Object)
         }
-        // CR 506.3d: "defending player" — look up from combat state using the source creature.
+        // CR 508.5 + CR 508.5a: "defending player" is the player the *attacking creature*
+        // is attacking, determined individually per attacker. resolve_defending_player
+        // tries the source as the attacker first (a creature's own attack trigger), then
+        // falls back to the attacker carried by the current triggering event (a separate
+        // permanent's attack trigger — Leeching Sliver watching another Sliver, or an
+        // Equipment). Returns None when neither is in combat, degrading to the caller's
+        // controller fallback exactly as the prior source-only lookup did.
         TargetFilter::DefendingPlayer => {
-            let combat = state.combat.as_ref()?;
-            let attacker_info = combat.attackers.iter().find(|a| a.object_id == source_id)?;
-            Some(TargetRef::Player(attacker_info.defending_player))
+            crate::game::combat::resolve_defending_player(state, source_id).map(TargetRef::Player)
         }
         TargetFilter::AttachedTo => {
             let host = state.objects.get(&source_id)?.attached_to?;
@@ -1850,7 +1857,12 @@ fn filter_targets_stack_abilities(filter: &TargetFilter) -> bool {
     }
 }
 
-fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: ObjectId) {
+fn add_players(
+    state: &GameState,
+    targets: &mut Vec<TargetRef>,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) {
     // Player-phasing exclusion: a phased-out player is treated as though they
     // don't exist for targeting purposes (mirrors CR 702.26b for permanents,
     // applied to players via card Oracle text like "you phase out").
@@ -1867,7 +1879,12 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: Objec
         }
         // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof, shroud,
         // and protection exclude illegal player targets.
-        if super::static_abilities::player_cannot_be_targeted_by(state, player.id, source_id) {
+        if super::static_abilities::player_cannot_be_targeted_by(
+            state,
+            player.id,
+            source_id,
+            source_controller,
+        ) {
             continue;
         }
         targets.push(TargetRef::Player(player.id));
@@ -1879,6 +1896,7 @@ fn add_specific_player(
     targets: &mut Vec<TargetRef>,
     player_id: PlayerId,
     source_id: ObjectId,
+    source_controller: PlayerId,
 ) {
     let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
         return;
@@ -1886,7 +1904,12 @@ fn add_specific_player(
     if player.is_phased_out() || player.is_eliminated {
         return;
     }
-    if super::static_abilities::player_cannot_be_targeted_by(state, player.id, source_id) {
+    if super::static_abilities::player_cannot_be_targeted_by(
+        state,
+        player.id,
+        source_id,
+        source_controller,
+    ) {
         return;
     }
     targets.push(TargetRef::Player(player.id));
@@ -1967,13 +1990,15 @@ fn can_target(
     //     target any permanent "as though it didn't have hexproof". This half is
     //     target-invariant, so callers hoist it ONCE per enumeration and thread the
     //     result in as `source_ignores_hexproof`.
-    //   - object-scoped (Nowhere to Run): specific permanents matching a static's
-    //     `affected` filter may be targeted as though they had no hexproof, by
-    //     ANY player — the card carries no "you control" qualifier on the spells
-    //     or abilities, which is the multiplayer-correct reading. This half is
-    //     per-object and stays inside the loop.
+    //   - object-scoped (Nowhere to Run, Glaring Spotlight): specific permanents
+    //     matching a static's `affected` filter may be targeted as though they
+    //     had no hexproof. Whose spells and abilities benefit depends on the
+    //     static's `bypass_beneficiary` (CR 609.4): unqualified (Nowhere to Run)
+    //     opens the permanents to ANY player; a "you control" qualifier (Glaring
+    //     Spotlight) restricts the bypass to the static controller. This half is
+    //     per-object (and now per-source-controller) and stays inside the loop.
     let ignores_hexproof = source_ignores_hexproof
-        || crate::game::static_abilities::target_ignores_hexproof(state, obj.id);
+        || crate::game::static_abilities::target_ignores_hexproof(state, obj.id, source_controller);
     // CR 702.11b: Hexproof on a permanent prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
@@ -2614,6 +2639,94 @@ mod tests {
                 &state
             ),
             "the static controller's own creature is outside the bypass scope and keeps hexproof"
+        );
+    }
+
+    #[test]
+    fn scoped_ignore_hexproof_you_control_qualifier_restricts_to_controller_multiplayer() {
+        // CR 702.11e + CR 609.4 + CR 109.5: Glaring Spotlight — "Creatures your
+        // opponents control with hexproof can be the targets of spells and
+        // abilities YOU CONTROL as though they didn't have hexproof." The "you
+        // control" qualifier (`bypass_beneficiary = Some(You)`) restricts the
+        // bypass to the static controller: in a 3-player game the controller can
+        // target the affected creature, but a third player still can't.
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+
+        // P0 controls Glaring Spotlight's object-scoped, controller-only bypass.
+        let spotlight = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Glaring Spotlight".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&spotlight)
+            .unwrap()
+            .static_definitions = vec![StaticDefinition::new(StaticMode::IgnoreHexproof)
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent),
+            ))
+            .bypass_beneficiary(Some(ControllerRef::You))]
+        .into();
+
+        // P1 (an opponent of P0) controls the affected hexproof creature.
+        let p1_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&p1_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Hexproof);
+        }
+        let p0_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "P0 Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let p2_source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(2),
+            "P2 Spell".to_string(),
+            Zone::Battlefield,
+        );
+
+        // P0 (the static controller) benefits from the bypass and CAN target it.
+        assert!(
+            can_target(
+                state.objects.get(&p1_creature).unwrap(),
+                PlayerId(0),
+                p0_source,
+                crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
+                &state
+            ),
+            "the 'you control' bypass must let the static controller target the affected creature"
+        );
+
+        // P2 (a third player, also an opponent of P1) is NOT the beneficiary, so
+        // hexproof still blocks it. LOAD-BEARING REVERT PROBE: dropping the
+        // `bypass_beneficiary` check makes this assertion fail.
+        assert!(
+            !can_target(
+                state.objects.get(&p1_creature).unwrap(),
+                PlayerId(2),
+                p2_source,
+                crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(2)),
+                &state
+            ),
+            "the 'you control' bypass must NOT extend to a third player in multiplayer"
         );
     }
 

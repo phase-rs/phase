@@ -15,11 +15,35 @@
 //!
 //! # Zone scope asymmetry
 //!
-//! - **Statics / triggers**: gated to the battlefield by the caller's choice
-//!   of iteration (`battlefield_active_*`). Command-zone emblems pass the
+//! - **Statics**: the full CR 113.6 zone-of-function gate lives in the shared
+//!   `static_functions_in_zone` predicate (empty `active_zones` defaults to
+//!   battlefield-only; a non-empty `active_zones` restricts to exactly the
+//!   listed zones; command-zone objects use the emblem-or-opt-in gate). Five
+//!   gathers delegate to it — `active_static_definitions` (which also layers
+//!   CR 113.6g's stack exception for self-referential
+//!   `CantBeCountered`/`CantBeCopied` on top, plus the CR 604.1 / CR 613.1
+//!   condition gate), `game_functioning_statics`, `battlefield_functioning_statics`,
+//!   `layers::active_combat_assignment_rule_effects_from_static_definitions`,
+//!   and `combat::compute_combat_tax`. **`layers::active_continuous_effects_from_static_definitions`
+//!   is the one exception** — it keeps its own inline `active_zones`
+//!   membership check rather than delegating here, and its off-battlefield
+//!   entry point (`active_continuous_effects_from_base_static_source`)
+//!   applies a separate caller-side pre-filter
+//!   (`base_static_can_source_off_zone_keyword_query`) before reaching it.
+//!   That gather does not currently agree with this module's predicate in
+//!   every case (notably: it admits a self-referential `affected` definition
+//!   regardless of whether `active_zones` declares the object's current
+//!   zone, where `static_functions_in_zone` would require the explicit
+//!   opt-in per CR 113.6b) — flagged here rather than silently papered over,
+//!   since the next person touching either side needs to know they can
+//!   diverge. Callers of the five delegating gathers never need to
+//!   pre-filter statics by zone; callers of the sixth should read
+//!   `layers.rs`'s own comments for its exact rule.
+//! - **Triggers**: gated to the battlefield by the caller's choice of
+//!   iteration (`battlefield_active_*`). Command-zone emblems pass the
 //!   phased-out/command-zone gate for per-object iteration, and non-emblem
 //!   command-zone objects may contribute definitions that explicitly opt in
-//!   via `active_zones` / `trigger_zones`.
+//!   via `trigger_zones`.
 //! - **Replacements**: NOT battlefield-scoped. Zone-of-function is a
 //!   per-replacement property on `ReplacementDefinition`, so
 //!   `active_replacements` scans every object and only applies the
@@ -42,7 +66,9 @@
 
 use crate::game::game_object::GameObject;
 use crate::game::layers::evaluate_condition;
-use crate::types::ability::{ReplacementDefinition, StaticDefinition, TriggerDefinition};
+use crate::types::ability::{
+    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
+};
 use crate::types::game_state::GameState;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
@@ -131,9 +157,49 @@ pub fn object_sources_static_from_command_zone(obj: &GameObject) -> bool {
             .any(|def| non_emblem_command_zone_static_functions(obj, def))
 }
 
+/// CR 113.6g: True when a `CantBeCountered`/`CantBeCopied` definition names
+/// the object the ability is ON, not some other set of objects. `affected:
+/// None` (runtime stamps in `casting.rs` that push a bare, unfiltered
+/// definition directly onto the one spell they apply to) and
+/// `Some(TargetFilter::SelfRef)` (the printed "this spell can't be countered"
+/// self-reference, e.g. Carnage Tyrant) both mean "this ability describes the
+/// object it's on." Any other `TargetFilter` (e.g. `Typed`) means the ability
+/// instead GRANTS un-counterability / un-copyability to some other set of
+/// objects (Allosaurus Shepherd's "Green spells you control can't be
+/// countered") and is not self-referential.
+pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
+    matches!(
+        def.mode,
+        StaticMode::CantBeCountered | StaticMode::CantBeCopied
+    ) && matches!(def.affected.as_ref(), None | Some(TargetFilter::SelfRef))
+}
+
+/// CR 113.6 + CR 113.6b + CR 114.3 / CR 114.4: Single-authority zone-of-
+/// function gate for a static definition, EXCLUDING the CR 113.6g
+/// self-referential `CantBeCountered`/`CantBeCopied` exception (the caller
+/// applies that first). Command-zone objects use the emblem-or-opt-in gate;
+/// every other zone uses the CR 113.6 default — empty `active_zones`
+/// restricts the static to the battlefield, non-empty restricts it to
+/// exactly the listed zones. Shared by the statics gathers that delegate to
+/// this predicate; `layers::active_continuous_effects_from_static_definitions`
+/// remains the documented exception because it applies its own inline
+/// `active_zones` gate.
+pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition) -> bool {
+    match obj.zone {
+        Zone::Command => obj.is_emblem || non_emblem_command_zone_static_functions(obj, def),
+        zone => {
+            if def.active_zones.is_empty() {
+                zone == Zone::Battlefield
+            } else {
+                def.active_zones.contains(&zone)
+            }
+        }
+    }
+}
+
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
-/// the CR 702.26b / CR 114.4 gate and the per-static CR 604.1 / CR 613.1
-/// `condition` gate applied.
+/// the CR 702.26b / CR 114.4 gate, the full CR 113.6 zone-of-function gate,
+/// and the per-static CR 604.1 / CR 613.1 `condition` gate applied.
 ///
 /// This is the authoritative replacement for `obj.static_definitions.iter_all()`
 /// at every read site in the engine.
@@ -147,18 +213,21 @@ pub fn active_static_definitions<'a>(
     }
     let source_id = obj.id;
     let controller = obj.controller;
-    // CR 114.4 + CR 113.6b: In the command zone, only emblems function by
-    // default; a non-emblem object still contributes statics that opt in via
-    // `active_zones.contains(Command)` (Eminence). Outside the command zone,
-    // the standard CR 113.6 default applies (empty active_zones = battlefield;
-    // non-empty restricts to the listed zones).
-    let zone = obj.zone;
-    let is_emblem = obj.is_emblem;
     Box::new(obj.static_definitions.iter_all().filter(move |def| {
-        if zone == Zone::Command
-            && !is_emblem
-            && !non_emblem_command_zone_static_functions(obj, def)
-        {
+        // CR 113.6g: An object's ability that states IT can't be countered
+        // or can't be copied functions on the stack — a self-referential
+        // exception to the CR 113.6 zone-of-function default below. A
+        // permanent's ability that instead GRANTS un-counterability /
+        // un-copyability to OTHER objects via a `TargetFilter` (Allosaurus
+        // Shepherd's "Green spells you control can't be countered") is not
+        // self-referential and must fall through to the ordinary default,
+        // so it keeps functioning from the battlefield like any other
+        // static. Fixes #1033.
+        if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
+            if obj.zone != Zone::Stack {
+                return false;
+            }
+        } else if !static_functions_in_zone(obj, def) {
             return false;
         }
         // CR 604.1 / CR 613.1: a static's `condition` must hold for the
@@ -201,10 +270,19 @@ pub fn game_active_statics(
 ///
 /// Use this when a caller must evaluate the condition with additional context,
 /// such as the affected object for recipient-relative static quantities, or
-/// the casting player for cost-modifier scope checks. Command-zone non-emblem
-/// objects contribute only their statics that opt in via CR 113.6b
-/// `active_zones.contains(Command)` (Eminence); phased-out objects contribute
-/// nothing per CR 702.26b.
+/// the casting player for cost-modifier scope checks. The CR 113.6 zone-of-
+/// function gate is delegated to the shared `static_functions_in_zone`
+/// predicate, so this iterator agrees with `active_static_definitions` and the
+/// `layers.rs` gathers: command-zone non-emblem objects contribute only their
+/// statics that opt in via CR 113.6b `active_zones.contains(Command)`
+/// (Eminence), and a battlefield object contributes only statics whose
+/// `active_zones` admit the battlefield (empty defaults to battlefield-only).
+/// Phased-out objects contribute nothing per CR 702.26b.
+///
+/// The CR 113.6g self-referential `CantBeCountered`/`CantBeCopied` stack
+/// exception is not applied here (that is `active_static_definitions`'
+/// responsibility): this iterator only ever scans the battlefield and command
+/// zone, never the stack, so the exception cannot apply to any object it sees.
 pub fn game_functioning_statics(
     state: &GameState,
 ) -> impl Iterator<Item = (&GameObject, &StaticDefinition)> {
@@ -215,18 +293,12 @@ pub fn game_functioning_statics(
         .filter_map(move |id| state.objects.get(id))
         .filter(|obj| !obj.is_phased_out())
         .flat_map(move |obj| {
-            let zone = obj.zone;
-            let is_emblem = obj.is_emblem;
             obj.static_definitions
                 .iter_all()
-                .filter(move |def| {
-                    // CR 114.4 + CR 113.6b: command-zone non-emblem objects
-                    // only contribute statics that explicitly opt in.
-                    if zone == Zone::Command && !is_emblem {
-                        return non_emblem_command_zone_static_functions(obj, def);
-                    }
-                    true
-                })
+                // CR 113.6 + CR 113.6b + CR 114.4: single-authority
+                // zone-of-function gate, shared with every other statics
+                // gather so they cannot disagree.
+                .filter(move |def| static_functions_in_zone(obj, def))
                 .map(move |def| (obj, def))
         })
 }
@@ -278,7 +350,20 @@ pub fn battlefield_functioning_statics(
         .iter()
         .filter_map(move |id| state.objects.get(id))
         .filter(|obj| object_functions(obj))
-        .flat_map(move |obj| obj.static_definitions.iter_all().map(move |def| (obj, def)))
+        .flat_map(move |obj| {
+            obj.static_definitions
+                .iter_all()
+                // CR 113.6 + CR 113.6b + CR 114.4: single-authority
+                // zone-of-function gate, shared with every other statics
+                // gather so they cannot disagree. A battlefield object's
+                // static restricted to a non-battlefield zone
+                // (`active_zones = [Graveyard]`, etc.) does NOT function from
+                // the battlefield and must be excluded here too, exactly like
+                // `game_functioning_statics` and `active_static_definitions`.
+                // Fixes the remaining #1033 sibling-function inconsistency.
+                .filter(move |def| static_functions_in_zone(obj, def))
+                .map(move |def| (obj, def))
+        })
 }
 
 /// Battlefield iteration specialised to a particular `StaticMode` shape.
@@ -377,7 +462,7 @@ pub fn active_replacements(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ReplacementDefinition, StaticCondition, StaticDefinition, TriggerDefinition,
+        ReplacementDefinition, StaticCondition, StaticDefinition, TriggerDefinition, TypedFilter,
     };
     use crate::types::format::FormatConfig;
     use crate::types::game_state::GameState;
@@ -557,6 +642,146 @@ mod tests {
         assert!(pairs[0].1.active_zones.contains(&Zone::Command));
     }
 
+    /// CR 113.6: `game_functioning_statics` must apply the shared zone-of-
+    /// function gate to BATTLEFIELD objects too, not just command-zone ones.
+    /// A battlefield object carrying a static restricted to a non-battlefield
+    /// zone (`active_zones = [Graveyard]`) does NOT function from the
+    /// battlefield, so it must be excluded — while a sibling static with empty
+    /// `active_zones` (battlefield default) on the same object is still
+    /// yielded. Pre-migration `game_functioning_statics` returned `true`
+    /// unconditionally for any non-command object, leaking the graveyard-only
+    /// static; this asserts the migration to `static_functions_in_zone`
+    /// closed that gap in lockstep with `active_static_definitions`. Fixes the
+    /// remaining #1033 sibling-function inconsistency.
+    #[test]
+    fn game_functioning_statics_battlefield_respects_active_zones() {
+        let mut state = new_state();
+        let mut obj = make_obj(1, Zone::Battlefield);
+        // Graveyard-only static: must NOT function from the battlefield.
+        let graveyard_only =
+            StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Graveyard]);
+        // Battlefield-default static (empty active_zones): must function.
+        let battlefield_default = StaticDefinition::new(StaticMode::Continuous);
+        obj.static_definitions = vec![graveyard_only, battlefield_default].into();
+        put_on_battlefield(&mut state, obj);
+
+        let pairs: Vec<_> = game_functioning_statics(&state)
+            .filter(|(obj, _)| obj.id == ObjectId(1))
+            .collect();
+        // Only the battlefield-default static survives the zone gate.
+        assert_eq!(
+            pairs.len(),
+            1,
+            "graveyard-only static must be excluded from a battlefield object"
+        );
+        assert!(
+            pairs[0].1.active_zones.is_empty(),
+            "the surviving static must be the battlefield-default one"
+        );
+    }
+
+    /// CR 113.6: general zone-of-function regression at the helper level
+    /// (the Underworld-Breach-class bug, independent of the full
+    /// cast-eligibility integration test in the PR). A Graveyard-zone object
+    /// with a `Continuous` static and empty `active_zones` functions only from
+    /// the battlefield by default, so `active_static_definitions` yields
+    /// nothing for it. Pre-fix the missing gate let it leak. Fixes #1033.
+    #[test]
+    fn graveyard_continuous_static_with_empty_active_zones_does_not_function() {
+        let state = new_state();
+        let mut obj = make_obj(1, Zone::Graveyard);
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
+        assert_eq!(active_static_definitions(&state, &obj).count(), 0);
+    }
+
+    /// CR 113.6g: A self-referential `CantBeCountered` (Carnage Tyrant's "This
+    /// spell can't be countered", modeled with `affected: Some(SelfRef)`)
+    /// functions from the stack and NOT from the battlefield.
+    #[test]
+    fn cant_be_countered_self_ref_functions_on_stack_only() {
+        let state = new_state();
+        let def =
+            StaticDefinition::new(StaticMode::CantBeCountered).affected(TargetFilter::SelfRef);
+        // Case 1: on the stack → functions (Carnage-Tyrant shape).
+        let mut on_stack = make_obj(1, Zone::Stack);
+        on_stack.static_definitions = vec![def.clone()].into();
+        assert_eq!(active_static_definitions(&state, &on_stack).count(), 1);
+        // Case 2: on the battlefield → does NOT function.
+        let mut on_bf = make_obj(2, Zone::Battlefield);
+        on_bf.static_definitions = vec![def].into();
+        assert_eq!(active_static_definitions(&state, &on_bf).count(), 0);
+    }
+
+    /// CR 113.6g: The `casting.rs` bare-stamp shape — a `CantBeCountered`
+    /// definition with `affected: None` pushed directly onto the one spell it
+    /// applies to. Distinct code path from the `Some(SelfRef)` case
+    /// (`None != Some(SelfRef)`), so it needs its own fixture. Same behavior:
+    /// functions from the stack, not the battlefield.
+    #[test]
+    fn cant_be_countered_bare_stamp_functions_on_stack_only() {
+        let state = new_state();
+        // affected: None — the runtime bare-stamp shape.
+        let def = StaticDefinition::new(StaticMode::CantBeCountered);
+        // Case 3: on the stack → functions.
+        let mut on_stack = make_obj(1, Zone::Stack);
+        on_stack.static_definitions = vec![def.clone()].into();
+        assert_eq!(active_static_definitions(&state, &on_stack).count(), 1);
+        // Case 4: on the battlefield → does NOT function.
+        let mut on_bf = make_obj(2, Zone::Battlefield);
+        on_bf.static_definitions = vec![def].into();
+        assert_eq!(active_static_definitions(&state, &on_bf).count(), 0);
+    }
+
+    /// CR 113.6g: Blocker-4 fixture — Allosaurus Shepherd carries BOTH a
+    /// self-referential `CantBeCountered` line (`affected: Some(SelfRef)`) and
+    /// a granting line that makes OTHER objects un-counterable
+    /// (`affected: Some(Typed(...))`, "Green spells you control can't be
+    /// countered"). The two co-resident definitions must be gated
+    /// independently per-definition, not per-object or per-mode: on the stack
+    /// only the self-referential def functions; on the battlefield only the
+    /// granting def functions.
+    #[test]
+    fn cant_be_countered_self_ref_and_granting_def_gated_independently() {
+        let state = new_state();
+        let self_ref_def =
+            StaticDefinition::new(StaticMode::CantBeCountered).affected(TargetFilter::SelfRef);
+        let granting_def = StaticDefinition::new(StaticMode::CantBeCountered)
+            .affected(TargetFilter::Typed(TypedFilter::creature()));
+        // On the stack: only the self-referential def functions.
+        let mut on_stack = make_obj(1, Zone::Stack);
+        on_stack.static_definitions = vec![self_ref_def.clone(), granting_def.clone()].into();
+        let stack_defs: Vec<_> = active_static_definitions(&state, &on_stack).collect();
+        assert_eq!(stack_defs.len(), 1);
+        assert!(matches!(
+            stack_defs[0].affected,
+            Some(TargetFilter::SelfRef)
+        ));
+        // On the battlefield: only the granting (Typed) def functions — it
+        // grants un-counterability to other objects like any battlefield static.
+        let mut on_bf = make_obj(2, Zone::Battlefield);
+        on_bf.static_definitions = vec![self_ref_def, granting_def].into();
+        let bf_defs: Vec<_> = active_static_definitions(&state, &on_bf).collect();
+        assert_eq!(bf_defs.len(), 1);
+        assert!(matches!(bf_defs[0].affected, Some(TargetFilter::Typed(_))));
+    }
+
+    /// CR 113.6g: Mode-symmetry check — the stack exception is not
+    /// counter-specific. A self-referential `CantBeCopied` functions from the
+    /// stack and not from the battlefield, exactly like `CantBeCountered`.
+    #[test]
+    fn cant_be_copied_self_ref_functions_on_stack_only() {
+        let state = new_state();
+        let def = StaticDefinition::new(StaticMode::CantBeCopied).affected(TargetFilter::SelfRef);
+        // Case 6a: on the stack → functions.
+        let mut on_stack = make_obj(1, Zone::Stack);
+        on_stack.static_definitions = vec![def.clone()].into();
+        assert_eq!(active_static_definitions(&state, &on_stack).count(), 1);
+        // Case 6b: on the battlefield → does NOT function.
+        let mut on_bf = make_obj(2, Zone::Battlefield);
+        on_bf.static_definitions = vec![def].into();
+        assert_eq!(active_static_definitions(&state, &on_bf).count(), 0);
+    }
+
     #[test]
     fn condition_false_static_is_filtered() {
         // IsMonarch evaluates false when state.monarch is None (default).
@@ -718,6 +943,49 @@ mod tests {
             battlefield_active_statics(&state).count(),
             0,
             "condition-gated iterator must drop the false-condition static"
+        );
+    }
+
+    /// CR 113.6 + CR 113.6b: `battlefield_functioning_statics` must apply the
+    /// shared zone-of-function gate per-definition, not just the object-level
+    /// `object_functions` gate. A battlefield object carrying a static
+    /// restricted to a non-battlefield zone (`active_zones = [Graveyard]`) does
+    /// NOT function from the battlefield, so it must be excluded — while a
+    /// sibling static with empty `active_zones` (battlefield default) on the
+    /// same object is still yielded (the positive reach-guard proving the
+    /// negative is not vacuous). Pre-migration this iterator yielded
+    /// `obj.static_definitions.iter_all()` completely unfiltered, leaking the
+    /// graveyard-only static into all four downstream consumers
+    /// (`collect_block_restriction_statics`, `collect_must_be_blocked_statics`,
+    /// `apply_cost_floor_inner`, `apply_cant_have_keyword_denials`). This
+    /// asserts the migration to `static_functions_in_zone` closed that gap in
+    /// lockstep with `game_functioning_statics` and `active_static_definitions`.
+    /// Fixes the remaining #1033 sibling-function inconsistency.
+    #[test]
+    fn battlefield_functioning_statics_respects_active_zones() {
+        let mut state = new_state();
+        let mut obj = make_obj(1, Zone::Battlefield);
+        // Graveyard-only static: must NOT function from the battlefield.
+        let graveyard_only =
+            StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Graveyard]);
+        // Battlefield-default static (empty active_zones): must function
+        // (positive reach-guard so the negative assertion is not vacuous).
+        let battlefield_default = StaticDefinition::new(StaticMode::Continuous);
+        obj.static_definitions = vec![graveyard_only, battlefield_default].into();
+        put_on_battlefield(&mut state, obj);
+
+        let pairs: Vec<_> = battlefield_functioning_statics(&state)
+            .filter(|(obj, _)| obj.id == ObjectId(1))
+            .collect();
+        // Only the battlefield-default static survives the zone gate.
+        assert_eq!(
+            pairs.len(),
+            1,
+            "graveyard-only static must be excluded from a battlefield object"
+        );
+        assert!(
+            pairs[0].1.active_zones.is_empty(),
+            "the surviving static must be the battlefield-default one"
         );
     }
 

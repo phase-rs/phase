@@ -784,6 +784,7 @@ pub fn candidate_actions_broad_with_probe(
             player,
             valid_attacker_ids,
             valid_attack_targets,
+            ..
         } => attacker_actions(state, *player, valid_attacker_ids, valid_attack_targets),
         WaitingFor::DeclareBlockers {
             player,
@@ -5538,6 +5539,7 @@ mod tests {
                     crate::types::identifiers::ObjectId(2),
                 ],
                 valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+                attacker_constraints: Default::default(),
             },
             ..GameState::new_two_player(42)
         };
@@ -5570,6 +5572,7 @@ mod tests {
                 // The goading player is deliberately first: the pre-fix generator
                 // would only ever offer this single (illegal-under-goad) pairing.
                 valid_attack_targets: vec![goader, other_a, other_b],
+                attacker_constraints: Default::default(),
             },
             ..GameState::new_two_player(42)
         };
@@ -5638,6 +5641,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(1)),
                 AttackTarget::Player(PlayerId(2)),
             ],
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);
@@ -5713,6 +5717,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(2)),
                 AttackTarget::Player(PlayerId(1)),
             ],
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);
