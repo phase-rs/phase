@@ -1575,6 +1575,39 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     modifications
 }
 
+/// CR 613.4c + CR 702: In a granted-keyword "where X is its `<P/T/mana value>`"
+/// clause, "its" refers to the RECIPIENT of the grant — the creature that has the
+/// keyword — not the grant's source object. `parse_quantity_ref_complete` maps a
+/// bare "its power" / "its toughness" / "its mana value" to `Source` scope (the
+/// correct default in a self-referential context); rebind those to `Recipient` so
+/// the continuous layer resolves the value against each affected creature
+/// (Infantry Shield: "Equipped creature has … mobilize X, where X is its power" →
+/// the equipped creature's power). Self-grants (subject `~`) are unaffected — for
+/// them the recipient IS the source, so both scopes resolve identically.
+fn rebind_source_scope_to_recipient(
+    qty: crate::types::ability::QuantityRef,
+) -> crate::types::ability::QuantityRef {
+    use crate::types::ability::{ObjectScope, QuantityRef};
+    match qty {
+        QuantityRef::Power {
+            scope: ObjectScope::Source,
+        } => QuantityRef::Power {
+            scope: ObjectScope::Recipient,
+        },
+        QuantityRef::Toughness {
+            scope: ObjectScope::Source,
+        } => QuantityRef::Toughness {
+            scope: ObjectScope::Recipient,
+        },
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Source,
+        } => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Recipient,
+        },
+        other => other,
+    }
+}
+
 pub(crate) fn push_grant_clause_modifications(
     modifications: &mut Vec<ContinuousModification>,
     part: &str,
@@ -1627,7 +1660,9 @@ pub(crate) fn push_grant_clause_modifications(
                 {
                     modifications.push(ContinuousModification::AddDynamicKeyword {
                         kind,
-                        value: QuantityExpr::Ref { qty: qty_ref },
+                        value: QuantityExpr::Ref {
+                            qty: rebind_source_scope_to_recipient(qty_ref),
+                        },
                     });
                     return;
                 }
