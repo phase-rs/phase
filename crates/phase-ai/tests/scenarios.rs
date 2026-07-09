@@ -109,6 +109,7 @@ fn scenario_blocks_lethal_attack_when_a_block_exists() {
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 
@@ -142,6 +143,7 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
             player: P0,
             valid_attacker_ids: vec![attacker_a, attacker_b],
             valid_attack_targets: vec![AttackTarget::Player(P1), AttackTarget::Player(PlayerId(2))],
+            attacker_constraints: Default::default(),
         };
     }
 
@@ -227,6 +229,7 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 

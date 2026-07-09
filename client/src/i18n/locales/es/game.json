@@ -278,7 +278,8 @@
     "assignRemaining_one": "Asignar {{count}} más",
     "assignRemaining_other": "Asignar {{count}} más",
     "confirmDistribute_one": "Declarar {{count}} atacante",
-    "confirmDistribute_other": "Declarar {{count}} atacantes"
+    "confirmDistribute_other": "Declarar {{count}} atacantes",
+    "mustAttackPlayer": "{{creature}} debe atacar a {{player}}"
   },
   "fullControl": {
     "label": "Control",
@@ -578,6 +579,16 @@
     "blockIncompleteAttacker": "{{assigned}} de {{required}} bloqueadores asignados",
     "blockIncomplete_one": "{{count}} atacante necesita otro bloqueador",
     "blockIncomplete_other": "{{count}} atacantes necesitan otro bloqueador",
+    "mustAttackBadge": "Must attack",
+    "mustAttackSatisfiedBadge": "Attacking ✓",
+    "mustBlockBadge": "Must block",
+    "mustBlockSatisfiedBadge": "Blocking ✓",
+    "cantAttackBadge": "Can't attack",
+    "cantBlockBadge": "Can't block",
+    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
+    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
+    "unsatisfiedMustBlock_one": "{{count}} creature must block",
+    "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Asignar {{amount}} de daño de combate",
     "assignDamageSubtitle": "{{name}} — Restante: {{remaining}}",
     "assignDamageButton": "Asignar daño",
@@ -1816,6 +1827,16 @@
     "dontShowAgain": "Don’t show again this session",
     "reportTitle": "Stuck decision: {{kind}}",
     "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
+  "mayTriggerAutoChoice": {
+    "listHeader": "Decisiones automáticas",
+    "menuButtonShortActive": "Decidiendo automáticamente",
+    "clearAll": "Borrar todo",
+    "remove": "Quitar",
+    "accept": "Sí",
+    "decline": "No",
+    "sourceFallback": "Efecto",
+    "entryLabel": "{{source}} — {{decision}}"
   },
   "optionalEffect": {
     "sourceFallback": "Efecto",

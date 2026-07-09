@@ -15552,6 +15552,7 @@ mod myriad_runtime_tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         let card_id = CardId(state.next_object_id);

@@ -3123,6 +3123,31 @@ pub(crate) fn parse_subject_suffix<'a>(
     ))
 }
 
+/// CR 111.1 + CR 111.6 + CR 109.5: "[creature ]token(s) you control" — token-ness is an
+/// object property (CR 111.1), never a card type/subtype, and a token can be any card type
+/// (CR 111.6), so "tokens you control" spans Treasure/Clue/Food/creature tokens alike.
+pub(crate) fn parse_token_you_control_descriptor(
+    descriptor: &TextPair<'_>,
+) -> Option<TargetFilter> {
+    // Token-ness derived from an optional "creature " prefix (CR 111.6: a token may be any
+    // card type); the bare form matches any token permanent. The passed creature_subject
+    // flag is intentionally not consulted — the prefix is the sole creature discriminator here.
+    let creature_prefixed = nom_tag_tp(descriptor, "creature ");
+    let core = creature_prefixed.as_ref().unwrap_or(descriptor);
+    if !matches!(core.lower, "token" | "tokens") {
+        return None;
+    }
+    let base = if creature_prefixed.is_some() {
+        TypedFilter::creature()
+    } else {
+        TypedFilter::permanent()
+    };
+    Some(TargetFilter::Typed(
+        base.properties(vec![FilterProp::Token])
+            .controller(ControllerRef::You),
+    ))
+}
+
 /// CR 109.5 + CR 205.3 + CR 205.4a: Controller-scoped subject descriptors
 /// may name object types, colors, subtypes, or supertypes controlled by the
 /// source's controller.
@@ -3132,6 +3157,10 @@ pub(crate) fn typed_you_control_descriptor_filter(
 ) -> Option<TargetFilter> {
     if descriptor_is_negation(descriptor.original) || descriptor_is_supertype(descriptor.original) {
         return None;
+    }
+
+    if let Some(filter) = parse_token_you_control_descriptor(&descriptor) {
+        return Some(filter);
     }
 
     if matches!(descriptor.lower, "creature" | "creatures") {

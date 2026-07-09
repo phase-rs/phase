@@ -1040,11 +1040,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             // the trigger, not an intervening triggered ability above it.
             extract_source_from_event(event).map(TargetRef::Object)
         }
-        // CR 506.3d: "defending player" — look up from combat state using the source creature.
+        // CR 508.5 + CR 508.5a: "defending player" is the player the *attacking creature*
+        // is attacking, determined individually per attacker. resolve_defending_player
+        // tries the source as the attacker first (a creature's own attack trigger), then
+        // falls back to the attacker carried by the current triggering event (a separate
+        // permanent's attack trigger — Leeching Sliver watching another Sliver, or an
+        // Equipment). Returns None when neither is in combat, degrading to the caller's
+        // controller fallback exactly as the prior source-only lookup did.
         TargetFilter::DefendingPlayer => {
-            let combat = state.combat.as_ref()?;
-            let attacker_info = combat.attackers.iter().find(|a| a.object_id == source_id)?;
-            Some(TargetRef::Player(attacker_info.defending_player))
+            crate::game::combat::resolve_defending_player(state, source_id).map(TargetRef::Player)
         }
         TargetFilter::AttachedTo => {
             let host = state.objects.get(&source_id)?.attached_to?;

@@ -7025,7 +7025,10 @@ fn parse_optional_token_substitution_choice(
 /// Deepest Foundation's "three times that many"), plus "those tokens plus [spec]"
 /// (Chatterfang — "that many 1/1 green Squirrel creature tokens"; Donatello —
 /// "a Mutagen token").
-fn parse_token_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+pub(crate) fn parse_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
     let modification_mode = parse_token_replacement_shape(lower)?;

@@ -196,6 +196,7 @@ fn initiative_attack_trigger_skips_without_initiative() {
         player: P0,
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(P1)],
+        attacker_constraints: Default::default(),
     };
     let hand_before = runner.state().players[0].hand.len();
 
@@ -231,6 +232,7 @@ fn initiative_attack_trigger_draws_with_initiative() {
         player: P0,
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(P1)],
+        attacker_constraints: Default::default(),
     };
     let hand_before = runner.state().players[0].hand.len();
 

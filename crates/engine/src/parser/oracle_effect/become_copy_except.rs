@@ -68,7 +68,7 @@
 
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
@@ -77,6 +77,7 @@ use nom::sequence::preceded;
 use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
+use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
@@ -785,6 +786,109 @@ pub(super) fn parse_its_a_type_loses_others(
     result.append(&mut modifications);
     result.extend(ability_mods);
     Some((rest, result))
+}
+
+/// CR 205.1a + CR 613.1d + CR 613.1f + CR 613.8a: "<article> <type words> [with
+/// \"<ability>\"] and loses all other card types and abilities" — the
+/// full-replacement animation used by "<subject> becomes …" effects that both
+/// replace the card-type set AND wipe every ability.
+///
+/// Vraska, Betrayal's Sting [-2] is the canonical member: "Target creature
+/// becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana
+/// of any color\" and loses all other card types and abilities." (`build_become_clause`
+/// strips the "becomes " verb, so this receives "a Treasure artifact with …".)
+///
+/// Distinct from [`parse_its_a_type_loses_others`] (the copy-except form): that
+/// path uses the "it's a" contraction and loses only *card types*; this path is
+/// reached from the become-animation dispatch and also loses *abilities*, so it
+/// emits a `RemoveAllAbilities` before the granted ability.
+///
+/// The produced modification set is ordered per CR 613.7a (a single effect's
+/// modifications apply in written order):
+///   1. `SetCardTypes[named core types]` — Layer 4 (CR 613.1d + CR 205.1a):
+///      replaces the core card-type set, satisfying "loses all other card
+///      types", and drops the correlated subtypes of removed types.
+///   2. `RemoveAllSubtypes{Creature}` + `RemoveAllSubtypes{Artifact}` — clear a
+///      pre-existing Artifact Creature's creature and artifact subtypes so only
+///      the newly added subtype survives. MUST precede the `AddSubtype` (removals
+///      after the add would wipe it).
+///   3. `AddSubtype` per named subtype (e.g. Treasure).
+///   4. `RemoveAllAbilities` — Layer 6 (CR 613.1f): "loses all abilities".
+///   5. Granted ability modifications from the quoted `with "…"` clause, ordered
+///      AFTER the removal (CR 613.8a: the grant depends on the removal, so the
+///      removal is applied first and the grant survives).
+///
+/// Returns `None` unless the "and loses all other card types and abilities"
+/// signal is present, terminates the sentence, and at least one core type is
+/// named.
+/// Consume a leading "a "/"an " article. Named (not an inline closure) so the
+/// `nom_on_lower` bridge's higher-ranked lifetime bound is satisfied.
+fn parse_leading_article(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("a "), tag("an ")))).parse(input)
+}
+
+pub(super) fn parse_becomes_type_loses_all(
+    become_text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    // Oracle text after normalization is ASCII, so the lowercase view is
+    // byte-length aligned with the original — safe for the bridge split helpers,
+    // and the original case is preserved for the quoted-ability parse.
+    let lower = become_text.to_lowercase();
+
+    // Leading article "a "/"an ".
+    let (_, after_article) = nom_on_lower(become_text, &lower, parse_leading_article)?;
+    let after_article_lower = &lower[become_text.len() - after_article.len()..];
+
+    // CR 205.1a + CR 613.1f: the replacement signal. The head before it is the
+    // "<type words> [with \"<ability>\"]" phrase.
+    let signal = " and loses all other card types and abilities";
+    let (head, tail) = split_once_on_lower(after_article, after_article_lower, signal)?;
+    // The signal must terminate the sentence (only a trailing period may follow).
+    if !tail.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    // CR 707.9a: peel an optional `with "<ability>"` clause off the head before
+    // the type list so its text is never mistaken for type words. Only the
+    // quoted form is granted; a non-quoted `with` clause yields no ability mods.
+    let head_lower = head.to_lowercase();
+    let (type_text, ability_mods) = match split_once_on_lower(head, &head_lower, " with ") {
+        Some((types, after_with)) => (types, parse_quoted_ability_modifications(after_with)),
+        None => (head, Vec::new()),
+    };
+
+    // CR 205.1b: classify each type word. Core types form the replacement set;
+    // everything else is an added subtype.
+    let mut core_types = Vec::new();
+    let mut subtype_mods = Vec::new();
+    for word in type_text.split_whitespace() {
+        let canonical = canonicalize_subtype_name(word);
+        if let Ok(core_type) = CoreType::from_str(&canonical) {
+            core_types.push(core_type);
+        } else {
+            subtype_mods.push(ContinuousModification::AddSubtype { subtype: canonical });
+        }
+    }
+    // "loses all other card types" is a card-type statement — with no named core
+    // type there is nothing to replace the set with.
+    if core_types.is_empty() {
+        return None;
+    }
+
+    // CR 613.7a: modifications from one effect apply in written order; removals
+    // MUST precede AddSubtype so the added subtype survives.
+    let mut result = vec![ContinuousModification::SetCardTypes { core_types }];
+    result.push(ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    });
+    result.push(ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Artifact,
+    });
+    result.append(&mut subtype_mods);
+    // CR 613.1f + CR 613.8a: "loses all abilities" ordered before the grant.
+    result.push(ContinuousModification::RemoveAllAbilities);
+    result.extend(ability_mods);
+    Some(result)
 }
 
 /// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.

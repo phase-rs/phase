@@ -1270,6 +1270,7 @@ fn attack_trigger_resolves_before_combat_damage_and_only_once() {
         player: PlayerId(0),
         valid_attacker_ids: vec![ajani, linden],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        attacker_constraints: Default::default(),
     };
 
     let declare_result = apply_as_current(
@@ -1462,6 +1463,7 @@ fn lifelink_replacement_does_not_double_fire_life_gain_triggers() {
         player: PlayerId(0),
         valid_attacker_ids: vec![bat],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        attacker_constraints: Default::default(),
     };
 
     apply_as_current(
@@ -4113,6 +4115,7 @@ fn declare_blockers_grants_ap_priority_when_no_legal_blockers() {
         player: PlayerId(0),
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        attacker_constraints: Default::default(),
     };
 
     apply_as_current(

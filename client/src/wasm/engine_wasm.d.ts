@@ -406,6 +406,7 @@ export interface InitOutput {
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
+    readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
@@ -440,7 +441,6 @@ export interface InitOutput {
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
-    readonly clear_game_state: () => void;
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;

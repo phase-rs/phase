@@ -101,6 +101,7 @@ fn probe_squirrel_board() {
         player: active,
         valid_attacker_ids,
         valid_attack_targets,
+        attacker_constraints: Default::default(),
     };
     measure("declare-attackers", &da);
 }
@@ -226,6 +227,7 @@ fn probe_declare_blockers() {
         valid_blocker_ids,
         valid_block_targets: vbt,
         block_requirements: std::collections::HashMap::new(),
+        blocker_constraints: Default::default(),
     };
 
     perf_counters::reset();

@@ -391,6 +391,7 @@ fn exile_return_end_to_end_through_pipeline() {
         &mut events,
         &default_wf,
         true,
+        false,
     )
     .unwrap();
 
@@ -480,6 +481,7 @@ fn until_source_leaves_return_brings_back_all_merge_components() {
         &mut events,
         &default_wf,
         true,
+        false,
     )
     .unwrap();
 
@@ -607,6 +609,7 @@ fn exile_return_after_destroy_resolution_via_apply() {
         &mut state,
         &mut events,
         &default_wf,
+        false,
         false,
     )
     .unwrap();
@@ -760,8 +763,14 @@ fn white_auracite_real_oracle_text_returns_exiled_card() {
     let default_wf = WaitingFor::Priority {
         player: PlayerId(0),
     };
-    crate::game::engine_priority::run_post_action_pipeline(state, &mut events, &default_wf, false)
-        .unwrap();
+    crate::game::engine_priority::run_post_action_pipeline(
+        state,
+        &mut events,
+        &default_wf,
+        false,
+        false,
+    )
+    .unwrap();
 
     // Confirm WA is in graveyard and the exiled enchantment has returned.
     assert!(
@@ -902,6 +911,7 @@ fn haytham_kenway_per_opponent_exile_returns_when_source_leaves() {
             player: PlayerId(0),
         },
         true,
+        false,
     )
     .unwrap();
 
@@ -1004,8 +1014,14 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
     let default_wf = WaitingFor::Priority {
         player: PlayerId(0),
     };
-    crate::game::engine_priority::run_post_action_pipeline(state, &mut events, &default_wf, false)
-        .unwrap();
+    crate::game::engine_priority::run_post_action_pipeline(
+        state,
+        &mut events,
+        &default_wf,
+        false,
+        false,
+    )
+    .unwrap();
 
     assert!(state.players[0].graveyard.contains(&journey_id));
     assert!(state.battlefield.contains(&creature_id));

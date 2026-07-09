@@ -214,15 +214,37 @@ fn parse_chosen_creature_type_static_scope_body(
     let (input, (pronoun, scope)) = parse_chosen_creature_type_static_subject(input)?;
     let (input, _) =
         alt((tag(" the chosen type"), tag(" the chosen creature type"))).parse(input)?;
-    let (input, addition) =
-        opt((tag(" in addition to "), tag(pronoun), tag(" other types"))).parse(input)?;
-    let application = if addition.is_some() {
+    // CR 205.1b (additive) vs CR 205.1a (SET/replace): the "in addition to ..."
+    // suffix is OPTIONAL — its presence selects additive, its absence selects
+    // replacement (Conspiracy). Shared with the compound-subject sibling.
+    let (input, addition) = match parse_chosen_type_additive_suffix(input, pronoun) {
+        Ok((rest, ())) => (rest, true),
+        Err(_) => (input, false),
+    };
+    let application = if addition {
         ChosenCreatureTypeApplication::Additive
     } else {
         ChosenCreatureTypeApplication::Replacing
     };
     let (input, _) = opt(tag(".")).parse(input)?;
     Ok((input, (scope, application)))
+}
+
+/// CR 205.1b: the additive "in addition to `<pronoun>` other [creature ]types"
+/// retain-suffix, shared by the single-subject
+/// ([`parse_chosen_creature_type_static_scope_body`]) and compound-subject
+/// ([`parse_compound_you_control_chosen_type_static`]) chosen-type static
+/// handlers. The optional "creature " before "types" accepts Rukarumel's
+/// "…in addition to their other creature types" spelling; the single-subject
+/// forms omit it (Arcane Adaptation → "…their other types"), so the `opt` matches
+/// nothing there and their behavior is unchanged.
+fn parse_chosen_type_additive_suffix<'a>(input: &'a str, pronoun: &str) -> OracleResult<'a, ()> {
+    let (input, _) = tag(" in addition to ").parse(input)?;
+    let (input, _) = tag(pronoun).parse(input)?;
+    let (input, _) = tag(" other ").parse(input)?;
+    let (input, _) = opt(tag("creature ")).parse(input)?;
+    let (input, _) = tag("types").parse(input)?;
+    Ok((input, ()))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_subject(
@@ -243,6 +265,93 @@ pub(crate) fn parse_chosen_creature_type_static_subject(
         ),
     ))
     .parse(input)
+}
+
+/// CR 611.3 + CR 607.2d + CR 205.1b + CR 205.3m: compound-subject sibling of
+/// [`parse_arcane_adaptation_chosen_type_static`]. "`<X>` you control and `<Y>`
+/// you control are the chosen type in addition to their other creature types"
+/// (Rukarumel, Biologist) — two independently-resolvable `you control` conjuncts
+/// joined by "and" that the single-subject dispatcher's fixed-arm subject matcher
+/// (`parse_chosen_creature_type_static_subject`) can't reach.
+///
+/// Structural mirror of [`parse_compound_all_subjects_type_change`] (#5219's
+/// compound-subject animation gate): delegate subject resolution WHOLE to the
+/// already-generic [`parse_continuous_subject_filter`] (which unions "X you
+/// control and Y you control" into an `Or` via
+/// `parse_controlled_compound_continuous_subject_filter`) and own only the
+/// predicate. Declines unless the subject is a genuine `Or` of 2+ filters, so
+/// single-subject lines fall through to the existing sibling unchanged, and
+/// declines non-additive (CR 205.1a SET) predicates. Reuses the fully-wired
+/// `AddChosenSubtype { CreatureType }` runtime — no new variant, no new runtime.
+pub(crate) fn parse_compound_you_control_chosen_type_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let affected = parse_continuous_subject_filter(subject_tp.original)?;
+    // Require a genuine compound (Or of 2+); a single-subject filter is owned by
+    // `parse_arcane_adaptation_chosen_type_static`.
+    match &affected {
+        TargetFilter::Or { filters } if filters.len() >= 2 => {}
+        _ => return None,
+    }
+    // Additive chosen-creature-type predicate only (CR 205.1b). A compound subject
+    // is plural, so the retain pronoun is always "their".
+    nom_on_lower(
+        predicate_tp.original,
+        predicate_tp.lower,
+        parse_compound_chosen_type_additive_predicate,
+    )?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            }])
+            .description(text.to_string()),
+    )
+}
+
+/// nom body for [`parse_compound_you_control_chosen_type_static`]'s predicate,
+/// consumed to `eof` so it never mis-claims a longer line: "the chosen [creature ]
+/// type in addition to their other [creature ]types[.]". Additive only — a bare
+/// "the chosen type" without the retain-suffix (CR 205.1a SET) fails, so a
+/// hypothetical replacing compound is declined rather than silently reinterpreted.
+fn parse_compound_chosen_type_additive_predicate(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = alt((tag("the chosen creature type"), tag("the chosen type"))).parse(input)?;
+    let (input, ()) = parse_chosen_type_additive_suffix(input, "their")?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, ()))
+}
+
+/// Prefix matcher for the `oracle.rs` "The same is true for ..." tail splitter:
+/// consumes "`<compound subject>` are the chosen [creature ]type in addition to
+/// their other [creature ]types[.]" so Rukarumel's trailing sentence is preserved
+/// as an `Unimplemented` residual (matching Arcane Adaptation / Maskwood Nexus)
+/// rather than collapsing the whole line into a strict-fail. Verifies the subject
+/// is a genuine compound `Or` before claiming, so single-subject chosen-type lines
+/// stay with [`parse_chosen_creature_type_static_prefix`].
+pub(crate) fn parse_compound_you_control_chosen_type_static_prefix(
+    input: &str,
+) -> OracleResult<'_, ()> {
+    let (after_subject, subject) =
+        take_until::<_, _, OracleError<'_>>(" are the chosen").parse(input)?;
+    match parse_continuous_subject_filter(subject) {
+        Some(TargetFilter::Or { filters }) if filters.len() >= 2 => {}
+        _ => {
+            return Err(nom::Err::Error(OracleError::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+    }
+    let (input, _) = tag(" are ").parse(after_subject)?;
+    let (input, _) = alt((tag("the chosen creature type"), tag("the chosen type"))).parse(input)?;
+    let (input, ()) = parse_chosen_type_additive_suffix(input, "their")?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
 }
 
 // CR 613.1d + CR 205.3m: "<creatures you control are> every creature type" —

@@ -3300,6 +3300,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_no_opponent_controls_a,
         // "your opponents control no [type]" → Not(IsPresent { Opponent })
         parse_your_opponents_control_no,
+        // "a player controls no [type]" → QuantityComparison(EQ, ControlledByEachPlayer{Min}, 0)
+        parse_a_player_controls_no,
         // CR 702: "a creature you control has <keyword>" — subject-first
         // presence check (Odric, Lunarch Marshal). Grouped into the control
         // family so the parent dispatcher's `alt` arity stays within bounds.
@@ -3954,6 +3956,43 @@ fn parse_no_opponent_controls_a(input: &str) -> OracleResult<'_, StaticCondition
                 filter: Some(filter),
             }),
         },
+    ))
+}
+
+/// CR 603.4 + CR 608.2c: Parse "a player controls no [type]" → an existential
+/// zero-control check over every player. Sothera, the Supervoid's end-step
+/// intervening-if ("if a player controls no creatures, ...").
+///
+/// Emits a `QuantityComparison` whose LHS is
+/// `ControlledByEachPlayer { aggregate: Min }` compared `EQ 0`: the minimum
+/// per-player controlled count is zero exactly when SOME player controls none
+/// of the matching permanents. This is deliberately NOT a `Not(IsPresent)` form
+/// — that would assert "no matching permanent exists on the battlefield at all",
+/// the wrong rule (the you / opponents `control no` arms above use it because
+/// their scope is a single fixed controller). The filter is intentionally
+/// controller-less: the resolver (`game::quantity`, `ControlledByEachPlayer`
+/// arm) gates each candidate on `obj.controller == p.id`, enforcing the "they
+/// control" semantics per iterated player (CR 109.5).
+fn parse_a_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a player controls no ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = input.len() - remainder.len();
+    Ok((
+        &input[consumed..],
+        make_quantity_comparison(
+            QuantityRef::ControlledByEachPlayer {
+                filter,
+                aggregate: AggregateFunction::Min,
+            },
+            Comparator::EQ,
+            0,
+        ),
     ))
 }
 
@@ -10366,6 +10405,57 @@ mod tests {
         let (rest, c) = parse_inner_condition("you control no creatures").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::Not { .. }));
+    }
+
+    // CR 603.4 + CR 109.5: Sothera, the Supervoid's end-step intervening-if. The
+    // existential "a player controls no creatures" must emit a QuantityComparison
+    // over ControlledByEachPlayer{Min} EQ 0 with a CONTROLLER-LESS filter — NOT
+    // the Not(IsPresent) form the you / opponents `control no` arms use (those
+    // assert no such permanent exists at all; this asserts some player has none).
+    #[test]
+    fn test_a_player_controls_no_creatures() {
+        let (rest, c) = parse_inner_condition("a player controls no creatures").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ControlledByEachPlayer {
+                                filter,
+                                aggregate: AggregateFunction::Min,
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {
+                // The filter must be controller-less: the resolver enforces
+                // "they control" via obj.controller == p.id (quantity.rs). A
+                // controller clause here would double-scope and zero the min.
+                match filter {
+                    TargetFilter::Typed(tf) => assert!(
+                        tf.controller.is_none(),
+                        "ControlledByEachPlayer filter must be controller-less, got {:?}",
+                        tf.controller
+                    ),
+                    other => panic!("expected Typed(creature) filter, got {other:?}"),
+                }
+            }
+            other => panic!(
+                "expected QuantityComparison(ControlledByEachPlayer{{Min}} EQ 0), got {other:?}"
+            ),
+        }
+    }
+
+    // Negative guard: the single-controller "you control no X" form must remain
+    // Not(IsPresent) — the new existential arm must not hijack it.
+    #[test]
+    fn test_you_control_no_is_not_quantity_comparison() {
+        let (_, c) = parse_inner_condition("you control no creatures").unwrap();
+        assert!(
+            matches!(c, StaticCondition::Not { .. }),
+            "you-scoped 'control no' must stay Not(IsPresent), got {c:?}"
+        );
     }
 
     #[test]
