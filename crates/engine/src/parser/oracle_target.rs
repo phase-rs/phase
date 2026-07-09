@@ -11044,16 +11044,19 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
-    /// Diagnostic for issue #5412 (Exhaustion / Icebreaker Kraken): does the
-    /// general compound-core-type-Or splitter (the `TYPE_SEPARATORS` recursion
-    /// plus `distribute_controller_to_or`) already handle the "target player/
-    /// opponent controls" controller-suffix family the same way it already
-    /// handles "your opponents control" (see
-    /// `artifacts_and_creatures_your_opponents_control` below)? If this
-    /// passes, the compound-subject gap for issue #5412 is NOT in this
-    /// general splitter, and the dedicated dispatcher added in
-    /// `oracle_effect/subject.rs` can call `parse_target` once on the whole
-    /// compound subject rather than per-conjunct.
+    /// Building-block regression guard: the general compound-core-type-Or
+    /// splitter (the `TYPE_SEPARATORS` recursion plus
+    /// `distribute_controller_to_or`) handles the "target player/opponent
+    /// controls" controller-suffix family the same way it already handles
+    /// "your opponents control" (see `artifacts_and_creatures_your_opponents_control`
+    /// below). This is what makes compound-subject "don't/doesn't untap"
+    /// restrictions like Exhaustion ("Creatures and lands target opponent
+    /// controls don't untap during their next untap step.") and Icebreaker
+    /// Kraken resolve correctly through the single generic
+    /// `parse_subject_application` call in `try_parse_subject_restriction_clause`
+    /// — no dedicated compound-subject dispatcher needed for this predicate
+    /// class (confirmed via the PR parse-diff baseline: both cards are
+    /// already `supported: true` on main).
     #[test]
     fn compound_creatures_and_lands_target_opponent_controls() {
         let (f, rest) = parse_type_phrase("creatures and lands target opponent controls");
