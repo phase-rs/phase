@@ -1174,7 +1174,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
-                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
+                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.17a: whole-body
                 // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
                 // "it loses ... and gains ...", return/put the enchanted creature
                 // card to the battlefield under your control, attach the Aura to

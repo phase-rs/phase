@@ -7284,7 +7284,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(Effect::RingTemptsYou);
     }
 
-    // CR 101.4 + CR 701.21a: "For each player, you choose from among the permanents that
+    // CR 101.4 + CR 701.17a: "For each player, you choose from among the permanents that
     // player controls an artifact, a creature, ..." — Tragic Arrogance pattern where
     // the spell's controller chooses for all players.
     if let Ok((after_prefix, _)) =
@@ -11430,11 +11430,11 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
     Some(AbilityDefinition::new(kind, effect))
 }
 
-/// CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: Whole-body, fail-closed recognizer
+/// CR 608.2c + CR 613.1f + CR 701.3a + CR 701.17a: Whole-body, fail-closed recognizer
 /// for the reanimator-Aura ETB effect shared by Animate Dead and Dance of the Dead.
 /// The chain it builds implements a reanimation instruction (CR 608.2c), a layer-6
 /// keyword swap (CR 613.1f), an attach (CR 701.3a), and a delayed sacrifice
-/// (CR 701.21a). Note: CR 303.4f does NOT apply — the Aura is not entering the
+/// (CR 701.17a). Note: CR 303.4f does NOT apply — the Aura is not entering the
 /// battlefield "by a means other than resolving as an Aura spell"; it resolved
 /// normally and this triggered ability then specifies the object to enchant.
 ///
@@ -11531,13 +11531,13 @@ fn parse_reanimator_aura_etb_body(i: &str) -> OracleResult<'_, crate::types::zon
 ///   (CR 701.3a: the Aura attaches to the reanimated creature — the #4767 bug).
 /// * `CreateDelayedTrigger` likewise keeps `SelfRef` (never rebound) so the
 ///   leaves-battlefield condition watches the Aura, and its `Sacrifice { ParentTarget }`
-///   snapshots the creature at delayed-trigger creation time (CR 701.21a /
+///   snapshots the creature at delayed-trigger creation time (CR 701.17a /
 ///   CR 603.7c: "that creature's controller sacrifices it").
 fn build_reanimator_aura_etb_chain(
     kind: AbilityKind,
     tap_state: crate::types::zones::EtbTapState,
 ) -> AbilityDefinition {
-    // CR 701.21a + CR 603.7c: "When ~ leaves the battlefield, that creature's
+    // CR 701.17a + CR 603.7c: "When ~ leaves the battlefield, that creature's
     // controller sacrifices it." — delayed leaves-battlefield sacrifice of the
     // reanimated creature (ParentTarget, snapshotted at creation).
     let sacrifice = AbilityDefinition::new(
@@ -11639,7 +11639,7 @@ enum EqualizeVerb {
 /// minimum) would mis-clamp a positive disposal count instead of yielding 0.
 fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
     match verb {
-        // CR 701.21a: battlefield clause — "lands they control" / "creatures
+        // CR 701.17a: battlefield clause — "lands they control" / "creatures
         // they control". `filter` carries `controller: You`. The sacrifice
         // `target` and the RIGHT `ControlledByEachPlayer` Min keep `You`; the
         // LEFT per-player count is re-scoped to `ScopedPlayer` so it reads the
@@ -12678,7 +12678,7 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             amount,
             player: target,
         },
-        // CR 115.1a/c + CR 701.21a + CR 608.2c: "Target opponent/player sacrifices
+        // CR 115.1a/c + CR 701.17a + CR 608.2c: "Target opponent/player sacrifices
         // a [typed] permanent ... for each X" (Urborg Justice, Din of the Fireherd,
         // Rakdos Riteknife). The for-each interception strips the dynamic count
         // early, so the fixed-count `inject_subject_target` Sacrifice arm never ran
@@ -13461,7 +13461,7 @@ fn try_parse_verb_and_target<'a>(
                 rem,
             ));
         }
-        // CR 107.1c + CR 701.21a: "sacrifice one or more / any number of
+        // CR 107.1c + CR 701.17a: "sacrifice one or more / any number of
         // <filter>" — delegate to the single variable-count-sacrifice
         // authority so the dynamic `UpTo(ObjectCount)` ceiling and the
         // matched `min_count` (1 vs 0) are produced consistently with the
@@ -17401,7 +17401,7 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         {
             tf.controller.clone()
         }
-        // CR 115.1 + CR 701.21a: A bare "target player" subject ("target player
+        // CR 115.1 + CR 701.17a: A bare "target player" subject ("target player
         // sacrifices a creature" — Diabolic Edict, Chainer's Edict, Geth's
         // Verdict, Liliana of the Veil −2) is a player target. "target opponent"
         // lowers to a typed filter with `controller: Opponent` (matched above),
@@ -18144,7 +18144,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // CR 608.2k + CR 109.4: "that player sacrifices a non-Elf creature" /
         // "each opponent sacrifices a creature they control". When the subject
         // is a player reference (TriggeringPlayer / TargetPlayer / etc.) and
-        // CR 115.1 + CR 701.21a: Sacrifice with a typed object filter —
+        // CR 115.1 + CR 701.17a: Sacrifice with a typed object filter —
         // inject the subject's controller constraint. For non-targeted subjects
         // ("each player sacrifices a non-Elf creature"), this scopes the filter
         // to the acting player's permanents. For targeted subjects ("target
@@ -25627,7 +25627,7 @@ pub(crate) fn parse_effect_chain_ir(
         let (text, mut unless_pay) =
             extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
 
-        // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
+        // CR 701.17a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
         // opponent (may) ", "each opponent ", "each player "). Threaded via
         // `ParseContext.actor` so targeted-action parsers can default
@@ -25635,7 +25635,7 @@ pub(crate) fn parse_effect_chain_ir(
         // itself doesn't specify one (e.g. "you may sacrifice a non-Demon
         // creature" → controller defaults to You). Without this default, the
         // resolver would treat `controller: None` as Any and let the actor
-        // sacrifice an opponent's permanent — violating CR 701.21a.
+        // sacrifice an opponent's permanent — violating CR 701.17a.
         let chunk_actor = match (is_optional, &opponent_may_scope, &player_scope) {
             (true, None, None) => Some(ControllerRef::You),
             // CR 608.2d + CR 101.4: "any player may sacrifice … of their choice" —
@@ -27084,7 +27084,7 @@ fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> 
 /// [`ThisWayCause`] the tracked-set consumer should bind to (`caused_by`):
 ///
 ///   - "exiled this way" → `Some(Exiled)` (CR 701.13a — exile).
-///   - "sacrificed this way" → `Some(Sacrificed)` (CR 701.21a).
+///   - "sacrificed this way" → `Some(Sacrificed)` (CR 701.17a).
 ///   - "destroyed this way" → `Some(Destroyed)` (CR 701.8a).
 ///   - "milled this way" → `Some(Milled)` (CR 701.17a).
 ///   - "discarded this way" → `Some(Discarded)` (CR 701.9a).
