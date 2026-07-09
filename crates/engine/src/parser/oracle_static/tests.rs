@@ -4095,7 +4095,7 @@ fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
 
     let cmc_ge_4 = FilterProp::Cmc {
         comparator: Comparator::GE,
-        value: QuantityExpr::Fixed(4),
+        value: QuantityExpr::Fixed { value: 4 },
     };
     // Artifact conjunct: a non-Equipment artifact you control, mana value >= 4.
     assert!(

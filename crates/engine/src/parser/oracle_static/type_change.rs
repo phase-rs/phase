@@ -1807,9 +1807,9 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
 /// `<non-X Y>` and `<non-Z W>` [you control] [with mana value N or greater] is
 /// a `<predicate>`" — a compound-subject continuous animation whose subject is
 /// a heterogeneous union of negated-type legs sharing a trailing qualifier
-/// (controller / mana-value threshold), and whose predicate grants a fixed P/T
-/// + type change PLUS a mixed bare-keyword/quoted-ability list. Corpus member:
-/// Bello, Bard of the Brambles — "During your turn, each non-Equipment
+/// (controller / mana-value threshold), and whose predicate grants a fixed
+/// P/T plus type change PLUS a mixed bare-keyword/quoted-ability list. Corpus
+/// member: Bello, Bard of the Brambles — "During your turn, each non-Equipment
 /// artifact and non-Aura enchantment you control with mana value 4 or greater
 /// is a 4/4 Elemental creature in addition to its other types and has
 /// indestructible, haste, and \"Whenever this creature deals combat damage to
