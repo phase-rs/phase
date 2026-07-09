@@ -348,7 +348,6 @@ enum FacePriority {
 /// Read-only inputs shared by every worker thread of the per-card parse pass.
 struct CardWorkCtx<'a> {
     filter_names: &'a [String],
-    stats: bool,
     token_source_metadata: &'a HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
     rarity_map: &'a HashMap<String, BTreeSet<Rarity>>,
     bracket_lists: &'a BracketLists,
@@ -367,7 +366,8 @@ struct CardWork<'a> {
     localized: Vec<(String, &'a AtomicCard)>,
     /// Number of `cards_with_unimplemented` increments this card contributes.
     /// A homonym group increments once per unimplemented face, so this is a
-    /// count rather than a flag. Always 0 when `--stats` is off.
+    /// count rather than a flag. Always computed (the AST scan is trivial next
+    /// to the parse); `--stats` only gates the printout.
     unimplemented_faces: u32,
 }
 
@@ -424,7 +424,7 @@ fn build_card_work<'a>(
             let key = face.name.to_lowercase();
             let legalities = legalities_to_export_map(&normalize_legalities(&source.legalities));
 
-            if ctx.stats && card_face_has_unimplemented_parts(&face) {
+            if card_face_has_unimplemented_parts(&face) {
                 work.unimplemented_faces += 1;
             }
 
@@ -460,13 +460,11 @@ fn build_card_work<'a>(
             );
         }
 
-        if ctx.stats {
-            let has_unimplemented = layout_faces(&layout)
-                .iter()
-                .any(|f| card_face_has_unimplemented_parts(f));
-            if has_unimplemented {
-                work.unimplemented_faces += 1;
-            }
+        if layout_faces(&layout)
+            .iter()
+            .any(|f| card_face_has_unimplemented_parts(f))
+        {
+            work.unimplemented_faces += 1;
         }
 
         for (face_idx, (face_ref, source)) in layout_faces(&layout)
@@ -527,7 +525,7 @@ fn build_card_work<'a>(
         let key = face.name.to_lowercase();
         let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 
-        if ctx.stats && card_face_has_unimplemented_parts(&face) {
+        if card_face_has_unimplemented_parts(&face) {
             work.unimplemented_faces += 1;
         }
 
@@ -1089,7 +1087,6 @@ fn main() {
 
     let ctx = CardWorkCtx {
         filter_names: &filter_names,
-        stats,
         token_source_metadata: &token_source_metadata,
         rarity_map: &rarity_map,
         bracket_lists: &bracket_lists,
