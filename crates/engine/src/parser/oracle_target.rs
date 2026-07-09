@@ -11104,6 +11104,43 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
+    /// Building-block regression guard: the general compound-core-type-Or
+    /// splitter (the `TYPE_SEPARATORS` recursion plus
+    /// `distribute_controller_to_or`) handles the "target player/opponent
+    /// controls" controller-suffix family the same way it already handles
+    /// "your opponents control" (see `artifacts_and_creatures_your_opponents_control`
+    /// below). This is what makes compound-subject "don't/doesn't untap"
+    /// restrictions like Exhaustion ("Creatures and lands target opponent
+    /// controls don't untap during their next untap step.") and Icebreaker
+    /// Kraken resolve correctly through the single generic
+    /// `parse_subject_application` call in `try_parse_subject_restriction_clause`
+    /// — no dedicated compound-subject dispatcher needed for this predicate
+    /// class (confirmed via the PR parse-diff baseline: both cards are
+    /// already `supported: true` on main).
+    #[test]
+    fn compound_creatures_and_lands_target_opponent_controls() {
+        let (f, rest) = parse_type_phrase("creatures and lands target opponent controls");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "expected 2 disjuncts, got {filters:?}");
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    )
+                );
+            }
+            other => panic!("expected Or filter, got {other:?}"),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
     #[test]
     fn artifacts_and_creatures_your_opponents_control() {
         let (f, rest) = parse_type_phrase("artifacts and creatures your opponents control");
