@@ -200,12 +200,10 @@ jobs:
         # at step start against the clean checkout, so oracle-gen's later
         # write-if-changed rewrite of oracle-subtypes.json cannot feed back in.
         #
-        # ai-gate.yml carries a `cardgen-` cache whose key EXPRESSION looks
-        # identical, but the two have never shared an entry and cannot: ai-gate
-        # restores its cache before it downloads AtomicCards.json (the download
-        # sits inside its miss-gated Generate step) and that file is gitignored,
-        # so `hashFiles` silently omits it there and the digests always differ.
-        # This expression intentionally supersets ai-gate's; they are independent.
+        # ai-gate.yml intentionally uses the same `cardgen-` key expression, so
+        # main pushes can seed generated-card-data entries that AI PR gates reuse.
+        # Both workflows download AtomicCards.json before this step so the
+        # gitignored MTGJSON input participates in `hashFiles`.
         id: cardgen-cache
         uses: actions/cache@v4
         with:
@@ -225,15 +223,12 @@ jobs:
         #
         # Deliberately a SEPARATE key from `cardgen-cache`, not a reuse of it.
         # A cardgen entry proves only that generation succeeded; it is not
-        # evidence that anything validated it. ai-gate.yml generates card-data
-        # and never validates it, and while its `cardgen-` key is de-facto
-        # disjoint from this workflow's today (see the note above), that is an
-        # accident of its step order, not a guarantee. Were ai-gate ever fixed to
-        # genuinely share the key, an engine change whose output fails
-        # `card-data-validate` would red card-data-gate while ai-gate still
-        # succeeded and saved the shared entry — and gating validate on that
-        # entry would skip validation on the next push: a false green. This cache
-        # is written by card-data-gate alone, so a hit cannot lie about a gate.
+        # evidence that anything validated it. ai-gate.yml intentionally shares
+        # `cardgen-` entries but never validates them. If this gate skipped
+        # validate/coverage on a shared cardgen hit, an engine change whose
+        # generated output fails `card-data-validate` could still seed a false
+        # green for the next push. This cache is written by card-data-gate alone,
+        # so a hit cannot lie about a gate.
         id: gates-cache
         uses: actions/cache@v4
         with:
