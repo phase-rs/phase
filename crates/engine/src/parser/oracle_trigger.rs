@@ -12361,44 +12361,27 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // CR 205.3a + CR 601.2a: a comma-separated card-type / subtype disjunction
         // ("Whenever you cast an Aura, Equipment, or Vehicle spell" — Sram, Senior
         // Edificer) spans the truncation ", " the same way the color disjunction
-        // above does. Parse it — and an optional "from <zone>" cast origin — as
-        // SEPARATE axes before the truncation below cuts the list to its first leg
+        // above does. Parse it -- and an optional "from <zone>" cast origin -- as
+        // separate axes before the truncation below cuts the list to its first leg
         // (which dropped Equipment/Vehicle, leaving the trigger firing only on
-        // Auras). The `from <zone>` tail must be split off FIRST so it is routed to
-        // the `spell_cast_origin` gate (CR 601.2a) rather than swept into the type
-        // filter as a `FilterProp::InZone` (which is wrong for a stack-resident
-        // spell). Fail-safe: fires only when the type phrase is a genuine multi-leg
-        // comma list, any cast-origin tail is cleanly consumed, and no post-spell
-        // modifier remains; otherwise control falls through unchanged.
+        // Auras). The immediate post-spell `from <zone>` tail is routed to the
+        // `spell_cast_origin` gate (CR 601.2a) rather than swept into the type filter
+        // as a `FilterProp::InZone` (which is wrong for a stack-resident spell).
+        // Fail-safe: fires only when the pre-" spell" type phrase is a
+        // genuine multi-leg comma list and the post-spell tail is empty, the effect
+        // comma, or a clean cast-origin tail followed by the effect comma;
+        // otherwise control falls through unchanged.
         {
             let trimmed = after.trim();
-            // Split off a cast-origin "from <zone>" tail first. It is a genuine
-            // cast origin only when the text before it is exactly the type-list
-            // spell (see the emptiness guard below) — else the "from" belongs to
-            // the effect clause and this split is ignored.
-            let (type_part, cast_origin, origin_tail_ok) =
-                match nom_primitives::split_once_on(trimmed, " from ") {
-                    Ok((_, (before, from_tail))) => {
-                        let origin_text = match nom_primitives::split_once_on(from_tail, ", ") {
-                            Ok((_, (origin_text, _effect_clause))) => origin_text,
-                            Err(_) => from_tail,
-                        };
-                        let origin_clause = format!("from {}", origin_text.trim_start());
-                        match parse_origin_constraint_tail(
-                            origin_clause.as_str(),
-                            parse_cast_origin_zone,
-                        ) {
-                            Ok((rest, origin)) if rest.trim().is_empty() => (before, origin, true),
-                            _ => (trimmed, OriginConstraint::Any, false),
-                        }
-                    }
-                    Err(_) => (trimmed, OriginConstraint::Any, true),
-                };
-            let type_part = type_part.trim();
             if let Ok((_, (type_phrase, post_spell))) =
-                nom_primitives::split_once_on(type_part, " spell")
+                nom_primitives::split_once_on(trimmed, " spell")
             {
                 let post_spell = post_spell.trim_start();
+                let (post_spell, cast_origin) =
+                    match parse_origin_constraint_tail(post_spell, parse_cast_origin_zone) {
+                        Ok((rest, origin)) => (rest.trim_start(), origin),
+                        Err(_) => (post_spell, OriginConstraint::Any),
+                    };
                 let post_spell_ok = post_spell.is_empty()
                     || tag::<_, _, OracleError<'_>>(",").parse(post_spell).is_ok();
                 let (filter, remainder) = parse_cast_type_list_filter(type_phrase.trim());
@@ -12409,9 +12392,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 ) && nom_primitives::split_once_on(consumed, ", ").is_ok();
                 let remainder_ok = remainder.trim().is_empty();
                 let comma_list = is_comma_type_list.then_some(filter);
-                if let Some(filter) =
-                    comma_list.filter(|_| remainder_ok && post_spell_ok && origin_tail_ok)
-                {
+                if let Some(filter) = comma_list.filter(|_| remainder_ok && post_spell_ok) {
                     let filter = if is_another {
                         add_another_prop(filter)
                     } else {
