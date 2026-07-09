@@ -7,7 +7,7 @@ use super::prelude::*;
 use super::support::*;
 use crate::types::ability::PlayerFilter;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
-use nom::combinator::{all_consuming, map, not, opt, peek, recognize};
+use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
@@ -1063,7 +1063,7 @@ pub(crate) fn parse_variable_pt_pattern(
         // (`0` included, so "+x/+0" still yields no toughness modification).
         let (rest, mag) = alt((
             value(None, tag("x")),
-            map(digit1, |d: &str| Some(d.parse::<i32>().unwrap_or(0))),
+            map_res(digit1, |d: &str| d.parse::<i32>().map(Some)),
         ))
         .parse(rest)?;
         Ok((rest, (sign, mag)))
