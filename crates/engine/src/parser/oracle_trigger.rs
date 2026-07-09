@@ -38,7 +38,7 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
@@ -4194,6 +4194,50 @@ fn extract_if_condition_with_card_name(
         return (
             strip_condition_clause(text, prefix.len(), pat.len()),
             Some(TriggerCondition::PlacedByAbilitySource),
+        );
+    }
+
+    // CR 603.4 + CR 702.105a: "if it's/is attacking the player with the most
+    // life or tied for most life" — the same defending-player-life-total
+    // predicate Dethrone's own synthesized trigger uses (`build_dethrone_trigger`,
+    // database/synthesis.rs), reused here so a card phrasing the identical CR
+    // 702.105a idiom as a plain intervening-if (Scourge of the Throne: "if
+    // it's attacking the player with the most life or tied for most life,
+    // untap all attacking creatures") gets the SAME typed condition instead of
+    // either the wrong bare `SourceIsAttacking` (dropping the life-total
+    // qualifier entirely — the phase-rs/phase#5449 review's second finding) or
+    // an unconditional `None` (which would make the ability fire regardless of
+    // who's being attacked — strictly worse than the original bug). Ordered
+    // before the plain "if it's attacking" simple-table entry so the longer,
+    // more specific phrase is never partially shadowed by the shorter one.
+    if let Some((before, _, rest)) = scan_preceded(&lower, |i| {
+        (
+            tag::<_, _, OracleError<'_>>("if it"),
+            alt((tag("'s"), tag(" is"))),
+            tag(" attacking the player with the most life or tied for most life"),
+        )
+            .parse(i)
+    }) {
+        let pat_start = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pat_start, clause_len),
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::DefendingPlayer,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    },
+                },
+            }),
         );
     }
 

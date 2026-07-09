@@ -662,6 +662,62 @@ fn trigger_conjunctive_battlefield_condition_does_not_corrupt_roll_die_effect() 
     );
 }
 
+// CR 603.4 + CR 702.105a (phase-rs/phase#5449 review, second finding):
+// Scourge of the Throne's "if it's attacking the player with the most life or
+// tied for most life" must map to the SAME typed QuantityComparison condition
+// Dethrone's own synthesized trigger uses (build_dethrone_trigger,
+// database/synthesis.rs) — not the wrong bare SourceIsAttacking (dropping the
+// life-total qualifier, the original regression) and not an unconditional
+// None (which would make UntapAll + the extra combat phase fire regardless of
+// who's being attacked — strictly worse than the original bug, since the
+// ability would then work "too well" under the wrong conditions).
+#[test]
+fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks for the first time each turn, if it's \
+             attacking the player with the most life or tied for most life, untap \
+             all attacking creatures.",
+        "Scourge of the Throne",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::DefendingPlayer,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            },
+        }),
+        "must map to the same typed life-total comparison Dethrone uses, not \
+         a bare SourceIsAttacking and not an unconditional None"
+    );
+    let Some(execute) = &def.execute else {
+        panic!("expected an UntapAll execute ability, got None");
+    };
+    assert_eq!(
+        *execute.effect,
+        Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![FilterProp::Attacking { defender: None }],
+            }),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        },
+        "the effect body must not be corrupted by the intervening-if extraction"
+    );
+}
+
 // Sibling: Animate Dead's own genuine (non-conjunctive) "if it's on the
 // battlefield" condition, immediately followed by a comma, must still match
 // the simple-table entry — the boundary check must not be so strict that it
