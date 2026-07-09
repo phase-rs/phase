@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::thread;
 
 use serde::{Deserialize, Serialize};
 
@@ -336,6 +337,226 @@ fn build_export_layout(
     }
 }
 
+/// Which `face_index` collision policy a pending face uses. Homonym groups
+/// (distinct cards sharing one printed name) resolve collisions differently
+/// from ordinary faces — see `homonym_face_priority` / `same_class_face_priority`.
+enum FacePriority {
+    SameClass,
+    Homonym,
+}
+
+/// Read-only inputs shared by every worker thread of the per-card parse pass.
+struct CardWorkCtx<'a> {
+    filter_names: &'a [String],
+    stats: bool,
+    token_source_metadata: &'a HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
+    rarity_map: &'a HashMap<String, BTreeSet<Rarity>>,
+    bracket_lists: &'a BracketLists,
+    #[cfg(feature = "forge")]
+    forge_index: Option<&'a engine::database::forge::ForgeIndex>,
+}
+
+/// One card's fully-parsed export payload. Produced off-thread by
+/// `build_card_work` (Oracle-text parsing dominates the pass at ~5ms/card) and
+/// merged into the order-sensitive shared indexes afterwards, in input order.
+struct CardWork<'a> {
+    mtgjson_key: &'a str,
+    /// Faces to insert into `face_index`, in the order the sequential loop emitted them.
+    entries: Vec<(String, CardExportEntry, FacePriority)>,
+    /// `(face key, source)` pairs destined for the localized sidecars.
+    localized: Vec<(String, &'a AtomicCard)>,
+    /// Number of `cards_with_unimplemented` increments this card contributes.
+    /// A homonym group increments once per unimplemented face, so this is a
+    /// count rather than a flag. Always 0 when `--stats` is off.
+    unimplemented_faces: u32,
+}
+
+/// Parse one MTGJSON atomic group into its export payload. Pure: reads only
+/// `ctx` and `faces`, touches no shared mutable state, so it is safe to run
+/// concurrently across cards. Returns `None` for cards the export skips.
+fn build_card_work<'a>(
+    ctx: &CardWorkCtx<'_>,
+    mtgjson_key: &'a str,
+    faces: &'a [AtomicCard],
+) -> Option<CardWork<'a>> {
+    // Drop officially-removed offensive cards before any other handling,
+    // so they never enter the card database (and not even an explicit
+    // --filter can resurrect them).
+    if faces
+        .first()
+        .is_some_and(|f| is_removed_offensive_card(&f.name))
+    {
+        return None;
+    }
+    // --filter: skip cards not matching any filter name
+    if !ctx.filter_names.is_empty() {
+        let card_name = faces
+            .first()
+            .map(|f| f.name.to_lowercase())
+            .unwrap_or_default();
+        if !ctx.filter_names.iter().any(|n| card_name.contains(n)) {
+            return None;
+        }
+    }
+
+    let mut work = CardWork {
+        mtgjson_key,
+        entries: Vec::new(),
+        localized: Vec::new(),
+        unimplemented_faces: 0,
+    };
+
+    let oracle_id = faces
+        .first()
+        .and_then(|f| f.identifiers.scryfall_oracle_id.clone());
+
+    let layout_kind = map_layout(&faces[0].layout);
+
+    if is_homonym_atomic_group(faces) {
+        for source in faces.iter() {
+            let oracle_id = source.identifiers.scryfall_oracle_id.clone();
+            let mut face = build_oracle_face(source, oracle_id);
+            #[cfg(feature = "forge")]
+            if let Some(fi) = ctx.forge_index {
+                engine::database::forge::apply_forge_fallback(&mut face, fi);
+            }
+            stamp_token_source_metadata(&mut face, source, ctx.token_source_metadata);
+            let key = face.name.to_lowercase();
+            let legalities = legalities_to_export_map(&normalize_legalities(&source.legalities));
+
+            if ctx.stats && card_face_has_unimplemented_parts(&face) {
+                work.unimplemented_faces += 1;
+            }
+
+            let rarities = ctx
+                .rarity_map
+                .get(&face.name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+
+            let bracket_signals = bracket_signals_for_face(ctx.bracket_lists, &face, source);
+            work.localized.push((key.clone(), source));
+            work.entries.push((
+                key,
+                CardExportEntry {
+                    face,
+                    legalities,
+                    layout: None,
+                    printings: source.printings.clone(),
+                    rulings: source.rulings.clone(),
+                    rarities,
+                    bracket_signals,
+                },
+                FacePriority::Homonym,
+            ));
+        }
+    } else if faces.len() >= 2 {
+        let mut legalities_by_face = BTreeMap::new();
+        let layout = build_export_layout(faces, oracle_id, layout_kind);
+        for (face, source) in layout_faces(&layout).iter().zip(faces.iter()) {
+            legalities_by_face.insert(
+                face.name.to_lowercase(),
+                legalities_to_export_map(&normalize_legalities(&source.legalities)),
+            );
+        }
+
+        if ctx.stats {
+            let has_unimplemented = layout_faces(&layout)
+                .iter()
+                .any(|f| card_face_has_unimplemented_parts(f));
+            if has_unimplemented {
+                work.unimplemented_faces += 1;
+            }
+        }
+
+        for (face_idx, (face_ref, source)) in layout_faces(&layout)
+            .into_iter()
+            .zip(faces.iter())
+            .enumerate()
+        {
+            let key = face_ref.name.to_lowercase();
+            let legalities = legalities_by_face.remove(&key).unwrap_or_default();
+            let mut face = face_ref.clone();
+            #[cfg(feature = "forge")]
+            if let Some(fi) = ctx.forge_index {
+                engine::database::forge::apply_forge_fallback(&mut face, fi);
+            }
+            stamp_token_source_metadata(&mut face, source, ctx.token_source_metadata);
+            let layout_str = match layout_kind {
+                LayoutKind::Single => None,
+                _ => Some(faces[0].layout.clone()),
+            };
+            // Front face (index 0) owns the rulings; back faces get an empty vec.
+            // MTGJSON duplicates rulings across faces; this dedups at export time.
+            let rulings = if face_idx == 0 {
+                faces[0].rulings.clone()
+            } else {
+                Vec::new()
+            };
+            let rarities = ctx
+                .rarity_map
+                .get(&face.name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            let bracket_signals = bracket_signals_for_face(ctx.bracket_lists, &face, source);
+            // Localized sidecars cover single-faced cards only — see
+            // `collect_localized`. Multi-face `foreignData` is a combined
+            // "A // B" name with no reliable per-face split, so these faces
+            // fall back to English at the display layer.
+            work.entries.push((
+                key,
+                CardExportEntry {
+                    face,
+                    legalities,
+                    layout: layout_str,
+                    printings: faces[0].printings.clone(),
+                    rulings,
+                    rarities,
+                    bracket_signals,
+                },
+                FacePriority::SameClass,
+            ));
+        }
+    } else {
+        let mut face = build_oracle_face(&faces[0], oracle_id);
+        #[cfg(feature = "forge")]
+        if let Some(fi) = ctx.forge_index {
+            engine::database::forge::apply_forge_fallback(&mut face, fi);
+        }
+        stamp_token_source_metadata(&mut face, &faces[0], ctx.token_source_metadata);
+        let key = face.name.to_lowercase();
+        let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
+
+        if ctx.stats && card_face_has_unimplemented_parts(&face) {
+            work.unimplemented_faces += 1;
+        }
+
+        let rarities = ctx
+            .rarity_map
+            .get(&face.name.to_lowercase())
+            .cloned()
+            .unwrap_or_default();
+
+        let bracket_signals = bracket_signals_for_face(ctx.bracket_lists, &face, &faces[0]);
+        work.localized.push((key.clone(), &faces[0]));
+        work.entries.push((
+            key,
+            CardExportEntry {
+                face,
+                legalities,
+                layout: None,
+                printings: faces[0].printings.clone(),
+                rulings: faces[0].rulings.clone(),
+                rarities,
+                bracket_signals,
+            },
+            FacePriority::SameClass,
+        ));
+    }
+
+    Some(work)
+}
+
 /// Write parser-authoritative creature subtypes: CardTypes.json ∪ corroborated
 /// AtomicCards harvest (token-only + newer card-printed types).
 fn write_oracle_subtypes(
@@ -351,12 +572,32 @@ fn write_oracle_subtypes(
     // `serde_json::to_string_pretty` does not emit a trailing newline; append one
     // so the committed generated file stays POSIX-compliant (no "\ No newline at
     // end of file" diff churn on every regeneration).
+    //
+    // Write only when the bytes actually change. The engine lib pulls this file
+    // in with `include_str!` (see `parser/oracle_util.rs`), so an unconditional
+    // `fs::write` bumps its mtime, dirties the engine crate's dep-info
+    // fingerprint, and forces a full engine recompile on the next cargo
+    // invocation — a byte-identical file costing ~220s of CI rebuild. This
+    // mirrors the `cmp`/`mv` mtime-preservation dance `scripts/gen-card-data.sh`
+    // performs on `known-tokens.toml` for exactly the same reason.
     match serde_json::to_string_pretty(&list)
         .map_err(|e| e.to_string())
-        .and_then(|json| std::fs::write(&out_path, format!("{json}\n")).map_err(|e| e.to_string()))
-    {
-        Ok(()) => eprintln!(
+        .and_then(|json| {
+            let contents = format!("{json}\n");
+            if std::fs::read_to_string(&out_path).is_ok_and(|prev| prev == contents) {
+                return Ok(false);
+            }
+            std::fs::write(&out_path, contents)
+                .map(|()| true)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(true) => eprintln!(
             "Wrote {} creature subtypes to {}",
+            list.len(),
+            out_path.display()
+        ),
+        Ok(false) => eprintln!(
+            "Skipped write of {} creature subtypes to {} (unchanged)",
             list.len(),
             out_path.display()
         ),
@@ -845,178 +1086,68 @@ fn main() {
     // tiebreakers produce the same winner every time.
     let mut atomic_keys: Vec<&String> = atomic.data.keys().collect();
     atomic_keys.sort_unstable();
-    for mtgjson_key in atomic_keys {
-        let faces = &atomic.data[mtgjson_key];
-        // Drop officially-removed offensive cards before any other handling,
-        // so they never enter the card database (and not even an explicit
-        // --filter can resurrect them).
-        if faces
-            .first()
-            .is_some_and(|f| is_removed_offensive_card(&f.name))
-        {
-            continue;
-        }
-        // --filter: skip cards not matching any filter name
-        if !filter_names.is_empty() {
-            let card_name = faces
-                .first()
-                .map(|f| f.name.to_lowercase())
-                .unwrap_or_default();
-            if !filter_names.iter().any(|n| card_name.contains(n)) {
-                continue;
-            }
-        }
 
+    let ctx = CardWorkCtx {
+        filter_names: &filter_names,
+        stats,
+        token_source_metadata: &token_source_metadata,
+        rarity_map: &rarity_map,
+        bracket_lists: &bracket_lists,
+        #[cfg(feature = "forge")]
+        forge_index: forge_index.as_ref(),
+    };
+
+    // Parse pass: Oracle-text parsing dominates this loop (~5ms/card over
+    // ~35k cards) and `build_card_work` is pure, so fan it out across cores.
+    // Results are collected index-addressed — each worker owns one contiguous
+    // chunk of the sorted key list and the chunks are concatenated in order —
+    // so the merge below observes exactly the sequential iteration order. That
+    // determinism is load-bearing: `insert_face`'s collision tiebreakers are
+    // order-sensitive, and CI caches card-data.json by content hash.
+    let worker_count = thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk_len = atomic_keys.len().div_ceil(worker_count).max(1);
+    let ctx = &ctx;
+    let atomic_data = &atomic.data;
+    let card_work: Vec<CardWork> = thread::scope(|scope| {
+        let handles: Vec<_> = atomic_keys
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|key| build_card_work(ctx, key.as_str(), &atomic_data[*key]))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("card parse worker panicked"))
+            .collect()
+    });
+
+    // Merge pass: single-threaded and in sorted-key order, because every
+    // mutation here is order-sensitive (`insert_face` collision resolution,
+    // sidecar first-writer-wins) or an accumulator.
+    for card in card_work {
         total_cards += 1;
-
-        let oracle_id = faces
-            .first()
-            .and_then(|f| f.identifiers.scryfall_oracle_id.clone());
-
-        let layout_kind = map_layout(&faces[0].layout);
-
-        if is_homonym_atomic_group(faces) {
-            for source in faces.iter() {
-                let oracle_id = source.identifiers.scryfall_oracle_id.clone();
-                let mut face = build_oracle_face(source, oracle_id);
-                #[cfg(feature = "forge")]
-                if let Some(ref fi) = forge_index {
-                    engine::database::forge::apply_forge_fallback(&mut face, fi);
+        cards_with_unimplemented += card.unimplemented_faces;
+        for (key, source) in &card.localized {
+            collect_localized(&mut sidecars, key, source);
+        }
+        for (key, entry, priority) in card.entries {
+            match priority {
+                FacePriority::SameClass => {
+                    insert_face(&mut face_index, card.mtgjson_key, key, entry)
                 }
-                stamp_token_source_metadata(&mut face, source, &token_source_metadata);
-                let key = face.name.to_lowercase();
-                let legalities =
-                    legalities_to_export_map(&normalize_legalities(&source.legalities));
-
-                if stats && card_face_has_unimplemented_parts(&face) {
-                    cards_with_unimplemented += 1;
-                }
-
-                let rarities = rarity_map
-                    .get(&face.name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
-                collect_localized(&mut sidecars, &key, source);
-                insert_face_with_priority(
+                FacePriority::Homonym => insert_face_with_priority(
                     &mut face_index,
-                    mtgjson_key.as_str(),
+                    card.mtgjson_key,
                     key,
-                    CardExportEntry {
-                        face,
-                        legalities,
-                        layout: None,
-                        printings: source.printings.clone(),
-                        rulings: source.rulings.clone(),
-                        rarities,
-                        bracket_signals,
-                    },
+                    entry,
                     homonym_face_priority,
-                );
+                ),
             }
-        } else if faces.len() >= 2 {
-            let mut legalities_by_face = BTreeMap::new();
-            let layout = build_export_layout(faces, oracle_id, layout_kind);
-            for (face, source) in layout_faces(&layout).iter().zip(faces.iter()) {
-                legalities_by_face.insert(
-                    face.name.to_lowercase(),
-                    legalities_to_export_map(&normalize_legalities(&source.legalities)),
-                );
-            }
-
-            if stats {
-                let has_unimplemented = layout_faces(&layout)
-                    .iter()
-                    .any(|f| card_face_has_unimplemented_parts(f));
-                if has_unimplemented {
-                    cards_with_unimplemented += 1;
-                }
-            }
-
-            for (face_idx, (face_ref, source)) in layout_faces(&layout)
-                .into_iter()
-                .zip(faces.iter())
-                .enumerate()
-            {
-                let key = face_ref.name.to_lowercase();
-                let legalities = legalities_by_face.remove(&key).unwrap_or_default();
-                let mut face = face_ref.clone();
-                #[cfg(feature = "forge")]
-                if let Some(ref fi) = forge_index {
-                    engine::database::forge::apply_forge_fallback(&mut face, fi);
-                }
-                stamp_token_source_metadata(&mut face, source, &token_source_metadata);
-                let layout_str = match layout_kind {
-                    LayoutKind::Single => None,
-                    _ => Some(faces[0].layout.clone()),
-                };
-                // Front face (index 0) owns the rulings; back faces get an empty vec.
-                // MTGJSON duplicates rulings across faces; this dedups at export time.
-                let rulings = if face_idx == 0 {
-                    faces[0].rulings.clone()
-                } else {
-                    Vec::new()
-                };
-                let rarities = rarity_map
-                    .get(&face.name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
-                let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
-                // Localized sidecars cover single-faced cards only — see
-                // `collect_localized`. Multi-face `foreignData` is a combined
-                // "A // B" name with no reliable per-face split, so these faces
-                // fall back to English at the display layer.
-                insert_face(
-                    &mut face_index,
-                    mtgjson_key.as_str(),
-                    key,
-                    CardExportEntry {
-                        face,
-                        legalities,
-                        layout: layout_str,
-                        printings: faces[0].printings.clone(),
-                        rulings,
-                        rarities,
-                        bracket_signals,
-                    },
-                );
-            }
-        } else {
-            let mut face = build_oracle_face(&faces[0], oracle_id);
-            #[cfg(feature = "forge")]
-            if let Some(ref fi) = forge_index {
-                engine::database::forge::apply_forge_fallback(&mut face, fi);
-            }
-            stamp_token_source_metadata(&mut face, &faces[0], &token_source_metadata);
-            let key = face.name.to_lowercase();
-            let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
-
-            if stats && card_face_has_unimplemented_parts(&face) {
-                cards_with_unimplemented += 1;
-            }
-
-            let rarities = rarity_map
-                .get(&face.name.to_lowercase())
-                .cloned()
-                .unwrap_or_default();
-
-            let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
-            collect_localized(&mut sidecars, &key, &faces[0]);
-            insert_face(
-                &mut face_index,
-                mtgjson_key.as_str(),
-                key,
-                CardExportEntry {
-                    face,
-                    legalities,
-                    layout: None,
-                    printings: faces[0].printings.clone(),
-                    rulings: faces[0].rulings.clone(),
-                    rarities,
-                    bracket_signals,
-                },
-            );
         }
     }
 
