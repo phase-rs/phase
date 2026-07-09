@@ -12379,16 +12379,13 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             let (type_part, cast_origin, origin_tail_ok) =
                 match nom_primitives::split_once_on(trimmed, " from ") {
                     Ok((_, (before, from_tail))) => {
-                        let tail = format!("from {}", from_tail.trim_start());
+                        let origin_text = match nom_primitives::split_once_on(from_tail, ", ") {
+                            Ok((_, (origin_text, _effect_clause))) => origin_text,
+                            Err(_) => from_tail,
+                        };
+                        let tail = format!("from {}", origin_text.trim_start());
                         match parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone) {
-                            Ok((rest, origin))
-                                if rest.trim().is_empty()
-                                    || tag::<_, _, OracleError<'_>>(",")
-                                        .parse(rest.trim_start())
-                                        .is_ok() =>
-                            {
-                                (before, origin, true)
-                            }
+                            Ok((rest, origin)) if rest.trim().is_empty() => (before, origin, true),
                             _ => (trimmed, OriginConstraint::Any, false),
                         }
                     }
