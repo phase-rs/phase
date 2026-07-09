@@ -3848,11 +3848,12 @@ pub(crate) fn distribute_core_type_to_or(filter: TargetFilter) -> TargetFilter {
     TargetFilter::Or { filters }
 }
 
-/// CR 205.4b: When a leading `non-` negation scopes a type disjunction
-/// ("non-Lesson instant and sorcery card"), the negated type must bind to
-/// every disjunct — not only the first leg parsed before the `and`/`or`
-/// connector. Without this, "non-Lesson instant and sorcery" would match
-/// any sorcery, including Lessons (issue #1163, Iroh, Grand Lotus).
+/// CR 109.2 + CR 205.2a + CR 205.3: When a leading `non-` negation scopes a
+/// type/subtype disjunction ("non-Lesson instant and sorcery card"), the
+/// negated type must bind to every disjunct — not only the first leg parsed
+/// before the `and`/`or` connector. Without this, "non-Lesson instant and
+/// sorcery" would match any sorcery, including Lessons (issue #1163, Iroh,
+/// Grand Lotus).
 ///
 /// Guarded to a single shared negation: if any OTHER leg already carries its
 /// own `Non(_)` type filter, the legs are independently negated ("non-Equipment

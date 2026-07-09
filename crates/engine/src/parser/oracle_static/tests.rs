@@ -4196,12 +4196,12 @@ fn compound_negated_type_subject_animation_declines_non_additive_predicate() {
 // a regression introduced by adding the compound handler).
 #[test]
 fn compound_negated_type_subject_animation_single_subject_falls_through() {
+    let line = "each non-Equipment artifact you control with mana value 4 or greater is a 4/4 \
+                Elemental creature in addition to its other types.";
+    let lower = line.to_lowercase();
+    let tp = crate::parser::oracle_util::TextPair::new(line, &lower);
     assert!(
-        parse_static_line_multi(
-            "each non-Equipment artifact you control with mana value 4 or greater is a 4/4 \
-             Elemental creature in addition to its other types."
-        )
-        .is_empty(),
+        super::type_change::parse_each_compound_subject_type_change(&tp, line).is_none(),
         "single-subject line must not be claimed by the compound-subject handler"
     );
 }
