@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 168,
+      "date": "2026-07-09",
+      "title": "Combat requirement badges arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Loyalty ultimates that finally fire: Kaya, Geist Hunter (token doubling), Vraska, Betrayal's Sting (Treasure and poison abilities), and Sothera, the Supervoid (dies-edict exile + reanimation)\n• More static-ability cards working: Rukarumel, Biologist and Shalai, Voice of Plenty (multi-subject type & hexproof grants), Triarch Stalker & Beckoning Will-o'-Wisp (\"attacking the last chosen player\"), Akron Legionnaire (\"except for…\" attack restriction), and Glaring Spotlight (hexproof bypass)\n• Nightcreep now turns all creatures black and all lands into Swamps\n• Infantry Shield grants Mobilize equal to the equipped creature's power; Death's Presence adds counters equal to the dead creature's power; Etali, Primal Sickness deals poison from its combat damage\n• Brine Elemental skips an opponent's next untap step; Jaheira grants her mana ability to every token you control (Treasures, Clues, and Food included)\n\n🛠️ Cards That Now Work Right\n• Winter Orb and Static Orb once again stop players from untapping (they were silently doing nothing)\n• Quest for Renewal's Seedborn untap kicks in once it has four quest counters\n• Veyran, Voice of Duality only doubles instant/sorcery cast triggers now, not every trigger you control\n• Cruel Revival no longer hands back the creature it destroyed when you decline the optional bounce\n• Kodama's enter-the-battlefield triggers wait for the tutor spell to finish resolving\n• Leeching Sliver drains the correct defending player when a different Sliver attacks\n• Armory Automaton's attach step can be skipped\n• Sram, Senior Edificer triggers on Aura, Equipment, AND Vehicle casts (not just Auras)\n• Panther Habit's damage prevention shields only the equipped creature\n\n⚔️ Combat & Gameplay\n• On-card badges now show attack and block requirements — must-attack, goad, must-block, can't-attack/block — with a clear message when a required attacker or blocker hasn't been declared\n• Sequential combat-damage prompts (e.g. 10+ tramplers from Stonehoof Chieftain) now appear one after another instead of looking frozen\n\n🖥️ Interface\n• Your companion now sits as the far-right card in your hand fan\n• A new viewer lets you review and clear \"Don't ask me again this game\" auto-choices for optional triggers\n• The scry/surveil dialog scrolls to reach every card at large counts\n• MTGA deck imports accept lowercase set codes\n• Spell colors now drive the auto-WUBRG battlefield background\n\n🌐 Multiplayer\n• Server-hosted rooms resume after a page reload",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524680978029744218"
+    },
+    {
       "id": 167,
       "date": "2026-07-08",
       "title": "Eidolon taxes opponents, dredge works mid-draw",
