@@ -1179,7 +1179,6 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // extremum-hand phrases must precede the generic target-zone and zone
         // arms they share a "cards in " prefix with.
         alt((
-            parse_number_of_cards_in_chosen_player_zone,
             // CR 402.1: "cards in the hand of the {player|opponent} with the
             // {most|fewest} cards in hand" (Adamaro P/T CDA class).
             parse_number_of_cards_in_hand_of_extremum_player,
@@ -1546,23 +1545,6 @@ fn parse_number_of_type_on_battlefield_with_keyword(input: &str) -> OracleResult
                 controller: None,
                 properties: vec![FilterProp::WithKeyword { value: keyword }],
             }),
-        },
-    ))
-}
-
-/// CR 613.1: Parse "cards in the chosen player's <zone>" after "the number of"
-/// into the general zone-count building block scoped to the source's persisted
-/// chosen player.
-fn parse_number_of_cards_in_chosen_player_zone(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("cards in the chosen player's ").parse(input)?;
-    let (rest, zone) = parse_zone_ref_singular(rest)?;
-    Ok((
-        rest,
-        QuantityRef::ZoneCardCount {
-            zone,
-            card_types: Vec::new(),
-            scope: CountScope::SourceChosenPlayer,
-            filter: None,
         },
     ))
 }
@@ -2122,6 +2104,15 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
                 parse_zone_ref_plural,
             ),
             |zone| (zone, CountScope::Opponents),
+        ),
+        // CR 613.1: "the chosen player's <zone>" — the player persisted on the
+        // source via an earlier "choose a player" (Haunting Apparition:
+        // "green creature cards in the chosen player's graveyard"). Placed on the
+        // shared scoped-zone path so card-type/color filters compose uniformly,
+        // rather than a separate unfiltered-only arm.
+        map(
+            preceded(tag("the chosen player's "), parse_zone_ref_singular),
+            |zone| (zone, CountScope::SourceChosenPlayer),
         ),
         map(preceded(tag("all "), parse_zone_ref_plural), |zone| {
             (zone, CountScope::All)

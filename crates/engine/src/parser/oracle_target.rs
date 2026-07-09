@@ -6910,6 +6910,12 @@ enum ZoneQual {
     /// "its owner's ", "that player's ", "defending player's ", "each player's ".
     /// No ownership constraint emitted; referent is resolved by context upstream.
     OtherPoss,
+    /// "the chosen player's " — the player persisted on the source via an earlier
+    /// "choose a player" (Haunting Apparition: "green creature cards in the chosen
+    /// player's graveyard"). Sets `ControllerRef::SourceChosenPlayer`, mirroring
+    /// how `You` sets `ControllerRef::You`; CR 613.1 resolves it against the
+    /// source's persisted choice.
+    ChosenPlayer,
     /// "a ", "the ", or nothing (e.g., "from exile").
     Plain,
 }
@@ -7079,6 +7085,10 @@ fn parse_zone_suffix_nom(
                 vec![FilterProp::InAnyZone { zones }],
                 Some(ControllerRef::You),
             ),
+            ZoneQual::ChosenPlayer => (
+                vec![FilterProp::InAnyZone { zones }],
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
             ZoneQual::TargetPlayer => (
                 vec![
                     FilterProp::Owned {
@@ -7113,6 +7123,10 @@ fn parse_zone_suffix_nom(
                 None,
             ),
             ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+            ZoneQual::ChosenPlayer => (
+                vec![FilterProp::InZone { zone }],
+                Some(ControllerRef::SourceChosenPlayer),
+            ),
             ZoneQual::TargetPlayer => (
                 vec![
                     FilterProp::Owned {
@@ -7145,6 +7159,9 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
+        // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
+        // isn't consumed as a bare "the " article.
+        value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
         value(ZoneQual::TargetPlayer, tag("target player's ")),
         value(ZoneQual::Their, tag("their ")),
         value(

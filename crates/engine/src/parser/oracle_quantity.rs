@@ -3333,6 +3333,57 @@ mod tests {
     }
 
     #[test]
+    fn cda_type_filtered_cards_in_chosen_players_graveyard() {
+        // CR 613.1: "creature cards in the chosen player's graveyard" — a type-
+        // filtered card count scoped to the source's persisted chosen player.
+        // Recognizing "the chosen player's <zone>" on the shared scoped-zone path
+        // lets the type filter compose, mirroring "your"/"opponents'" graveyards.
+        let expr =
+            parse_cda_quantity("the number of creature cards in the chosen player's graveyard");
+        assert_eq!(
+            expr,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Creature],
+                    scope: CountScope::SourceChosenPlayer,
+                    filter: None,
+                },
+            }),
+            "got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn cda_color_filtered_cards_in_chosen_players_graveyard() {
+        // CR 613.1: Haunting Apparition — "green creature cards in the chosen
+        // player's graveyard". A color (property) filter routes through the
+        // general typed-phrase path as an `ObjectCount`; the "the chosen player's"
+        // zone qualifier must set `ControllerRef::SourceChosenPlayer`, mirroring
+        // how "your graveyard" sets `ControllerRef::You`.
+        let expr = parse_cda_quantity(
+            "the number of green creature cards in the chosen player's graveyard",
+        );
+        let Some(QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        }) = expr
+        else {
+            panic!("expected ObjectCount with a typed filter, got {expr:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::SourceChosenPlayer));
+        assert!(tf.properties.contains(&FilterProp::HasColor {
+            color: ManaColor::Green
+        }));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: crate::types::zones::Zone::Graveyard
+        }));
+    }
+
+    #[test]
     fn cda_half_highest_opponent_life_rounded_up() {
         // Malignus: "half the highest life total among your opponents, rounded up".
         // The inner is a cross-player life aggregate the general nom grammar does
