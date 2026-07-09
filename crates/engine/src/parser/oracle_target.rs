@@ -1866,6 +1866,65 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     parse_type_phrase_with_ctx(text, &mut ParseContext::default())
 }
 
+/// Consume an `"or"` connector whose right-hand side is article-led
+/// (`"or a "` / `"or an "`) or bare (`"or "`), returning the text after it.
+fn parse_or_connector_with_optional_article(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = nom::character::complete::space0.parse(input)?;
+    let (input, _) = tag("or ").parse(input)?;
+    let (input, _) = opt(nom_primitives::parse_article).parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 608.2c: A filter phrase may name its alternatives as an article-led
+/// disjunction — "a non-Avatar creature card **or a** planeswalker card"
+/// (Overlord of the Balemurk). `parse_type_phrase` stops at the connector and
+/// hands the right-hand side back as remainder (see
+/// `parse_type_phrase_leaves_article_led_or_rhs_as_remainder`), because a bare
+/// `"or <type>"` union and an article-led `"or a <type>"` continuation are
+/// different productions.
+///
+/// Callers that would otherwise discard that remainder must fold it in, or the
+/// spell silently loses an alternative the Oracle text named — the planeswalker
+/// half of Overlord's return was unreachable this way. Each disjunct is parsed
+/// by the full `parse_type_phrase` grammar and unioned into `TargetFilter::Or`,
+/// so this composes for any number of alternatives rather than one card's shape.
+///
+/// Returns `head` untouched (and the remainder unconsumed) when the remainder
+/// does not open an article-led disjunct, so it is safe to call unconditionally.
+pub(crate) fn fold_article_led_or_type_phrases<'a>(
+    head: TargetFilter,
+    remainder: &'a str,
+) -> (TargetFilter, &'a str) {
+    let mut filters = vec![head];
+    let mut rest = remainder;
+
+    loop {
+        let lower = rest.to_lowercase();
+        let Ok((after_connector, ())) = parse_or_connector_with_optional_article(&lower) else {
+            break;
+        };
+        // Map the lowercase offset back onto the original-case slice so subtype
+        // capitalization ("Avatar", "Plan") survives into the parsed filter.
+        let rhs = &rest[rest.len() - after_connector.len()..];
+        let (filter, next) = parse_type_phrase(rhs);
+        // A leg that consumed nothing is not a type phrase (e.g. "or a card in
+        // your hand"); leave it for the caller rather than looping forever.
+        if next.len() >= rhs.len() {
+            break;
+        }
+        filters.push(filter);
+        rest = next;
+    }
+
+    match filters.len() {
+        1 => (
+            filters.pop().expect("head filter is always present"),
+            remainder,
+        ),
+        _ => (TargetFilter::Or { filters }, rest),
+    }
+}
+
 /// CR 608.2c: separator byte length for a mass-target union continuation
 /// ("…, all artifacts, and all enchantments"). Longest-match-first over the
 /// comma / "and" / "or" connectors. Returns `None` when `lower` does not start
@@ -15383,6 +15442,67 @@ mod tests {
         };
         assert!(tf.type_filters.contains(&TypeFilter::Artifact));
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// CR 608.2c: the fold turns the article-led RHS that `parse_type_phrase`
+    /// leaves behind into a real `Or` union — Overlord of the Balemurk's
+    /// "a non-Avatar creature card or a planeswalker card".
+    #[test]
+    fn fold_article_led_or_unions_planeswalker_disjunct() {
+        let (head, rest) = parse_type_phrase("non-Avatar creature card or a planeswalker card");
+        assert_eq!(
+            rest, "or a planeswalker card",
+            "the disjunct is left unparsed"
+        );
+
+        let (folded, rest) = fold_article_led_or_type_phrases(head, rest);
+        assert!(
+            rest.trim().is_empty(),
+            "disjunct must be consumed: {rest:?}"
+        );
+        let TargetFilter::Or { filters } = folded else {
+            panic!("expected Or union, got {folded:?}");
+        };
+        assert_eq!(filters.len(), 2, "one leg per named alternative");
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Planeswalker)
+            )),
+            "the planeswalker alternative must survive: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.type_filters.contains(&TypeFilter::Non(Box::new(
+                            TypeFilter::Subtype("Avatar".to_string())
+                        )))
+            )),
+            "the non-Avatar creature alternative must survive: {filters:?}"
+        );
+    }
+
+    /// The fold is a no-op when the remainder is not an article-led disjunct,
+    /// so callers may invoke it unconditionally.
+    #[test]
+    fn fold_article_led_or_is_noop_without_disjunct() {
+        let (head, rest) = parse_type_phrase("creature card");
+        let head_clone = head.clone();
+        let (folded, rest2) = fold_article_led_or_type_phrases(head, rest);
+        assert_eq!(folded, head_clone, "filter must be returned untouched");
+        assert_eq!(rest2, rest, "remainder must be left unconsumed");
+    }
+
+    /// A trailing "or" clause that is not a type phrase must be left for the
+    /// caller rather than swallowed (and must not loop).
+    #[test]
+    fn fold_article_led_or_leaves_non_type_phrase_rhs() {
+        let head = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        let (folded, rest) = fold_article_led_or_type_phrases(head.clone(), " or you lose 2 life");
+        assert_eq!(folded, head);
+        assert_eq!(rest, " or you lose 2 life");
     }
 
     /// Regression: a bare (no-article) connector RHS still parses to an Or via

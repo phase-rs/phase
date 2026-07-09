@@ -1817,7 +1817,13 @@ pub(super) fn parse_targeted_action_ast(
         let (target, target_syntax, _count_for_shape) = match counted_return {
             Some((target, c)) => (target, TargetSyntax::TargetKeyword, c),
             None => {
-                let (target, _rem, syntax) = parse_target_with_syntax(target_text, ctx);
+                let (target, rem, syntax) = parse_target_with_syntax(target_text, ctx);
+                // CR 608.2c: "... a non-Avatar creature card or a planeswalker card"
+                // names two alternatives; `parse_target_with_syntax` stops at the
+                // article-led connector, so fold the remaining disjuncts in rather
+                // than dropping them (Overlord of the Balemurk).
+                let (target, _rem) =
+                    crate::parser::oracle_target::fold_article_led_or_type_phrases(target, rem);
                 #[cfg(debug_assertions)]
                 assert_no_compound_remainder(_rem, text);
                 (target, syntax, QuantityExpr::Fixed { value: 0 })
