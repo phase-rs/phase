@@ -365,11 +365,12 @@ pub(crate) fn parse_compound_subject_rule_static(
 /// type-phrase exemption ("artifact creatures", via [`parse_exempt_conjunct`])
 /// or a named exemption within a type class ("creatures named Akron
 /// Legionnaire", via `FilterProp::Named`), Or-combined, then ANDed as
-/// `Not{Or{..}}` onto the `affected` filter of every `StaticDefinition`
-/// [`parse_compound_subject_rule_static`] produces for the remainder after the
-/// exempt clause — the same "resolve conjuncts independently, recombine
-/// generically" shape as the compound-subject animation dispatcher (#5219).
-/// Must precede that sibling in dispatch order (`shared.rs`).
+/// `Not{Or{..}}` onto the `affected` filter of every rule-restriction
+/// `StaticDefinition` the normal static parser produces for the remainder
+/// after the exempt clause — the same "resolve conjuncts independently,
+/// recombine generically" shape as the compound-subject animation dispatcher
+/// (#5219). Must precede [`parse_compound_subject_rule_static`] in dispatch
+/// order (`shared.rs`).
 ///
 /// Scoped to the 2-conjunct "`<A>` and `<B>`" form: a Scryfall full-text search
 /// (`o:/^Except for/`) returns exactly one printed card in this shape (Akron
@@ -405,7 +406,31 @@ pub(crate) fn parse_leading_except_for_rule_static(
 
     let rest_offset = lower.len() - rest_lower.len();
     let rest_text = &text[rest_offset..];
-    let mut defs = parse_compound_subject_rule_static(rest_text, rest_lower)?;
+    let mut defs = parse_static_line_multi(rest_text);
+    if defs.is_empty()
+        || !defs.iter().all(|def| match &def.mode {
+            StaticMode::CantAttack
+            | StaticMode::CantBlock
+            | StaticMode::CantAttackOrBlock
+            | StaticMode::CantCrew
+            | StaticMode::CantUntap
+            | StaticMode::CantBeActivated { .. }
+            | StaticMode::MustAttack
+            | StaticMode::MustBlock
+            | StaticMode::MustBeBlocked { .. }
+            | StaticMode::Goaded
+            | StaticMode::BlockRestriction { .. }
+            | StaticMode::Shroud
+            | StaticMode::Hexproof
+            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::NoMaximumHandSize
+            | StaticMode::MayPlayAdditionalLand => true,
+            StaticMode::Other(name) => name == "CantBeSacrificed",
+            _ => false,
+        })
+    {
+        return None;
+    }
 
     let not_exempt = TargetFilter::Not {
         filter: Box::new(exempt_filter),
