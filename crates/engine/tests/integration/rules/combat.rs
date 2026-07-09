@@ -190,6 +190,171 @@ fn becomes_blocked_by_creature_fires_for_each_blocker() {
     assert_eq!(state.objects[&blocker_b].damage_marked, 2);
 }
 
+/// CR 509.1h + CR 509.3d + CR 603.7: Venom's "blocks or becomes blocked by a
+/// non-Wall creature, destroy the other creature at end of combat" — the
+/// originally reported bug (a compound blocks-or-becomes-blocked trigger with a
+/// blocker filter silently dropping "or becomes blocked", and, independently,
+/// the runtime resolving "the other creature" to the wrong object).
+///
+/// Reverting the compound-mode dispatch (`oracle_trigger.rs`) → the trigger
+/// parses as plain `Blocks` and never fires when Venom's host is blocked as an
+/// attacker, so no delayed trigger is scheduled (first assert flips). Reverting
+/// the `blocked_attacker_from_event` leading arm (`targeting.rs`) → "the other
+/// creature" resolves to Venom's host instead of the blocker, so the delayed
+/// trigger targets the wrong object and the wrong creature dies (both zone
+/// asserts flip).
+///
+/// Sizing: attacker and blocker are 1/5 so both survive combat damage — the
+/// blocker's death must come from Venom's end-of-combat destroy, not combat.
+///
+/// (The real card is an Aura using "enchanted creature"; the scenario harness
+/// has no aura-attach helper, so the runtime paths — compound matcher,
+/// per-blocker filtered event emission, ParentTarget resolution, delayed-trigger
+/// scheduling — are exercised via the self-referential `SelfRef` form. The
+/// verbatim "enchanted creature" (`AttachedTo`) parse and the delayed-destroy
+/// AST shape are covered by the parser test
+/// `trigger_blocks_or_becomes_blocked_venom_parses_delayed_destroy`.)
+#[test]
+fn venom_destroys_the_creature_that_blocked_it_at_end_of_combat() {
+    use engine::types::ability::{DelayedTriggerCondition, Effect};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature(P0, "Venom", 1, 5)
+        .from_oracle_text(
+            "Whenever Venom blocks or becomes blocked by a non-Wall creature, \
+             destroy the other creature at end of combat.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Bear", 1, 5).id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Venom creature should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker)],
+        })
+        .expect("Bear should be able to block");
+    runner.advance_until_stack_empty();
+
+    // CR 603.7: resolving the compound trigger creates a delayed "at end of
+    // combat, destroy the other creature" trigger. Its presence proves the
+    // compound mode fired from the becomes-blocked event and was NOT silently
+    // dropped: reverting the compound-mode dispatch parses Venom as plain
+    // `Blocks`, whose matcher requires the source to be the *blocker* — Venom's
+    // host is the attacker, so it never fires and no delayed trigger exists.
+    // ("The other creature" is lowered to a tracked-set target; the object it
+    // actually resolves to is proven by the graveyard assertions below.)
+    let scheduled_destroy = runner.state().delayed_triggers.iter().any(|dt| {
+        matches!(
+            dt.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ) && matches!(&dt.ability.effect, Effect::Destroy { .. })
+    });
+    assert!(
+        scheduled_destroy,
+        "Venom must schedule an end-of-combat destroy (compound mode must fire, not be \
+         dropped to plain Blocks); delayed_triggers = {:?}",
+        runner.state().delayed_triggers
+    );
+
+    // Advance through combat damage into End of Combat so the delayed trigger
+    // fires. Both creatures are 1/5, so neither dies to combat damage — the
+    // blocker's death must come from Venom's end-of-combat destroy. Pass
+    // priority (resolving the delayed trigger when it lands on the stack) until
+    // the blocker leaves the battlefield or the loop bound is hit.
+    for _ in 0..40 {
+        if runner.state().objects[&blocker].zone == Zone::Graveyard {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            runner.advance_until_stack_empty();
+        } else if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "the blocker must be destroyed at end of combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&attacker).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "the Venom host (attacker) must survive — Venom destroys the OTHER creature, \
+         never its own host"
+    );
+}
+
+/// CR 509.3d + CR 608.2k: Quagmire Lamprey's "becomes blocked by a creature,
+/// put a -1/-1 counter on that creature" — the pre-existing bug where the
+/// counter landed on Quagmire itself (its own host / the attacker) instead of
+/// the blocker. Fixed as an in-scope byproduct of re-typing the per-blocker
+/// event so `blocked_attacker_from_event` returns the blocker.
+///
+/// Reverting the `blocked_attacker_from_event` leading arm → the -1/-1 counter
+/// lands on Quagmire (attacker) instead of the Bear (blocker): both asserts flip.
+#[test]
+fn quagmire_lamprey_puts_minus_counter_on_blocker_not_itself() {
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature(P0, "Quagmire Lamprey", 2, 2)
+        .from_oracle_text(
+            "Whenever Quagmire Lamprey becomes blocked by a creature, \
+             put a -1/-1 counter on that creature.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Bear", 3, 3).id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Quagmire Lamprey should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker)],
+        })
+        .expect("Bear should be able to block");
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&blocker]
+            .counters
+            .get(&CounterType::Minus1Minus1)
+            .copied(),
+        Some(1),
+        "the -1/-1 counter must land on the blocker (Bear)"
+    );
+    assert_eq!(
+        state.objects[&attacker]
+            .counters
+            .get(&CounterType::Minus1Minus1)
+            .copied(),
+        None,
+        "Quagmire Lamprey (the attacker/host) must NOT receive its own -1/-1 counter"
+    );
+}
+
 #[test]
 fn decayed_attacker_sacrifices_at_end_of_combat() {
     let mut scenario = GameScenario::new();

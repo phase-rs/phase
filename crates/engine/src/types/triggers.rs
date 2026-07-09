@@ -540,6 +540,10 @@ pub enum TriggerMode {
     EntersOrAttacks,
     /// "Whenever ~ attacks or blocks" — fires on both attack (CR 508.3a) and block (CR 509.1h) events.
     AttacksOrBlocks,
+    /// CR 509.1h + CR 509.3d: "~ blocks or becomes blocked" — fires on either the
+    /// blocker-declaration event or the becomes-blocked event, with per-firing
+    /// blocker/attacker disambiguation available to the effect body.
+    BlocksOrBecomesBlocked,
     /// CR 702.55c: "~ enters or the creature it haunts dies" — parsed as one compound
     /// trigger; the ETB half fires on the battlefield and synthesis clones the effect into
     /// a `HauntedCreatureDies` trigger in exile for the haunted-dies half.
@@ -604,6 +608,7 @@ impl FromStr for TriggerMode {
             "BecomesTargetOnce" => TriggerMode::BecomesTargetOnce,
             "BlockersDeclared" => TriggerMode::BlockersDeclared,
             "Blocks" => TriggerMode::Blocks,
+            "BlocksOrBecomesBlocked" => TriggerMode::BlocksOrBecomesBlocked,
             "CaseSolved" => TriggerMode::CaseSolved,
             "Championed" => TriggerMode::Championed,
             "ChangesController" => TriggerMode::ChangesController,
@@ -893,6 +898,7 @@ mod tests {
             "BecomesTargetOnce",
             "BlockersDeclared",
             "Blocks",
+            "BlocksOrBecomesBlocked",
             "CaseSolved",
             "Championed",
             "ChangesController",
