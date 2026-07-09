@@ -124,9 +124,12 @@ export function getPlayerZoneIds(
 export function isPrivatelyLookedAtByViewer(
   gameState: GameState | null,
   objectId: ObjectId,
-  viewerId: PlayerId,
+  viewerId: PlayerId | null | undefined,
 ): boolean {
-  if (!gameState) return false;
+  // Guard against `undefined === undefined`: if the caller hasn't resolved a
+  // real viewer yet (e.g. mid-load) and `private_look_player` also happens to
+  // be unset, a bare `===` would match and leak the private look to nobody.
+  if (!gameState || viewerId == null) return false;
   return (
     gameState.private_look_player === viewerId &&
     (gameState.private_look_ids?.includes(objectId) ?? false)
