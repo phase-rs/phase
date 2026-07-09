@@ -4107,6 +4107,16 @@ fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
         "artifact conjunct must be non-Equipment artifact you control, MV>=4: {:?}",
         def.affected
     );
+    // Regression guard: the artifact conjunct's OWN negation (non-Equipment)
+    // must not cross-contaminate into the enchantment conjunct's non-Aura
+    // negation — each leg carries only its own qualifier.
+    assert!(
+        !filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Artifact)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".to_string())))))),
+        "artifact conjunct must not also carry non-Aura: {:?}",
+        def.affected
+    );
     // Enchantment conjunct: a non-Aura enchantment you control, mana value >= 4.
     assert!(
         filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
@@ -4115,6 +4125,17 @@ fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
                 && tf.controller == Some(ControllerRef::You)
                 && tf.properties.contains(&cmc_ge_4))),
         "enchantment conjunct must be non-Aura enchantment you control, MV>=4: {:?}",
+        def.affected
+    );
+    // Regression guard (issue reported in code review): the enchantment
+    // conjunct must not also inherit the artifact conjunct's non-Equipment
+    // negation via `distribute_neg_type_filters_to_or` treating the two
+    // independently-negated legs as one shared-negation disjunction.
+    assert!(
+        !filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Enchantment)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Equipment".to_string())))))),
+        "enchantment conjunct must not also carry non-Equipment: {:?}",
         def.affected
     );
 

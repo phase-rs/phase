@@ -3853,6 +3853,15 @@ pub(crate) fn distribute_core_type_to_or(filter: TargetFilter) -> TargetFilter {
 /// every disjunct — not only the first leg parsed before the `and`/`or`
 /// connector. Without this, "non-Lesson instant and sorcery" would match
 /// any sorcery, including Lessons (issue #1163, Iroh, Grand Lotus).
+///
+/// Guarded to a single shared negation: if any OTHER leg already carries its
+/// own `Non(_)` type filter, the legs are independently negated ("non-Equipment
+/// artifact and non-Aura enchantment" — Bello, Bard of the Brambles) and must
+/// NOT be cross-contaminated with the first leg's negation. Distributing
+/// unconditionally would leak the artifact leg's `Non(Equipment)` onto the
+/// enchantment leg (which only wants `Non(Aura)`), silently narrowing Bello's
+/// enchantment conjunct to exclude non-Aura-non-Equipment enchantments the
+/// Oracle text never excludes.
 pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetFilter {
     let TargetFilter::Or { mut filters } = filter else {
         return filter;
@@ -3876,6 +3885,14 @@ pub(crate) fn distribute_neg_type_filters_to_or(filter: TargetFilter) -> TargetF
         .unwrap_or_default();
 
     if neg_filters.is_empty() {
+        return TargetFilter::Or { filters };
+    }
+
+    let other_legs_already_negated = filters.iter().skip(1).any(|f| {
+        matches!(f, TargetFilter::Typed(TypedFilter { type_filters, .. })
+            if type_filters.iter().any(|tf| matches!(tf, TypeFilter::Non(_))))
+    });
+    if other_legs_already_negated {
         return TargetFilter::Or { filters };
     }
 
