@@ -1312,12 +1312,11 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
 /// so the clause splitter treats an emblem's granted-ability quote as a
 /// self-contained sentence.
 fn clause_is_emblem_creation_head(current: &str) -> bool {
-    let lower = current.trim_start().to_ascii_lowercase();
     let is_emblem_head = alt((
-        tag::<_, _, OracleError<'_>>("you get an emblem with \""),
-        tag("get an emblem with \""),
+        tag_no_case::<_, _, OracleError<'_>>("you get an emblem with \""),
+        tag_no_case("get an emblem with \""),
     ))
-    .parse(lower.as_str())
+    .parse(current.trim_start())
     .is_ok();
     is_emblem_head
 }
