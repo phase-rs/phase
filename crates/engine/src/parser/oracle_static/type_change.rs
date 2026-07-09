@@ -1155,12 +1155,14 @@ pub(crate) fn parse_enchanted_is_type(
         // NO `SetCardTypes` is emitted — but still emit the subtype replacement
         // (`RemoveAllSubtypes{Creature}` → `AddSubtype`) below.
         //
-        // Two disambiguators from the basic-land subtype change ("Enchanted land
-        // is a Mountain", which must return None here and defer to
-        // SetBasicLandType): a base P/T is creature-only (Lignify), OR the
-        // enchanted permanent itself is a creature — "Enchanted CREATURE is a
-        // Flagbearer" (Coalition Flag) names a creature subtype even without a
-        // base P/T, whereas the basic-land form enchants a LAND (`perm_tf` = Land).
+        // CR 613.1d (Layer 4): the subtype-setting branch below is a
+        // type-changing effect. Two disambiguators separate it from the basic-land
+        // subtype change ("Enchanted land is a Mountain", which must return None
+        // here and defer to SetBasicLandType): a base P/T is creature-only
+        // (Lignify), OR the enchanted permanent itself is a creature — "Enchanted
+        // CREATURE is a Flagbearer" (Coalition Flag) names a creature subtype even
+        // without a base P/T, whereas the basic-land form enchants a LAND (`perm_tf`
+        // = Land).
         let subtype_only_creature_change = granted_core_types.is_empty()
             && !granted_subtypes.is_empty()
             && (base_pt.is_some() || matches!(perm_tf, TypeFilter::Creature));
