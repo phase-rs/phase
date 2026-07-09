@@ -4712,9 +4712,9 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             return player;
         }
     }
-    // CR 608.2d + CR 603.10a: "they may tap that permanent" on zone-change
-    // observer triggers (Charismatic Conqueror) — the entering object's
-    // controller decides whether to tap it, not the ability's controller.
+    // CR 608.2d: "they may tap that permanent" on zone-change observer
+    // triggers (Charismatic Conqueror) — the entering object's controller
+    // decides whether to tap it, not the ability's controller.
     // Resolve the actor from the EVENT-TIME controller recorded on the trigger's
     // `ZoneChangeRecord` (`TriggeringPlayer` → `record.controller`), NOT the
     // object's live controller: if the entering permanent changes controllers
