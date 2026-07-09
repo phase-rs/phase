@@ -4081,7 +4081,7 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::parser::oracle_static::parse_static_line;
+    use crate::parser::oracle_static::{parse_static_line, parse_static_line_multi};
     use crate::types::ability::{
         ChosenAttribute, Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope,
         QuantityExpr, QuantityRef, SeatDirection, StaticCondition, StaticDefinition, TargetFilter,
@@ -4536,6 +4536,69 @@ mod tests {
             "after its controller casts a spell, the creature can't attack"
         );
         assert!(validate_attackers(&state, &[attacker]).is_err());
+    }
+
+    /// CR 508.1c + CR 201.2a: Akron Legionnaire's exempt-list restriction
+    /// end-to-end through actual attacker declaration — not just the parsed
+    /// AST shape (see `oracle_static::tests::
+    /// akron_legionnaire_leading_except_for_exempts_named_and_artifact_creatures`
+    /// for that unit-level check). Attaches the REAL parsed static via
+    /// `parse_static_line_multi` — the only entry point that reaches
+    /// `parse_leading_except_for_rule_static`, since the scoped (non-self)
+    /// subject defers the single-return `parse_static_line` path — to Akron
+    /// Legionnaire itself, then proves the restriction actually gates
+    /// `validate_attackers`/`get_valid_attacker_ids`: a plain nonartifact
+    /// creature you control is excluded, while Akron Legionnaire (exempted by
+    /// name) and an artifact creature you control (exempted by type) remain
+    /// legal attackers.
+    #[test]
+    fn akron_legionnaire_exempts_named_and_artifact_creatures_from_attacking() {
+        let mut state = setup();
+
+        let akron = create_creature(&mut state, PlayerId(0), "Akron Legionnaire", 8, 4);
+        let defs = parse_static_line_multi(
+            "Except for creatures named Akron Legionnaire and artifact creatures, \
+             creatures you control can't attack.",
+        );
+        assert_eq!(defs.len(), 1, "{defs:?}");
+        assert_eq!(defs[0].mode, StaticMode::CantAttack);
+        state
+            .objects
+            .get_mut(&akron)
+            .unwrap()
+            .static_definitions
+            .push(defs.into_iter().next().unwrap());
+
+        let artifact_creature = create_creature(&mut state, PlayerId(0), "Ornithopter", 0, 2);
+        state
+            .objects
+            .get_mut(&artifact_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let plain_creature = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        let valid = get_valid_attacker_ids(&state);
+        assert!(
+            valid.contains(&akron),
+            "Akron Legionnaire exempts itself by name"
+        );
+        assert!(
+            valid.contains(&artifact_creature),
+            "artifact creatures are exempt"
+        );
+        assert!(
+            !valid.contains(&plain_creature),
+            "a plain nonartifact creature you control can't attack"
+        );
+
+        assert!(validate_attackers(&state, &[akron]).is_ok());
+        assert!(validate_attackers(&state, &[artifact_creature]).is_ok());
+        assert!(validate_attackers(&state, &[plain_creature]).is_err());
+        assert!(validate_attackers(&state, &[akron, artifact_creature]).is_ok());
+        assert!(validate_attackers(&state, &[akron, plain_creature]).is_err());
     }
 
     #[test]
