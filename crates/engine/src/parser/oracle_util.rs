@@ -1389,6 +1389,24 @@ pub fn has_unconsumed_conditional(text: &str) -> bool {
         .any(|kw| lower.contains(kw))
 }
 
+/// CR 201.5c: Some cards refer to themselves by a shortened printed name.
+///
+/// For comma-form names, the short self-reference is the span before the comma
+/// after removing MTGJSON's structural Alchemy `A-` prefix.
+pub(crate) fn comma_short_self_name(card_name: &str) -> Option<&str> {
+    let effective_name = if card_name.as_bytes().get(0..2) == Some(b"A-") {
+        &card_name[2..]
+    } else {
+        card_name
+    };
+    let (_, (short_name, _)) = nom_primitives::split_once_on(effective_name, ", ").ok()?;
+    if short_name.len() >= 2 {
+        Some(short_name)
+    } else {
+        None
+    }
+}
+
 /// Replace all occurrences of `needle` in `haystack` with `replacement`,
 /// case-sensitively, only at word boundaries.
 fn replace_all_words_case_sensitive(haystack: &str, needle: &str, replacement: &str) -> String {
@@ -2122,11 +2140,8 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // Part-Time Mutant" (full form, inside an except clause). The earlier
     // `replace_all_words` is word-boundary-aware, so re-running on the
     // residue cannot re-touch a `~` produced by the prior pass.
-    if let Some(comma_pos) = effective_name.find(", ") {
-        let short_name = &effective_name[..comma_pos];
-        if short_name.len() >= 2 {
-            result = replace_all_words(&result, short_name, "~");
-        }
+    if let Some(short_name) = comma_short_self_name(card_name) {
+        result = replace_all_words(&result, short_name, "~");
     }
 
     // "Of"-based short name: "Rosie Cotton of South Lane" → "Rosie Cotton"
@@ -2636,6 +2651,20 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sprouting Goblin enters", "A-Sprouting Goblin"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn comma_short_self_name_extracts_comma_prefix() {
+        assert_eq!(comma_short_self_name("Mishra, Eminent One"), Some("Mishra"));
+        assert_eq!(comma_short_self_name("Gilded Lotus"), None);
+    }
+
+    #[test]
+    fn comma_short_self_name_strips_alchemy_prefix() {
+        assert_eq!(
+            comma_short_self_name("A-Mishra, Eminent One"),
+            Some("Mishra")
         );
     }
 

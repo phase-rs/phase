@@ -7,7 +7,7 @@ use super::prelude::*;
 use super::support::*;
 use crate::types::ability::PlayerFilter;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
-use nom::combinator::{all_consuming, not, opt, peek, recognize};
+use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
@@ -1041,15 +1041,37 @@ pub(crate) fn remove_trailing_quote_connector(text: &mut String) {
 /// Returns AddDynamicPower + AddDynamicToughness modifications if found.
 /// CR 613.4c: Parse a variable P/T modifier pattern like "+x/+x", "-x/-0", "+0/-x".
 /// Returns (power_sign, power_is_x, toughness_sign, toughness_is_x) and remaining text.
+/// CR 613.4c: parse a variable P/T grant body "±P/±T" where each axis is either
+/// the variable X (dynamic — returned as `None`) or a fixed integer magnitude
+/// (returned as `Some(n)`, `n >= 0`). Accepting a fixed magnitude alongside X is
+/// what lets a MIXED grant like Cranial Ram "+X/+1" parse: previously each axis
+/// was restricted to `x`/`0`, so the fixed `+1` failed `digit`-matching and the
+/// whole pattern was rejected, dropping the equip static. The sign is returned
+/// separately per axis so the caller applies it uniformly to the dynamic
+/// quantity or the fixed magnitude.
+/// Parsed axes of a variable P/T grant: `(p_sign, p_mag, t_sign, t_mag)` where
+/// each `*_mag` is `None` for the variable X (dynamic) or `Some(n)` for a fixed
+/// integer magnitude.
+type VariablePtAxes = (i32, Option<i32>, i32, Option<i32>);
+
 pub(crate) fn parse_variable_pt_pattern(
     input: &str,
-) -> nom::IResult<&str, (i32, bool, i32, bool), OracleError<'_>> {
-    let (rest, p_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
-    let (rest, p_is_x) = alt((value(true, tag("x")), value(false, tag("0")))).parse(rest)?;
+) -> nom::IResult<&str, VariablePtAxes, OracleError<'_>> {
+    fn axis(input: &str) -> nom::IResult<&str, (i32, Option<i32>), OracleError<'_>> {
+        let (rest, sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
+        // `None` == the variable X (dynamic); `Some(n)` == a fixed magnitude
+        // (`0` included, so "+x/+0" still yields no toughness modification).
+        let (rest, mag) = alt((
+            value(None, tag("x")),
+            map_res(digit1, |d: &str| d.parse::<i32>().map(Some)),
+        ))
+        .parse(rest)?;
+        Ok((rest, (sign, mag)))
+    }
+    let (rest, (p_sign, p_mag)) = axis(input)?;
     let (rest, _) = tag("/").parse(rest)?;
-    let (rest, t_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(rest)?;
-    let (rest, t_is_x) = alt((value(true, tag("x")), value(false, tag("0")))).parse(rest)?;
-    Ok((rest, (p_sign, p_is_x, t_sign, t_is_x)))
+    let (rest, (t_sign, t_mag)) = axis(rest)?;
+    Ok((rest, (p_sign, p_mag, t_sign, t_mag)))
 }
 
 pub(crate) fn parse_fixed_pt_in_text(lower: &str) -> Option<(i32, i32)> {
