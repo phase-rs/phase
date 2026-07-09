@@ -1275,6 +1275,15 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 508.1c + CR 201.2a: "Except for <A> and <B>, <rule-static>" (Akron
+    // Legionnaire) — a leading exempt-list clause. Must precede
+    // parse_compound_subject_rule_static: that sibling's subject grammar has
+    // no leading-clause syntax and would otherwise strict-fail on the
+    // "except for" prefix.
+    if let Some(defs) = parse_leading_except_for_rule_static(&stripped, &lower) {
+        return defs;
+    }
+
     if let Some(defs) = parse_compound_subject_rule_static(&stripped, &lower) {
         return defs;
     }
@@ -3919,7 +3928,7 @@ pub(crate) fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<F
     (&subject[..before.len()], Some(prop))
 }
 
-fn merge_filter_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+pub(crate) fn merge_filter_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
             tf.properties.push(prop);
