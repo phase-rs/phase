@@ -12368,8 +12368,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // the `spell_cast_origin` gate (CR 601.2a) rather than swept into the type
         // filter as a `FilterProp::InZone` (which is wrong for a stack-resident
         // spell). Fail-safe: fires only when the type phrase is a genuine multi-leg
-        // comma list whose remainder is bare (a cast origin was cleanly consumed)
-        // or is only the effect clause; otherwise control falls through unchanged.
+        // comma list, any cast-origin tail is cleanly consumed, and no post-spell
+        // modifier remains; otherwise control falls through unchanged.
         {
             let trimmed = after.trim();
             // Split off a cast-origin "from <zone>" tail first. It is a genuine
@@ -12418,9 +12418,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                         filter
                     };
                     def.valid_card = Some(filter);
-                    if cast_origin != OriginConstraint::Any {
-                        def.spell_cast_origin = cast_origin;
-                    }
+                    def.spell_cast_origin = cast_origin;
                     return Some((TriggerMode::SpellCast, def));
                 }
             }
