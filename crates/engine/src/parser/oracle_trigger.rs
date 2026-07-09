@@ -12403,7 +12403,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 let is_comma_type_list = matches!(
                     &filter,
                     TargetFilter::Or { filters } if filters.len() >= 2
-                ) && nom_primitives::scan_contains(consumed, ", ");
+                ) && nom_primitives::split_once_on(consumed, ", ").is_ok();
                 let remainder_ok = remainder.trim().is_empty();
                 let comma_list = is_comma_type_list.then_some(filter);
                 if let Some(filter) =
