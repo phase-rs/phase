@@ -5434,6 +5434,33 @@ fn parse_ownership_or_controller_suffix(
         }
         return own_ctrl_offset + (own_ctrl.len() - rest.len());
     }
+    // CR 102.1 + CR 302.6 + CR 508.1a: "the active player has controlled
+    // continuously since the beginning of the turn" is a target-selection
+    // relative clause (Nettling Imp / Norritt / Arcum's Whistle) — distinct
+    // from `parse_controller_suffix`'s past-tense LOOK-BACK arm ("the active
+    // player controlled", CR 608.2i, used by look-back aggregates over
+    // objects that may have since left the battlefield). This clause instead
+    // restricts a LIVE battlefield target: it must both (a) currently be
+    // controlled by the active player and (b) have been so controlled
+    // without interruption since that player's turn began — the same
+    // continuity test CR 508.1a uses to gate which creatures may attack.
+    // Both facts are pushed together: `*controller` pins the live
+    // ActivePlayer scope, and `FilterProp::ControlledContinuouslySinceTurnBegan`
+    // pins the continuity predicate (runtime-evaluated in game/filter.rs as
+    // `!obj.summoning_sick`, CR 302.6's summoning-sickness flag). Only the
+    // ActivePlayer subject is recognized — no card in the corpus was found
+    // using a "you've controlled/you have controlled continuously..." form
+    // for this clause, so that variant is not built ahead of a card that
+    // needs it.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(
+        "the active player has controlled continuously since the beginning of the turn",
+    )
+    .parse(own_ctrl)
+    {
+        *controller = Some(ControllerRef::ActivePlayer);
+        properties.push(FilterProp::ControlledContinuouslySinceTurnBegan);
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
+    }
 
     let (ctrl, ctrl_len) =
         parse_controller_suffix(text, ctx).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
@@ -7989,6 +8016,26 @@ mod tests {
             )
         );
         assert_eq!(rest, "");
+    }
+
+    // Nettling Imp / Norritt / Arcum's Whistle class: verbatim clause from
+    // Nettling Imp's real Oracle text. Building-block test — isolates the new
+    // controller+continuity arm from the pre-existing "non-Wall" type-filter
+    // handling (already covered elsewhere).
+    #[test]
+    fn parse_target_active_player_controlled_continuously_since_turn_began() {
+        let (f, rest) = parse_target(
+            "target creature the active player has controlled continuously since the beginning of the turn",
+        );
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::ActivePlayer)
+                    .properties(vec![FilterProp::ControlledContinuouslySinceTurnBegan])
+            )
+        );
+        assert_eq!(rest.trim(), "");
     }
 
     #[test]

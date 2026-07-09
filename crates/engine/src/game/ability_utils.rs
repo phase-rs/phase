@@ -9127,6 +9127,78 @@ mod tests {
         assert!(matches!(err, EngineError::ActionNotAllowed(_)));
     }
 
+    // Nettling Imp / Norritt / Arcum's Whistle class: "target creature the active
+    // player has controlled continuously since the beginning of the turn". Proves
+    // BOTH predicates gate legality independently — the active-player controller
+    // scope AND the continuity flag — via three fixtures, only one of which is a
+    // legal target. Positive full-set assertion (not a bare negative) so neither
+    // hostile fixture can be excluded vacuously by an upstream short-circuit.
+    #[test]
+    fn build_target_slots_active_player_controlled_continuously_since_turn_began() {
+        use crate::types::ability::{ControllerRef, FilterProp};
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        // Active player (CR 102.1) is PlayerId(0) at game start.
+        assert_eq!(state.active_player, PlayerId(0));
+
+        // Legal: active player's control, no summoning sickness (create_object
+        // does not set the flag — a "pre-existing" battlefield creature).
+        let continuous_active = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Continuous Active".to_string(),
+            Zone::Battlefield,
+        );
+        // Illegal via continuity: active player's control, but summoning-sick.
+        let fresh_active = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Fresh Active".to_string(),
+            Zone::Battlefield,
+        );
+        // Illegal via controller: continuous control, but by the non-active player.
+        let continuous_nonactive = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Continuous Nonactive".to_string(),
+            Zone::Battlefield,
+        );
+        for creature in [continuous_active, fresh_active, continuous_nonactive] {
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        state.objects.get_mut(&fresh_active).unwrap().summoning_sick = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::ActivePlayer)
+                        .properties(vec![FilterProp::ControlledContinuouslySinceTurnBegan]),
+                ),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(continuous_active)]
+        );
+    }
+
     #[test]
     fn build_target_slots_uses_prior_player_targets_for_relative_controller_filters() {
         use crate::types::ability::ControllerRef;
