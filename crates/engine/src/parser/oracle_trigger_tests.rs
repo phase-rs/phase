@@ -9,9 +9,9 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CountScope, DamageChannel,
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
-    ZoneRef,
+    PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -737,6 +737,65 @@ fn trigger_bare_battlefield_condition_still_matches_simple_table() {
         def.execute.is_some(),
         "the reanimator-Aura ETB effect must still parse via the whole-body recognizer"
     );
+}
+
+// Digital-only Alchemy (no CR entry) + CR 113.6b (phase-rs/phase#5449 review,
+// third finding): Hex's leading source-zone intervening-if is
+// "if ~ is on the battlefield or in exile", and its later "Then if it's on the
+// battlefield" clause is part of the effect body. The simple source-zone table
+// must not scan past the leading condition and hoist the later clause instead,
+// which would narrow the trigger to battlefield-only and turn the perpetual
+// effect into a regular Pump.
+#[test]
+fn trigger_hex_companion_keeps_exile_or_battlefield_perpetual_condition() {
+    let def = parse_trigger_line(
+        "Whenever you cast an Adventure spell, if Hex, Kellan's Companion is on \
+             the battlefield or in exile, it perpetually gets +1/+1. Then if it's \
+             on the battlefield, exile it with a fetch counter on it.",
+        "Hex, Kellan's Companion",
+    );
+
+    let Some(TriggerCondition::Or { conditions }) = &def.condition else {
+        panic!(
+            "expected battlefield-or-exile source-zone condition, got {:?}",
+            def.condition
+        );
+    };
+    assert!(
+        conditions.contains(&TriggerCondition::SourceInZone {
+            zone: Zone::Battlefield
+        }),
+        "Hex trigger must still function from the battlefield, got {conditions:?}"
+    );
+    assert!(
+        conditions.contains(&TriggerCondition::SourceInZone { zone: Zone::Exile }),
+        "Hex trigger must still function from exile, got {conditions:?}"
+    );
+    assert!(
+        def.trigger_zones.contains(&Zone::Battlefield),
+        "trigger scanner must include battlefield, got {:?}",
+        def.trigger_zones
+    );
+    assert!(
+        def.trigger_zones.contains(&Zone::Exile),
+        "trigger scanner must include exile, got {:?}",
+        def.trigger_zones
+    );
+
+    let execute = def.execute.as_deref().expect("Hex trigger execute body");
+    match execute.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            ..
+        } => {
+            assert_eq!((*power_delta, *toughness_delta), (1, 1));
+        }
+        other => panic!("expected ApplyPerpetual +1/+1, got {other:?}"),
+    }
 }
 
 /// CR 603.10a + CR 603.4 (issue #4521): Kishla Skimmer — "Whenever a card

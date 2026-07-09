@@ -5637,8 +5637,12 @@ fn try_extract_simple_condition(
     text: &str,
     patterns: &[(&str, TriggerCondition)],
 ) -> Option<(String, Option<TriggerCondition>)> {
+    let first_if = tp.find("if "); // allow-noncombinator: structural first-if anchor for trigger-level intervening-if extraction
     for (pattern, condition) in patterns {
         if let Some(pos) = tp.find(pattern) {
+            if Some(pos) != first_if {
+                continue;
+            }
             let after = &tp.lower[pos + pattern.len()..];
             let is_whole_clause = after.is_empty() || after.starts_with([',', '.']);
             if !is_whole_clause {
