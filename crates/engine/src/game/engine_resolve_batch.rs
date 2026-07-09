@@ -21,6 +21,15 @@ pub struct ResolveAllFastForwardResult {
     /// Stack depth at this chunk's entry. The frontend latches the first
     /// chunk's `total` as the storm-origin denominator for progress display.
     pub total: u32,
+    /// Every action applied during this batch (including priority passes
+    /// fast-forwarded by `seed_remaining_priority_cycle_passes`, which are
+    /// semantically equivalent to — but bypass — an explicit `PassPriority`
+    /// through `apply`), in submission order. `#[serde(skip)]`: this is
+    /// consumed in-process by the WASM bridge to extend the Replay system's
+    /// recording (see `crates/engine-wasm/src/lib.rs::resolve_all`) and must
+    /// never reach the JS-visible result shape.
+    #[serde(skip)]
+    pub recorded_actions: Vec<(PlayerId, GameAction)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +70,7 @@ where
     let mut log_entries = Vec::new();
     let mut items_resolved = 0u32;
     let mut deferred_display_pending = false;
+    let mut recorded_actions: Vec<(PlayerId, GameAction)> = Vec::new();
 
     for _ in 0..max_iterations {
         let semantic_priority_seat = match &state.waiting_for {
@@ -98,12 +108,14 @@ where
             }
         };
 
+        let mut seeded_actions: Vec<(PlayerId, GameAction)> = Vec::new();
         if matches!(action, GameAction::PassPriority) && !state.stack.is_empty() {
             match seed_remaining_priority_cycle_passes(
                 state,
                 semantic_priority_seat,
                 requester,
                 &mut choose_non_requester_action,
+                &mut seeded_actions,
             ) {
                 PriorityCycleFastForward::Seeded | PriorityCycleFastForward::CannotSeed => {}
                 PriorityCycleFastForward::Stop => break,
@@ -113,6 +125,7 @@ where
         let remaining_resolution_cap = resolution_cap.saturating_sub(items_resolved).max(1);
         let stack_resolution_limit =
             matches!(action, GameAction::PassPriority).then_some(remaining_resolution_cap);
+        let action_for_record = action.clone();
         let Ok(boundary) = apply_action_boundary_with_stack_limit(
             state,
             actor,
@@ -122,6 +135,19 @@ where
         ) else {
             break;
         };
+        // `actor` holds priority right now (per `WaitingFor::Priority`), so a
+        // legal replay must submit its action before any of the seeded
+        // passes below — those represent *later* seats in the priority
+        // rotation. Seeding mutates `state.priority_passes` directly ahead
+        // of this `apply` call (see `seed_remaining_priority_cycle_passes`)
+        // so the engine's own full-cycle-resolved check fires correctly,
+        // but that internal mutation order must not leak into the recorded
+        // order: `apply` rejects an action from any actor other than the
+        // current `WaitingFor` seat, so recording the seeded entries first
+        // would make the exported replay un-submittable from the original
+        // state.
+        recorded_actions.push((actor, action_for_record));
+        recorded_actions.extend(seeded_actions);
 
         if matches!(mode, PublicFinalizeMode::DeferredDisplay) {
             deferred_display_pending = true;
@@ -153,6 +179,7 @@ where
         log_entries,
         items_resolved,
         total: total as u32,
+        recorded_actions,
     }
 }
 
@@ -161,6 +188,7 @@ fn seed_remaining_priority_cycle_passes<F>(
     current_seat: PlayerId,
     requester: PlayerId,
     choose_non_requester_action: &mut F,
+    seeded_actions: &mut Vec<(PlayerId, GameAction)>,
 ) -> PriorityCycleFastForward
 where
     F: FnMut(&GameState, PlayerId) -> ResolveAllCallbackDecision,
@@ -187,12 +215,22 @@ where
                     ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
                 }
             }
-            seeded.push(representative);
+            seeded.push((representative, actor));
         }
     }
 
-    for seat in seeded {
+    // These representatives never went through `apply` — they're the
+    // documented fast-forward shortcut over an explicit `PassPriority` each
+    // (see the module doc comment). Recorded as if they had been, so replay
+    // reconstruction (which only knows how to replay via `apply`) reproduces
+    // the same end state. Appended to a caller-local scratch buffer, not
+    // directly to the batch's `recorded_actions` — the caller must record
+    // `current_seat`'s own pass *before* these (it holds priority right
+    // now), even though the state mutation below necessarily happens before
+    // `current_seat`'s actual `apply` call. See the call site.
+    for (seat, actor) in seeded {
         state.priority_passes.insert(seat);
+        seeded_actions.push((actor, GameAction::PassPriority));
     }
 
     PriorityCycleFastForward::Seeded
@@ -379,6 +417,24 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, GameEvent::PriorityPassed { .. })),
             "Resolve All seeds accepted priority passes instead of emitting every intermediate pass"
+        );
+        // Both the requester's own pass (which does go through `apply`) and
+        // the fast-forward-seeded pass (PlayerId(1), bypassing `apply`
+        // entirely — see `seed_remaining_priority_cycle_passes`) must be
+        // captured so an exported replay of a Resolve-All-driven game
+        // doesn't silently omit real state transitions. The requester must
+        // be recorded *first*: it holds priority in the original state, and
+        // a replay reconstructing from that state can only legally submit
+        // PlayerId(1)'s pass after PlayerId(0)'s — `apply` rejects an
+        // action from any actor that isn't the current `WaitingFor` seat.
+        assert_eq!(
+            result.recorded_actions,
+            vec![
+                (PlayerId(0), GameAction::PassPriority),
+                (PlayerId(1), GameAction::PassPriority),
+            ],
+            "every action applied (or fast-forward-equivalent pass) during the batch must be \
+             recorded in an order a fresh replay reconstruction can legally submit through apply"
         );
     }
 

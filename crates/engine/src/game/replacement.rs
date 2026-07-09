@@ -2687,6 +2687,28 @@ fn create_token_applier(
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
+    // Extract the seven fields the applier reads, given a def and the controller
+    // that installed it. Shared by the object-hosted branch and the floating
+    // (`ObjectId(0)` sentinel) branch so both produce an identical tuple.
+    let extract = |def: &ReplacementDefinition, controller: PlayerId| {
+        (
+            def.quantity_modification.clone(),
+            def.additional_token_spec.clone(),
+            def.ensure_token_specs.clone(),
+            def.token_owner_redirect.clone(),
+            // CR 614.1a + CR 111.1: Full token-substitution payload
+            // (Divine Visitation) — carried as an Effect::Token in the
+            // existing `execute` field (Approach A, no new field).
+            def.execute
+                .as_deref()
+                .map(|ability| (*ability.effect).clone())
+                .filter(|effect| matches!(effect, Effect::Token { .. })),
+            def.execute
+                .as_deref()
+                .is_some_and(is_choose_token_substitution),
+            controller,
+        )
+    };
     let (
         modification,
         additional_spec,
@@ -2695,34 +2717,31 @@ fn create_token_applier(
         substitute_effect,
         choose_token_substitution,
         source_controller,
-    ) = state
-        .objects
-        .get(&rid.source)
-        .and_then(|obj| {
-            obj.replacement_definitions
-                .get(rid.index)
-                .map(|def| (def, obj.controller))
-        })
-        .map(|(def, controller)| {
-            (
-                def.quantity_modification.clone(),
-                def.additional_token_spec.clone(),
-                def.ensure_token_specs.clone(),
-                def.token_owner_redirect.clone(),
-                // CR 614.1a + CR 111.1: Full token-substitution payload
-                // (Divine Visitation) — carried as an Effect::Token in the
-                // existing `execute` field (Approach A, no new field).
-                def.execute
-                    .as_deref()
-                    .map(|ability| (*ability.effect).clone())
-                    .filter(|effect| matches!(effect, Effect::Token { .. })),
-                def.execute
-                    .as_deref()
-                    .is_some_and(is_choose_token_substitution),
-                controller,
-            )
-        })
-        .unwrap_or((None, None, None, None, None, false, PlayerId(0)));
+    ) = if rid.source == ObjectId(0) {
+        // CR 614.1a + CR 111.2: Floating token-creation replacements (Kaya,
+        // Geist Hunter −2) live under the `ObjectId(0)` sentinel in
+        // `pending_damage_replacements`; their installing controller is latched
+        // in `source_controller` (mirrors `damage_modification_for_rid`). Fall
+        // back to the active player when unstamped.
+        state
+            .pending_damage_replacements
+            .get(rid.index)
+            .map(|def| {
+                let controller = def.source_controller.unwrap_or(state.active_player);
+                extract(def, controller)
+            })
+            .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| {
+                obj.replacement_definitions
+                    .get(rid.index)
+                    .map(|def| extract(def, obj.controller))
+            })
+            .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
+    };
 
     if let ProposedEvent::CreateToken {
         owner,
@@ -4459,6 +4478,34 @@ fn apply_state_level_gates(
             event,
         ) {
             return false;
+        }
+    }
+    // CR 111.2 + CR 614.1a: "under your control" — a floating token-creation
+    // replacement (Kaya, Geist Hunter −2) only doubles tokens whose owner is the
+    // installing controller (`source_controller`). Mirrors the object-path gate
+    // in `object_replacement_candidate_applies`, but keyed on the latched
+    // installer instead of a live object controller. Fail-closed on every scope
+    // that has no meaningful installer-relative reading here.
+    if let Some(ref scope) = repl_def.token_owner_scope {
+        if let ProposedEvent::CreateToken { owner, .. } = event {
+            let matches = match scope {
+                crate::types::ability::ControllerRef::You => *owner == source_controller,
+                crate::types::ability::ControllerRef::Opponent => *owner != source_controller,
+                crate::types::ability::ControllerRef::ScopedPlayer
+                | crate::types::ability::ControllerRef::TargetPlayer
+                | crate::types::ability::ControllerRef::TargetOpponent
+                | crate::types::ability::ControllerRef::ParentTargetController
+                | crate::types::ability::ControllerRef::ParentTargetOwner
+                | crate::types::ability::ControllerRef::DefendingPlayer
+                | crate::types::ability::ControllerRef::SourceChosenPlayer
+                | crate::types::ability::ControllerRef::ChosenPlayer { .. }
+                | crate::types::ability::ControllerRef::TriggeringPlayer
+                | crate::types::ability::ControllerRef::EnchantedPlayer
+                | crate::types::ability::ControllerRef::ActivePlayer => false,
+            };
+            if !matches {
+                return false;
+            }
         }
     }
     true

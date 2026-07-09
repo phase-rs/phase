@@ -312,6 +312,10 @@ pub enum KeywordKind {
 pub enum DynamicKeywordKind {
     Annihilator,
     Modular,
+    // CR 702.181a: Mobilize N — a granted mobilize whose count is a "where X is
+    // [quantity]" value (Infantry Shield: "Equipped creature has … mobilize X,
+    // where X is its power"). Resolves to `Keyword::Mobilize(Fixed { value })`.
+    Mobilize,
 }
 
 impl DynamicKeywordKind {
@@ -320,6 +324,12 @@ impl DynamicKeywordKind {
         match self {
             Self::Annihilator => Keyword::Annihilator(value),
             Self::Modular => Keyword::Modular(value),
+            // CR 702.181a: the resolved count is applied as a fixed value; the
+            // continuous layer pass re-resolves it whenever the source's power
+            // changes, so the mobilize count tracks "its power".
+            Self::Mobilize => Keyword::Mobilize(QuantityExpr::Fixed {
+                value: value as i32,
+            }),
         }
     }
 
@@ -328,6 +338,7 @@ impl DynamicKeywordKind {
         match name {
             "annihilator" => Some(Self::Annihilator),
             "modular" => Some(Self::Modular),
+            "mobilize" => Some(Self::Mobilize),
             _ => None,
         }
     }

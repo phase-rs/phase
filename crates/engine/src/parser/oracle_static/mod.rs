@@ -104,8 +104,8 @@ mod support {
     pub(super) use super::cost_mod::parse_cost_payment_prohibition_statics;
     pub(super) use super::evasion::{
         classify_block_exception, parse_compound_subject_keyword_static,
-        parse_compound_subject_rule_static, parse_property_descriptor,
-        parse_rule_static_separator_nom, try_parse_compound_subtypes,
+        parse_compound_subject_rule_static, parse_leading_except_for_rule_static,
+        parse_property_descriptor, parse_rule_static_separator_nom, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,
@@ -156,6 +156,7 @@ pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_conditional_protection_grant_list;
+pub(crate) use shared::parse_continuous_subject_filter;
 pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
@@ -166,9 +167,11 @@ pub(crate) use shared::{
     parse_tiered_enters_with_additional_counters_pattern,
 };
 pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
+pub(crate) use static_helpers::parse_basic_land_type_plural;
+pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
 pub(crate) use type_change::{
     parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
-    parse_every_creature_type_static_prefix,
+    parse_compound_you_control_chosen_type_static_prefix, parse_every_creature_type_static_prefix,
 };
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.

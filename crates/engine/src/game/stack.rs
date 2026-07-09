@@ -1835,6 +1835,7 @@ fn resolve_proven_self_counter_batch(
             event_start,
             &default_wf,
             false,
+            false,
         )
         .ok()?;
         if !matches!(wf, WaitingFor::Priority { .. })

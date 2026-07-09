@@ -1,6 +1,30 @@
 import { waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const localStorageItems = vi.hoisted(() => {
+  const items = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => items.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        items.set(key, value);
+      },
+      removeItem: (key: string) => {
+        items.delete(key);
+      },
+      clear: () => {
+        items.clear();
+      },
+      key: (index: number) => [...items.keys()][index] ?? null,
+      get length() {
+        return items.size;
+      },
+    },
+  });
+  return items;
+});
+
 import type { PlayerSlot } from "../../multiplayer/seatTypes";
 import { formatMetadata } from "../../data/formatRegistry";
 import {
@@ -9,6 +33,11 @@ import {
   type HostingSettings,
   useMultiplayerStore,
 } from "../multiplayerStore";
+import {
+  clearWsSession,
+  loadWsSession,
+  saveWsSession,
+} from "../../services/multiplayerSession";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -22,6 +51,14 @@ const p2pMocks = vi.hoisted(() => ({
 
 const socketMocks = vi.hoisted(() => ({
   send: vi.fn(),
+  close: vi.fn(),
+  currentWs: null as {
+    send: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
+    onmessage: ((event: MessageEvent) => void) | null;
+    onerror: (() => void) | null;
+    onclose: (() => void) | null;
+  } | null,
 }));
 
 vi.mock("../../network/connection", () => ({
@@ -57,14 +94,18 @@ vi.mock("../../services/openPhaseSocket", () => ({
     }
   },
   openPhaseSocket: vi.fn(async () => ({
-    serverInfo: { mode: "Full", protocolVersion: 1 },
-    ws: {
+    serverInfo: { mode: "Full", protocolVersion: 13 },
+    ws: (() => {
+      const ws = {
       send: socketMocks.send,
       close: vi.fn(),
       onmessage: null,
       onerror: null,
       onclose: null,
-    },
+      };
+      socketMocks.currentWs = ws;
+      return ws;
+    })(),
   })),
   withReconnect: vi.fn(),
 }));
@@ -88,10 +129,19 @@ function hostingSettings(
   };
 }
 
+function emitServerMessage(type: string, data?: unknown): void {
+  socketMocks.currentWs?.onmessage?.({
+    data: JSON.stringify({ type, data }),
+  } as MessageEvent);
+}
+
 describe("multiplayerStore", () => {
   beforeEach(() => {
     useMultiplayerStore.getState().cancelHosting();
     vi.clearAllMocks();
+    socketMocks.currentWs = null;
+    localStorageItems.clear();
+    clearWsSession();
     useMultiplayerStore.setState({
       displayName: "",
       connectionStatus: "disconnected",
@@ -198,6 +248,122 @@ describe("multiplayerStore", () => {
       data: { ai_seats: unknown[] };
     };
     expect(frame.data.ai_seats).toEqual(aiSeats);
+  });
+
+  it("saves server-host metadata with the reconnect token while waiting for players", async () => {
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: ["Goreclaw, Terror of Qal Sisma"],
+      },
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    emitServerMessage("GameCreated", {
+      game_code: "ABCDE",
+      player_token: "host-token",
+    });
+
+    expect(loadWsSession()).toMatchObject({
+      gameCode: "ABCDE",
+      playerToken: "host-token",
+      serverUrl: "ws://localhost:8787",
+      hostIsPublic: true,
+      hostSession: {
+        formatConfig: FORMAT_DEFAULTS.Commander,
+        timerSeconds: null,
+        matchType: "Bo1",
+      },
+    });
+  });
+
+  it("resumes a saved server-host room and receives joined-seat updates", async () => {
+    saveWsSession({
+      gameCode: "ABCDE",
+      playerToken: "host-token",
+      serverUrl: "ws://localhost:8787",
+      timestamp: Date.now(),
+      hostIsPublic: true,
+      hostSession: {
+        formatConfig: FORMAT_DEFAULTS.Commander,
+        timerSeconds: null,
+        matchType: "Bo1",
+      },
+    });
+
+    expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(true);
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    expect(JSON.parse(socketMocks.send.mock.calls[0][0] as string)).toEqual({
+      type: "Reconnect",
+      data: {
+        game_code: "ABCDE",
+        player_token: "host-token",
+      },
+    });
+
+    const slots: PlayerSlot[] = [
+      { playerId: 0, name: "Host", kind: { type: "HostHuman" } },
+      { playerId: 1, name: "Guest", kind: { type: "JoinedHuman" } },
+    ];
+    emitServerMessage("GameCreated", {
+      game_code: "ABCDE",
+      player_token: "host-token",
+    });
+    emitServerMessage("PlayerSlotsUpdate", { slots });
+
+    await waitFor(() => {
+      expect(useMultiplayerStore.getState()).toMatchObject({
+        hostingStatus: "waiting",
+        hostGameCode: "ABCDE",
+        hostIsPublic: true,
+        hostSession: {
+          formatConfig: FORMAT_DEFAULTS.Commander,
+          timerSeconds: null,
+          matchType: "Bo1",
+        },
+        playerSlots: slots,
+      });
+    });
+  });
+
+  it("does not resume ordinary in-game websocket sessions as pregame hosts", async () => {
+    saveWsSession({
+      gameCode: "ABCDE",
+      playerToken: "host-token",
+      serverUrl: "ws://localhost:8787",
+      timestamp: Date.now(),
+    });
+
+    expect(useMultiplayerStore.getState().resumeServerHosting()).toBe(false);
+    expect(socketMocks.send).not.toHaveBeenCalled();
+  });
+
+  it("removes pregame host metadata once the server starts the game", async () => {
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: ["Goreclaw, Terror of Qal Sisma"],
+      },
+    );
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    emitServerMessage("GameCreated", {
+      game_code: "ABCDE",
+      player_token: "host-token",
+    });
+
+    emitServerMessage("GameStarted", {});
+
+    expect(loadWsSession()).toMatchObject({
+      gameCode: "ABCDE",
+      playerToken: "host-token",
+      serverUrl: "ws://localhost:8787",
+    });
+    expect(loadWsSession()?.hostSession).toBeUndefined();
   });
 
   it("applies setup-time AI seats when starting a P2P host session", async () => {

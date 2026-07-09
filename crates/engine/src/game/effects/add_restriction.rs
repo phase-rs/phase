@@ -141,6 +141,20 @@ fn fill_runtime_fields(
                         ability.scoped_player.unwrap_or(ability.controller),
                     );
                 }
+                // CR 109.4 + CR 608.2c + CR 608.2h: "its controller" — capture the
+                // controller of the parent object target (the countered spell) as
+                // the restriction is created. By now the spell has left the stack
+                // (countered), so parent_target_controller reads it from
+                // last-known information. If the referent can't be resolved (no
+                // parent object target), leave the scope unresolved — enforcement
+                // then restricts no one (fail-closed).
+                RestrictionPlayerScope::ParentObjectTargetController => {
+                    if let Some(controller) =
+                        crate::game::ability_utils::parent_target_controller(ability, state)
+                    {
+                        *affected_players = RestrictionPlayerScope::SpecificPlayer(controller);
+                    }
+                }
                 RestrictionPlayerScope::AllPlayers
                 | RestrictionPlayerScope::SpecificPlayer(_)
                 | RestrictionPlayerScope::OpponentsOfSourceController => {}
@@ -365,6 +379,99 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 109.4 + CR 608.2h: Render Silent — "its controller" (the controller of
+    /// the parent object target, the countered spell) lowers to the object's
+    /// controller. The parent Counter target is inherited onto the sub-ability, so
+    /// the restriction's `ParentObjectTargetController` scope resolves via
+    /// `parent_target_controller` to that object's controller (PlayerId(1)), NOT
+    /// the ability controller (PlayerId(0)).
+    #[test]
+    fn parent_object_target_controller_resolves_to_object_controller() {
+        use crate::game::zones::create_object;
+        let mut state = GameState::new_two_player(42);
+
+        // The countered spell has landed in a graveyard (CR 701.6a) controlled by
+        // PlayerId(1); create_object leaves controller == owner, which is the
+        // last-known controller of the countered spell.
+        let spell_obj = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(1),
+            "Some Spell".to_string(),
+            Zone::Graveyard,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                },
+            },
+            // The Counter's object target inherited onto the restriction sub-ability.
+            vec![TargetRef::Object(spell_obj)],
+            ObjectId(7),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            matches!(
+                &state.restrictions[0],
+                GameRestriction::ProhibitActivity {
+                    source: ObjectId(7),
+                    affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            ),
+            "got {:?}",
+            state.restrictions[0]
+        );
+    }
+
+    /// CR 109.4: hostile — a `ParentObjectTargetController` restriction with no
+    /// parent object target cannot resolve its referent, so it stays unresolved
+    /// (fail-closed: enforcement then restricts no one) rather than defaulting to
+    /// the ability controller.
+    #[test]
+    fn parent_object_target_controller_unresolved_without_object_target() {
+        let mut state = GameState::new_two_player(42);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                },
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            matches!(
+                &state.restrictions[0],
+                GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    ..
+                }
+            ),
+            "got {:?}",
+            state.restrictions[0]
+        );
     }
 
     /// CR 109.5 + CR 514.2 + CR 500.7: The Second Doctor / City Hall — the

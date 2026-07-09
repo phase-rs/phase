@@ -10200,6 +10200,66 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn attacking_defender_matches_source_chosen_player() {
+        // CR 508.1b + CR 613.1: Triarch Stalker / Beckoning Will-o'-Wisp scope
+        // attackers by the source's persisted chosen player. `attacking_defender_
+        // matches` resolves `Some(SourceChosenPlayer)` through the generic
+        // `controller_ref_player` arm, which reads the choice durably persisted on
+        // the source object (`ChosenAttribute::Player`). An attacker attacking the
+        // chosen player matches; one attacking any other player does not.
+        use crate::game::zones::create_object;
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(7);
+        let card_id = CardId(state.next_object_id);
+        let src = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Triarch Stalker".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        // The combat trigger persisted P1 as the chosen player.
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+
+        let source_ctx = SourceContext {
+            id: src,
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+            recipient_id: None,
+        };
+
+        assert!(
+            attacking_defender_matches(
+                &state,
+                &source_ctx,
+                PlayerId(1),
+                Some(&ControllerRef::SourceChosenPlayer),
+            ),
+            "an attacker attacking the persisted chosen player must match"
+        );
+        assert!(
+            !attacking_defender_matches(
+                &state,
+                &source_ctx,
+                PlayerId(0),
+                Some(&ControllerRef::SourceChosenPlayer),
+            ),
+            "an attacker attacking a non-chosen player must not match"
+        );
+    }
+
     // ===========================================================================
     // CR 702.73a — Changeling subtype expansion cascade.
     //

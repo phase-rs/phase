@@ -115,6 +115,7 @@
     "recoveryDescription": "Si una carta funciona mal, exporta el estado primero. El panel de depuración avanzada está disponible cuando necesites inspeccionar o ajustar la partida.",
     "copyState": "Copiar estado",
     "exportState": "Exportar estado",
+    "exportReplay": "Exportar repetición",
     "openAdvancedDebug": "Abrir depuración avanzada",
     "sections": {
       "Flow": "Flujo",
@@ -125,7 +126,10 @@
       "copied": "Estado de la partida copiado al portapapeles.",
       "copyFailed": "No se pudo copiar el estado de la partida.",
       "exported": "Se exportó {{filename}}.",
-      "exportFailed": "No se pudo exportar el estado de la partida."
+      "exportFailed": "No se pudo exportar el estado de la partida.",
+      "replayExported": "Repetición guardada como {{filename}}.",
+      "replayExportUnavailable": "No hay ninguna grabación de repetición disponible para esta partida.",
+      "replayExportFailed": "No se pudo exportar la repetición."
     },
     "prompt": {
       "starting": "La partida se está iniciando o restaurando el estado.",

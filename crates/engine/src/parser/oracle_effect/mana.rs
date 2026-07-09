@@ -1003,15 +1003,12 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
 
-    if let Some((_, rest)) = nom_on_lower(trimmed, &lower, |i| {
-        value((), alt((tag("that much "), tag("that many ")))).parse(i)
-    }) {
-        return Some((
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            },
-            rest.trim_start(),
-        ));
+    if let Some((qty, rest)) = nom_on_lower(
+        trimmed,
+        &lower,
+        crate::parser::oracle_nom::quantity::parse_that_much_or_many,
+    ) {
+        return Some((QuantityExpr::Ref { qty }, rest.trim_start()));
     }
 
     // Try "x " via nom (case-insensitive via lowercase)

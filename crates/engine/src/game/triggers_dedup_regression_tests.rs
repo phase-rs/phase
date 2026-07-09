@@ -1156,6 +1156,152 @@ fn panharmonicon_does_not_double_attack_triggers() {
     );
 }
 
+/// CR 603.2d + CR 601.2 + CR 707.10: Veyran, Voice of Duality
+/// (`ControllerCastOrCopiedSpell { [Instant, Sorcery] }`) doubles a
+/// magecraft-style trigger when its controller casts an instant.
+#[test]
+fn veyran_doubles_trigger_caused_by_controller_casting_instant() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::SpellCastOrCopy);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    // An instant spell on the stack, cast by the doubler's controller.
+    let spell = create_object(
+        &mut state,
+        CardId(200),
+        PlayerId(0),
+        "Opt".to_string(),
+        Zone::Stack,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Instant);
+
+    let event = GameEvent::SpellCast {
+        card_id: CardId(200),
+        controller: PlayerId(0),
+        object_id: spell,
+    };
+
+    process_triggers(&mut state, &[event]);
+    // CR 603.3b (#531): drain the per-controller ordering prompt.
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 2,
+        "Veyran must double a trigger caused by its controller casting an instant"
+    );
+}
+
+/// CR 603.2d: Veyran does NOT double attack triggers — the cause predicate is
+/// `ControllerCastOrCopiedSpell`, not `CreatureAttacking`. Regression for
+/// issue #5291 (Veyran was copying an attack trigger).
+#[test]
+fn veyran_does_not_double_attack_triggers() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    let event = GameEvent::AttackersDeclared {
+        attacker_ids: vec![observer],
+        defending_player: PlayerId(1),
+        attacks: vec![(
+            observer,
+            crate::game::combat::AttackTarget::Player(PlayerId(1)),
+        )],
+    };
+
+    process_triggers(&mut state, &[event]);
+    // CR 603.3b (#531): drain the per-controller ordering prompt.
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Veyran must NOT double attack triggers — cause is ControllerCastOrCopiedSpell (#5291)"
+    );
+}
+
+/// CR 603.2d + CR 601.2: Veyran does NOT double a trigger caused by an
+/// OPPONENT casting a spell — "you casting or copying" scopes the cause to
+/// the doubler's controller.
+#[test]
+fn veyran_does_not_double_opponent_cast_trigger() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::SpellCastOrCopy);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    // An instant spell on the stack, cast by the OPPONENT.
+    let spell = create_object(
+        &mut state,
+        CardId(201),
+        PlayerId(1),
+        "Opt".to_string(),
+        Zone::Stack,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Instant);
+
+    let event = GameEvent::SpellCast {
+        card_id: CardId(201),
+        controller: PlayerId(1),
+        object_id: spell,
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Veyran must NOT double a trigger caused by an opponent's cast"
+    );
+}
+
 /// Helper: install a source-restricted `DoubleTriggers` static
 /// (Splinter-class) — cause `Any`, narrowed by an `affected` source filter —
 /// controlled by PlayerId(0).

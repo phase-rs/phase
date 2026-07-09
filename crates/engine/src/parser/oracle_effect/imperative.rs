@@ -3439,6 +3439,50 @@ fn parse_choose_discard_rest_of_hand(text: &str, lower: &str) -> Option<Targeted
     })
 }
 
+/// CR 701.13a + CR 109.5 + CR 608.2c: "choose a[n] <type> they control and
+/// [verb]s it" — the per-actor edict where the chooser both selects and acts on
+/// one of their own permanents (Sothera, the Supervoid: "each opponent chooses a
+/// creature they control and exiles it"). The "each opponent" subject and its
+/// leading verb are already stripped / de-inflected to "choose" by the
+/// player-scope layer, so this operates on the post-"choose " body; the inner
+/// verb keeps its third-person "-s" inflection ("exiles it").
+///
+/// Reparses to the controller-scoped edict ("exile a creature you control",
+/// controller `You`). `You` is CORRECT at parse time: the each-actor driver
+/// rebinds `ability.controller` to each iterated player at runtime
+/// (`set_controller_recursive`), and `FilterContext::from_ability` resolves the
+/// reparsed filter's `ControllerRef::You` to the ITERATING actor — so each actor
+/// exiles from their OWN permanents (CR 109.5). The verb axis is a single
+/// `alt()`, covering the edict class (exile / sacrifice / destroy) without
+/// proliferating recognizers.
+fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    let (_, (_, type_text, _, verb, _, _, _)) = (
+        alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))),
+        take_until::<_, _, OracleError<'_>>(" they control and "),
+        tag::<_, _, OracleError<'_>>(" they control and "),
+        alt((
+            value("exile", tag::<_, _, OracleError<'_>>("exiles")),
+            value("sacrifice", tag("sacrifices")),
+            value("destroy", tag("destroys")),
+        )),
+        tag::<_, _, OracleError<'_>>(" it"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+        eof,
+    )
+        .parse(rest_lower)
+        .ok()?;
+    // Validate the captured phrase is a real object type with no leftover text —
+    // keeps the recognizer precise so it never hijacks unrelated "choose a …"
+    // bodies whose type phrase is junk or carries a trailing predicate.
+    let (filter, filter_rem) = parse_type_phrase(type_text);
+    if !filter_rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some(ChooseImperativeAst::Reparse {
+        text: format!("{verb} a {type_text} you control"),
+    })
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -3513,6 +3557,16 @@ pub(super) fn parse_choose_ast(
         // parser, mirroring `try_parse_proliferate_target`'s
         // "for each kind of counter on " + `parse_target` structure.
         if let Some(ast) = try_parse_choose_counter_on_target(rest) {
+            return Some(ast);
+        }
+
+        // CR 701.13a + CR 109.5 + CR 608.2c: "choose a <type> they control and
+        // [verb]s it" — the per-actor edict (Sothera, the Supervoid). Must
+        // precede `is_choose_as_targeting`, which would otherwise Reparse the
+        // whole conjoined body (parse_effect fails → `Effect::Unimplemented`)
+        // and drop the exile. Operates on `rest_lower` (the "choose " strip has
+        // de-inflected the leading actor verb; the inner "exiles" keeps its -s).
+        if let Some(ast) = try_parse_choose_and_verb_it_edict(rest_lower) {
             return Some(ast);
         }
 
@@ -9974,12 +10028,17 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
     };
 
     // Parse quantity + counter kind from the remaining text.
-    // Patterns: "a poison" / "an experience" / "two rad" / "10 poison"
-    let (count, counter_kind) =
-        if let Ok((kind, _)) = nom_primitives::parse_article.parse(before_counter) {
-            (1u32, kind.trim())
+    // Patterns: "that many poison" / "a poison" / "an experience" / "two rad" / "10 poison"
+    // CR 608.2h: "that many/much <kind> counters" binds the triggering event's
+    // amount (e.g. Etali, Primal Sickness — combat damage → that many poison
+    // counters); the amount is determined once, when the effect is applied.
+    let (count, counter_kind): (QuantityExpr, &str) =
+        if let Ok((rest, qty)) = nom_quantity::parse_that_much_or_many(before_counter) {
+            (QuantityExpr::Ref { qty }, rest.trim())
+        } else if let Ok((kind, _)) = nom_primitives::parse_article.parse(before_counter) {
+            (QuantityExpr::Fixed { value: 1 }, kind.trim())
         } else if let Ok((rest, n)) = nom_primitives::parse_number.parse(before_counter) {
-            (n, rest.trim())
+            (QuantityExpr::Fixed { value: n as i32 }, rest.trim())
         } else {
             return None;
         };
@@ -9990,22 +10049,20 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
         return None;
     }
 
-    // CR 122.1b: Map to typed PlayerCounterKind — reject anything that's an object counter.
-    // Energy counters are NOT included — they use the dedicated GainEnergy effect.
-    let kind = match counter_kind {
-        "poison" => PlayerCounterKind::Poison,
-        "experience" => PlayerCounterKind::Experience,
-        "rad" => PlayerCounterKind::Rad,
-        "ticket" => PlayerCounterKind::Ticket,
-        _ => return None,
-    };
+    // CR 122.1: Map to typed PlayerCounterKind — reject anything that's an object
+    // counter. Energy counters are NOT included (they use the dedicated
+    // GainEnergy effect). Single authority: `nom_primitives::parse_player_counter_kind`,
+    // shared with the oracle_nom threshold rider. `all_consuming` enforces that
+    // the whole kind word is a recognized player counter (so "poisonx" is
+    // rejected rather than matching the "poison" prefix).
+    let (_, kind) = all_consuming(nom_primitives::parse_player_counter_kind)
+        .parse(counter_kind)
+        .ok()?;
 
     let _ = plural; // plural is just grammatical, doesn't affect semantics
     Some(ImperativeFamilyAst::GivePlayerCounter {
         counter_kind: kind,
-        count: QuantityExpr::Fixed {
-            value: count as i32,
-        },
+        count,
     })
 }
 
@@ -14921,6 +14978,90 @@ mod tests {
         );
     }
 
+    /// CR 608.2h: "get that many <kind> counters" binds the triggering event's
+    /// amount (Etali, Primal Sickness: combat damage → that many poison
+    /// counters). Revert-failing: without the `parse_that_much_or_many` arm the
+    /// count matches neither `parse_article` nor `parse_number`, so
+    /// `try_parse_player_counter` returns None and the effect lowers to
+    /// `Effect::Unimplemented`.
+    #[test]
+    fn parse_player_counter_that_many_binds_event_amount() {
+        match try_parse_player_counter("get that many poison counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Poison);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                ));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Class coverage: the "that many" amount arm generalizes across the whole
+    /// player-counter kind set (experience, not just poison).
+    #[test]
+    fn parse_player_counter_that_many_experience() {
+        match try_parse_player_counter("get that many experience counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Experience);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                ));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Sibling reach-guard: the new that-many arm must not swallow the fixed
+    /// article/number forms — "get a poison counter" still binds Fixed 1 and
+    /// "gets two rad counters" still binds Fixed 2 (proves the fixed arms are
+    /// reached, not short-circuited).
+    #[test]
+    fn parse_player_counter_fixed_arms_unaffected() {
+        match try_parse_player_counter("get a poison counter") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Poison);
+                assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+        match try_parse_player_counter("gets two rad counters") {
+            Some(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            }) => {
+                assert_eq!(counter_kind, PlayerCounterKind::Rad);
+                assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    /// Hostile: "+1/+1 counter" is an object counter, not a player counter —
+    /// the that-many arm must not misroute it (the `+`/`-` guard still rejects).
+    #[test]
+    fn parse_player_counter_that_many_rejects_object_counter() {
+        assert!(
+            try_parse_player_counter("gets a +1/+1 counter").is_none(),
+            "Object counter must not parse as a player counter"
+        );
+    }
+
     /// CR 107.17: Each `{TK}` glyph is one ticket counter. "get {tk}{tk}" → 2.
     /// Building-block test: exercises the symbol-counting branch across counts.
     #[test]
@@ -15778,6 +15919,34 @@ mod tests {
             }
             other => panic!("Expected FromTrackedSet, got {other:?}"),
         }
+    }
+
+    // CR 701.13a + CR 109.5: Sothera, the Supervoid's per-actor edict. The
+    // post-strip body ("choose a creature they control and exiles it") must
+    // reparse to the controller-scoped edict "exile a creature you control".
+    #[test]
+    fn parse_choose_creature_they_control_and_exiles_it() {
+        let text = "choose a creature they control and exiles it";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::Reparse { text }) => {
+                assert_eq!(text, "exile a creature you control");
+            }
+            other => panic!("Expected Reparse(\"exile a creature you control\"), got {other:?}"),
+        }
+    }
+
+    // Anti-Unimplemented reach-guard: the reparsed edict text must itself parse
+    // to a real exile effect (not Unimplemented), proving the Reparse produces a
+    // resolvable body rather than silently degrading.
+    #[test]
+    fn choose_and_exiles_it_reparse_body_is_not_unimplemented() {
+        let effect = super::super::parse_effect("exile a creature you control");
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "reparsed edict body must resolve to a real exile effect, got {effect:?}"
+        );
     }
 
     #[test]

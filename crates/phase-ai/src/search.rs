@@ -4398,6 +4398,7 @@ mod tests {
                 m
             },
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
 
         for difficulty in [
@@ -4430,6 +4431,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -4462,6 +4464,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![target],
+            attacker_constraints: Default::default(),
         };
 
         let action = validated_declare_attackers(&state, vec![(creature, target)]);
