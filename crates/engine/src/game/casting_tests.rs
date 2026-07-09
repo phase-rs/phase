@@ -2304,6 +2304,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             description: Some("Assassin spells you cast have freerunning {B}{B}.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -10041,6 +10042,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                bypass_beneficiary: None,
             }]
             .into();
         }
@@ -12533,6 +12535,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             ),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -12648,6 +12651,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
             ),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         }]
         .into();
     }
@@ -13063,6 +13067,83 @@ fn granted_blitz_offers_blitz_variant() {
         "granted Blitz must surface the Blitz option; got {:?}",
         choices.options
     );
+}
+
+/// CR 702.152a + CR 604.1 + CR 118.9: Henzie "Toolbox" Torre — "Each creature
+/// spell you cast with mana value 4 or greater has blitz. The blitz cost is
+/// equal to its mana cost." The grant carries `Blitz(ManaCost::SelfManaCost)`, so
+/// the offered Blitz option must surface the self-referential cost (resolved to
+/// the spell's own mana cost at payment time by the shared `SelfManaCost` path,
+/// the same one the granted-flashback cost uses). This pins that a granted
+/// alternative cost equal to the card's mana cost flows intact through the
+/// casting-variant choice set rather than being dropped or fixed to a constant.
+#[test]
+fn granted_blitz_self_mana_cost_surfaces_self_referential_cost() {
+    use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    let mut state = setup_game_at_main_phase();
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
+
+    // Henzie's grant, modeled as the CastWithKeyword static the parser emits:
+    // creature spells you cast with mana value >= 4 gain Blitz whose cost equals
+    // the spell's own mana cost.
+    let grantor = create_object(
+        &mut state,
+        CardId(9110),
+        PlayerId(0),
+        "Henzie".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&grantor).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types.core_types.push(CoreType::Creature);
+        let def = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Blitz(ManaCost::SelfManaCost),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::GE,
+                value: crate::types::ability::QuantityExpr::Fixed { value: 4 },
+            }]),
+        ));
+        obj.static_definitions = vec![def].into();
+    }
+
+    // Recipient: a {5} creature (mana value 5 >= 4) in hand with no printed Blitz.
+    let spell_cost = ManaCost::generic(5);
+    let spell = create_object(
+        &mut state,
+        CardId(9111),
+        PlayerId(0),
+        "Big Creature".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = spell_cost.clone();
+        obj.base_mana_cost = spell_cost.clone();
+    }
+
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let blitz = choices
+        .options
+        .iter()
+        .find(|o| o.variant == CastingVariant::Blitz)
+        .expect("granted Blitz must surface the Blitz option");
+    assert_eq!(
+        blitz.mana_cost,
+        ManaCost::SelfManaCost,
+        "granted Blitz must carry the self-referential cost (resolved to the \
+         spell's own mana cost at payment time), got {:?}",
+        blitz.mana_cost
+    );
+    // The recipient really is MV >= 4, so the grant's filter admits it.
+    assert_eq!(state.objects.get(&spell).unwrap().mana_cost, spell_cost);
 }
 
 /// CR 702.141a + CR 604.1 (seam 4: activated-ability-on-grant): Encore
@@ -33858,6 +33939,7 @@ mod loyalty_gate {
 /// until `finalize_cast` performs the standard library → stack move.
 mod top_of_library_cast_permission_runtime {
     use super::*;
+    use crate::game::scenario::{GameScenario, P0};
     use crate::types::ability::{
         CardPlayMode, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
@@ -33882,6 +33964,24 @@ mod top_of_library_cast_permission_runtime {
             obj.card_types.subtypes = vec!["Elf".to_string()];
         }
         // Move it to the front of the library.
+        let player = state.players.iter_mut().find(|p| p.id == owner).unwrap();
+        player.library.retain(|id| *id != obj_id);
+        player.library.push_front(obj_id);
+        obj_id
+    }
+
+    fn put_card_on_top_of_library(
+        state: &mut GameState,
+        owner: PlayerId,
+        card_id: CardId,
+        name: &str,
+        core_types: Vec<CoreType>,
+    ) -> ObjectId {
+        let obj_id = create_object(state, card_id, owner, name.to_string(), Zone::Library);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types = core_types;
+        }
         let player = state.players.iter_mut().find(|p| p.id == owner).unwrap();
         player.library.retain(|id| *id != obj_id);
         player.library.push_front(obj_id);
@@ -33988,6 +34088,74 @@ mod top_of_library_cast_permission_runtime {
         let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(903));
         let available = spell_objects_available_to_cast(&state, PlayerId(0));
         assert!(!available.contains(&top));
+    }
+
+    /// CR 305.1 + CR 401.5: Case of the Locked Hothouse's solved reward
+    /// ("You may play lands and cast creature and enchantment spells from the
+    /// top of your library.") must authorize the land on the play-land path
+    /// and the typed spells on the cast path.
+    #[test]
+    fn mixed_disjunctive_play_permission_surfaces_land_creature_and_enchantment() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source_id = {
+            let mut source = scenario.add_creature(P0, "Locked Hothouse Reward", 0, 4);
+            let source_id = source.id();
+            source.as_enchantment().with_subtypes(vec!["Case"]).from_oracle_text(
+                "You may play lands and cast creature and enchantment spells from the top of your library.",
+            );
+            source_id
+        };
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+
+        let land =
+            put_card_on_top_of_library(state, P0, CardId(907), "Top Land", vec![CoreType::Land]);
+        assert_eq!(
+            top_of_library_land_playable_by_permission(state, P0),
+            Some((land, source_id)),
+            "the land branch must authorize the top land on the play-land path"
+        );
+        assert!(
+            !spell_objects_available_to_cast(state, P0).contains(&land),
+            "lands must not leak onto the cast path"
+        );
+
+        let creature = put_card_on_top_of_library(
+            state,
+            P0,
+            CardId(908),
+            "Top Creature",
+            vec![CoreType::Creature],
+        );
+        assert!(
+            spell_objects_available_to_cast(state, P0).contains(&creature),
+            "the creature branch must authorize the top creature"
+        );
+
+        let enchantment = put_card_on_top_of_library(
+            state,
+            P0,
+            CardId(909),
+            "Top Enchantment",
+            vec![CoreType::Enchantment],
+        );
+        assert!(
+            spell_objects_available_to_cast(state, P0).contains(&enchantment),
+            "the enchantment branch must authorize the top enchantment spell"
+        );
+
+        let artifact = put_card_on_top_of_library(
+            state,
+            P0,
+            CardId(910),
+            "Top Artifact",
+            vec![CoreType::Artifact],
+        );
+        assert!(
+            !spell_objects_available_to_cast(state, P0).contains(&artifact),
+            "cards outside the mixed branch filter must stay unavailable"
+        );
     }
 
     /// Install a `OncePerTurn` top-of-library permission (Assemble the

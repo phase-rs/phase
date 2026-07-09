@@ -972,6 +972,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::HasSingleTarget => parts.push("single target".into()),
             FilterProp::Modal => parts.push("modal spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
+            FilterProp::Transformed => parts.push("transformed".into()),
             FilterProp::TargetsOnly { filter } => {
                 parts.push(format!("targets only {}", fmt_target(filter)));
             }
@@ -11229,6 +11230,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -11274,6 +11276,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -12260,6 +12263,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -12292,6 +12296,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -12322,6 +12327,7 @@ mod tests {
             description: None,
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -12470,6 +12476,7 @@ mod tests {
             description: Some("Skip your draw step.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(
@@ -12500,6 +12507,7 @@ mod tests {
             description: Some("Players skip their upkeep steps.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(
@@ -12540,6 +12548,7 @@ mod tests {
             description: Some("Players can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -12571,6 +12580,7 @@ mod tests {
             description: Some("You can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -12604,6 +12614,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -12643,6 +12654,7 @@ mod tests {
                 description: Some(description.to_string()),
                 attack_defended: None,
                 source_controller: None,
+                bypass_beneficiary: None,
             });
         }
 
@@ -12784,6 +12796,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            bypass_beneficiary: None,
         });
 
         assert!(

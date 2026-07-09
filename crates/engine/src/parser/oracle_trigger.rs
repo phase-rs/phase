@@ -28,7 +28,7 @@ use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_static::parse_commander_subject_filter_prefix;
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase,
-    starts_with_type_word,
+    starts_with_type_list_continuation, starts_with_type_word,
 };
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
@@ -1094,6 +1094,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
+        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text),
         in_trigger: true,
         ..Default::default()
     };
@@ -7169,6 +7170,32 @@ fn extract_trigger_subject_for_context(
     subject
 }
 
+fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<TargetFilter> {
+    let lower = condition_text.to_lowercase();
+    let after_keyword = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest)
+    .unwrap_or(&lower);
+
+    // CR 608.2k + CR 601.2a: spell-cast trigger conditions introduce the cast
+    // spell as the effect body's untargeted object antecedent. "it" in
+    // "Whenever you cast a spell, put it ..." names the spell on the stack.
+    let is_spell_cast_trigger = alt((
+        tag::<_, _, OracleError<'_>>("you cast "),
+        tag("a player casts "),
+        tag("an opponent casts "),
+        tag("each opponent casts "),
+        tag("one or more players cast "),
+        tag("enchanted player casts "),
+    ))
+    .parse(after_keyword)
+    .is_ok();
+    is_spell_cast_trigger.then_some(TargetFilter::TriggeringSource)
+}
+
 // ---------------------------------------------------------------------------
 // Subject parsing: extracts the trigger subject filter and remaining text
 // ---------------------------------------------------------------------------
@@ -8683,11 +8710,30 @@ fn try_parse_event(
         return Some((mode, def));
     }
 
-    // "blocks" — fires for the blocking creature.
-    if tag::<_, _, OracleError<'_>>("blocks").parse(rest).is_ok() {
+    // "blocks or becomes blocked [by a <filter>]" — Karn (bare), Goblin Cadets
+    // (bare), Venom/Mammoth Harness (filtered). CR 509.1h + CR 509.3d: the
+    // compound form must be dispatched before the bare "blocks" arm because
+    // `tag("blocks")` would otherwise match its prefix and silently drop the
+    // "or becomes blocked [by a <filter>]" remainder.
+    if let Ok((after_compound, _)) =
+        tag::<_, _, OracleError<'_>>("blocks or becomes blocked").parse(rest)
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::BlocksOrBecomesBlocked;
+        def.valid_card = Some(subject.clone());
+        def.valid_target = parse_becomes_blocked_by_filter(after_compound);
+        return Some((TriggerMode::BlocksOrBecomesBlocked, def));
+    }
+
+    // "blocks [a <filter>]" — fires for the blocking creature. Wall of Frost
+    // (bare), High-Rise Sawjack (filtered). CR 509.3b: capture the
+    // "a <filter> creature" attacker-side qualifier so a filtered "blocks"
+    // trigger fires only against a matching attacker.
+    if let Ok((after_blocks, _)) = tag::<_, _, OracleError<'_>>("blocks").parse(rest) {
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
+        def.valid_target = parse_blocks_a_filter(after_blocks);
         return Some((TriggerMode::Blocks, def));
     }
 
@@ -9194,6 +9240,15 @@ fn try_parse_event(
         let (filter, rest) = parse_type_phrase(type_phrase);
         rest.trim().is_empty().then_some(filter)
     }
+    /// CR 509.3b: "blocks a <filter>" carries a target-side (attacker) qualifier —
+    /// mirrors `parse_becomes_blocked_by_filter`'s blocker-side qualifier exactly.
+    fn parse_blocks_a_filter(input: &str) -> Option<TargetFilter> {
+        let (type_phrase, _) = alt((tag::<_, _, OracleError<'_>>(" a "), tag(" an ")))
+            .parse(input)
+            .ok()?;
+        let (filter, rest) = parse_type_phrase(type_phrase);
+        rest.trim().is_empty().then_some(filter)
+    }
     if let Ok((remaining, event)) = parse_simple_event.parse(rest) {
         let mut def = make_base();
         match event {
@@ -9293,6 +9348,22 @@ fn try_parse_event(
             SimpleEvent::BecomesTapped => {
                 def.mode = TriggerMode::Taps;
                 def.valid_card = Some(subject.clone());
+                // CR 603.2e: a "becomes tapped" trigger event may carry a "during
+                // your turn" turn restriction (Captain America, Living Legend —
+                // "Whenever a creature you control becomes tapped during your turn,
+                // if it's the first time …"). The intervening-if extractor (CR
+                // 603.4) strips the trailing "if …" clause but leaves the "during
+                // your turn" phrase
+                // on the event tail (`remaining`); peel it into the trigger's turn
+                // constraint so the ability only fires on the controller's turn,
+                // instead of being silently dropped. `remaining` still carries the
+                // trailing ", if …/untap it" clause, so match the turn phrase as a
+                // LEADING prefix (boundary-checked), not an all-consuming peel.
+                // Builds for the class — any "<subject> becomes tapped during
+                // your/opponent's turn" trigger.
+                if let Some(constraint) = parse_leading_turn_constraint(remaining) {
+                    def.constraint = Some(constraint);
+                }
             }
             SimpleEvent::TappedForMana => {
                 def.mode = TriggerMode::TapsForMana;
@@ -12382,11 +12453,27 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             return Some((TriggerMode::SpellCast, def));
         }
 
-        // Truncate at ", " so any effect clause doesn't leak into the type parser.
-        let payload = nom_primitives::split_once_on(after, ", ")
-            .map(|(_, (before, _))| before)
-            .unwrap_or(after)
-            .trim();
+        // Truncate at ", " so any effect clause doesn't leak into the type
+        // parser — but skip commas that continue an Oxford-comma type list
+        // (CR 205.3a: "an Aura, Equipment, or Vehicle spell" is set-union
+        // sugar whose internal commas belong to the payload). Naive
+        // first-comma truncation collapsed such filters to their first leg,
+        // so the trigger fired only on the first listed type (issue #5324,
+        // Sram, Senior Edificer).
+        let payload = {
+            let mut scan = after;
+            let mut cut = after;
+            while let Ok((_, (_, rest))) = nom_primitives::split_once_on(scan, ", ") {
+                if starts_with_type_list_continuation(rest) {
+                    scan = rest;
+                } else {
+                    cut = &after[..after.len() - rest.len() - ", ".len()];
+                    break;
+                }
+            }
+            cut
+        }
+        .trim();
         let (payload, spell_not_owned_by_you) = strip_spell_not_owned_qualifier(payload);
         let (payload, turn_constraint) = peel_trailing_turn_constraint(payload);
         if let Some(constraint) = turn_constraint {
@@ -14813,31 +14900,65 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     None
 }
 
+/// CR 603.1: match the turn specifier that follows "during " in a trigger's
+/// turn-restriction clause → the corresponding trigger constraint. Single
+/// authority shared by the trailing peel ([`peel_trailing_turn_constraint`]) and
+/// the leading matcher ([`parse_leading_turn_constraint`]).
+fn parse_during_turn_spec(input: &str) -> OracleResult<'_, TriggerConstraint> {
+    alt((
+        value(
+            TriggerConstraint::OnlyDuringOpponentsTurn,
+            alt((
+                tag("an opponent's turn"),
+                tag("each opponent's turn"),
+                tag("each opponents\u{2019} turn"),
+                tag("each opponents' turn"),
+                tag("your opponent's turn"),
+                tag("your opponents\u{2019} turn"),
+                tag("your opponents' turn"),
+                tag("each of your opponents\u{2019} turn"),
+                tag("each of your opponents' turn"),
+            )),
+        ),
+        value(
+            TriggerConstraint::OnlyDuringYourTurn,
+            alt((tag("your turn"), tag("each of your turns"))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 603.1: match a "during `<your/opponent's>` turn" restriction at the START of
+/// a post-event tail (Captain America, Living Legend: "becomes tapped during your
+/// turn, if it's the first time …"). Unlike [`peel_trailing_turn_constraint`] the
+/// phrase need not consume the whole tail — the intervening-if / effect clause
+/// follows it. The trailing `terminated(..)` boundary combinator requires the turn
+/// spec to be followed by end-of-input or a `,` (the start of the ", if …/effect"
+/// clause), so it doesn't misfire on a longer phrase that merely starts with
+/// "during your …". Boundary acceptance stays inside the nom combinator (no
+/// string dispatch).
+fn parse_leading_turn_constraint(input: &str) -> Option<TriggerConstraint> {
+    terminated(
+        preceded(
+            tag::<_, _, OracleError<'_>>("during "),
+            parse_during_turn_spec,
+        ),
+        alt((
+            value((), eof),
+            value((), peek(tag::<_, _, OracleError<'_>>(","))),
+        )),
+    )
+    .parse(input.trim_start())
+    .map(|(_, constraint)| constraint)
+    .ok()
+}
+
 fn peel_trailing_turn_constraint(input: &str) -> (&str, Option<TriggerConstraint>) {
     let mut remaining = input.trim();
     loop {
         if let Ok((_, constraint)) = preceded(
             tag::<_, _, OracleError<'_>>("during "),
-            all_consuming(alt((
-                value(
-                    TriggerConstraint::OnlyDuringOpponentsTurn,
-                    alt((
-                        tag("an opponent's turn"),
-                        tag("each opponent's turn"),
-                        tag("each opponents\u{2019} turn"),
-                        tag("each opponents' turn"),
-                        tag("your opponent's turn"),
-                        tag("your opponents\u{2019} turn"),
-                        tag("your opponents' turn"),
-                        tag("each of your opponents\u{2019} turn"),
-                        tag("each of your opponents' turn"),
-                    )),
-                ),
-                value(
-                    TriggerConstraint::OnlyDuringYourTurn,
-                    alt((tag("your turn"), tag("each of your turns"))),
-                ),
-            ))),
+            all_consuming(parse_during_turn_spec),
         )
         .parse(remaining)
         {

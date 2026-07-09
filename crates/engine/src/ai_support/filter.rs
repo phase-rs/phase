@@ -731,6 +731,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::Historic
         | FilterProp::NotHistoric
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities

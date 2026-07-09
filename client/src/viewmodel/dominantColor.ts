@@ -1,4 +1,5 @@
 import type { GameObject, ManaColor, PlayerId } from "../adapter/types";
+import { SHARD_ABBREVIATION } from "./costLabel";
 
 const LAND_SUBTYPE_TO_COLOR: Record<string, ManaColor> = {
   Plains: "White",
@@ -37,8 +38,13 @@ function countColors(
     } else if (obj.mana_cost.type === "Cost") {
       // Non-land permanents: count colored mana shards
       for (const shard of obj.mana_cost.shards) {
-        // Handle hybrid shards like "W/U" — count both halves
-        for (const part of shard.split("/")) {
+        // The engine serializes shards as Rust variant names ("White",
+        // "WhiteBlue", "TwoWhite", "PhyrexianWhite"…), so bridge to Scryfall
+        // symbols first (the same canonical map the rest of the viewmodel uses).
+        // The `?? shard` fallback also accepts an already-symbolic shard.
+        const symbol = SHARD_ABBREVIATION[shard] ?? shard;
+        // Handle hybrid shards like "W/U" — count both halves.
+        for (const part of symbol.split("/")) {
           const color = SHARD_TO_COLOR[part];
           if (color) colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
         }

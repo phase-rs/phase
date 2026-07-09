@@ -50,7 +50,6 @@ type PendingAction =
       password?: string;
       format?: GameFormat;
       isP2P?: boolean;
-      reservationToken?: string | null;
       /**
        * Full lobby row, populated when the join originated from a lobby list
        * click (not from a typed code). Lets the deck-select view render
@@ -291,24 +290,14 @@ export function MultiplayerPage() {
    * is referenced as an identifier (stable across renders via React).
    */
   const joinP2PRoom = useCallback(
-    async (
-      code: string,
-      initialPassword?: string,
-      reservationToken?: string | null,
-    ): Promise<boolean> => {
+    async (code: string, initialPassword?: string): Promise<boolean> => {
       let password = initialPassword;
       while (true) {
-        const result = await resolveGuestFromStore(code, password, { reservationToken });
+        const result = await resolveGuestFromStore(code, password);
         if (result.ok) {
           const gameId = crypto.randomUUID();
           useGameStore.setState({ gameId });
           const roomCode = stripPeerIdPrefix(result.peerInfo.host_peer_id);
-          if (result.peerInfo.reservation_token) {
-            window.sessionStorage.setItem(
-              `phase-p2p-reservation:${roomCode}`,
-              result.peerInfo.reservation_token,
-            );
-          }
           navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
           return true;
         }
@@ -482,7 +471,7 @@ export function MultiplayerPage() {
         const { code, password, context } = action;
 
         if (context?.is_p2p === true || action.isP2P === true) {
-          return joinP2PRoom(code, password, action.reservationToken);
+          return joinP2PRoom(code, password);
         }
 
         const p2pCode = parseRoomCode(code);
@@ -498,12 +487,7 @@ export function MultiplayerPage() {
         saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
         useGameStore.setState({ gameId });
         const params = new URLSearchParams({ mode: "join", code });
-        if (action.reservationToken) {
-          window.sessionStorage.setItem(
-            `phase-join-reservation:${code}`,
-            action.reservationToken,
-          );
-        }
+        window.sessionStorage.removeItem(`phase-join-reservation:${code}`);
         if (password) {
           params.set("password", password);
         }
@@ -614,25 +598,18 @@ export function MultiplayerPage() {
       let resolvedFormat = format;
       let resolvedPassword = password;
       let resolvedIsP2P = context?.is_p2p === true;
-      let reservationToken: string | null = null;
-      const reserveOptions = {
-        reserve: true,
-        displayName: useMultiplayerStore.getState().displayName || "Player",
-      };
-      const result = await lookupJoinTargetFromStore(code, resolvedPassword, reserveOptions);
+      const result = await lookupJoinTargetFromStore(code, resolvedPassword);
       if (result.ok) {
         resolvedFormat = result.info.format_config?.format ?? resolvedFormat;
         resolvedIsP2P = result.info.is_p2p;
-        reservationToken = result.info.reservation_token ?? null;
       } else if (result.reason === "password_required") {
         const entered = window.prompt(t("page.passwordPrompt"));
         if (!entered) return;
         resolvedPassword = entered;
-        const retry = await lookupJoinTargetFromStore(code, resolvedPassword, reserveOptions);
+        const retry = await lookupJoinTargetFromStore(code, resolvedPassword);
         if (retry.ok) {
           resolvedFormat = retry.info.format_config?.format ?? resolvedFormat;
           resolvedIsP2P = retry.info.is_p2p;
-          reservationToken = retry.info.reservation_token ?? null;
         } else {
           showToast(retry.message);
           return;
@@ -647,7 +624,6 @@ export function MultiplayerPage() {
         password: resolvedPassword,
         format: resolvedFormat,
         isP2P: resolvedIsP2P,
-        reservationToken,
         context,
       };
       setPendingAction(action);
@@ -658,13 +634,6 @@ export function MultiplayerPage() {
 
   const handleBack = () => {
     if (view === "deck-select") {
-      if (pendingAction?.type === "join" && pendingAction.reservationToken) {
-        void lookupJoinTargetFromStore(
-          pendingAction.code,
-          pendingAction.password,
-          { releaseReservationToken: pendingAction.reservationToken },
-        );
-      }
       // With a pending action the user clearly came from a host/join
       // attempt; without one they came from the "Change Deck" affordance,
       // and `deckSelectReturn` remembers which view rendered that button.

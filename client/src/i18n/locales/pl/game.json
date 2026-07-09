@@ -278,7 +278,8 @@
     "assignRemaining_one": "Przydziel jeszcze {{count}}",
     "assignRemaining_other": "Przydziel jeszcze {{count}}",
     "confirmDistribute_one": "Zadeklaruj {{count}} atakującego",
-    "confirmDistribute_other": "Zadeklaruj {{count}} atakujących"
+    "confirmDistribute_other": "Zadeklaruj {{count}} atakujących",
+    "mustAttackPlayer": "{{creature}} musi zaatakować {{player}}"
   },
   "fullControl": {
     "label": "Kontrola",
@@ -578,6 +579,16 @@
     "blockIncompleteAttacker": "{{assigned}} z {{required}} blokujących przydzielonych",
     "blockIncomplete_one": "{{count}} atakujący potrzebuje kolejnego blokującego",
     "blockIncomplete_other": "{{count}} atakujących potrzebuje kolejnego blokującego",
+    "mustAttackBadge": "Must attack",
+    "mustAttackSatisfiedBadge": "Attacking ✓",
+    "mustBlockBadge": "Must block",
+    "mustBlockSatisfiedBadge": "Blocking ✓",
+    "cantAttackBadge": "Can't attack",
+    "cantBlockBadge": "Can't block",
+    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
+    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
+    "unsatisfiedMustBlock_one": "{{count}} creature must block",
+    "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Przydziel {{amount}} obrażeń bojowych",
     "assignDamageSubtitle": "{{name}} — Pozostało: {{remaining}}",
     "assignDamageButton": "Przydziel obrażenia",
@@ -1597,6 +1608,10 @@
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
   },
+  "pileOpponent": {
+    "title": "Choose Opponent",
+    "subtitle": "Choose which opponent separates the cards into piles."
+  },
   "assist": {
     "choose": {
       "title": "Choose a Player to Assist",
@@ -1816,6 +1831,16 @@
     "dontShowAgain": "Don’t show again this session",
     "reportTitle": "Stuck decision: {{kind}}",
     "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
+  "mayTriggerAutoChoice": {
+    "listHeader": "Wybory automatyczne",
+    "menuButtonShortActive": "Automatyczne decyzje",
+    "clearAll": "Wyczyść wszystko",
+    "remove": "Usuń",
+    "accept": "Tak",
+    "decline": "Nie",
+    "sourceFallback": "Efekt",
+    "entryLabel": "{{source}} — {{decision}}"
   },
   "optionalEffect": {
     "sourceFallback": "Efekt",

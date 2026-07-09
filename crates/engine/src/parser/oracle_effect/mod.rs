@@ -216,6 +216,9 @@ pub(crate) fn replace_first_object_pronoun(body: &str, replacement: &str) -> Opt
 /// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
 /// because the triggering event's source IS the attached-to creature.
 pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
+    if let Some(target) = ctx.object_pronoun_ref.clone() {
+        return target;
+    }
     match &ctx.subject {
         Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
             TargetFilter::TriggeringSource
@@ -1713,6 +1716,44 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
         target: TargetFilter::Any,
+    })
+}
+
+/// CR 614.1a + CR 111.2 + CR 514.2: Install an until-end-of-turn floating
+/// token-creation replacement (Kaya, Geist Hunter −2: "Until end of turn, if one
+/// or more tokens would be created under your control, twice that many of those
+/// tokens are created instead."). Unlike Doubling Season (an object-hosted static
+/// replacement), this is a one-shot loyalty effect that *creates* a turn-bound
+/// replacement effect — it must survive Kaya leaving the battlefield and lapse at
+/// cleanup, so it is installed as a controller-anchored floating replacement
+/// (`AddTargetReplacement { target: None }` → `pending_damage_replacements`) with
+/// an explicit EOT expiry rather than hosted on Kaya's object.
+///
+/// The token-doubling shape (`token_owner_scope`, `quantity_modification`,
+/// `event: CreateToken`) is built by the shared `parse_token_replacement`
+/// building block, so any future ×N / halving / plus-spec until-EOT installer
+/// reuses this path.
+fn parse_token_creation_replacement_effect(lower: &str) -> Option<Effect> {
+    // Strip the optional leading "until end of turn[, ]" duration prefix via nom;
+    // the EOT lifetime is carried explicitly on the def below, so the remainder
+    // (the token-creation replacement clause) is what we hand to the shared
+    // builder.
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("until end of turn"))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>(", "), tag(" "))))
+        .parse(rest)
+        .ok()?;
+
+    let mut def = crate::parser::oracle_replacement::parse_token_replacement(rest, rest)?;
+    // CR 514.2: The installed replacement lasts "until end of turn"; stamp the
+    // expiry directly so the lifetime is self-contained (not dependent on the
+    // ability frame's duration threading) — mirrors `try_parse_die_exile_rider`.
+    def.expiry = Some(RestrictionExpiry::EndOfTurn);
+
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(def),
+        target: TargetFilter::None,
     })
 }
 
@@ -3320,6 +3361,14 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             value(
                 RestrictionPlayerScope::ParentTargetedPlayer,
                 tag("that player"),
+            ),
+            // CR 109.4 + CR 608.2c: "its controller" — the controller of the
+            // parent object target (the countered spell). Bound at resolution via
+            // add_restriction + parent_target_controller. The sub-ability inherits
+            // the counter's target at effects/mod.rs:7441-7450.
+            value(
+                RestrictionPlayerScope::ParentObjectTargetController,
+                tag("its controller"),
             ),
             // CR 508.5: "defending player" — the player being attacked by the
             // source ("Whenever ~ attacks, defending player can't cast spells
@@ -6997,6 +7046,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = try_parse_leave_battlefield_exile_replacement(&lower) {
         return parsed_clause(effect);
     }
+    // CR 614.1a + CR 111.2 + CR 514.2: "Until end of turn, if one or more tokens
+    // would be created under your control, twice that many … are created instead"
+    // (Kaya, Geist Hunter −2) installs a floating until-EOT token-creation
+    // replacement. Routed here beside the other replacement-installing effect
+    // helpers, before the generic clause dispatch / Unimplemented fallback.
+    if let Some(effect) = parse_token_creation_replacement_effect(&lower) {
+        return parsed_clause(effect);
+    }
     // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
     // the planar die, [effect] instead" (Fixed Point in Time). Routed here in the
     // replacement chain — BEFORE the leading-"if" strip further down would peel
@@ -9204,10 +9261,17 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
 /// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
 /// one-shot step skips. Handles controller and target-player forms.
 fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    // CR 614.10a: "[you ]skip your next <step>" — controller-subject one-shot
+    // step skip. The "skip their next <step>" form is the per-player body a
+    // for-each-player distributor leaves after stripping its "each opponent" /
+    // "each player" head (Brine Elemental: "each opponent skips their next untap
+    // step"); it resolves relative to the iterating player, so it lowers to the
+    // same `Controller`-targeted skip.
     if let Some((step, rest)) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = alt((
             tag::<_, _, OracleError<'_>>("you skip your next "),
             tag("skip your next "),
+            tag("skip their next "),
         ))
         .parse(input)?;
         let (input, step) = parse_skip_step_name(input)?;
@@ -12840,7 +12904,12 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                     // (covers "target X" / "it" / "that card" — count stays 1).
                     let (count_expr, after_count) =
                         peel_put_at_library_count(before).unwrap_or((None, before));
-                    let (filter, _) = parse_target(after_count);
+                    // CR 608.2k: thread the real trigger context so a bare object
+                    // pronoun ("put it on the bottom …") binds to the trigger's
+                    // `object_pronoun_ref` (the cast spell for spell-cast triggers)
+                    // rather than defaulting to `ParentTarget`. `parse_target`
+                    // spins up a fresh empty context, which loses that antecedent.
+                    let (filter, _) = parse_target_with_ctx(after_count, ctx);
                     let new_target = if matches!(filter, TargetFilter::Any) {
                         None
                     } else {
@@ -23834,6 +23903,67 @@ pub(crate) fn parse_effect_chain_ir(
                     parsed: parsed_clause(Effect::ReturnAsAura {
                         enchant_filter,
                         grants,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: starting_with.clone(),
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
+                });
+                continue;
+            }
+        }
+
+        // CR 122.1 + CR 122.1f + CR 107.1b: Threshold player-counter top-up
+        // rider (Vraska, Betrayal's Sting [-9]: "If target player has fewer
+        // than nine poison counters, they get a number of poison counters equal
+        // to the difference."). Dispatched BEFORE `split_leading_conditional`
+        // so the whole sentence is captured as one `GivePlayerCounter` with a
+        // `max(0, N − current)` count. Splitting off the leading "If …" as a
+        // pass/fail condition would sever the "equal to the difference"
+        // arithmetic from the count, so `condition: None` is intentional: the
+        // effect always resolves and the `ClampMin { minimum: 0 }` makes the
+        // already-at-or-above-`N` case a zero no-op (CR 107.1b; the resolver
+        // no-ops at amount 0). The count reads the chosen TARGET player's
+        // counters via `QuantityRef::TargetControllerCounter`, bound at
+        // resolution by `parent_target_controller`.
+        {
+            let chunk_lower = normalized_text.to_ascii_lowercase();
+            if let Some((kind, threshold, target)) =
+                crate::parser::oracle_nom::player_counter_difference::try_parse(&chunk_lower)
+            {
+                let count = QuantityExpr::ClampMin {
+                    inner: Box::new(QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Multiply {
+                            factor: -1,
+                            inner: Box::new(QuantityExpr::Ref {
+                                qty: QuantityRef::TargetControllerCounter { kind },
+                            }),
+                        }),
+                        offset: threshold,
+                    }),
+                    minimum: 0,
+                };
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::GivePlayerCounter {
+                        counter_kind: kind,
+                        count,
+                        target,
                     }),
                     boundary: chunk.boundary_after,
                     condition: None,

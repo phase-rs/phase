@@ -115,6 +115,7 @@
     "recoveryDescription": "Wenn sich eine Karte fehlerhaft verhält, exportiere zuerst den Zustand. Das erweiterte Debug-Panel steht zur Verfügung, wenn du das Spiel inspizieren oder anpassen musst.",
     "copyState": "Zustand kopieren",
     "exportState": "Zustand exportieren",
+    "exportReplay": "Wiederholung exportieren",
     "openAdvancedDebug": "Erweitertes Debug öffnen",
     "sections": {
       "Flow": "Ablauf",
@@ -125,7 +126,10 @@
       "copied": "Spielzustand in die Zwischenablage kopiert.",
       "copyFailed": "Spielzustand konnte nicht kopiert werden.",
       "exported": "{{filename}} exportiert.",
-      "exportFailed": "Spielzustand konnte nicht exportiert werden."
+      "exportFailed": "Spielzustand konnte nicht exportiert werden.",
+      "replayExported": "Wiederholung gespeichert als {{filename}}.",
+      "replayExportUnavailable": "Für diese Partie ist keine Wiederholungsaufzeichnung verfügbar.",
+      "replayExportFailed": "Die Wiederholung konnte nicht exportiert werden."
     },
     "prompt": {
       "starting": "Das Spiel startet oder stellt den Zustand wieder her.",

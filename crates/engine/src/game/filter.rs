@@ -223,6 +223,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
@@ -450,6 +451,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
@@ -3157,6 +3159,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // permanent — fail closed against the spell-cast snapshot.
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         // CR 201.2: Source-/target-relative name predicates require
@@ -4184,6 +4187,9 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
+        // CR 701.27g: Match transformed permanents (a transforming DFC on the
+        // battlefield with its back face up).
+        FilterProp::Transformed => obj.transformed,
         // CR 115.9c: If the object is a stack entry, ALL of its targets must match
         // the inner filter. Falls back permissive for non-stack objects so trigger
         // matchers remain the primary authority (they validate separately).
@@ -4605,6 +4611,7 @@ fn zone_change_record_matches_property(
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::Foretold
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
@@ -6829,6 +6836,26 @@ mod tests {
         let filter =
             TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Tapped]));
         assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    // CR 701.27g: `Transformed` matches only permanents whose back face is up.
+    #[test]
+    fn transformed_property_matches_only_transformed() {
+        let mut state = setup();
+        let transformed = add_creature(&mut state, PlayerId(0), "Back Face");
+        let normal = add_creature(&mut state, PlayerId(0), "Front Face");
+        state.objects.get_mut(&transformed).unwrap().transformed = true;
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Transformed]));
+        assert!(
+            matches_target_filter(&state, transformed, &filter, transformed),
+            "a transformed permanent must match"
+        );
+        assert!(
+            !matches_target_filter(&state, normal, &filter, normal),
+            "a non-transformed permanent must not match"
+        );
     }
 
     // CR 702.171b: `IsSaddled` matches only objects with the saddled designation.
@@ -10217,6 +10244,66 @@ mod tests {
             &attacked_with_company,
             &source_ctx,
         ));
+    }
+
+    #[test]
+    fn attacking_defender_matches_source_chosen_player() {
+        // CR 508.1b + CR 613.1: Triarch Stalker / Beckoning Will-o'-Wisp scope
+        // attackers by the source's persisted chosen player. `attacking_defender_
+        // matches` resolves `Some(SourceChosenPlayer)` through the generic
+        // `controller_ref_player` arm, which reads the choice durably persisted on
+        // the source object (`ChosenAttribute::Player`). An attacker attacking the
+        // chosen player matches; one attacking any other player does not.
+        use crate::game::zones::create_object;
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(7);
+        let card_id = CardId(state.next_object_id);
+        let src = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Triarch Stalker".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        // The combat trigger persisted P1 as the chosen player.
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+
+        let source_ctx = SourceContext {
+            id: src,
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+            recipient_id: None,
+        };
+
+        assert!(
+            attacking_defender_matches(
+                &state,
+                &source_ctx,
+                PlayerId(1),
+                Some(&ControllerRef::SourceChosenPlayer),
+            ),
+            "an attacker attacking the persisted chosen player must match"
+        );
+        assert!(
+            !attacking_defender_matches(
+                &state,
+                &source_ctx,
+                PlayerId(0),
+                Some(&ControllerRef::SourceChosenPlayer),
+            ),
+            "an attacker attacking a non-chosen player must not match"
+        );
     }
 
     // ===========================================================================

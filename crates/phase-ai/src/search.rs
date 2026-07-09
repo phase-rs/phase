@@ -1541,6 +1541,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // object goes to derived pile B) is the simplest legal partition, and
         // pile A is the default choice for the chooser. Tactical AI override
         // happens through legal_actions; this is the safety net.
+        WaitingFor::SeparatePilesChooseOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opp| GameAction::ChoosePileOpponent { opponent: opp }),
         WaitingFor::SeparatePilesPartition { .. } => {
             Some(GameAction::SubmitPilePartition { pile_a: Vec::new() })
         }
@@ -4398,6 +4401,7 @@ mod tests {
                 m
             },
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
 
         for difficulty in [
@@ -4430,6 +4434,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -4462,6 +4467,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![target],
+            attacker_constraints: Default::default(),
         };
 
         let action = validated_declare_attackers(&state, vec![(creature, target)]);

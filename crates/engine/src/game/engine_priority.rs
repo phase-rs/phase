@@ -12,8 +12,16 @@ pub(super) fn run_post_action_pipeline(
     events: &mut Vec<GameEvent>,
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
+    skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
-    run_post_action_pipeline_from(state, events, 0, default_wf, skip_trigger_scan)
+    run_post_action_pipeline_from(
+        state,
+        events,
+        0,
+        default_wf,
+        skip_trigger_scan,
+        skip_deferred_trigger_drain,
+    )
 }
 
 /// Run the normal post-action settlement while scanning only events produced at
@@ -25,6 +33,7 @@ pub(crate) fn run_post_action_pipeline_from(
     event_start: usize,
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
+    skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
@@ -141,6 +150,7 @@ pub(crate) fn run_post_action_pipeline_from(
     // handled by the check below.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
+        && !skip_deferred_trigger_drain
     {
         if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events) {
             state.waiting_for = wf;

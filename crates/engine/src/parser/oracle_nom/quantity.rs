@@ -1179,7 +1179,6 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // extremum-hand phrases must precede the generic target-zone and zone
         // arms they share a "cards in " prefix with.
         alt((
-            parse_number_of_cards_in_chosen_player_zone,
             // CR 402.1: "cards in the hand of the {player|opponent} with the
             // {most|fewest} cards in hand" (Adamaro P/T CDA class).
             parse_number_of_cards_in_hand_of_extremum_player,
@@ -1546,23 +1545,6 @@ fn parse_number_of_type_on_battlefield_with_keyword(input: &str) -> OracleResult
                 controller: None,
                 properties: vec![FilterProp::WithKeyword { value: keyword }],
             }),
-        },
-    ))
-}
-
-/// CR 613.1: Parse "cards in the chosen player's <zone>" after "the number of"
-/// into the general zone-count building block scoped to the source's persisted
-/// chosen player.
-fn parse_number_of_cards_in_chosen_player_zone(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("cards in the chosen player's ").parse(input)?;
-    let (rest, zone) = parse_zone_ref_singular(rest)?;
-    Ok((
-        rest,
-        QuantityRef::ZoneCardCount {
-            zone,
-            card_types: Vec::new(),
-            scope: CountScope::SourceChosenPlayer,
-            filter: None,
         },
     ))
 }
@@ -2122,6 +2104,15 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
                 parse_zone_ref_plural,
             ),
             |zone| (zone, CountScope::Opponents),
+        ),
+        // CR 613.1: "the chosen player's <zone>" — the player persisted on the
+        // source via an earlier "choose a player" (Haunting Apparition:
+        // "green creature cards in the chosen player's graveyard"). Placed on the
+        // shared scoped-zone path so card-type/color filters compose uniformly,
+        // rather than a separate unfiltered-only arm.
+        map(
+            preceded(tag("the chosen player's "), parse_zone_ref_singular),
+            |zone| (zone, CountScope::SourceChosenPlayer),
         ),
         map(preceded(tag("all "), parse_zone_ref_plural), |zone| {
             (zone, CountScope::All)
@@ -2781,6 +2772,22 @@ fn parse_amassed_army_property_ref(input: &str) -> OracleResult<'_, QuantityRef>
     .parse(rest)
 }
 
+/// CR 122.1 + CR 608.2 + CR 608.2h: leaf demonstrative amount "that much"/"that
+/// many" → the triggering event's amount (`QuantityRef::EventContextAmount`).
+/// Single authority for the count-prefix slot shared by the player-counter,
+/// counter-removal, and mana-production arms. Matches the bare quantifier
+/// WITHOUT a trailing space; callers `.trim_start()` the remainder. Narrower
+/// than `parse_event_context_refs` (which also matches "that damage"/"the
+/// damage dealt"/power/toughness/amass — invalid in a pure count slot). Per CR
+/// 608.2h the referenced amount is determined once, when the effect is applied.
+pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
+    alt((
+        value(QuantityRef::EventContextAmount, tag("that much")),
+        value(QuantityRef::EventContextAmount, tag("that many")),
+    ))
+    .parse(input)
+}
+
 /// Parse event-context quantity references.
 ///
 /// CR 603.7c: "that {noun}" in a triggered ability refers to the object or
@@ -2788,8 +2795,10 @@ fn parse_amassed_army_property_ref(input: &str) -> OracleResult<'_, QuantityRef>
 /// `extract_source_from_event` → live object or LKI cache.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::EventContextAmount, tag("that much")),
-        value(QuantityRef::EventContextAmount, tag("that many")),
+        // CR 608.2h: bare demonstrative amount — delegate to the shared
+        // single-authority combinator (also used by the player-counter,
+        // counter-removal, and mana-production count-prefix slots).
+        parse_that_much_or_many,
         value(QuantityRef::EventContextAmount, tag("that damage")),
         // CR 120.1 + CR 603.7c: "the damage dealt" bare form in a triggered
         // ability body — refers to the total from the triggering combat-damage
@@ -2811,6 +2820,11 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("that creature's toughness"),
         ),
+        // CR 608.2k + CR 700.4: of-genitive form of the dies-trigger referent's
+        // P/T ("the power of the creature that died" — Death's Presence). The
+        // property axis is composed from the object phrase rather than enumerated
+        // as full-phrase tags — see `parse_died_creature_property_ref`.
+        parse_died_creature_property_ref,
         // "Whenever you cast an enchantment spell, ... equal to that spell's
         // mana value" (Dusty Parlor) — the SpellCast event's source object is
         // the spell itself, so CMC reads cleanly off it.
@@ -2845,6 +2859,42 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_anaphoric_target_card_property_ref,
     ))
     .parse(input)
+}
+
+/// CR 608.2k + CR 700.4: Parse the of-genitive form of a dies-trigger's dead
+/// creature P/T reference — "the power/toughness of the creature that died
+/// [this turn]" (Death's Presence: "put X +1/+1 counters …, where X is the power
+/// of the creature that died").
+///
+/// Composes the property axis (`power` ↔ `toughness`) with the fixed
+/// died-creature event phrase rather than enumerating full-phrase tags, so the
+/// next equivalent wording reuses this one combinator instead of adding another
+/// verbatim string. Both properties resolve through `ObjectScope::CostPaidObject`
+/// — the trigger event's source (the same referent as the possessive "that
+/// creature's power" arm); since that creature is now in the graveyard its P/T is
+/// read from last-known information (CR 603.10a / CR 113.7a). The optional
+/// " this turn" tolerates the qualified phrasing without changing the (singular)
+/// referent.
+fn parse_died_creature_property_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, qty) = alt((
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("toughness"),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" of the creature that died").parse(rest)?;
+    let (rest, _) = opt(tag(" this turn")).parse(rest)?;
+    Ok((rest, qty))
 }
 
 /// Parse target-creature power refs:
@@ -7394,6 +7444,36 @@ mod tests {
             }
         );
         assert_eq!(rest2, "");
+
+        // CR 608.2k + CR 700.4 (issue #5333): of-genitive form of the dies-trigger
+        // referent's P/T — Death's Presence's "the power of the creature that
+        // died" must bind the same CostPaidObject scope as the possessive form,
+        // not fall through to an unbound Variable (which resolved to 0 counters).
+        for (phrase, expected) in [
+            (
+                "the power of the creature that died",
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+            (
+                "the toughness of the creature that died",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+            // The optional " this turn" qualifier keeps the same singular referent.
+            (
+                "the power of the creature that died this turn",
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(q, expected, "phrase {phrase:?}");
+            assert_eq!(rest, "", "phrase {phrase:?} must fully consume");
+        }
 
         let (rest3, q3) = parse_quantity_ref("the amassed Army's power").unwrap();
         assert_eq!(

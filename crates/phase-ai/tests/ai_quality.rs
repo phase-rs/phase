@@ -70,6 +70,7 @@ fn blocks_lethal_attack() {
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 
@@ -105,6 +106,7 @@ fn does_not_block_when_safe() {
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 
@@ -227,6 +229,7 @@ fn ai_vs_ai_completes_combat_sequence() {
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 
@@ -287,6 +290,7 @@ fn declare_blockers_never_produces_pass_priority() {
                 (blocker_b, vec![attacker]),
             ]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 
@@ -316,6 +320,7 @@ fn attacks_when_opponent_is_at_lethal() {
             player: P0,
             valid_attacker_ids: vec![attacker],
             valid_attack_targets: vec![AttackTarget::Player(P1)],
+            attacker_constraints: Default::default(),
         };
     }
 
@@ -395,6 +400,7 @@ fn attacks_with_evasive_creatures() {
             player: P0,
             valid_attacker_ids: vec![flyer],
             valid_attack_targets: vec![AttackTarget::Player(P1)],
+            attacker_constraints: Default::default(),
         };
     }
 

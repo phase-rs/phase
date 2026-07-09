@@ -419,6 +419,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
             | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
             | GameEvent::CombatTaxPaid { .. }
             | GameEvent::CombatTaxDeclined { .. }
             | GameEvent::BecomesTarget { .. }
