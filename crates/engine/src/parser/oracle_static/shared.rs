@@ -3043,9 +3043,13 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         (" with a mana ability", FilterProp::HasManaAbility),
         (" with no abilities", FilterProp::HasNoAbilities),
     ] {
-        if let Ok((_, (base_lower, after))) = nom_primitives::split_once_on(tp.lower, needle) {
-            if after.trim().is_empty() && !base_lower.trim().is_empty() {
-                let base = tp.original[..base_lower.len()].trim();
+        let parse_trailing_qualifier = all_consuming(terminated(
+            take_until::<_, _, OracleError<'_>>(needle),
+            tag::<_, _, OracleError<'_>>(needle),
+        ));
+        if let Ok((_, base_lower)) = parse_trailing_qualifier.parse(tp.lower) {
+            if !base_lower.trim().is_empty() {
+                let base = lower_subslice_to_original(&tp, base_lower)?.trim();
                 return parse_continuous_subject_filter(base).map(|f| add_property(f, prop));
             }
         }
