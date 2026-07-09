@@ -13591,6 +13591,39 @@ fn dynamic_pt_in_text_minus_x_over_0_without_where_clause_defaults_to_cost_x_pai
 }
 
 #[test]
+fn dynamic_pt_in_text_mixed_dynamic_power_fixed_toughness() {
+    // CR 613.4c layer 7c: a MIXED "+X/+1" grant (Cranial Ram, "Equipped
+    // creature gets +X/+1, where X is the number of artifacts you control")
+    // must emit BOTH an X-valued power modification and a CONSTANT +1
+    // toughness modification. Before `parse_variable_pt_pattern` accepted a
+    // fixed magnitude per axis, the `+1` failed the pattern and the entire
+    // equip static was dropped.
+    let mods = parse_dynamic_pt_in_text(
+        "equipped creature gets +x/+1",
+        Some("the number of artifacts you control"),
+    )
+    .expect("mixed +X/+1 grant must emit modifications");
+
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+        "expected AddDynamicPower for the X power axis, got {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })),
+        "expected fixed AddToughness {{ value: 1 }} for the +1 toughness axis, got {mods:?}"
+    );
+    // The fixed +1 toughness must be a constant, never a dynamic modification.
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+        "fixed +1 toughness must not be dynamic, got {mods:?}"
+    );
+}
+
+#[test]
 fn dynamic_pt_in_text_minus_x_over_minus_x_without_where_clause_defaults_both_to_cost_x_paid() {
     // CR 107.3i: Symmetric -X/-X with no binding clause must default both
     // legs to `QuantityRef::CostXPaid` wrapped in

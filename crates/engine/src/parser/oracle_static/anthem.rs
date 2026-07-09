@@ -1063,8 +1063,11 @@ pub(crate) fn parse_dynamic_pt_in_text(
     let after_verb = nom_tag_lower(after_gets, after_gets, "gets ")
         .or_else(|| nom_tag_lower(after_gets, after_gets, "get "))?;
 
-    // CR 613.4c: Parse variable P/T pattern via nom combinator
-    let (_, (p_sign, p_is_x, t_sign, t_is_x)) = parse_variable_pt_pattern(after_verb).ok()?;
+    // CR 613.4c: Parse variable P/T pattern via nom combinator. Each axis is
+    // either the variable X (`None`) or a fixed magnitude (`Some(n)`).
+    let (_, (p_sign, p_mag, t_sign, t_mag)) = parse_variable_pt_pattern(after_verb).ok()?;
+    let p_is_x = p_mag.is_none();
+    let t_is_x = t_mag.is_none();
 
     if !p_is_x && !t_is_x {
         return None; // No X variable — not a dynamic P/T pattern
@@ -1093,27 +1096,38 @@ pub(crate) fn parse_dynamic_pt_in_text(
     };
 
     let mut mods = Vec::new();
-    if p_is_x {
-        let qty = if p_sign < 0 {
-            QuantityExpr::Multiply {
-                factor: -1,
-                inner: Box::new(quantity.clone()),
-            }
-        } else {
-            quantity.clone()
-        };
-        mods.push(ContinuousModification::AddDynamicPower { value: qty });
+    // CR 613.4c layer 7c: the dynamic axis grants an X-valued modification; a
+    // fixed nonzero axis grants a constant modification alongside it (the mixed
+    // "+X/+1" case). A fixed `0` axis contributes nothing.
+    match p_mag {
+        None => {
+            let qty = if p_sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(quantity.clone()),
+                }
+            } else {
+                quantity.clone()
+            };
+            mods.push(ContinuousModification::AddDynamicPower { value: qty });
+        }
+        Some(n) if n != 0 => mods.push(ContinuousModification::AddPower { value: p_sign * n }),
+        Some(_) => {}
     }
-    if t_is_x {
-        let qty = if t_sign < 0 {
-            QuantityExpr::Multiply {
-                factor: -1,
-                inner: Box::new(quantity),
-            }
-        } else {
-            quantity
-        };
-        mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+    match t_mag {
+        None => {
+            let qty = if t_sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(quantity),
+                }
+            } else {
+                quantity
+            };
+            mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+        }
+        Some(n) if n != 0 => mods.push(ContinuousModification::AddToughness { value: t_sign * n }),
+        Some(_) => {}
     }
 
     Some(mods)
