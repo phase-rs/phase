@@ -80,6 +80,28 @@ impl CombatStaticGates {
     }
 }
 
+fn intrinsic_cant_attack_static_matches(state: &GameState, obj: &GameObject) -> bool {
+    super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+        matches!(
+            sd.mode,
+            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
+        ) && sd.attack_defended.is_none()
+            && match sd.affected.as_ref() {
+                // CR 604.1 + CR 109.5: an unscoped source-local attack
+                // restriction is intrinsic to its own source.
+                None => true,
+                // CR 508.1c: scoped attack restrictions affect this source only
+                // when their affected filter actually matches it.
+                Some(filter) => matches_target_filter(
+                    state,
+                    obj.id,
+                    filter,
+                    &FilterContext::from_source(state, obj.id),
+                ),
+            }
+    })
+}
+
 /// CR 702.19: Which trample variant applies to combat damage assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrampleKind {
@@ -527,20 +549,16 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         // resolved through the shared `check_static_ability` building block, which
         // matches `def.affected` against this attacker and applies any
         // per-affected-player gate.
-        if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-            matches!(
-                sd.mode,
-                StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-            ) && sd.attack_defended.is_none()
-        }) || (gates.has_cant_attack
-            && crate::game::static_abilities::check_static_ability(
-                state,
-                StaticMode::CantAttack,
-                &crate::game::static_abilities::StaticCheckContext {
-                    target_id: Some(id),
-                    ..Default::default()
-                },
-            ))
+        if intrinsic_cant_attack_static_matches(state, obj)
+            || (gates.has_cant_attack
+                && crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantAttack,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(id),
+                        ..Default::default()
+                    },
+                ))
             || (gates.has_cant_attack_or_block
                 && crate::game::static_abilities::check_static_ability(
                     state,
@@ -3229,12 +3247,7 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                                 ..Default::default()
                             },
                         )))
-                && !super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-                    matches!(
-                        sd.mode,
-                        StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-                    ) && sd.attack_defended.is_none()
-                })
+                && !intrinsic_cant_attack_static_matches(state, obj)
                 // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
                 // (Angelic Arbiter restricting opponents' creatures) resolved via
                 // the shared `check_static_ability` building block.
@@ -4042,14 +4055,7 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                                     ..Default::default()
                                 },
                             )))
-                    && !super::functioning_abilities::active_static_definitions(state, obj).any(
-                        |sd| {
-                            matches!(
-                                sd.mode,
-                                StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-                            ) && sd.attack_defended.is_none()
-                        },
-                    )
+                    && !intrinsic_cant_attack_static_matches(state, obj)
                     // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
                     // (Angelic Arbiter) resolved via `check_static_ability`.
                     && !(gates.has_cant_attack
