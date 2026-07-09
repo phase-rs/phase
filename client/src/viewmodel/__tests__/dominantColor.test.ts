@@ -98,18 +98,20 @@ describe("getDominantManaColor", () => {
   });
 
   it("counts mana cost shards of non-land permanents", () => {
+    // The engine serializes shards as Rust variant names (e.g. "White", "Red"),
+    // not MTG symbols ("W", "R") — mirror the real payload here.
     const objects: Record<string, GameObject> = {
       "1": makeGameObject({
         id: 1,
         name: "Serra Angel",
         card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Angel"] },
-        mana_cost: { type: "Cost", shards: ["W", "W"], generic: 3 },
+        mana_cost: { type: "Cost", shards: ["White", "White"], generic: 3 },
       }),
       "2": makeGameObject({
         id: 2,
         name: "Lightning Bolt",
         card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-        mana_cost: { type: "Cost", shards: ["R"], generic: 0 },
+        mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
       }),
     };
 
@@ -118,21 +120,46 @@ describe("getDominantManaColor", () => {
     expect(result).toBe("White");
   });
 
-  it("combines land subtypes and spell mana costs", () => {
+  it("counts both halves of a hybrid shard variant", () => {
+    // "WhiteBlue" (the {W/U} hybrid variant name) must contribute to both
+    // White and Blue — SHARD_ABBREVIATION maps it to "W/U", split on "/".
     const objects: Record<string, GameObject> = {
-      "1": makeGameObject({ id: 1, card_types: { supertypes: ["Basic"], core_types: ["Land"], subtypes: ["Island"] } }),
-      "2": makeGameObject({ id: 2, card_types: { supertypes: ["Basic"], core_types: ["Land"], subtypes: ["Island"] } }),
-      "3": makeGameObject({
-        id: 3,
-        name: "Red Creature",
+      "1": makeGameObject({
+        id: 1,
+        name: "Hybrid Creature",
         card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-        mana_cost: { type: "Cost", shards: ["R"], generic: 1 },
+        mana_cost: { type: "Cost", shards: ["WhiteBlue"], generic: 0 },
+      }),
+      "2": makeGameObject({
+        id: 2,
+        name: "Blue Creature",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["Blue"], generic: 0 },
       }),
     };
 
-    const result = getDominantManaColor([1, 2, 3], objects, 0);
+    // White=1 (from the hybrid), Blue=2 (hybrid + mono-blue) → Blue wins.
+    const result = getDominantManaColor([1, 2], objects, 0);
 
     expect(result).toBe("Blue");
+  });
+
+  it("combines land subtypes and spell mana costs", () => {
+    const objects: Record<string, GameObject> = {
+      "1": makeGameObject({ id: 1, card_types: { supertypes: ["Basic"], core_types: ["Land"], subtypes: ["Island"] } }),
+      "2": makeGameObject({
+        id: 2,
+        name: "Red Creature",
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["Red", "Red"], generic: 1 },
+      }),
+    };
+
+    // Island=Blue 1, creature=Red 2 → Red wins (would be Blue if spell shards
+    // were silently dropped, as with the pre-fix symbol-keyed lookup).
+    const result = getDominantManaColor([1, 2], objects, 0);
+
+    expect(result).toBe("Red");
   });
 });
 

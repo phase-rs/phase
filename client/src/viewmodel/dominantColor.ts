@@ -1,4 +1,5 @@
 import type { GameObject, ManaColor, PlayerId } from "../adapter/types";
+import { SHARD_ABBREVIATION } from "./costLabel";
 
 const LAND_SUBTYPE_TO_COLOR: Record<string, ManaColor> = {
   Plains: "White",
@@ -8,7 +9,10 @@ const LAND_SUBTYPE_TO_COLOR: Record<string, ManaColor> = {
   Forest: "Green",
 };
 
-const SHARD_TO_COLOR: Record<string, ManaColor> = {
+// Keyed by MTG symbol halves ("W", "U", …) — the components produced by
+// splitting a shard's `SHARD_ABBREVIATION` on "/". Colorless/Snow/X/Phyrexian
+// halves have no entry and are ignored, so only true color pips are counted.
+const SYMBOL_TO_COLOR: Record<string, ManaColor> = {
   W: "White",
   U: "Blue",
   B: "Black",
@@ -35,11 +39,15 @@ function countColors(
         if (color) colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
       }
     } else if (obj.mana_cost.type === "Cost") {
-      // Non-land permanents: count colored mana shards
+      // Non-land permanents: count colored mana shards. The engine serializes
+      // shards as Rust variant names ("White", "WhiteBlue", "PhyrexianRed"),
+      // not MTG symbols — SHARD_ABBREVIATION is the canonical bridge to symbols
+      // ("W", "W/U", "R/P"). Split hybrid/Phyrexian shards on "/" and count each
+      // colored half.
       for (const shard of obj.mana_cost.shards) {
-        // Handle hybrid shards like "W/U" — count both halves
-        for (const part of shard.split("/")) {
-          const color = SHARD_TO_COLOR[part];
+        const abbreviation = SHARD_ABBREVIATION[shard] ?? shard;
+        for (const part of abbreviation.split("/")) {
+          const color = SYMBOL_TO_COLOR[part];
           if (color) colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
         }
       }
