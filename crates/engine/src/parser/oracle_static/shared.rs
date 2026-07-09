@@ -3043,7 +3043,7 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         (" with a mana ability", FilterProp::HasManaAbility),
         (" with no abilities", FilterProp::HasNoAbilities),
     ] {
-        let parse_trailing_qualifier = all_consuming(terminated(
+        let mut parse_trailing_qualifier = all_consuming(terminated(
             take_until::<_, _, OracleError<'_>>(needle),
             tag::<_, _, OracleError<'_>>(needle),
         ));
