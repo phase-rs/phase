@@ -424,6 +424,7 @@ mod issue_4921_skullscorch_unless_deal_damage;
 mod issue_4962_volo_guide_to_monsters;
 mod issue_5145_violent_eruption_choose_target_distribution;
 mod issue_5159_attacks_alone_investigate;
+mod issue_5335_stonehoof_mass_attack;
 mod issue_5336_kodama_mana_value_filter;
 mod issue_5339_armory_automaton;
 mod issue_536_six_grants_retrace;

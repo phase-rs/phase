@@ -3506,6 +3506,7 @@ fn trigger_events_match_for_ordering(
     same_event_conflict: bool,
     batch_conflict: bool,
     c2_order_independent: bool,
+    disjoint_per_attacker_fanout: bool,
 ) -> bool {
     // C1 (CR 603.3b): same firing event auto-orders only when the identical
     // siblings' resolution functions provably COMMUTE — the `ability_rw` kind/
@@ -3548,6 +3549,13 @@ fn trigger_events_match_for_ordering(
                 return true;
             }
         }
+        // C0-distinct (CR 603.3b + CR 508.3): per-attacker fan-out whose event
+        // objects are proven disjoint can auto-order without the coarse C2
+        // walker. Other distinct-event groups still fall through to C2 so the
+        // sibling-mutable axis remains load-bearing.
+        if disjoint_per_attacker_fanout {
+            return true;
+        }
     }
 
     // C2 (adopted from #5084 + a series soundness conjunct, CR 603.3b): distinct
@@ -3563,6 +3571,40 @@ fn trigger_events_match_for_ordering(
     // Precision dominates coarseness: C2 may auto-order only when the batch profiler
     // ALSO agrees the group is conflict-clean.
     c2_order_independent && !batch_conflict
+}
+
+/// CR 508.3 + CR 603.3b: per-attacker attack fan-out (Stonehoof Chieftain #5335)
+/// where each sibling carries a single-attacker `AttackersDeclared` event whose
+/// object is disjoint from every member's trigger source.
+fn attack_triggers_have_disjoint_event_objects(group: &[PendingTriggerContext]) -> bool {
+    let group_sources: std::collections::HashSet<ObjectId> =
+        group.iter().map(|ctx| ctx.pending.source_id).collect();
+    let mut seen_attackers = std::collections::HashSet::new();
+    for ctx in group {
+        let Some(GameEvent::AttackersDeclared {
+            attacker_ids,
+            attacks,
+            ..
+        }) = ctx.pending.trigger_event.as_ref()
+        else {
+            return false;
+        };
+        if attacker_ids.len() != 1 || attacks.len() != 1 {
+            return false;
+        }
+        let attacker = attacker_ids[0];
+        // Every event object must be absent from the whole group's source set —
+        // not only from its own trigger source. Otherwise a mixed batch where
+        // one sibling's attacker is another member's source can wrongly suppress
+        // `legacy_batch_prompt` via the first-event-only conjunct.
+        if group_sources.contains(&attacker) {
+            return false;
+        }
+        if !seen_attackers.insert(attacker) {
+            return false;
+        }
+    }
+    true
 }
 
 /// CR 603.3c/603.3d + CR 601.2c/601.2d: A trigger requires ordering-relevant
@@ -3751,10 +3793,19 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
     };
     let same_event_conflict =
         crate::game::ability_rw::profiles_conflict(&profile, &same_event_structure);
+    // CR 508.3 + CR 603.3b (#5335): per-attacker attack fan-out with disjoint
+    // event objects commutes — the D3 `legacy_batch_prompt` parity gate applies
+    // to co-departure batches with frozen look-back reads, not to distinct
+    // single-attacker events that only write their own event object. The
+    // all-sources disjointness proof lives entirely in
+    // `attack_triggers_have_disjoint_event_objects` (per-trigger event object vs
+    // the whole group source set); do not reuse the first-event-only
+    // `event_object_excludes_sources` witness here.
+    let disjoint_per_attacker_fanout = attack_triggers_have_disjoint_event_objects(group);
     // D3 / D5: the batch branch keeps prompting the 12 retained event-context
     // refs (`legacy_batch_prompt`) for strict parity, plus the freeze-invalidation
     // / live-read/write feed rows from `profiles_conflict`.
-    let batch_conflict = profile.legacy_batch_prompt()
+    let batch_conflict = (!disjoint_per_attacker_fanout && profile.legacy_batch_prompt())
         || crate::game::ability_rw::profiles_conflict(&profile, &batch_structure);
 
     // C2 (fail-closed AST walker): two distinct soundness axes (event context,
@@ -3772,6 +3823,7 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
                 same_event_conflict,
                 batch_conflict,
                 c2_order_independent,
+                disjoint_per_attacker_fanout,
             )
             && t.subject_match_count == first.pending.subject_match_count
             && t.may_trigger_origin == first.pending.may_trigger_origin
@@ -22230,6 +22282,144 @@ pub mod tests {
                 panic!("C2 ON: distinct-event sound group must auto-order when loop_detection On")
             }
         }
+    }
+
+    fn single_attacker_declared(attacker: ObjectId) -> GameEvent {
+        GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        }
+    }
+
+    fn stonehoof_grant_ability(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GenericEffect {
+                target: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::TriggeringSource)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    }])],
+            },
+            Vec::new(),
+            source,
+            controller,
+        )
+    }
+
+    fn attack_pending_from_source(
+        source_id: ObjectId,
+        controller: PlayerId,
+        ability: ResolvedAbility,
+        trigger_event: GameEvent,
+    ) -> PendingTriggerContext {
+        PendingTriggerContext::single(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability,
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: Some(trigger_event),
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        })
+    }
+
+    /// #5335 soundness: an event object that is another member's source must not
+    /// qualify for the per-attacker fan-out fast path.
+    #[test]
+    fn attack_triggers_disjoint_fanout_rejects_event_object_in_group_sources() {
+        let mut state = setup();
+        let stonehoof_card = CardId(state.next_object_id);
+        let stonehoof = create_object(
+            &mut state,
+            stonehoof_card,
+            PlayerId(0),
+            "Stonehoof Chieftain".to_string(),
+            Zone::Battlefield,
+        );
+        let raider_card = CardId(state.next_object_id);
+        let raider = create_object(
+            &mut state,
+            raider_card,
+            PlayerId(0),
+            "Raider".to_string(),
+            Zone::Battlefield,
+        );
+        let group = vec![
+            attack_pending_from_source(
+                stonehoof,
+                PlayerId(0),
+                stonehoof_grant_ability(stonehoof, PlayerId(0)),
+                single_attacker_declared(raider),
+            ),
+            attack_pending_from_source(
+                raider,
+                PlayerId(0),
+                stonehoof_grant_ability(raider, PlayerId(0)),
+                single_attacker_declared(stonehoof),
+            ),
+        ];
+        assert!(
+            !attack_triggers_have_disjoint_event_objects(&group),
+            "an attacker that is another member's source must fail the disjoint fan-out gate"
+        );
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "mixed fan-out with a member-source event object must not auto-order"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("mixed fan-out with member-source event object must prompt")
+            }
+        }
+    }
+
+    /// #5335: homogeneous Stonehoof fan-out — each raider is not any group source.
+    #[test]
+    fn attack_triggers_disjoint_fanout_accepts_stonehoof_ten_raider_pattern() {
+        let mut state = setup();
+        let stonehoof_card = CardId(state.next_object_id);
+        let stonehoof = create_object(
+            &mut state,
+            stonehoof_card,
+            PlayerId(0),
+            "Stonehoof Chieftain".to_string(),
+            Zone::Battlefield,
+        );
+        let mut group = Vec::new();
+        for i in 0..10 {
+            let raider_card = CardId(state.next_object_id);
+            let raider = create_object(
+                &mut state,
+                raider_card,
+                PlayerId(0),
+                format!("Raider {i}"),
+                Zone::Battlefield,
+            );
+            group.push(attack_pending_from_source(
+                stonehoof,
+                PlayerId(0),
+                stonehoof_grant_ability(stonehoof, PlayerId(0)),
+                single_attacker_declared(raider),
+            ));
+        }
+        assert!(
+            attack_triggers_have_disjoint_event_objects(&group),
+            "ten single-attacker events whose objects are not group sources must pass"
+        );
     }
 
     /// C0 axis-2 load-bearing at C2: the Rubblebelt Rioters / Orcish Siegemaster
