@@ -1216,6 +1216,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::Always
         | TriggerMode::EntersOrAttacks
         | TriggerMode::AttacksOrBlocks
+        | TriggerMode::BlocksOrBecomesBlocked
         | TriggerMode::StateCondition
         | TriggerMode::Airbend
         | TriggerMode::Earthbend

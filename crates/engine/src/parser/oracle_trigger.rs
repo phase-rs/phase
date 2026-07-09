@@ -8684,11 +8684,30 @@ fn try_parse_event(
         return Some((mode, def));
     }
 
-    // "blocks" — fires for the blocking creature.
-    if tag::<_, _, OracleError<'_>>("blocks").parse(rest).is_ok() {
+    // "blocks or becomes blocked [by a <filter>]" — Karn (bare), Goblin Cadets
+    // (bare), Venom/Mammoth Harness (filtered). CR 509.1h + CR 509.3d: the
+    // compound form must be dispatched before the bare "blocks" arm because
+    // `tag("blocks")` would otherwise match its prefix and silently drop the
+    // "or becomes blocked [by a <filter>]" remainder.
+    if let Ok((after_compound, _)) =
+        tag::<_, _, OracleError<'_>>("blocks or becomes blocked").parse(rest)
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::BlocksOrBecomesBlocked;
+        def.valid_card = Some(subject.clone());
+        def.valid_target = parse_becomes_blocked_by_filter(after_compound);
+        return Some((TriggerMode::BlocksOrBecomesBlocked, def));
+    }
+
+    // "blocks [a <filter>]" — fires for the blocking creature. Wall of Frost
+    // (bare), High-Rise Sawjack (filtered). CR 509.3b: capture the
+    // "a <filter> creature" attacker-side qualifier so a filtered "blocks"
+    // trigger fires only against a matching attacker.
+    if let Ok((after_blocks, _)) = tag::<_, _, OracleError<'_>>("blocks").parse(rest) {
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
+        def.valid_target = parse_blocks_a_filter(after_blocks);
         return Some((TriggerMode::Blocks, def));
     }
 
@@ -9190,6 +9209,15 @@ fn try_parse_event(
     }
     fn parse_becomes_blocked_by_filter(input: &str) -> Option<TargetFilter> {
         let (type_phrase, _) = alt((tag::<_, _, OracleError<'_>>(" by a "), tag(" by an ")))
+            .parse(input)
+            .ok()?;
+        let (filter, rest) = parse_type_phrase(type_phrase);
+        rest.trim().is_empty().then_some(filter)
+    }
+    /// CR 509.3b: "blocks a <filter>" carries a target-side (attacker) qualifier —
+    /// mirrors `parse_becomes_blocked_by_filter`'s blocker-side qualifier exactly.
+    fn parse_blocks_a_filter(input: &str) -> Option<TargetFilter> {
+        let (type_phrase, _) = alt((tag::<_, _, OracleError<'_>>(" a "), tag(" an ")))
             .parse(input)
             .ok()?;
         let (filter, rest) = parse_type_phrase(type_phrase);

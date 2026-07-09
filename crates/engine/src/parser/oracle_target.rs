@@ -919,6 +919,27 @@ pub fn parse_target_with_syntax<'a>(
         );
     }
 
+    // CR 608.2k + CR 509.3d: "the other creature"/"the other permanent" — the
+    // single object opposite the trigger's own source in a compound
+    // blocks-or-becomes-blocked pairing (Venom's "destroy the other creature",
+    // Mammoth Harness). This is a per-firing anaphor resolved at runtime via
+    // `blocked_attacker_from_event`, NOT the split-pile "the other" tracked-set
+    // reference in TRACKED_SET_PHRASES below — so it MUST be matched first, or
+    // the bare "the other" prefix would consume it and bind it to an
+    // (unpopulated) tracked set.
+    if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(
+                TargetFilter::ParentTarget,
+                tag::<_, _, OracleError<'_>>("the other creature"),
+            ),
+            value(TargetFilter::ParentTarget, tag("the other permanent")),
+        ))
+        .parse(input)
+    }) {
+        return (filter, rest, syntax);
+    }
+
     // CR 603.7: Anaphoric tracked-set pronouns
     static TRACKED_SET_PHRASES: &[&str] = &[
         "the chosen cards",

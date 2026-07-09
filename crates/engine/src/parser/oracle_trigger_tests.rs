@@ -6603,6 +6603,198 @@ fn trigger_becomes_blocked_by_two_or_more_creatures_stays_bare() {
     );
 }
 
+/// CR 509.3b: "blocks a <filter> creature" — the plain `Blocks` mode must
+/// capture the attacker-side qualifier (High-Rise Sawjack). Without the
+/// `parse_blocks_a_filter` capture the trigger would over-fire on any block.
+#[test]
+fn trigger_blocks_a_filtered_creature_captures_attacker_filter() {
+    let def = parse_trigger_line(
+        "Whenever High-Rise Sawjack blocks a creature with flying, High-Rise Sawjack gets +2/+0 until end of turn.",
+        "High-Rise Sawjack",
+    );
+    assert_eq!(def.mode, TriggerMode::Blocks);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    match def.valid_target {
+        Some(TargetFilter::Typed(ref tf)) => {
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            assert!(
+                tf.properties.iter().any(
+                    |p| matches!(p, FilterProp::WithKeyword { value } if *value == Keyword::Flying)
+                ),
+                "expected WithKeyword(Flying) in {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected a flying-creature attacker filter, got {other:?}"),
+    }
+}
+
+/// CR 509.1h + CR 509.3d: bare "blocks or becomes blocked" — compound mode with
+/// no CR 509 blocker/attacker qualifier (Goblin Cadets). The effect-text
+/// lowering may surface `TargetFilter::Player` from "target opponent", which the
+/// runtime `combat_filter` guard (see trigger_matchers unit tests) treats as
+/// absent; either way there is no genuine per-blocker filter.
+#[test]
+fn trigger_blocks_or_becomes_blocked_bare_no_combat_filter() {
+    let def = parse_trigger_line(
+        "Whenever Goblin Cadets blocks or becomes blocked, target opponent gains control of it.",
+        "Goblin Cadets",
+    );
+    assert_eq!(def.mode, TriggerMode::BlocksOrBecomesBlocked);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    // Any surfaced filter must be the spurious Player case, never a real object
+    // (CR 509) blocker/attacker filter.
+    assert!(
+        matches!(def.valid_target, None | Some(TargetFilter::Player)),
+        "bare compound trigger must not carry a real CR 509 filter, got {:?}",
+        def.valid_target
+    );
+}
+
+/// CR 509.1h + CR 509.3d: compound mode WITH a blocker/attacker qualifier
+/// (Mammoth Harness) — the "or becomes blocked by a creature" remainder must no
+/// longer be silently dropped, and "the other creature" must reach the subject
+/// parser as a `ParentTarget` grant.
+#[test]
+fn trigger_blocks_or_becomes_blocked_filtered_mammoth_harness() {
+    let def = parse_trigger_line(
+        "Whenever enchanted creature blocks or becomes blocked by a creature, the other creature gains first strike until end of turn.",
+        "Mammoth Harness",
+    );
+    assert_eq!(def.mode, TriggerMode::BlocksOrBecomesBlocked);
+    assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+    match def.valid_target {
+        Some(TargetFilter::Typed(ref tf)) => {
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        }
+        other => panic!("expected a creature blocker filter, got {other:?}"),
+    }
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("Mammoth Harness body must lower to an execute ability");
+    // "the other creature gains first strike" — the granted keyword targets the
+    // per-firing opposite creature (ParentTarget), never the enchanted host.
+    // Reverting the subject.rs "the other <type>" arm degrades this to
+    // Effect::Unimplemented (the fallback for an unrecognized subject phrase).
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "'the other creature' subject must be recognized, not dropped to Unimplemented"
+    );
+    match execute.effect.as_ref() {
+        Effect::GenericEffect { target, .. } => {
+            assert_eq!(
+                *target,
+                Some(TargetFilter::ParentTarget),
+                "the keyword grant must apply to the OTHER creature (ParentTarget), not the host"
+            );
+        }
+        other => panic!("expected a targeted GenericEffect grant, got {other:?}"),
+    }
+}
+
+/// CR 509.3d + CR 603.7: Venom — compound mode with a non-Wall exclusion filter,
+/// scheduling an end-of-combat destroy on "the other creature" (the blocker).
+#[test]
+fn trigger_blocks_or_becomes_blocked_venom_parses_delayed_destroy() {
+    let def = parse_trigger_line(
+        "Whenever enchanted creature blocks or becomes blocked by a non-Wall creature, destroy the other creature at end of combat.",
+        "Venom",
+    );
+    assert_eq!(def.mode, TriggerMode::BlocksOrBecomesBlocked);
+    assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+    match def.valid_target {
+        Some(TargetFilter::Typed(ref tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature in {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Wall")
+                )),
+                "expected non-Wall exclusion in {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected a non-Wall creature filter, got {other:?}"),
+    }
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("Venom body must lower to an execute ability");
+    match execute.effect.as_ref() {
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            assert!(
+                matches!(condition, DelayedTriggerCondition::AtNextPhase { phase } if *phase == Phase::EndCombat),
+                "expected AtNextPhase(EndCombat), got {condition:?}"
+            );
+            match effect.effect.as_ref() {
+                Effect::Destroy { target, .. } => {
+                    // "the other creature" binds to the per-firing antecedent —
+                    // lowered either as `ParentTarget` (resolved at runtime via
+                    // `blocked_attacker_from_event`) or as the tracked-set
+                    // published by the filtered trigger. Both resolve to the
+                    // blocker (proven by the runtime test
+                    // `venom_destroys_the_creature_that_blocked_it_at_end_of_combat`);
+                    // the load-bearing negative is that it is NOT the host/self.
+                    assert!(
+                        matches!(
+                            target,
+                            TargetFilter::ParentTarget
+                                | TargetFilter::TrackedSet { .. }
+                                | TargetFilter::TrackedSetFiltered { .. }
+                        ),
+                        "Venom destroys 'the other creature', never its host/self; got {target:?}"
+                    );
+                    assert!(
+                        !matches!(target, TargetFilter::SelfRef | TargetFilter::AttachedTo),
+                        "delayed destroy must not target Venom's own host; got {target:?}"
+                    );
+                }
+                other => panic!("expected delayed Destroy, got {other:?}"),
+            }
+        }
+        other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
+}
+
+/// Regression documentation for the Quagmire Lamprey runtime fix (5.15-sibling
+/// integration test): the parser already routes "put a -1/-1 counter on that
+/// creature" through a `ParentTarget` target on a per-blocker `BecomesBlocked`
+/// trigger. This assertion makes the runtime resolution test non-vacuous — it
+/// proves the fix is in `blocked_attacker_from_event`, not the parser.
+#[test]
+fn trigger_quagmire_lamprey_counter_targets_parent_target() {
+    let def = parse_trigger_line(
+        "Whenever Quagmire Lamprey becomes blocked by a creature, put a -1/-1 counter on that creature.",
+        "Quagmire Lamprey",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    assert!(
+        def.valid_target.is_some(),
+        "per-blocker filter must be present"
+    );
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("Quagmire body must lower to an execute ability");
+    match execute.effect.as_ref() {
+        Effect::PutCounter { target, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "'that creature' on a self-ref BecomesBlocked counter effect routes via ParentTarget"
+            );
+        }
+        other => panic!("expected PutCounter, got {other:?}"),
+    }
+}
+
 #[test]
 fn trigger_becomes_blocked_pump_scales_with_creatures_blocking_it() {
     let def = parse_trigger_line(
@@ -11571,13 +11763,18 @@ fn trigger_blocks_a_creature() {
 
 #[test]
 fn trigger_blocks_or_becomes_blocked() {
-    // "blocks or becomes blocked" — parsed as Blocks (blocker side)
+    // CR 509.1h + CR 509.3d: "blocks or becomes blocked" is a compound trigger —
+    // the remainder must no longer be silently dropped into a plain `Blocks`.
     let def = parse_trigger_line(
         "Whenever Karn, Silver Golem blocks or becomes blocked, it gets -4/+4 until end of turn.",
         "Karn, Silver Golem",
     );
-    assert_eq!(def.mode, TriggerMode::Blocks);
+    assert_eq!(def.mode, TriggerMode::BlocksOrBecomesBlocked);
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert!(
+        def.valid_target.is_none(),
+        "no blocker/attacker qualifier on Karn's trigger"
+    );
 }
 
 #[test]
