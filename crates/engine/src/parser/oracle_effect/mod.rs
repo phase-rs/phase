@@ -7646,7 +7646,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 121.1 + CR 701.21a: "{verb} cards equal to {quantity}" — dynamic count
+    // CR 121.1 + CR 701.17a: "{verb} cards equal to {quantity}" — dynamic count
     // from game state for draw or mill.
     if let Some(clause) = try_parse_equal_to_quantity_effect(tp) {
         return clause;
@@ -9523,7 +9523,7 @@ enum EqualToQtyVerb {
     Draw,
 }
 
-/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.1 + CR 701.21a).
+/// Parse "{verb} cards equal to {quantity_ref}" patterns (CR 121.1 + CR 701.17a).
 ///
 /// Handles verbs whose count field is `QuantityExpr` (mill, draw).
 fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause> {
@@ -9551,7 +9551,7 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
     match verb {
         EqualToQtyVerb::Mill => Some(parsed_clause(Effect::Mill {
             count: qty,
-            // CR 701.21a: No subject → controller mills.
+            // CR 701.17a: No subject → controller mills.
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
         })),
@@ -27086,7 +27086,7 @@ fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> 
 ///   - "exiled this way" → `Some(Exiled)` (CR 701.13a — exile).
 ///   - "sacrificed this way" → `Some(Sacrificed)` (CR 701.21a).
 ///   - "destroyed this way" → `Some(Destroyed)` (CR 701.8a).
-///   - "milled this way" → `Some(Milled)` (CR 701.21a).
+///   - "milled this way" → `Some(Milled)` (CR 701.17a).
 ///   - "discarded this way" → `Some(Discarded)` (CR 701.9a).
 ///   - "returned this way" / "put … onto the battlefield this way" →
 ///     `Some(Returned)` (CR 608.2c + CR 400.7 — a one-shot put-onto-battlefield
