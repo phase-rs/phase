@@ -3186,8 +3186,15 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::SeparateIntoPiles {
             object_filter,
             chosen_pile_effect,
+            unchosen_pile_effect,
             ..
-        } => legacy_target_filter(object_filter) || legacy_definition(chosen_pile_effect),
+        } => {
+            legacy_target_filter(object_filter)
+                || legacy_definition(chosen_pile_effect)
+                || unchosen_pile_effect
+                    .as_ref()
+                    .is_some_and(|d| legacy_definition(d))
+        }
         Effect::EpicCopy { spell } => contains_legacy_event_ref(spell),
         Effect::CreateDelayedTrigger { effect, .. } => legacy_definition(effect),
         Effect::CreateDrawReplacement { replacement_effect } => legacy_effect(replacement_effect),
@@ -4797,13 +4804,40 @@ fn rw_effect(
         }
         Effect::TurnFaceDown { target, profile: _ } => obj(StateKind::ObjectPt, target),
         Effect::GenericEffect {
-            static_abilities: _,
+            static_abilities,
             duration,
             target,
         } => {
-            let tf = target.clone().unwrap_or(TargetFilter::SelfRef);
-            let (mut p, sc) = obj(StateKind::ObjectPt, &tf);
-            place_object_write(&mut p, StateKind::SetMembership, scope_of(&tf, chain_root));
+            // CR 611.2c: the player-chosen `target` slot names the affected object
+            // when present; otherwise transient static grants (Stonehoof #5335)
+            // carry `affected: TriggeringSource` on the nested static.
+            let target_filters: Vec<_> = target.clone().map_or_else(
+                || {
+                    let nested: Vec<_> = static_abilities
+                        .iter()
+                        .filter_map(|s| s.affected.clone())
+                        .collect();
+                    if nested.is_empty() {
+                        vec![TargetFilter::SelfRef]
+                    } else {
+                        nested
+                    }
+                },
+                |tf| vec![tf],
+            );
+            let mut p = RwProfile::empty();
+            let mut sc = None;
+            for tf in target_filters {
+                let (target_profile, target_scope) = obj(StateKind::ObjectPt, &tf);
+                p.merge(target_profile);
+                place_object_write(&mut p, StateKind::SetMembership, scope_of(&tf, chain_root));
+                sc = match (sc, target_scope) {
+                    (None, next) => next,
+                    (current, None) => current,
+                    (Some(current), Some(next)) if current == next => Some(current),
+                    (Some(_), Some(_)) => Some(WriteScope::External),
+                };
+            }
             if let Some(d) = duration {
                 p.merge(rw_duration(d));
             }

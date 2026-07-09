@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
@@ -242,6 +242,69 @@ describe("ActionButton", () => {
     expect(cancel).toBeEnabled();
     fireEvent.click(cancel);
     expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
+  });
+
+  it("gates Confirm/Skip attackers on an unselected must-attack creature and enables on selection", () => {
+    const wf: WaitingFor = {
+      type: "DeclareAttackers",
+      data: {
+        player: 0,
+        valid_attacker_ids: [100],
+        attacker_constraints: { "100": { kind: "MustAttack", players: [] } },
+      },
+    };
+    useGameStore.setState({
+      gameState: { ...createGameState(wf), phase: "DeclareAttackers", active_player: 0, auto_pass: {} },
+      waitingFor: wf,
+      legalActions: [],
+    });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
+
+    render(<ActionButton />);
+    // Unselected must-attacker -> "Attack with None" skip is disabled.
+    expect(screen.getByRole("button", { name: "Attack with None" })).toBeDisabled();
+
+    // Selecting the must-attacker satisfies the gate and enables Confirm.
+    act(() => {
+      useUiStore.setState({ selectedAttackers: [100] });
+    });
+    expect(screen.getByRole("button", { name: "Confirm Attackers (1)" })).toBeEnabled();
+  });
+
+  it("gates Block with None on an unassigned must-block creature, independent of menace", () => {
+    // No block_requirements (menace) present, so incompleteBlockCount is 0 — the
+    // gate here is purely the engine-provided must-block constraint.
+    const wf: WaitingFor = {
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200] },
+        blocker_constraints: { "100": { kind: "MustBlock" } },
+      },
+    };
+    useGameStore.setState({ gameState: createGameState(wf), waitingFor: wf, legalActions: [] });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
+
+    render(<ActionButton />);
+    expect(screen.getByRole("button", { name: "Block with None" })).toBeDisabled();
+  });
+
+  it("enables Confirm Blockers once the must-block creature is assigned", () => {
+    const wf: WaitingFor = {
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200] },
+        blocker_constraints: { "100": { kind: "MustBlock" } },
+      },
+    };
+    useGameStore.setState({ gameState: createGameState(wf), waitingFor: wf, legalActions: [] });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map([[100, 200]]) });
+
+    render(<ActionButton />);
+    expect(screen.getByRole("button", { name: "Confirm Blockers (1)" })).toBeEnabled();
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {

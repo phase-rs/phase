@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 
-import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
+import type { AttackTarget, CombatRequirement, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -21,6 +21,16 @@ type AssignmentMap = Map<ObjectId, AttackTarget | null>;
 interface AttackTargetPickerProps {
   validTargets: AttackTarget[];
   selectedAttackers: ObjectId[];
+  /**
+   * Engine-provided per-attacker combat requirements (`DeclareAttackers`
+   * `attacker_constraints`, keyed by stringified ObjectId). A
+   * `MustAttack{players}` with a non-empty `players` list is a
+   * `StaticMode::MustAttackPlayer` lure (CR 508.1d) that the engine enforces by
+   * requiring the attack be declared directly against one of those players; the
+   * picker mirrors that enforcement so the player never trips the invisible
+   * rejection. Optional/empty for 2-player games and generic goad.
+   */
+  attackerConstraints?: Record<string, CombatRequirement>;
   onConfirm: (attacks: [ObjectId, AttackTarget][]) => void;
   onCancel: () => void;
 }
@@ -50,6 +60,7 @@ interface AttackTargetPickerProps {
 export function AttackTargetPicker({
   validTargets,
   selectedAttackers,
+  attackerConstraints,
   onConfirm,
   onCancel,
 }: AttackTargetPickerProps) {
@@ -98,6 +109,26 @@ export function AttackTargetPicker({
     [assignments, selectedAttackers],
   );
 
+  // CR 508.1d: the first distribute-mode attacker whose assigned target fails
+  // its MustAttackPlayer lure, or null when every constrained attacker is aimed
+  // at a required player. Gates the distribute Confirm so the display matches
+  // what the engine will accept.
+  const distributeMisaim = useMemo(
+    () => firstMisaimedAttacker(selectedAttackers, (id) => assignments.get(id) ?? null, attackerConstraints),
+    [selectedAttackers, assignments, attackerConstraints],
+  );
+
+  /** "{creature} must attack {player}" message for a mis-aimed lure. */
+  function mustAttackMessage(misaim: MisaimedAttacker): string {
+    const creature =
+      gameState?.objects[misaim.objectId]?.name ??
+      t("attackTargetPicker.creatureFallback", { id: misaim.objectId });
+    const player = misaim.players
+      .map((pid) => getPlayerLabel(t, pid, myId, teamBased))
+      .join(", ");
+    return t("attackTargetPicker.mustAttackPlayer", { creature, player });
+  }
+
   function getTargetLabel(target: AttackTarget): string {
     if (target.type === "Player") {
       return getPlayerLabel(t, target.data, myId, teamBased);
@@ -115,6 +146,9 @@ export function AttackTargetPicker({
   }
 
   function handleAttackAll(target: AttackTarget) {
+    // Defensive: the button is disabled when a lured creature can't legally
+    // attack this target, but guard the dispatch too (CR 508.1d).
+    if (firstMisaimedAttacker(selectedAttackers, () => target, attackerConstraints) != null) return;
     onConfirm(selectedAttackers.map((id) => [id, target]));
   }
 
@@ -191,6 +225,9 @@ export function AttackTargetPicker({
   }
 
   function handleDistributeConfirm() {
+    // The button is disabled while anything is unassigned or a lure is
+    // mis-aimed; guard here too so a stray call can't submit a rejected set.
+    if (unassignedTotal > 0 || distributeMisaim != null) return;
     // The gate guarantees no nulls, but flatMap also makes the types sound.
     const attacks = selectedAttackers.flatMap((id): [ObjectId, AttackTarget][] => {
       const target = assignments.get(id);
@@ -269,22 +306,33 @@ export function AttackTargetPicker({
                 <div className="flex flex-col gap-2">
                   {sortedTargets.map((target) => {
                     const color = getTargetSeatColor(target);
+                    // "Attack All" sends every selected creature here, so this
+                    // target is illegal if any of them is lured elsewhere.
+                    const blockedBy = firstMisaimedAttacker(selectedAttackers, () => target, attackerConstraints);
                     return (
-                      <button
-                        key={attackTargetKey(target)}
-                        onClick={() => handleAttackAll(target)}
-                        className={gameButtonClass({ tone: "red", size: "md" })}
-                      >
-                        <Trans
-                          t={t}
-                          i18nKey="attackTargetPicker.attackWith"
-                          count={selectedAttackers.length}
-                          values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
-                          components={{
-                            name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
-                          }}
-                        />
-                      </button>
+                      <div key={attackTargetKey(target)} className="flex flex-col gap-0.5">
+                        <button
+                          onClick={() => handleAttackAll(target)}
+                          disabled={blockedBy != null}
+                          title={blockedBy ? mustAttackMessage(blockedBy) : undefined}
+                          className={gameButtonClass({ tone: "red", size: "md", disabled: blockedBy != null })}
+                        >
+                          <Trans
+                            t={t}
+                            i18nKey="attackTargetPicker.attackWith"
+                            count={selectedAttackers.length}
+                            values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
+                            components={{
+                              name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
+                            }}
+                          />
+                        </button>
+                        {blockedBy && (
+                          <p className="px-1 text-center text-[11px] font-medium text-rose-300">
+                            {mustAttackMessage(blockedBy)}
+                          </p>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -497,15 +545,24 @@ export function AttackTargetPicker({
             {/* Footer — pinned actions, so Confirm/Cancel never scroll away */}
             <div className={`shrink-0 border-t border-white/10 pb-5 pt-3 ${sidePadding}`}>
               {mode === "distribute" && (
-                <button
-                  onClick={handleDistributeConfirm}
-                  disabled={unassignedTotal > 0}
-                  className={`w-full ${gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 })}`}
-                >
-                  {unassignedTotal > 0
-                    ? t("attackTargetPicker.assignRemaining", { count: unassignedTotal })
-                    : t("attackTargetPicker.confirmDistribute", { count: selectedAttackers.length })}
-                </button>
+                <>
+                  {/* Once everything is assigned, a mis-aimed lure is the only
+                      thing blocking Confirm — surface which creature and where. */}
+                  {unassignedTotal === 0 && distributeMisaim && (
+                    <p className="mb-2 text-center text-xs font-medium text-rose-300">
+                      {mustAttackMessage(distributeMisaim)}
+                    </p>
+                  )}
+                  <button
+                    onClick={handleDistributeConfirm}
+                    disabled={unassignedTotal > 0 || distributeMisaim != null}
+                    className={`w-full ${gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 || distributeMisaim != null })}`}
+                  >
+                    {unassignedTotal > 0
+                      ? t("attackTargetPicker.assignRemaining", { count: unassignedTotal })
+                      : t("attackTargetPicker.confirmDistribute", { count: selectedAttackers.length })}
+                  </button>
+                </>
               )}
               <button
                 onClick={onCancel}
@@ -539,6 +596,50 @@ function objectCounterChips(obj: GameObject | undefined): Array<{ type: string; 
 /** Stable key for an AttackTarget. */
 function attackTargetKey(target: AttackTarget): string {
   return `${target.type}-${target.data}`;
+}
+
+/** A constrained attacker whose assigned target fails its MustAttackPlayer lure. */
+interface MisaimedAttacker {
+  objectId: ObjectId;
+  players: PlayerId[];
+}
+
+/**
+ * Whether `target` satisfies a `MustAttack{players}` lure. Mirrors the engine's
+ * declare-attackers validation exactly (CR 508.1d; `combat.rs`
+ * `must_attack_players_for_creature` + `matches!(target, AttackTarget::Player(pid)
+ * if *pid == req_player)`): the requirement is satisfied ONLY by attacking one of
+ * the required players *directly*. Attacking a planeswalker/battle those players
+ * control does NOT satisfy it, so a non-`Player` target never counts — display
+ * must equal enforcement or the player hits the invisible engine rejection.
+ */
+function attackTargetSatisfies(target: AttackTarget, requiredPlayers: PlayerId[]): boolean {
+  return target.type === "Player" && requiredPlayers.includes(target.data);
+}
+
+/**
+ * First selected attacker under a specific-player MustAttack lure whose target
+ * (as resolved by `targetFor`) violates it, or null when every constrained
+ * attacker is aimed at a required player. `MustAttack{players: []}` (generic
+ * must-attack / goad) and non-MustAttack constraints impose no target
+ * restriction. A null `targetFor` result (still Unassigned) is skipped — that
+ * case is already gated by the unassigned count.
+ */
+function firstMisaimedAttacker(
+  attackerIds: ObjectId[],
+  targetFor: (id: ObjectId) => AttackTarget | null,
+  constraints: Record<string, CombatRequirement> | undefined,
+): MisaimedAttacker | null {
+  if (!constraints) return null;
+  for (const id of attackerIds) {
+    const requirement = constraints[id];
+    if (requirement?.kind !== "MustAttack" || requirement.players.length === 0) continue;
+    const target = targetFor(id);
+    if (target != null && !attackTargetSatisfies(target, requirement.players)) {
+      return { objectId: id, players: requirement.players };
+    }
+  }
+  return null;
 }
 
 function RestoreTab({ onClick }: { onClick: () => void }) {

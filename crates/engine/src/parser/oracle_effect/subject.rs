@@ -2537,6 +2537,28 @@ pub(super) fn parse_subject_application(
         });
     }
 
+    // CR 608.2k + CR 509.1/509.3d: "the other creature" — the creature on the
+    // opposite side of a compound blocks-or-becomes-blocked pairing (Mammoth
+    // Harness, Venom). Unconditionally ParentTarget (unlike "that creature"):
+    // the antecedent flips per-firing-orientation, which
+    // `blocked_attacker_from_event` already disambiguates from the resolved
+    // event shape, regardless of ctx.subject.
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("the other ").parse(lower.as_str())
+    {
+        let consumed = lower.len() - rest_subject.len();
+        let original_rest = &subject[consumed..];
+        let (filter, rem) = parse_type_phrase(original_rest);
+        if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: Some(TargetFilter::ParentTarget),
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
+    }
+
     // CR 608.2c: "that creature/permanent/land" — anaphoric back-reference to a
     // previously mentioned object in the same effect sequence. Strip "that " and parse
     // the remainder as a type phrase. Covers all "that [type]" patterns generically.
@@ -3778,6 +3800,36 @@ fn build_become_clause(
 
     if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text, ctx) {
         return Some(clause);
+    }
+
+    // CR 205.1a + CR 613.1d + CR 613.1f + CR 613.8a: "becomes a <type> [with
+    // \"<ability>\"] and loses all other card types and abilities" — full
+    // card-type replacement plus ability wipe plus optional ability grant
+    // (Vraska, Betrayal's Sting [-2]). Must intercept before parse_animation_spec,
+    // which bails on the " loses all other card types " tail and would drop both
+    // the type replacement and the granted ability.
+    if let Some(modifications) =
+        super::become_copy_except::parse_becomes_type_loses_all(become_text)
+    {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
     }
 
     let (become_text, name_override) = strip_become_name_override(become_text);

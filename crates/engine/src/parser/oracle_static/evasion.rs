@@ -324,6 +324,14 @@ pub(crate) fn parse_compound_subject_rule_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {
+    parse_compound_subject_rule_static_inner(text, lower, true)
+}
+
+fn parse_compound_subject_rule_static_inner(
+    text: &str,
+    lower: &str,
+    require_tail_predicate: bool,
+) -> Option<Vec<StaticDefinition>> {
     let (subject_lower, first, after_first) =
         nom_primitives::scan_preceded(lower, parse_rule_static_predicate_nom)?;
     let (rest, mut predicates) = many0(preceded(
@@ -336,7 +344,7 @@ pub(crate) fn parse_compound_subject_rule_static(
     if !rest.trim().is_empty() {
         return None;
     }
-    if predicates.is_empty() {
+    if require_tail_predicate && predicates.is_empty() {
         return None;
     }
     let subject = text[..subject_lower.len()].trim();
@@ -350,6 +358,109 @@ pub(crate) fn parse_compound_subject_rule_static(
             })
             .collect(),
     )
+}
+
+/// CR 508.1c + CR 201.2a: A leading "Except for `<A>` and `<B>`, " clause
+/// scopes an otherwise-blanket rule-static predicate to every object NOT
+/// matching either exempt conjunct (Akron Legionnaire: "Except for creatures
+/// named Akron Legionnaire and artifact creatures, creatures you control can't
+/// attack."). [`parse_compound_subject_rule_static`]'s subject grammar has no
+/// leading-clause syntax — it hands the FULL prefix before the first
+/// recognized predicate to [`parse_rule_static_subject_filter`], which has no
+/// "except for" arm — so the line strict-fails today without this dispatcher.
+///
+/// Each exempt conjunct is resolved independently as either a bare
+/// type-phrase exemption ("artifact creatures", via [`parse_exempt_conjunct`])
+/// or a named exemption within a type class ("creatures named Akron
+/// Legionnaire", via `FilterProp::Named`), Or-combined, then ANDed as
+/// `Not{Or{..}}` onto the `affected` filter of every `StaticDefinition`
+/// produced by the rule-static remainder after the exempt clause — the same
+/// "resolve conjuncts independently, recombine generically" shape as the
+/// compound-subject animation dispatcher (#5219). Must precede
+/// [`parse_compound_subject_rule_static`] in dispatch order (`shared.rs`).
+///
+/// Scoped to the 2-conjunct "`<A>` and `<B>`" form: a Scryfall full-text search
+/// (`o:/^Except for/`) returns exactly one printed card in this shape (Akron
+/// Legionnaire), so an unbounded Oxford-comma exempt list would be speculative
+/// — no card exists to validate a 3+-conjunct split against the genuine
+/// ambiguity of which comma ends the exempt list and which starts the next
+/// conjunct. Widen this once a 3+-conjunct card is identified, mirroring how
+/// Shalai's N-way keyword-grant generalization was built only once a 3-item
+/// printed card existed.
+///
+/// Distinct from `parse_except_for_type_list_suffix` (`oracle_target.rs`),
+/// which strips a TRAILING "`<type>` except for `<type-list>`" suffix off a
+/// single type filter and explicitly declines named exceptions there as
+/// unsafe (an unrecognized word falls back to a silently-vacuous negated
+/// Subtype) — this is a sentence-INITIAL exception clause scoping an entire
+/// restriction predicate, a different grammatical slot: the exempt set here is
+/// ANDed as an explicit negation, never silently folded into a type list, so a
+/// named conjunct is safe to support directly.
+pub(crate) fn parse_leading_except_for_rule_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (after_except, _) = tag::<_, _, OracleError<'_>>("except for ")
+        .parse(lower)
+        .ok()?;
+    let (_, (exempt_lower, rest_lower)) = nom_primitives::split_once_on(after_except, ", ").ok()?;
+    let (_, (exempt_a, exempt_b)) = nom_primitives::split_once_on(exempt_lower, " and ").ok()?;
+    let filter_a = parse_exempt_conjunct(exempt_a.trim())?;
+    let filter_b = parse_exempt_conjunct(exempt_b.trim())?;
+    let exempt_filter = TargetFilter::Or {
+        filters: vec![filter_a, filter_b],
+    };
+
+    let rest_offset = lower.len() - rest_lower.len();
+    let rest_text = &text[rest_offset..];
+    let mut defs = parse_compound_subject_rule_static_inner(rest_text, rest_lower, false)?;
+
+    let not_exempt = TargetFilter::Not {
+        filter: Box::new(exempt_filter),
+    };
+    for def in &mut defs {
+        let affected = def.affected.take().unwrap_or(TargetFilter::Any);
+        def.affected = Some(TargetFilter::And {
+            filters: vec![affected, not_exempt.clone()],
+        });
+        def.description = Some(text.to_string());
+    }
+    Some(defs)
+}
+
+/// Resolve one exempt-list conjunct for
+/// [`parse_leading_except_for_rule_static`]: a bare type-phrase exemption
+/// ("artifact creatures") or a named exemption within a type class ("creatures
+/// named Akron Legionnaire"). The " named " split happens BEFORE
+/// `parse_type_phrase` runs (mirroring `parse_control_named_type_filter` in
+/// `oracle_nom/condition.rs`) — `parse_type_phrase` has no grammar for a
+/// trailing "named `<Name>`" clause and would otherwise leave it unconsumed.
+fn parse_exempt_conjunct(conjunct: &str) -> Option<TargetFilter> {
+    if let Ok((_, (type_text, name_text))) = nom_primitives::split_once_on(conjunct, " named ") {
+        let (filter, remainder) = parse_type_phrase(type_text);
+        // `merge_filter_prop` silently no-ops on a non-`Typed` filter (Or/And/
+        // SelfRef/…), which would drop the Named constraint and over-claim
+        // every object of the bare type instead of just the named one — fail
+        // closed instead of risking that silent overreach.
+        if !remainder.trim().is_empty() || !matches!(filter, TargetFilter::Typed(_)) {
+            return None;
+        }
+        let name = name_text.trim();
+        if name.is_empty() {
+            return None;
+        }
+        return Some(merge_filter_prop(
+            filter,
+            FilterProp::Named {
+                name: name.to_string(),
+            },
+        ));
+    }
+    let (filter, remainder) = parse_type_phrase(conjunct);
+    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return Some(filter);
+    }
+    None
 }
 
 /// CR 702.11 + CR 702.16 + CR 702.18 + CR 611.3a: Compound-subject keyword-grant

@@ -1040,11 +1040,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             // the trigger, not an intervening triggered ability above it.
             extract_source_from_event(event).map(TargetRef::Object)
         }
-        // CR 506.3d: "defending player" — look up from combat state using the source creature.
+        // CR 508.5 + CR 508.5a: "defending player" is the player the *attacking creature*
+        // is attacking, determined individually per attacker. resolve_defending_player
+        // tries the source as the attacker first (a creature's own attack trigger), then
+        // falls back to the attacker carried by the current triggering event (a separate
+        // permanent's attack trigger — Leeching Sliver watching another Sliver, or an
+        // Equipment). Returns None when neither is in combat, degrading to the caller's
+        // controller fallback exactly as the prior source-only lookup did.
         TargetFilter::DefendingPlayer => {
-            let combat = state.combat.as_ref()?;
-            let attacker_info = combat.attackers.iter().find(|a| a.object_id == source_id)?;
-            Some(TargetRef::Player(attacker_info.defending_player))
+            crate::game::combat::resolve_defending_player(state, source_id).map(TargetRef::Player)
         }
         TargetFilter::AttachedTo => {
             let host = state.objects.get(&source_id)?.attached_to?;
@@ -1161,6 +1165,16 @@ fn blocked_attacker_from_event(
     event: &crate::types::events::GameEvent,
     source_id: ObjectId,
 ) -> Option<ObjectId> {
+    // CR 509.3d: a per-blocker `BecomesBlocked`/`Blocks`/`BlocksOrBecomesBlocked`
+    // firing carries an unambiguous (attacker, blocker) pair. The trigger source
+    // is the attacker (the blocked creature), so "that creature"/"the other
+    // creature" is the blocker — returned directly, with no orientation inference.
+    if let crate::types::events::GameEvent::AttackerBecameBlockedByFilteredBlocker {
+        blocker, ..
+    } = event
+    {
+        return Some(*blocker);
+    }
     // CR 509.3c: an effect-driven "becomes blocked" carries only the attacker
     // (the blocked creature); "that creature" resolves to that attacker.
     if let crate::types::events::GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
@@ -1335,6 +1349,12 @@ pub(crate) fn extract_source_from_event(
         // CR 509.3c: an effect-driven "becomes blocked" trigger's source is the
         // attacker that became blocked.
         GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(*attacker),
+        // CR 509.3d: a per-blocker filtered `BecomesBlocked`/`Blocks` firing
+        // resolves its `TriggeringSource`-routed "that creature"/"it" reference to
+        // the single blocker carried by the narrowed event (mirrors what the
+        // generic `BlockersDeclared` arm above returned before these firings were
+        // re-typed to the dedicated per-blocker event).
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { blocker, .. } => Some(*blocker),
         _ => None,
     }
 }
@@ -4784,6 +4804,33 @@ mod tests {
         let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
 
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
+    }
+
+    /// CR 509.3d + CR 608.2k: the disambiguated per-blocker event carries both
+    /// ids explicitly. The trigger source is the attacker, so `ParentTarget`
+    /// ("the other creature") resolves to the blocker, and the
+    /// `TriggeringSource`-routed reference (`extract_source_from_event`) also
+    /// resolves to the single carried blocker. These two arms are the runtime
+    /// fix for Quagmire Lamprey / Venom.
+    #[test]
+    fn filtered_blocker_event_resolves_parent_target_and_source_to_blocker() {
+        let (mut state, attacker, blocker) = setup_with_creatures();
+        let event = crate::types::events::GameEvent::AttackerBecameBlockedByFilteredBlocker {
+            attacker,
+            blocker,
+        };
+        state.current_trigger_event = Some(event.clone());
+        // The trigger's own source is the attacker; "the other creature"
+        // (ParentTarget) must resolve to the blocker.
+        let ability = make_resolved_with_targets(vec![], attacker);
+        assert_eq!(
+            resolved_targets(&ability, &TargetFilter::ParentTarget, &state),
+            vec![TargetRef::Object(blocker)],
+            "ParentTarget on a filtered-blocker event resolves to the blocker, not the host"
+        );
+        // TriggeringSource-routed "that creature"/"it" also resolves to the
+        // single carried blocker (preserves the pre-existing Acolyte path).
+        assert_eq!(extract_source_from_event(&event), Some(blocker));
     }
 
     /// CR 702.184a: "that creature" on a Stationed trigger is the creature that

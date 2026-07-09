@@ -298,6 +298,15 @@ export type AttackTarget =
   | { type: "Planeswalker"; data: ObjectId }
   | { type: "Battle"; data: ObjectId };
 
+// CR 508.1c/d + CR 509.1b/c: per-creature combat requirement/restriction the
+// engine surfaces on the declare-attackers/blockers waiting payloads for
+// display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
+export type CombatRequirement =
+  | { kind: "MustAttack"; players: PlayerId[] }
+  | { kind: "MustBlock" }
+  | { kind: "CantAttack" }
+  | { kind: "CantBlock" };
+
 // CR 702.19: Which trample variant applies to combat damage assignment.
 export type TrampleKind = "Standard" | "OverPlaneswalkers";
 
@@ -687,6 +696,19 @@ export interface MayTriggerAutoChoiceKey {
   source_id: ObjectId;
   origin: MayTriggerOrigin;
 }
+
+export interface MayTriggerAutoChoiceRecord {
+  key: MayTriggerAutoChoiceKey;
+  choice: AutoMayChoice;
+}
+
+// CR 603.5: The mutation a `SetMayTriggerAutoChoice` action performs on the
+// acting player's stored "don't ask again" auto-choices for optional ("may")
+// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every
+// stored auto-choice belonging to the acting player.
+export type MayTriggerAutoChoiceOp =
+  | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
+  | { type: "ClearAll" };
 
 // ── Casting Permission ───────────────────────────────────────────────────
 
@@ -1298,8 +1320,8 @@ export type WaitingFor =
     }
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId; pending_mana_ability?: unknown } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }
-  | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
-  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
+  | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[]; attacker_constraints?: Record<string, CombatRequirement> } }
+  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number>; blocker_constraints?: Record<string, CombatRequirement> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
@@ -1538,6 +1560,12 @@ export type WaitingFor =
   | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } }
   // CR 700.3 + CR 700.3a: Subject is partitioning their own eligible objects
   // into two piles for an `Effect::SeparateIntoPiles`. `player` is the
+  // CR 608.2d + CR 700.3: Controller chooses which opponent separates piles (multiplayer).
+  | { type: "SeparatePilesChooseOpponent"; data: {
+      player: PlayerId;
+      candidates: PlayerId[];
+      source_id: ObjectId;
+    } }
   // partitioner (subject); pile B is derived engine-side as
   // `eligible \ pile_a`. `chosen_pile_effect` is opaque to the frontend.
   | { type: "SeparatePilesPartition"; data: {
@@ -1849,6 +1877,7 @@ export type GameAction =
   // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
+  | { type: "ChoosePileOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
   | {
@@ -1862,6 +1891,7 @@ export type GameAction =
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
+  | { type: "SetMayTriggerAutoChoice"; data: { op: MayTriggerAutoChoiceOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
@@ -2411,6 +2441,8 @@ export interface GameState {
   phase_stops?: Record<number, PhaseStop[]>;
   /** CR 117.3d: the viewer's standing priority-yield preferences. */
   priority_yields?: PriorityYield[];
+  /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
+  may_trigger_auto_choices?: MayTriggerAutoChoiceRecord[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
     target_player: PlayerId;

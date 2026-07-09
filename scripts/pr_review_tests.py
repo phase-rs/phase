@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import tempfile
@@ -568,6 +569,125 @@ class PrReviewTests(unittest.TestCase):
         self.assertFalse(profile["proof_required"])
         self.assertFalse(profile["proof_gap"])
         self.assertIn("missing-ai-contributor-template", profile["risk_flags"])
+
+    def test_low_risk_parser_refactor_clears_agent_coauthor_proof_gap(self) -> None:
+        policy = pr_review.Policy(
+            {"path_classes": {"engine": {"patterns": ["crates/engine/**"]}}}
+        )
+        packet = pr_review.make_packet(
+            {
+                "number": 5302,
+                "title": "refactor(parser): nom P/T remainder combinator",
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "APPROVED",
+                "author": {"login": "contributor"},
+                "labels": [{"name": "refactor"}],
+                "files": [
+                    {"path": "crates/engine/src/parser/oracle_static/grammar.rs"},
+                    {"path": "crates/engine/src/parser/oracle_static/tests.rs"},
+                    {"path": "crates/engine/src/parser/oracle_static/type_change.rs"},
+                ],
+                "comments": [
+                    {
+                        "author": {"login": "github-actions"},
+                        "body": (
+                            f"{pr_review.PARSE_DIFF_MARKER}\n"
+                            "### Parse changes introduced by this PR\n\n"
+                            "✓ No card-parse changes detected.\n"
+                        ),
+                        "updatedAt": "2026-07-08T17:14:15Z",
+                    }
+                ],
+                "statusCheckRollup": [
+                    {"name": "Rust tests", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+                "commits": [
+                    {
+                        "authors": [
+                            {"login": "contributor"},
+                            {"login": "cursoragent"},
+                        ]
+                    }
+                ],
+            },
+            policy,
+            "maintainer",
+            "full",
+            {},
+            None,
+            {"scrutiny": "maintainer_attention"},
+        )
+
+        self.assertTrue(packet["proof"]["proof_required"])
+        self.assertTrue(packet["proof"]["proof_satisfied"])
+        self.assertFalse(packet["proof"]["proof_gap"])
+        self.assertEqual(
+            packet["proof"]["proof_override"],
+            "low_risk_parser_refactor_green_no_parse_changes",
+        )
+        self.assertEqual(
+            packet["recommendation"]["advisory_action"],
+            "approve_ready_for_handler",
+        )
+
+    def test_low_risk_refactor_override_does_not_clear_skipped_verification(self) -> None:
+        policy = pr_review.Policy(
+            {"path_classes": {"engine": {"patterns": ["crates/engine/**"]}}}
+        )
+        packet = pr_review.make_packet(
+            {
+                "number": 5303,
+                "title": "refactor(parser): nom helper",
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "APPROVED",
+                "author": {"login": "contributor"},
+                "labels": [{"name": "refactor"}],
+                "body": "## Summary\nRefactor parser.\n\n- [ ] `cargo test` (local verification skipped)\n",
+                "files": [
+                    {"path": "crates/engine/src/parser/oracle_static/type_change.rs"},
+                ],
+                "comments": [
+                    {
+                        "author": {"login": "github-actions"},
+                        "body": (
+                            f"{pr_review.PARSE_DIFF_MARKER}\n"
+                            "✓ No card-parse changes detected.\n"
+                        ),
+                        "updatedAt": "2026-07-08T17:14:15Z",
+                    }
+                ],
+                "statusCheckRollup": [
+                    {"name": "Rust tests", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+                "commits": [
+                    {
+                        "authors": [
+                            {"login": "contributor"},
+                            {"login": "cursoragent"},
+                        ]
+                    }
+                ],
+            },
+            policy,
+            "maintainer",
+            "full",
+            {},
+            None,
+            {"scrutiny": "maintainer_attention"},
+        )
+
+        self.assertTrue(packet["proof"]["proof_gap"])
+        self.assertNotIn("proof_override", packet["proof"])
+        self.assertEqual(
+            packet["recommendation"]["advisory_action"],
+            "request_changes",
+        )
+        self.assertEqual(
+            packet["recommendation"]["reason"],
+            "proof_required_missing",
+        )
 
     def test_gittensor_closed_heavy_feeds_proof_risk(self) -> None:
         records = [
@@ -1348,8 +1468,28 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "review")
         self.assertEqual(recommendation["reason"], "review_parse_baseline_pending")
 
+        repeated_maintainer_merge = copy.deepcopy(base_packet)
+        repeated_maintainer_merge["pr"]["reviewDecision"] = "CHANGES_REQUESTED"
+        repeated_maintainer_merge["pr"]["maintainer_merge_commit_count"] = 1
+        repeated_maintainer_merge["latest_maintainer_review_commit"] = "old_head"
+        ready = pr_review.recommend_from_packet(repeated_maintainer_merge)
+        self.assertEqual(ready["advisory_action"], "approve_ready_for_handler")
+        self.assertEqual(
+            ready["reason"],
+            "baseline_pending_after_maintainer_merge_ready",
+        )
+
+        needs_review = copy.deepcopy(base_packet)
+        needs_review["pr"]["maintainer_merge_commit_count"] = 1
+        maintainer_merge = pr_review.recommend_from_packet(needs_review)
+        self.assertEqual(maintainer_merge["advisory_action"], "review")
+        self.assertEqual(
+            maintainer_merge["reason"],
+            "review_parse_baseline_pending_after_maintainer_merge",
+        )
+
         # Frontend-only surface (no engine path class) keeps the generic review reason.
-        frontend_packet = dict(base_packet)
+        frontend_packet = copy.deepcopy(base_packet)
         frontend_packet["classification"] = {
             "hard_stop_paths": [],
             "surface": "backend",

@@ -142,7 +142,11 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
   // trailing-group allowance in MTGA_LINE_PATTERN so a detected MTGA line is
   // never demoted to the simple matcher (which would swallow the set/number
   // into the card name).
-  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
+  // The set code may be lowercase (Scryfall-style, e.g. `(2xm) 123`); several
+  // exporters emit it that way. `setCode.toLowerCase()` below already normalizes
+  // case, so widening the char class only keeps the line from being demoted to
+  // the simple matcher (which would swallow the set/number into the card name).
+  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Za-z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
   if (mtgaMatch) {
     const setCode = mtgaMatch[3];
     const collectorNumber = mtgaMatch[4];
@@ -439,7 +443,7 @@ export function parseDeckFile(content: string): ParsedDeck {
 
 // MTGA format detection: count + name + (set) + collector#, with optional
 // trailing Archidekt category annotation (e.g. "[Commander {top}]").
-const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Z0-9]*\)\s+\S+(\s+\S.*)?$/;
+const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Za-z0-9]*\)\s+\S+(\s+\S.*)?$/;
 
 /**
  * Parse an MTGA text format deck.

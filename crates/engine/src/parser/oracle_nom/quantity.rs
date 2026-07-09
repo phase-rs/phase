@@ -1179,7 +1179,6 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // extremum-hand phrases must precede the generic target-zone and zone
         // arms they share a "cards in " prefix with.
         alt((
-            parse_number_of_cards_in_chosen_player_zone,
             // CR 402.1: "cards in the hand of the {player|opponent} with the
             // {most|fewest} cards in hand" (Adamaro P/T CDA class).
             parse_number_of_cards_in_hand_of_extremum_player,
@@ -1546,23 +1545,6 @@ fn parse_number_of_type_on_battlefield_with_keyword(input: &str) -> OracleResult
                 controller: None,
                 properties: vec![FilterProp::WithKeyword { value: keyword }],
             }),
-        },
-    ))
-}
-
-/// CR 613.1: Parse "cards in the chosen player's <zone>" after "the number of"
-/// into the general zone-count building block scoped to the source's persisted
-/// chosen player.
-fn parse_number_of_cards_in_chosen_player_zone(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("cards in the chosen player's ").parse(input)?;
-    let (rest, zone) = parse_zone_ref_singular(rest)?;
-    Ok((
-        rest,
-        QuantityRef::ZoneCardCount {
-            zone,
-            card_types: Vec::new(),
-            scope: CountScope::SourceChosenPlayer,
-            filter: None,
         },
     ))
 }
@@ -2122,6 +2104,15 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
                 parse_zone_ref_plural,
             ),
             |zone| (zone, CountScope::Opponents),
+        ),
+        // CR 613.1: "the chosen player's <zone>" — the player persisted on the
+        // source via an earlier "choose a player" (Haunting Apparition:
+        // "green creature cards in the chosen player's graveyard"). Placed on the
+        // shared scoped-zone path so card-type/color filters compose uniformly,
+        // rather than a separate unfiltered-only arm.
+        map(
+            preceded(tag("the chosen player's "), parse_zone_ref_singular),
+            |zone| (zone, CountScope::SourceChosenPlayer),
         ),
         map(preceded(tag("all "), parse_zone_ref_plural), |zone| {
             (zone, CountScope::All)
@@ -2781,6 +2772,22 @@ fn parse_amassed_army_property_ref(input: &str) -> OracleResult<'_, QuantityRef>
     .parse(rest)
 }
 
+/// CR 122.1 + CR 608.2 + CR 608.2h: leaf demonstrative amount "that much"/"that
+/// many" → the triggering event's amount (`QuantityRef::EventContextAmount`).
+/// Single authority for the count-prefix slot shared by the player-counter,
+/// counter-removal, and mana-production arms. Matches the bare quantifier
+/// WITHOUT a trailing space; callers `.trim_start()` the remainder. Narrower
+/// than `parse_event_context_refs` (which also matches "that damage"/"the
+/// damage dealt"/power/toughness/amass — invalid in a pure count slot). Per CR
+/// 608.2h the referenced amount is determined once, when the effect is applied.
+pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
+    alt((
+        value(QuantityRef::EventContextAmount, tag("that much")),
+        value(QuantityRef::EventContextAmount, tag("that many")),
+    ))
+    .parse(input)
+}
+
 /// Parse event-context quantity references.
 ///
 /// CR 603.7c: "that {noun}" in a triggered ability refers to the object or
@@ -2788,8 +2795,10 @@ fn parse_amassed_army_property_ref(input: &str) -> OracleResult<'_, QuantityRef>
 /// `extract_source_from_event` → live object or LKI cache.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        value(QuantityRef::EventContextAmount, tag("that much")),
-        value(QuantityRef::EventContextAmount, tag("that many")),
+        // CR 608.2h: bare demonstrative amount — delegate to the shared
+        // single-authority combinator (also used by the player-counter,
+        // counter-removal, and mana-production count-prefix slots).
+        parse_that_much_or_many,
         value(QuantityRef::EventContextAmount, tag("that damage")),
         // CR 120.1 + CR 603.7c: "the damage dealt" bare form in a triggered
         // ability body — refers to the total from the triggering combat-damage

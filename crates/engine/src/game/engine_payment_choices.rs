@@ -1195,6 +1195,7 @@ pub(super) fn handle_unless_payment(
                         event_start,
                         &default_wf,
                         false,
+                        false,
                     )?;
                     state.waiting_for = wf;
                     return Ok(action_result(events, state.waiting_for.clone()));
@@ -1251,6 +1252,7 @@ pub(super) fn handle_unless_payment(
             events,
             event_start,
             &default_wf,
+            false,
             false,
         )?;
         state.waiting_for = wf;

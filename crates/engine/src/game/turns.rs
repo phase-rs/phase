@@ -2449,10 +2449,15 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 508.1: Active player declares attackers as a turn-based action.
                 let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
                 let valid_attack_targets = super::combat::get_valid_attack_targets(state);
+                let attacker_constraints = super::combat::attacker_constraints_for_active_player(
+                    state,
+                    &valid_attacker_ids,
+                );
                 return WaitingFor::DeclareAttackers {
                     player: state.active_player,
                     valid_attacker_ids,
                     valid_attack_targets,
+                    attacker_constraints,
                 };
             }
             Phase::DeclareBlockers => {
@@ -2475,11 +2480,17 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
                     let block_requirements =
                         super::combat::block_requirements_for_player(state, defending);
+                    let blocker_constraints = super::combat::blocker_constraints_for_player(
+                        state,
+                        defending,
+                        &valid_block_targets,
+                    );
                     return WaitingFor::DeclareBlockers {
                         player: defending,
                         valid_blocker_ids,
                         valid_block_targets,
                         block_requirements,
+                        blocker_constraints,
                     };
                 } else {
                     // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.
@@ -4540,6 +4551,29 @@ mod tests {
         Arc::make_mut(&mut obj.base_static_definitions).push(def);
     }
 
+    /// CR 502.3 + CR 611.3a: Install a real-parsed Winter-Orb-shaped conditional
+    /// max-untap cap on `source_id`, with the given tapped state. Sourced from the
+    /// real parser output on Winter Orb's verbatim Oracle text so the test drives
+    /// the actual dispatch fix (not a hand-built `StaticDefinition`).
+    fn install_conditional_max_untap_static(
+        state: &mut GameState,
+        source_id: ObjectId,
+        tapped: bool,
+    ) {
+        use crate::types::card_type::CoreType;
+        let defs = crate::parser::oracle_static::parse_static_line_multi(
+            "As long as this artifact is untapped, players can't untap more than one land during their untap steps.",
+        );
+        let obj = state.objects.get_mut(&source_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        obj.tapped = tapped;
+        for def in &defs {
+            obj.static_definitions.push(def.clone());
+        }
+        Arc::make_mut(&mut obj.base_static_definitions).extend(defs);
+    }
+
     fn create_tapped_creature(state: &mut GameState, card_id: u64, name: &str) -> ObjectId {
         use crate::types::card_type::CoreType;
         let id = create_object(
@@ -4643,6 +4677,120 @@ mod tests {
 
         assert!(prompt.is_none(), "no cap means nothing to prompt");
         assert_eq!(scans, 0, "bail short-circuits before any whole-board scan");
+    }
+
+    /// CR 502.3 + CR 611.3a: Winter Orb's cap is gated on the artifact's OWN
+    /// tapped state. Drives the fix through the real `active_static_definitions`
+    /// condition gate (not just `parse_static_line`) — while Winter Orb is
+    /// TAPPED the cap must be inactive (both lands untap); while UNTAPPED the cap
+    /// of one land must force the bounded subset-selection prompt over two tapped
+    /// lands. Discriminating: before this fix Winter Orb parsed to a no-op
+    /// Continuous, so `max_untap_restrictions` would never contain this cap at all,
+    /// regardless of tapped state.
+    #[test]
+    fn winter_orb_max_untap_cap_gated_by_own_tapped_state() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let winter_orb = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Winter Orb".to_string(),
+            Zone::Battlefield,
+        );
+        install_conditional_max_untap_static(&mut state, winter_orb, true);
+
+        let land_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Land A".to_string(),
+            Zone::Battlefield,
+        );
+        let land_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Land B".to_string(),
+            Zone::Battlefield,
+        );
+        for land in [land_a, land_b] {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+            obj.tapped = true;
+        }
+
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            max_untap_restrictions(&state).is_empty(),
+            "cap must be inactive while Winter Orb is tapped"
+        );
+        assert!(
+            max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new()).is_none(),
+            "no cap => no subset prompt while tapped"
+        );
+
+        state.objects.get_mut(&winter_orb).unwrap().tapped = false;
+        crate::game::layers::evaluate_layers(&mut state);
+        let restrictions = max_untap_restrictions(&state);
+        assert_eq!(
+            restrictions.len(),
+            1,
+            "cap must be active while Winter Orb is untapped"
+        );
+        assert_eq!(
+            restrictions[0].1, 1,
+            "Winter Orb caps untapping at one land"
+        );
+
+        let (mut group, max) = max_untap_subset_prompt(&state, PlayerId(0), &HashSet::new())
+            .expect("two tapped lands exceed the cap of one while Winter Orb is untapped");
+        assert_eq!(max, 1);
+        group.sort_by_key(|id| id.0);
+        let mut expected = vec![land_a, land_b];
+        expected.sort_by_key(|id| id.0);
+        assert_eq!(
+            group, expected,
+            "both tapped lands are offered for the bounded selection"
+        );
+    }
+
+    /// CR 502.3 + CR 611.3a: Multi-authority proof — the tapped-state gate binds
+    /// to EACH Winter Orb's own source_id, not a shared flag. One tapped, one
+    /// untapped: only the untapped one's cap contributes to `max_untap_restrictions`.
+    #[test]
+    fn two_winter_orbs_gate_independently_on_own_tapped_state() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let tapped_orb = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Winter Orb A".to_string(),
+            Zone::Battlefield,
+        );
+        install_conditional_max_untap_static(&mut state, tapped_orb, true);
+        let untapped_orb = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Winter Orb B".to_string(),
+            Zone::Battlefield,
+        );
+        install_conditional_max_untap_static(&mut state, untapped_orb, false);
+
+        crate::game::layers::evaluate_layers(&mut state);
+        let restrictions = max_untap_restrictions(&state);
+        assert_eq!(
+            restrictions.len(),
+            1,
+            "only the untapped Winter Orb's cap must be active, got {restrictions:?}"
+        );
     }
 
     /// CR 502.3: With a Smoke-class cap of one creature and two tapped
@@ -5210,6 +5358,87 @@ mod tests {
         assert!(!state.objects[&mine_a].tapped);
         assert!(!state.objects[&mine_b].tapped);
         assert!(!state.objects[&seedborn].tapped);
+    }
+
+    /// CR 502.3 + CR 611.3a + CR 604.1: Quest for Renewal — the untap-during-
+    /// each-other-player's-untap-step static is gated by a live counter-threshold
+    /// condition ("as long as there are four or more quest counters on this
+    /// enchantment"). The runtime already honors `def.condition` via
+    /// `active_static_definitions`/`evaluate_condition`; this proves the parsed
+    /// `HasCounters` condition drives the Seedborn untap pass. PAIRED, non-
+    /// vacuous: 2 counters keeps creatures tapped (negative), 4 counters untaps
+    /// them (positive reach guard).
+    #[test]
+    fn quest_for_renewal_counter_gated_seedborn_untap() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = setup();
+        state.active_player = PlayerId(1); // Opponent's untap step.
+
+        let quest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quest for Renewal".to_string(),
+            Zone::Battlefield,
+        );
+        // Install the Seedborn untap static gated on the quest-counter threshold,
+        // exactly as the parser lowers Quest for Renewal's static line.
+        let def = StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ))
+            .condition(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("quest".to_string())),
+                minimum: 4,
+                maximum: None,
+            });
+        {
+            let obj = state.objects.get_mut(&quest).unwrap();
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        let mine = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        mark_as_creature(&mut state, mine);
+        state.objects.get_mut(&mine).unwrap().tapped = true;
+
+        // Negative: only 2 quest counters — condition fails, creature stays tapped.
+        state
+            .objects
+            .get_mut(&quest)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("quest".to_string()), 2);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            state.objects[&mine].tapped,
+            "below threshold (2 < 4): the untap static must not fire"
+        );
+
+        // Positive reach guard: 4 quest counters — condition holds, creature untaps.
+        state
+            .objects
+            .get_mut(&quest)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("quest".to_string()), 4);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            !state.objects[&mine].tapped,
+            "at threshold (4 >= 4): the untap static must untap the controller's creature"
+        );
     }
 
     #[test]

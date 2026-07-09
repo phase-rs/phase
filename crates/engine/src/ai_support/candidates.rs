@@ -784,6 +784,7 @@ pub fn candidate_actions_broad_with_probe(
             player,
             valid_attacker_ids,
             valid_attack_targets,
+            ..
         } => attacker_actions(state, *player, valid_attacker_ids, valid_attack_targets),
         WaitingFor::DeclareBlockers {
             player,
@@ -1459,6 +1460,20 @@ pub fn candidate_actions_broad_with_probe(
         // with the player who is authorized to submit it; otherwise the
         // action gets routed to the wrong AI seat in multiplayer. The
         // `actor` field is always set to the authorized submitter.
+        // CR 608.2d + CR 700.3: AI opponent choice for pile separation — offer each
+        // candidate opponent as a legal action.
+        WaitingFor::SeparatePilesChooseOpponent {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|&opp| {
+                candidate(
+                    GameAction::ChoosePileOpponent { opponent: opp },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 700.3 + CR 700.3a: AI partition candidates. Full powerset is
         // exponential, so we cap at three heuristics: all-in-A (chooser
         // sees an empty pile B), all-in-B (chooser sees a full pile A),
@@ -5538,6 +5553,7 @@ mod tests {
                     crate::types::identifiers::ObjectId(2),
                 ],
                 valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+                attacker_constraints: Default::default(),
             },
             ..GameState::new_two_player(42)
         };
@@ -5570,6 +5586,7 @@ mod tests {
                 // The goading player is deliberately first: the pre-fix generator
                 // would only ever offer this single (illegal-under-goad) pairing.
                 valid_attack_targets: vec![goader, other_a, other_b],
+                attacker_constraints: Default::default(),
             },
             ..GameState::new_two_player(42)
         };
@@ -5638,6 +5655,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(1)),
                 AttackTarget::Player(PlayerId(2)),
             ],
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);
@@ -5713,6 +5731,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(2)),
                 AttackTarget::Player(PlayerId(1)),
             ],
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);

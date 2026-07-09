@@ -1275,6 +1275,15 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 508.1c + CR 201.2a: "Except for <A> and <B>, <rule-static>" (Akron
+    // Legionnaire) — a leading exempt-list clause. Must precede
+    // parse_compound_subject_rule_static: that sibling's subject grammar has
+    // no leading-clause syntax and would otherwise strict-fail on the
+    // "except for" prefix.
+    if let Some(defs) = parse_leading_except_for_rule_static(&stripped, &lower) {
+        return defs;
+    }
+
     if let Some(defs) = parse_compound_subject_rule_static(&stripped, &lower) {
         return defs;
     }
@@ -3123,6 +3132,31 @@ pub(crate) fn parse_subject_suffix<'a>(
     ))
 }
 
+/// CR 111.1 + CR 111.6 + CR 109.5: "[creature ]token(s) you control" — token-ness is an
+/// object property (CR 111.1), never a card type/subtype, and a token can be any card type
+/// (CR 111.6), so "tokens you control" spans Treasure/Clue/Food/creature tokens alike.
+pub(crate) fn parse_token_you_control_descriptor(
+    descriptor: &TextPair<'_>,
+) -> Option<TargetFilter> {
+    // Token-ness derived from an optional "creature " prefix (CR 111.6: a token may be any
+    // card type); the bare form matches any token permanent. The passed creature_subject
+    // flag is intentionally not consulted — the prefix is the sole creature discriminator here.
+    let creature_prefixed = nom_tag_tp(descriptor, "creature ");
+    let core = creature_prefixed.as_ref().unwrap_or(descriptor);
+    if !matches!(core.lower, "token" | "tokens") {
+        return None;
+    }
+    let base = if creature_prefixed.is_some() {
+        TypedFilter::creature()
+    } else {
+        TypedFilter::permanent()
+    };
+    Some(TargetFilter::Typed(
+        base.properties(vec![FilterProp::Token])
+            .controller(ControllerRef::You),
+    ))
+}
+
 /// CR 109.5 + CR 205.3 + CR 205.4a: Controller-scoped subject descriptors
 /// may name object types, colors, subtypes, or supertypes controlled by the
 /// source's controller.
@@ -3132,6 +3166,10 @@ pub(crate) fn typed_you_control_descriptor_filter(
 ) -> Option<TargetFilter> {
     if descriptor_is_negation(descriptor.original) || descriptor_is_supertype(descriptor.original) {
         return None;
+    }
+
+    if let Some(filter) = parse_token_you_control_descriptor(&descriptor) {
+        return Some(filter);
     }
 
     if matches!(descriptor.lower, "creature" | "creatures") {
@@ -3890,7 +3928,7 @@ pub(crate) fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<F
     (&subject[..before.len()], Some(prop))
 }
 
-fn merge_filter_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+pub(crate) fn merge_filter_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
             tf.properties.push(prop);
