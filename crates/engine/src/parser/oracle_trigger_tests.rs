@@ -7374,6 +7374,70 @@ fn trigger_you_cast_oxford_comma_subtype_list_spell() {
     );
 }
 
+/// CR 205.2a + CR 205.3a + CR 601.2: an Oxford-comma type list whose legs mix
+/// CORE types and a subtype — "an instant, sorcery, or Wizard spell" (Master of
+/// Winds, Umara Mystic, Umara Wizard, ...) — must survive the payload
+/// truncation the same way the pure-subtype list does, and each leg must be
+/// typed correctly: `instant`/`sorcery` as core-type filters, `Wizard` as a
+/// subtype. This guards the generality of the truncation fix (issue #5324):
+/// the earlier subtype-list-only approach mis-typed the core-type legs as
+/// bogus `Subtype("instant")`/`Subtype("sorcery")` filters that matched no
+/// spell, so instant/sorcery casts silently stopped triggering. The list must
+/// route through `parse_type_phrase` (which types each leg), NOT a
+/// subtype-only list parser.
+#[test]
+fn trigger_you_cast_oxford_comma_mixed_type_list_spell() {
+    let def = parse_trigger_line(
+        "Whenever you cast an instant, sorcery, or Wizard spell, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    let Some(TargetFilter::Or { filters }) = &def.valid_card else {
+        panic!(
+            "expected a 3-leg Or valid_card for a mixed core+subtype list, got {:?}",
+            def.valid_card
+        );
+    };
+    assert_eq!(
+        filters.len(),
+        3,
+        "expected 3 legs (instant, sorcery, Wizard), got {filters:?}"
+    );
+    // Flatten every leg's type_filters so we can assert on the whole set.
+    let all_type_filters: Vec<&TypeFilter> = filters
+        .iter()
+        .filter_map(|f| match f {
+            TargetFilter::Typed(tf) => Some(tf.type_filters.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    // The two core-type legs must be typed as core types, NOT subtypes.
+    assert!(
+        all_type_filters.contains(&&TypeFilter::Instant),
+        "instant leg must be TypeFilter::Instant, got {filters:?}"
+    );
+    assert!(
+        all_type_filters.contains(&&TypeFilter::Sorcery),
+        "sorcery leg must be TypeFilter::Sorcery, got {filters:?}"
+    );
+    // The subtype leg must be a subtype.
+    assert!(
+        all_type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Wizard")),
+        "Wizard leg must be TypeFilter::Subtype(\"Wizard\"), got {filters:?}"
+    );
+    // Bug signature: no core type may have been mis-typed as a raw-word subtype.
+    assert!(
+        !all_type_filters.iter().any(|t| matches!(
+            t,
+            TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("instant") || s.eq_ignore_ascii_case("sorcery")
+        )),
+        "core types were mis-typed as bogus subtype filters (issue #5324 regression): {filters:?}"
+    );
+}
+
 /// CR 205.2a + CR 601.2: "whenever you cast an artifact creature spell" must
 /// AND both core types into `valid_card`, so a non-creature artifact spell
 /// does NOT fire the trigger. Regression for Lux Artillery, whose spell-cast
