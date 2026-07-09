@@ -1174,7 +1174,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
-                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.17a: whole-body
+                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
                 // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
                 // "it loses ... and gains ...", return/put the enchanted creature
                 // card to the battlefield under your control, attach the Aura to
@@ -7302,7 +7302,7 @@ enum PlayerEventVerbRoute {
 
 /// CR 603.4: Recognize a player-subject event-verb head and report which
 /// downstream parser handles it. ViaEvent verbs (CR 121.1 draw, CR 119.3 life,
-/// CR 701.17a mill) are parsed by `try_parse_event` on `verb_rest`;
+/// CR 701.21a mill) are parsed by `try_parse_event` on `verb_rest`;
 /// ViaPlayerTrigger verbs (CR 601.2 cast, CR 701.21 sacrifice, CR 701.9
 /// discard) are parsed only by `try_parse_player_trigger`.
 fn parse_player_event_verb_head(input: &str) -> OracleResult<'_, PlayerEventVerbRoute> {
@@ -8113,7 +8113,7 @@ fn append_trigger_condition(
     }
 }
 
-/// CR 701.17a: Parse the milled-card filter from the predicate tail of an
+/// CR 701.21a: Parse the milled-card filter from the predicate tail of an
 /// active-voice mill trigger ("mills **a nonland card**", "mills **one or more
 /// creature cards**"). Optionally consumes a leading "one or more " quantifier
 /// (semantically redundant — `valid_card` matching is per-object), then
@@ -8962,7 +8962,7 @@ fn try_parse_event(
         return Some((TriggerMode::Destroyed, def));
     }
 
-    // CR 701.17a: "is milled" / "are milled" — passive-voice mill trigger.
+    // CR 701.21a: "is milled" / "are milled" — passive-voice mill trigger.
     // "For a player to mill a number of cards, that player puts that many cards
     // from the top of their library into their graveyard." Mirrors the `is exiled`
     // / `is sacrificed` arms above. The passive subject (parsed by
@@ -8984,7 +8984,7 @@ fn try_parse_event(
         return Some((TriggerMode::Milled, def));
     }
 
-    // CR 701.17a + CR 603.2c: "mills <object filter>" — active-voice mill trigger
+    // CR 701.21a + CR 603.2c: "mills <object filter>" — active-voice mill trigger
     // ("a player mills a nonland card", "an opponent mills a nonland card",
     // "a player mills one or more creature cards"). Here the parsed subject is
     // the *milling player*, not the milled card; the milled card is the typed

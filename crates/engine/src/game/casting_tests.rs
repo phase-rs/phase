@@ -35925,7 +35925,7 @@ fn animate_dead_full_pipeline_reanimates_and_reattaches() {
     );
 }
 
-/// CR 701.17a + CR 603.7c regression (issue #4767): the delayed "When ~ leaves the
+/// CR 701.21a + CR 603.7c regression (issue #4767): the delayed "When ~ leaves the
 /// battlefield, that creature's controller sacrifices it" trigger must sacrifice
 /// the reanimated creature when the Aura leaves the battlefield.
 ///
@@ -35965,7 +35965,7 @@ fn animate_dead_delayed_sacrifice_when_aura_leaves() {
     );
 }
 
-/// CR 701.17a regression (issue #4767, `sacrifice.rs` controller-scope relaxation):
+/// CR 701.21a regression (issue #4767, `sacrifice.rs` controller-scope relaxation):
 /// "that creature's controller sacrifices it" must be performed by the creature's
 /// CURRENT controller even if control changed after Animate Dead reanimated it and
 /// before the delayed leaves-battlefield trigger fires.
