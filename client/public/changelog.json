@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 169,
+      "date": "2026-07-09",
+      "title": "Fact or Fiction piles resolve",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Fact or Fiction now works end-to-end: reveal the top cards, have an opponent separate them into two piles, then choose the pile that goes to your hand (with Steam Augury-style variants and multiplayer opponent selection)\n• Henzie \"Toolbox\" Torre now grants blitz with each spell's own mana cost, and Hatchery Sliver grants replicate with the Sliver spell's own mana cost\n• Render Silent now keeps the controller of the countered spell from casting spells for the rest of the turn\n• Bello, Bard of the Brambles now animates non-Equipment artifacts and non-Aura enchantments you control with mana value 4 or greater, granting the full Elemental package and combat-damage draw trigger\n\n🛠️ Cards That Now Work Right\n• Animate Dead and Dance of the Dead now reanimate their enchanted graveyard creature correctly, attach to it, and clean up when it leaves\n• Dauthi Voidwalker and Forbidden Crypt now exile only the cards from the correctly scoped graveyard, preserving their counter riders\n• Ambush Commander now animates the Forests you control; Raggadragga, Muraganda Petroglyphs, and Ruxa now recognize mana-ability and no-ability creature qualifiers\n• Cranial Ram now grants its mixed +X/+1 bonus, and Mishra Warform preserves the copied token's name\n• Machine Man's \"he gains flying\" continuation, Mutagen Connoisseur's transformed filter, and Coalition Flag's subtype-only type change now parse correctly\n• Equipment-attachment follow-ups now attach the Equipment to the source when the printed condition says to do so\n• Haunting Apparition can count filtered cards in the chosen player's graveyard\n• Cockatrice, Venom, Mammoth Harness, Karn Silver Golem, and similar \"blocks or becomes blocked by\" abilities now keep their blocker filters\n\n⚔️ Combat & Gameplay\n• \"Attacks alone\" triggers now evaluate relative to the lone attacker, so observer abilities such as Exalted and Sharon Carter-style checks fire when another creature attacks alone\n• Attack-count and attack-target qualifiers now use the full attack declaration while preserving the correct stack-time conditions\n• Captain America now triggers only when a creature becomes tapped during its controller's turn, not during every player's turn\n\n🖥️ Interface\n• Player-attached Auras and Curses are now visible and interactive in split-view seat headers\n• Auras attached to players can now be selected for every object-choice prompt that offers them, including copy and retarget choices\n• The Replay Viewer link has been removed from the home dashboard\n\n🌐 Multiplayer\n• Fact or Fiction-style effects with multiple possible opponents now prompt the selected opponent to separate the revealed cards into piles",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1524892896770265093"
+    },
+    {
       "id": 168,
       "date": "2026-07-09",
       "title": "Combat requirement badges arrive",
