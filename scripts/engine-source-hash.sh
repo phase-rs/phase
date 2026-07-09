@@ -38,7 +38,7 @@ sha="$1"
 # `-r` recurses into the src tree so every file's blob hash participates; the
 # blob hashes change iff content changes. Hash the listing to a stable digest.
 # Truncated to 16 hex chars to match the card_data_hash convention (ci.yml).
-git ls-tree -r "$sha" -- \
+git ls-tree --full-tree -r "$sha" -- \
   crates/engine/src \
   crates/engine/data \
   crates/engine/build.rs \
