@@ -324,10 +324,10 @@ pub(crate) fn parse_compound_subject_rule_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {
-    parse_subject_rule_static(text, lower, true)
+    parse_compound_subject_rule_static_inner(text, lower, true)
 }
 
-fn parse_subject_rule_static(
+fn parse_compound_subject_rule_static_inner(
     text: &str,
     lower: &str,
     require_tail_predicate: bool,
@@ -413,7 +413,7 @@ pub(crate) fn parse_leading_except_for_rule_static(
 
     let rest_offset = lower.len() - rest_lower.len();
     let rest_text = &text[rest_offset..];
-    let mut defs = parse_subject_rule_static(rest_text, rest_lower, false)?;
+    let mut defs = parse_compound_subject_rule_static_inner(rest_text, rest_lower, false)?;
 
     let not_exempt = TargetFilter::Not {
         filter: Box::new(exempt_filter),
