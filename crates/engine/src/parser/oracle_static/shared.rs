@@ -3028,6 +3028,33 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         return parse_continuous_subject_filter(rest_tp.original.trim());
     }
 
+    // CR 605.1 / CR 113.1: strip a trailing "with a mana ability" / "with no
+    // abilities" object qualifier, parse the base subject recursively, and
+    // attach the runtime-evaluated `FilterProp`. Covers Raggadragga, Goregutter
+    // ("Each creature you control with a mana ability gets +2/+2"), Muraganda
+    // Petroglyphs ("Creatures with no abilities get +2/+2"), and Ruxa, Patient
+    // Professor ("Creatures you control with no abilities get +1/+1"). Both
+    // props are matched authoritatively by `game::filter`
+    // (`HasManaAbility` via the mana-ability classifier, `HasNoAbilities` via
+    // `object_has_no_abilities`), so this is a grammar-only seam. The qualifier
+    // must sit at the very end of the subject phrase (`after` empty) so a
+    // mid-phrase "with ..." clause is not misclaimed.
+    for (needle, prop) in [
+        (" with a mana ability", FilterProp::HasManaAbility),
+        (" with no abilities", FilterProp::HasNoAbilities),
+    ] {
+        let mut parse_trailing_qualifier = all_consuming(terminated(
+            take_until::<_, _, OracleError<'_>>(needle),
+            tag::<_, _, OracleError<'_>>(needle),
+        ));
+        if let Ok((_, base_lower)) = parse_trailing_qualifier.parse(tp.lower) {
+            if !base_lower.trim().is_empty() {
+                let base = lower_subslice_to_original(&tp, base_lower)?.trim();
+                return parse_continuous_subject_filter(base).map(|f| add_property(f, prop));
+            }
+        }
+    }
+
     if let Some(filter) = parse_shared_controller_compound_subject_filter(&tp) {
         return Some(filter);
     }

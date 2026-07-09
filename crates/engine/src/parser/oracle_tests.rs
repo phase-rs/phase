@@ -4677,6 +4677,70 @@ fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
     );
 }
 
+/// Helper: assert a subject qualifier produces a real continuous static (no
+/// `static_structure` Unimplemented) whose affected filter carries `prop_name`.
+fn assert_anthem_carries_prop(text: &str, name: &str, types: &[&str], prop_name: &str) {
+    let r = parse(text, name, &[], types, &[]);
+    let has_static_unimpl = r.abilities.iter().any(
+        |a| matches!(&*a.effect, Effect::Unimplemented { name, .. } if name == "static_structure"),
+    );
+    assert!(
+        !has_static_unimpl,
+        "{name}: qualifier must be structured, but produced static_structure Unimplemented: {:#?}",
+        r.abilities
+    );
+    assert!(
+        !r.statics.is_empty(),
+        "{name}: expected a continuous static, got none"
+    );
+    let dump = format!("{:?}", r.statics);
+    assert!(
+        dump.contains(prop_name),
+        "{name}: affected filter must carry {prop_name}, got {dump}"
+    );
+}
+
+#[test]
+fn anthem_subject_with_mana_ability_qualifier_carries_has_mana_ability() {
+    // CR 605.1: Raggadragga, Goregutter — "Each creature you control with a
+    // mana ability gets +2/+2." The "with a mana ability" object qualifier is
+    // stripped in `parse_continuous_subject_filter` and lowered to the
+    // runtime-evaluated `FilterProp::HasManaAbility`. Before the fix the line
+    // fell through to `Effect::Unimplemented { name: "static_structure", .. }`.
+    assert_anthem_carries_prop(
+        "Each creature you control with a mana ability gets +2/+2.",
+        "Raggadragga, Goregutter",
+        &["Creature"],
+        "HasManaAbility",
+    );
+}
+
+#[test]
+fn anthem_subject_with_no_abilities_qualifier_carries_has_no_abilities() {
+    // CR 113.1: Ruxa, Patient Professor — "Creatures you control with no
+    // abilities get +1/+1." The controller-scoped plural form lowers to
+    // `FilterProp::HasNoAbilities`.
+    assert_anthem_carries_prop(
+        "Creatures you control with no abilities get +1/+1.",
+        "Ruxa, Patient Professor",
+        &["Creature"],
+        "HasNoAbilities",
+    );
+}
+
+#[test]
+fn anthem_global_with_no_abilities_qualifier_carries_has_no_abilities() {
+    // CR 113.1: Muraganda Petroglyphs — "Creatures with no abilities get
+    // +2/+2." The global (no "you control") form lowers to the same
+    // `FilterProp::HasNoAbilities` on an uncontrolled creature subject.
+    assert_anthem_carries_prop(
+        "Creatures with no abilities get +2/+2.",
+        "Muraganda Petroglyphs",
+        &["Enchantment"],
+        "HasNoAbilities",
+    );
+}
+
 #[test]
 fn lost_in_thought_ignore_effect_rider_fails_closed() {
     let r = parse(
