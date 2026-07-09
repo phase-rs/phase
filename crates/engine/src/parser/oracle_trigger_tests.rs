@@ -9446,6 +9446,43 @@ fn extract_if_condition_first_time_tapped_pattern() {
     assert_eq!("untap it", cleaned);
 }
 
+/// CR 603.4 + CR 701.26 + issue #5325: Captain America, Living Legend — the
+/// "during your turn" restriction embedded between the tapped-event clause and
+/// the first-time intervening-if must lower to the `OnlyDuringYourTurn` trigger
+/// constraint. It was previously dropped (left on the event tail after the
+/// intervening-if was peeled), so the ability fired on any turn.
+#[test]
+fn captain_america_becomes_tapped_during_your_turn_constraint() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control becomes tapped during your turn, if it's the first time that creature has become tapped this turn, untap it.",
+        "Captain America, Living Legend",
+    );
+    assert_eq!(def.mode, TriggerMode::Taps);
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn),
+        "'during your turn' must scope the tapped trigger to the controller's turn"
+    );
+    // The first-tap intervening-if must survive alongside the turn constraint.
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::FirstTimeObjectTappedThisTurn),
+        "the first-tap intervening-if must be preserved"
+    );
+}
+
+/// Regression guard: a bare "becomes tapped" trigger (no turn phrase) must NOT
+/// gain a turn constraint.
+#[test]
+fn becomes_tapped_without_turn_phrase_has_no_constraint() {
+    let def = parse_trigger_line(
+        "Whenever Night Market Lookout becomes tapped, each opponent loses 1 life and you gain 1 life.",
+        "Night Market Lookout",
+    );
+    assert_eq!(def.mode, TriggerMode::Taps);
+    assert_eq!(def.constraint, None);
+}
+
 #[test]
 fn trigger_enchanted_land_is_tapped_for_mana() {
     let def = parse_trigger_line(
