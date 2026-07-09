@@ -12383,13 +12383,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                             Ok((_, (origin_text, _effect_clause))) => origin_text,
                             Err(_) => from_tail,
                         };
-                        match parse_cast_origin_zone(origin_text.trim_start()) {
-                            Ok((rest, Some(origin))) if rest.trim().is_empty() => {
-                                (before, OriginConstraint::Equals(origin), true)
-                            }
-                            Ok((rest, None)) if rest.trim().is_empty() => {
-                                (before, OriginConstraint::Any, true)
-                            }
+                        let origin_clause = format!("from {}", origin_text.trim_start());
+                        match parse_origin_constraint_tail(
+                            origin_clause.as_str(),
+                            parse_cast_origin_zone,
+                        ) {
+                            Ok((rest, origin)) if rest.trim().is_empty() => (before, origin, true),
                             _ => (trimmed, OriginConstraint::Any, false),
                         }
                     }
