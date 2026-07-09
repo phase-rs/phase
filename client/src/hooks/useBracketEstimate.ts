@@ -5,6 +5,7 @@ import type { EngineAdapter, GameFormat } from "../adapter/types";
 import type { BracketEstimate } from "../types/bracket";
 import { isCommanderFamilyFormat } from "../types/bracket";
 import type { ParsedDeck } from "../services/deckParser";
+import { buildBracketDeckKey } from "./bracketDeckKey";
 
 const DEBOUNCE_MS = 200;
 
@@ -86,13 +87,7 @@ export function useBracketEstimate({
 
   const eligible = isCommanderFamilyFormat(format) && commanders.length > 0;
 
-  const deckKey = (() => {
-    if (!eligible) return null;
-    const parts: string[] = [...commanders.map((c) => `c:${c.toLowerCase()}`)];
-    for (const e of deck.main) parts.push(`m:${e.count}x${e.name.toLowerCase()}`);
-    parts.sort();
-    return parts.join("|");
-  })();
+  const deckKey = eligible ? buildBracketDeckKey(commanders, deck) : null;
 
   useEffect(() => {
     if (!eligible || !deckKey) {

@@ -142,7 +142,11 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
   // trailing-group allowance in MTGA_LINE_PATTERN so a detected MTGA line is
   // never demoted to the simple matcher (which would swallow the set/number
   // into the card name).
-  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
+  // The set code may be lowercase (Scryfall-style, e.g. `(2xm) 123`); several
+  // exporters emit it that way. `setCode.toLowerCase()` below already normalizes
+  // case, so widening the char class only keeps the line from being demoted to
+  // the simple matcher (which would swallow the set/number into the card name).
+  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Za-z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
   if (mtgaMatch) {
     const setCode = mtgaMatch[3];
     const collectorNumber = mtgaMatch[4];
@@ -168,14 +172,28 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
 
 function normalizeCardName(name: string): string {
   const trimmed = name.trim();
-  if (!trimmed.includes("/")) return trimmed;
 
-  const slashParts = trimmed.split("/").map((part) => part.trim()).filter(Boolean);
-  if (slashParts.length === 2) {
-    return `${slashParts[0]} // ${slashParts[1]}`;
+  // The canonical MTG split/DFC separator is " // " (double slash, spaced).
+  // Whitespace adjacent to a "//" is the tell that it's a separator: normalize
+  // irregular spacing ("Fire// Ice", "Wear //Tear") to the canonical " // ".
+  // A "//" with NO adjacent whitespace is part of a printed name — e.g.
+  // "SP//dr, Piloted by Peni" — and must be left verbatim, or the engine's
+  // exact-name lookup (keyed on the real "//"-glued name) fails to resolve it.
+  if (trimmed.includes("//")) {
+    return /\s\/\/|\/\/\s/.test(trimmed)
+      ? trimmed.replace(/\s*\/\/+\s*/g, " // ")
+      : trimmed;
   }
 
-  return trimmed.replace(/\s*\/{2,}\s*/g, " // ");
+  // Single-slash exporter forms upgrade to canonical. Split on each "/" so both
+  // two-part ("Revival/Revenge") and multi-part
+  // ("Who / What / When / Where / Why") split cards collapse to " // " joins.
+  if (!trimmed.includes("/")) return trimmed;
+  return trimmed
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" // ");
 }
 
 function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {
@@ -425,7 +443,7 @@ export function parseDeckFile(content: string): ParsedDeck {
 
 // MTGA format detection: count + name + (set) + collector#, with optional
 // trailing Archidekt category annotation (e.g. "[Commander {top}]").
-const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Z0-9]*\)\s+\S+(\s+\S.*)?$/;
+const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Za-z0-9]*\)\s+\S+(\s+\S.*)?$/;
 
 /**
  * Parse an MTGA text format deck.

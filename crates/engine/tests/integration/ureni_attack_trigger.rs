@@ -152,6 +152,8 @@ fn ureni_attacks_in_second_combat_fires_again() {
     runner.state_mut().extra_phases.push(ExtraPhase {
         anchor: current_phase,
         phase: Phase::BeginCombat,
+        attacker_restriction: None,
+        attacker_restriction_source: None,
     });
 
     // Advance out of the current step (post-combat / end phase) into the

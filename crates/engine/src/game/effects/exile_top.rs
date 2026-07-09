@@ -569,6 +569,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(recall_inner),
                 uses_tracked_set: true,
@@ -690,10 +691,12 @@ mod tests {
                     qty: QuantityRef::TrackedSetAggregate {
                         function: AggregateFunction::Sum,
                         property: ObjectProperty::ManaValue,
+                        source: crate::types::ability::TrackedAnaphorSource::ChainSet,
                     },
                 },
                 target: TargetFilter::Controller,
                 damage_source: None,
+                excess: None,
             },
             vec![],
             ObjectId(100),

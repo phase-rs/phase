@@ -17,6 +17,11 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
   playerId: PlayerId;
+  /** Split multiplayer overview pane: the card is ~40px wide, so the centered
+   *  "Commander" wordmark spans the whole card and hides the cost pips. Drop
+   *  the wordmark (the amber frame + dock position + tooltip still mark the
+   *  commander) and shrink the pips so the cost reads instead. */
+  splitOverview?: boolean;
 }
 
 /**
@@ -24,7 +29,7 @@ interface CommanderCardZoneProps {
  * right-side zone rail. Shows castability glow when legal to cast and
  * displays effective cost (including commander tax).
  */
-export function CommanderCardZone({ playerId }: CommanderCardZoneProps) {
+export function CommanderCardZone({ playerId, splitOverview = false }: CommanderCardZoneProps) {
   const gameState = useGameStore((s) => s.gameState);
 
   const commanders = useMemo(
@@ -37,13 +42,19 @@ export function CommanderCardZone({ playerId }: CommanderCardZoneProps) {
   return (
     <div className="flex flex-col gap-1">
       {commanders.map((cmd) => (
-        <CommanderCard key={cmd.id} commander={cmd} />
+        <CommanderCard key={cmd.id} commander={cmd} splitOverview={splitOverview} />
       ))}
     </div>
   );
 }
 
-function CommanderCard({ commander }: { commander: GameObject }) {
+function CommanderCard({
+  commander,
+  splitOverview,
+}: {
+  commander: GameObject;
+  splitOverview: boolean;
+}) {
   const { t } = useTranslation("game");
   const isCompactHeight = useIsCompactHeight();
   const legalActions = useGameStore((s) => s.legalActions);
@@ -142,19 +153,28 @@ function CommanderCard({ commander }: { commander: GameObject }) {
         />
       </div>
 
-      {/* Commander badge */}
-      <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 rounded-sm bg-amber-700 px-1.5 py-px text-[8px] font-bold text-amber-100 shadow">
-        {t("zone.commander")}
-      </div>
+      {/* Commander badge — omitted in split panes where it would blanket the
+          card and hide the cost pips. */}
+      {!splitOverview && (
+        <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-sm bg-amber-700 px-1.5 py-px text-[8px] font-bold text-amber-100 shadow">
+          {t("zone.commander")}
+        </div>
+      )}
 
       {/* Castable glow ring */}
       {canCast && (
         <div className={`absolute inset-0 rounded-lg ${CASTABLE_AFFORDANCE_ACTIVE}`} />
       )}
 
-      {/* Commander tax badge */}
+      {/* Commander tax badge — nowrap: the absolute box is clamped to the
+          card's width, so on narrow cards "Tax: +N" would otherwise break
+          into two lines; centered overhang beats a wrapped pill. */}
       {tax > 0 && (
-        <div className="absolute -bottom-1 left-1/2 z-10 -translate-x-1/2 rounded-sm bg-amber-900 px-1.5 py-px text-[8px] font-bold text-amber-200 shadow">
+        <div
+          className={`absolute -bottom-1 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-sm bg-amber-900 py-px font-bold text-amber-200 shadow ${
+            splitOverview ? "px-1 text-[7px]" : "px-1.5 text-[8px]"
+          }`}
+        >
           {t("zone.tax", { tax })}
         </div>
       )}
@@ -164,7 +184,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
         <ManaCostPips
           cost={displayCost}
           isReduced={false}
-          size={isCompactHeight ? "xs" : "md"}
+          size={splitOverview || isCompactHeight ? "2xs" : "xs"}
           className="absolute right-[4%] top-[2%]"
         />
       )}

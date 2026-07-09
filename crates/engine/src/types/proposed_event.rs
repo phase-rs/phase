@@ -442,6 +442,17 @@ pub enum ProposedEvent {
         units: Vec<UnitDecision>,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 701.31 + CR 901.9c + CR 614.1a: A player is about to planeswalk as a
+    /// result of rolling the Planeswalker symbol on the planar die (the
+    /// CR 901.8 "planeswalking ability" resolving). This is the ONLY planeswalk
+    /// cause routed through the replacement pipeline — encounter / SBA /
+    /// leave-game planeswalks (CR 701.31c) call `planechase::planeswalk`
+    /// directly and are never replaced. "Chaos ensues instead" (Fixed Point in
+    /// Time) replaces this event.
+    Planeswalk {
+        player_id: PlayerId,
+        applied: HashSet<ReplacementId>,
+    },
 }
 
 fn default_produce_mana_count() -> u32 {
@@ -480,6 +491,15 @@ impl ProposedEvent {
         Self::BeginPhase {
             player_id,
             phase,
+            applied: HashSet::new(),
+        }
+    }
+
+    /// CR 701.31 + CR 901.9c + CR 614.1a: Construct a `Planeswalk` proposed
+    /// event for the planar-die planeswalking ability (CR 901.8).
+    pub fn planeswalk(player_id: PlayerId) -> Self {
+        Self::Planeswalk {
+            player_id,
             applied: HashSet::new(),
         }
     }
@@ -559,7 +579,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginTurn { applied, .. }
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
-            | ProposedEvent::EmptyManaPool { applied, .. } => applied,
+            | ProposedEvent::EmptyManaPool { applied, .. }
+            | ProposedEvent::Planeswalk { applied, .. } => applied,
         }
     }
 
@@ -589,7 +610,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginTurn { applied, .. }
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
-            | ProposedEvent::EmptyManaPool { applied, .. } => applied,
+            | ProposedEvent::EmptyManaPool { applied, .. }
+            | ProposedEvent::Planeswalk { applied, .. } => applied,
         }
     }
 
@@ -677,7 +699,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginTurn { player_id, .. }
             | ProposedEvent::BeginPhase { player_id, .. }
             | ProposedEvent::ProduceMana { player_id, .. }
-            | ProposedEvent::EmptyManaPool { player_id, .. } => *player_id,
+            | ProposedEvent::EmptyManaPool { player_id, .. }
+            | ProposedEvent::Planeswalk { player_id, .. } => *player_id,
             ProposedEvent::CreateToken { owner, .. } => *owner,
         }
     }
@@ -724,7 +747,10 @@ impl ProposedEvent {
             | ProposedEvent::CreateToken { .. }
             | ProposedEvent::BeginTurn { .. }
             | ProposedEvent::BeginPhase { .. }
-            | ProposedEvent::EmptyManaPool { .. } => None,
+            | ProposedEvent::EmptyManaPool { .. }
+            // CR 701.31: a planeswalk has no affected object — the planar deck
+            // rotation is not an object-scoped event.
+            | ProposedEvent::Planeswalk { .. } => None,
         }
     }
 }

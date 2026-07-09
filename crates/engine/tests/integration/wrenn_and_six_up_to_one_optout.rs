@@ -6,12 +6,10 @@
 //! count is announced at activation). When the controller chooses ZERO targets,
 //! the ability must resolve doing nothing — with no lingering selection prompt.
 //!
-//! Before the fix, the +1 parses to `Effect::Bounce { selection: Targeted }`
-//! with `multi_target { min: 0, max: 1 }`. Declining left `ability.targets`
-//! empty, and the bounce resolver's resolution-time graveyard branch fired
-//! anyway, surfacing an `EffectZoneChoice` that re-prompted the player who had
-//! already opted out. The fix short-circuits an empty *targeted* up-to-one
-//! bounce to "do nothing", mirroring the established `ChangeZone` guard.
+//! The +1 parses to a graveyard-to-hand `Effect::ChangeZone` with
+//! `multi_target { min: 0, max: 1 }`. Declining leaves `ability.targets` empty,
+//! and the resolver must short-circuit that empty targeted up-to-one return to
+//! "do nothing" with no follow-up zone choice.
 //!
 //! These tests drive the real activation pipeline via `GameRunner::activate`.
 
@@ -89,15 +87,22 @@ fn graveyard_len(state: &GameState, player: PlayerId) -> usize {
         .len()
 }
 
-/// The +1 parses to a targeted "up to one" bounce: `multi_target { min: 0 }`
-/// makes `targeting_is_optional()` true. This is the structural fact the runtime
-/// fix relies on, and the parser must keep emitting it.
+/// The +1 parses to a targeted "up to one" graveyard-to-hand return:
+/// `multi_target { min: 0 }` makes `targeting_is_optional()` true. This is the
+/// structural fact the runtime fix relies on, and the parser must keep emitting it.
 #[test]
-fn plus_one_parses_as_optional_targeted_graveyard_bounce() {
+fn plus_one_parses_as_optional_targeted_graveyard_return() {
     let def = parse_effect_chain(WRENN_PLUS_ONE, AbilityKind::Activated);
     assert!(
-        matches!(&*def.effect, Effect::Bounce { .. }),
-        "expected Effect::Bounce, got {:?}",
+        matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "expected graveyard-to-hand ChangeZone, got {:?}",
         def.effect
     );
     let spec = def

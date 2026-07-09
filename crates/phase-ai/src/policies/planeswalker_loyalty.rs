@@ -203,6 +203,8 @@ mod tests {
                 characteristic_defining: false,
                 description: None,
                 attack_defended: None,
+                source_controller: None,
+                bypass_beneficiary: None,
             }],
             target: None,
             duration: None,

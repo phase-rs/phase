@@ -138,6 +138,8 @@ fn rejects_oversized_debug_token_counter_name() {
         request: DebugTokenRequest::Preset {
             preset_id: "soldier".to_string(),
             owner: PlayerId(0),
+            power_override: None,
+            toughness_override: None,
             enter_with_counters: vec![(CounterType::Generic("x".repeat(MAX_CHOICE_LEN + 1)), 1)],
         },
         run_etb: true,
@@ -145,6 +147,22 @@ fn rejects_oversized_debug_token_counter_name() {
 
     let err = guard_game_action_payload(&action).unwrap_err();
     assert!(err.contains("Debug.CreateToken.request.enter_with_counters[0].counter_type.Generic"));
+}
+
+#[test]
+fn accepts_debug_token_preset_pt_override_fields() {
+    let action = GameAction::Debug(DebugAction::CreateToken {
+        request: DebugTokenRequest::Preset {
+            preset_id: "source-defined-ooze".to_string(),
+            owner: PlayerId(0),
+            power_override: Some(4),
+            toughness_override: Some(5),
+            enter_with_counters: Vec::new(),
+        },
+        run_etb: true,
+    });
+
+    guard_game_action_payload(&action).expect("numeric P/T overrides are semantic engine input");
 }
 
 #[test]

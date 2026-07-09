@@ -77,7 +77,7 @@ export function ConfirmDialog({
         >
           <button
             type="button"
-            className="absolute inset-0 bg-black/68 backdrop-blur-[2px]"
+            className="absolute inset-0 bg-black/68"
             onClick={onCancel}
             aria-label={t("actions.closeNamed", { name: title })}
           />
@@ -87,7 +87,7 @@ export function ConfirmDialog({
             aria-modal="true"
             aria-labelledby={titleId}
             aria-describedby={messageId}
-            className="relative z-10 w-full max-w-md overflow-hidden rounded-[20px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
+            className="relative z-10 w-full max-w-md overflow-hidden rounded-[10px] border border-white/10 bg-[#0b1020] p-6 shadow-[0_18px_48px_rgba(0,0,0,0.48)]"
             initial={{ scale: 0.97, opacity: 0, y: 10 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.97, opacity: 0, y: 10 }}
@@ -105,7 +105,7 @@ export function ConfirmDialog({
                 ref={cancelRef}
                 type="button"
                 onClick={onCancel}
-                className="rounded-[14px] border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10"
+                className="rounded-[8px] border border-white/10 bg-slate-950/80 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-slate-900"
               >
                 {t("common:actions.cancel")}
               </button>
@@ -113,7 +113,7 @@ export function ConfirmDialog({
                 <button
                   type="button"
                   onClick={onSecondaryConfirm}
-                  className={`rounded-[14px] border px-4 py-2 text-sm font-medium transition ${CONFIRM_TONE_CLASS[secondaryTone]}`}
+                  className={`rounded-[8px] border px-4 py-2 text-sm font-medium transition ${CONFIRM_TONE_CLASS[secondaryTone]}`}
                 >
                   {secondaryConfirmLabel}
                 </button>
@@ -121,7 +121,7 @@ export function ConfirmDialog({
               <button
                 type="button"
                 onClick={onConfirm}
-                className={`rounded-[14px] border px-4 py-2 text-sm font-medium transition ${CONFIRM_TONE_CLASS[tone]}`}
+                className={`rounded-[8px] border px-4 py-2 text-sm font-medium transition ${CONFIRM_TONE_CLASS[tone]}`}
               >
                 {confirmLabel}
               </button>

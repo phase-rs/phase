@@ -60,6 +60,7 @@ fn bench_n(n: usize) {
         player: P0,
         valid_attacker_ids,
         valid_attack_targets,
+        attacker_constraints: Default::default(),
     };
 
     let at_declare = matches!(

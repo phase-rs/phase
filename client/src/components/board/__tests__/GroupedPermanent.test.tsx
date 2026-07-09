@@ -6,6 +6,15 @@ import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import {
+  buildGameState,
+  buildPendingCast,
+  buildTargetSelectionProgress,
+  buildTargetSelectionSlot,
+  buildTargetSelectionWaitingFor,
+} from "../../../test/factories/gameStateFactory.ts";
+import { toCardProps } from "../../../viewmodel/cardProps.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../../viewmodel/battlefieldProps.ts";
 import { BattlefieldRow } from "../BattlefieldRow.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -22,58 +31,30 @@ vi.mock("../../card/CardImage.tsx", () => ({
 }));
 
 function makeObject(id: number): GameObject {
-  return {
+  return buildGameObject({
     id,
     card_id: 100,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield",
-    tapped: false,
-    face_down: false,
-    flipped: false,
-    transformed: false,
-    damage_marked: 0,
-    dealt_deathtouch_damage: false,
-    attached_to: null,
-    attachments: [],
-    counters: {},
     name: "Saproling",
     power: 1,
     toughness: 1,
-    loyalty: null,
     card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
-    mana_cost: { type: "NoCost" },
-    keywords: [],
-    abilities: [],
-    trigger_definitions: [],
-    replacement_definitions: [],
-    static_definitions: [],
     color: ["Green"],
     base_power: 1,
     base_toughness: 1,
-    base_keywords: [],
     base_color: ["Green"],
     timestamp: id,
-    entered_battlefield_turn: null,
-  };
+  });
 }
 
 function makeState(waitingFor: WaitingFor): GameState {
-  const objects = Object.fromEntries(
-    [1, 2, 3, 4, 5].map((id) => [id, makeObject(id)]),
+  const objects = buildObjectMap(
+    ...[1, 2, 3, 4, 5].map((id) => makeObject(id)),
   );
-  return {
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
+  return buildGameState({
     objects,
     battlefield: [1, 2, 3, 4, 5],
-    exile: [],
-    stack: [],
-    combat: null,
     waiting_for: waitingFor,
-  } as unknown as GameState;
+  });
 }
 
 function makeGroup(): GroupedPermanentType {
@@ -81,7 +62,7 @@ function makeGroup(): GroupedPermanentType {
     name: "Saproling",
     ids: [1, 2, 3, 4, 5],
     count: 5,
-    representative: {} as GroupedPermanentType["representative"],
+    representative: toCardProps(makeObject(1)),
   };
 }
 
@@ -207,18 +188,20 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
   });
 
   it("dispatches a concrete target choice from the picker", () => {
-    const waitingFor = {
-      type: "TargetSelection",
+    const waitingFor = buildTargetSelectionWaitingFor({
       data: {
         player: 0,
-        pending_cast: {},
-        target_slots: [],
-        selection: {
+        pending_cast: buildPendingCast(),
+        target_slots: [
+          buildTargetSelectionSlot({
+            legal_targets: [{ Object: 1 }, { Object: 2 }, { Object: 3 }],
+          }),
+        ],
+        selection: buildTargetSelectionProgress({
           current_legal_targets: [{ Object: 1 }, { Object: 2 }, { Object: 3 }],
-          selected_targets: [],
-        },
+        }),
       },
-    } as unknown as WaitingFor;
+    });
     useGameStore.setState({
       gameState: makeState(waitingFor),
       waitingFor,
@@ -296,7 +279,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
         zone: "Battlefield",
         destination: null,
       },
-    } as unknown as WaitingFor;
+    };
     useGameStore.setState({
       gameState: makeState(waitingFor),
       waitingFor,
@@ -329,7 +312,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
         zone: "Battlefield",
         destination: null,
       },
-    } as unknown as WaitingFor;
+    };
     useGameStore.setState({
       gameState: makeState(waitingFor),
       waitingFor,

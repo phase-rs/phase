@@ -153,6 +153,8 @@ interface PlayerAreaProps {
   battlefieldView?: PlayerBattlefieldView;
   /** HUD element rendered inline between lands and support in the middle row */
   hud?: React.ReactNode;
+  /** Split multiplayer overview uses the focused layout, but top-anchors it. */
+  splitOverview?: boolean;
 }
 
 export function PlayerArea({
@@ -163,6 +165,7 @@ export function PlayerArea({
   creatureOverride,
   battlefieldView,
   hud,
+  splitOverview = false,
 }: PlayerAreaProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
@@ -277,6 +280,7 @@ export function PlayerArea({
             side="left"
             className="justify-start px-0"
             showCollapseControl={isOwnArea}
+            splitOverview={splitOverview}
           />
         </>
       ),
@@ -300,6 +304,7 @@ export function PlayerArea({
           dividerBeforeIndex={supportDividerIndex}
           className="justify-end px-0"
           showCollapseControl={isOwnArea}
+          splitOverview={splitOverview}
         />
       ),
     },
@@ -311,7 +316,13 @@ export function PlayerArea({
       labelKey: "zone.commandZone",
       editClass: "ring-2 ring-amber-400/70 bg-amber-400/10",
       badgeClass: "bg-amber-400",
-      content: <CommandDock playerId={playerId} isMirrored={isMirrored} />,
+      content: (
+        <CommandDock
+          playerId={playerId}
+          isMirrored={isMirrored}
+          splitOverview={splitOverview}
+        />
+      ),
     },
   };
 
@@ -326,7 +337,10 @@ export function PlayerArea({
   const supportIdx = middleOrder.indexOf("support");
   const dividerCell: MiddleCell | null =
     Math.abs(landsIdx - supportIdx) === 1 ? (landsIdx < supportIdx ? "lands" : "support") : null;
-  const middleRowClass = "flex min-h-0 min-w-0 items-stretch justify-between gap-2";
+  // Split panes get MORE row gap, not less — at a third-width the bands crowd
+  // each other visually, so breathing room does the de-cluttering.
+  const middleRowGap = "gap-2";
+  const middleRowClass = `flex min-h-0 min-w-0 items-stretch justify-between ${middleRowGap}`;
   // Drag-to-reorder is enabled only in the viewer's own area while editing; the
   // resulting order persists globally and applies to every area (incl. plain
   // render below). Framer's Reorder distinguishes a drag from a tap, so cards
@@ -410,6 +424,14 @@ export function PlayerArea({
     </div>
   ) : null;
 
+  const areaGap = splitOverview ? "gap-2.5" : isCompactHeight ? "gap-0.5" : "gap-2";
+  const verticalPlacement = mode === "full"
+    ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-8"
+    : splitOverview
+      ? "justify-start py-1"
+      : isCompactHeight ? "justify-end py-0" : "justify-end py-1";
+  const mirroredCreatureAlign = "items-end";
+
   return (
     <div
       className={`relative flex min-h-0 min-w-0 flex-1 overflow-visible ${
@@ -419,13 +441,7 @@ export function PlayerArea({
       data-phased-out={isPhasedOut ? "true" : undefined}
     >
       <div
-        className={`flex min-w-0 flex-1 flex-col px-1 ${
-          isCompactHeight ? "gap-0.5" : "gap-2"
-        } ${
-          mode === "full"
-            ? isCompactHeight ? "pt-0 pb-0.5" : "pt-1 pb-8"
-            : isCompactHeight ? "justify-end py-0" : "justify-end py-1"
-        }`}
+        className={`flex min-w-0 flex-1 flex-col px-1 ${areaGap} ${verticalPlacement}`}
       >
         {isMirrored ? (
           <>
@@ -434,12 +450,16 @@ export function PlayerArea({
               {middleRow}
               {hudBand}
             </div>
-            <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
+            <div
+              className={`flex min-h-0 flex-1 ${mirroredCreatureAlign} px-2`}
+              data-debug-label="Opp Creatures"
+            >
               <BattlefieldZoneOverflow
                 groups={creatures}
                 zone="creatures"
                 side="left"
                 className="w-full"
+                splitOverview={splitOverview}
               />
             </div>
           </>

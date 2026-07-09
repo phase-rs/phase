@@ -12,6 +12,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition::{
     inject_controller_you, parse_cast_using_teamwork_phrase, parse_spell_target_superlative_suffix,
+    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -20,14 +21,14 @@ use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_wo
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::{ContinuationAst, PutCount};
+use crate::parser::oracle_ir::ast::ContinuationAst;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DamageChannel,
-    DigSource, Duration, Effect, FilterProp, ObjectScope, ParsedCondition, PlayerScope, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter,
-    TypedFilter,
+    DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope,
+    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -790,6 +791,44 @@ fn strip_reflexive_conditional_body_separator(input: &str) -> &str {
     .unwrap_or(input)
 }
 
+/// CR 608.2d: Strip a leading "if they guessed wrong/right, " head into the
+/// typed `EffectOutcomeSignal::Guessed { outcome }` outcome condition for an
+/// `Effect::OpponentGuess` branch. Both polarities are positive tests: "wrong"
+/// → `outcome: GuessOutcome::Incorrect`, "right" → `outcome: GuessOutcome::Correct`.
+pub(super) fn strip_guess_outcome_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_ascii_lowercase();
+    let parsed: Result<(&str, GuessOutcome), nom::Err<()>> = alt((
+        value(
+            GuessOutcome::Incorrect,
+            tag::<_, _, ()>("if they guessed wrong, "),
+        ),
+        value(
+            GuessOutcome::Incorrect,
+            tag::<_, _, ()>("if they guess wrong, "),
+        ),
+        value(
+            GuessOutcome::Correct,
+            tag::<_, _, ()>("if they guessed right, "),
+        ),
+        value(
+            GuessOutcome::Correct,
+            tag::<_, _, ()>("if they guess right, "),
+        ),
+    ))
+    .parse(lower.as_str());
+    if let Ok((rest, outcome)) = parsed {
+        let consumed = lower.len() - rest.len();
+        let body = text[consumed..].trim_start().to_string();
+        return (
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::Guessed { outcome },
+            }),
+            body,
+        );
+    }
+    (None, text.to_string())
+}
+
 pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
@@ -1295,6 +1334,76 @@ fn parse_its_a_card_type_gate_body<'a>(
     ))
 }
 
+/// CR 608.2c + CR 301.5b + CR 701.3a: "If it's a[n] &lt;subtype&gt;, [you may] attach
+/// it to ~" follow-up on a just-put permanent (The Invincible Iron Man: "put an
+/// artifact card from your hand onto the battlefield. If it's an Equipment,
+/// attach it to ~"). The bare-"it" anaphor (CR 608.2c) binds to the moved card,
+/// and "~" (CR 201.5) is the ability's own source. Recognized as a UNIT so the
+/// generic "it's a [subtype]" condition arm can't mis-key the type gate to the
+/// ability's injected parent target (the source, not the moved card) or emit a
+/// self-attach `ParentTarget`/`ParentTarget` (an Equipment can't equip itself,
+/// CR 301.5c).
+///
+/// Emits the supported `ZoneChangedThisWay` + `Attach` forward_result idiom: the
+/// condition gates on the moved card's type (read from `last_zone_changed_ids`,
+/// independent of the target slot); the attach makes the moved card (`SelfRef`,
+/// rebound to the forwarded object at resolution) the attachment and the source
+/// (`ParentTarget`, the injected original source) the host. Only the
+/// source-as-host recipient ("~") is in scope; typed hosts remain an honest gap.
+/// Returns `(condition, attach_effect, attach_is_optional)`.
+pub(super) fn try_parse_moved_card_subtype_attach_followup(
+    text: &str,
+) -> Option<(AbilityCondition, Effect, bool)> {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim();
+    // Leading anaphoric gate: "if it's a "/"if it's an ".
+    let (after_gate, _) = alt((
+        tag::<_, _, OracleError<'_>>("if it's a "),
+        tag("if it's an "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    // Split the subtype phrase from the "attach ..." body on the first comma.
+    let (_, (subtype_phrase, body)) = nom_primitives::split_once_on(after_gate, ", ").ok()?;
+    // Require a pure subtype gate (Equipment/Aura/Fortification, ...): the type
+    // phrase must consume fully and reference at least one CR 205.3 subtype.
+    let (filter, leftover) = parse_type_phrase(subtype_phrase);
+    if !leftover.trim().is_empty() {
+        return None;
+    }
+    let TargetFilter::Typed(typed) = &filter else {
+        return None;
+    };
+    if !typed
+        .type_filters
+        .iter()
+        .any(type_filter_references_subtype)
+    {
+        return None;
+    }
+    // Body: "[you may ]attach it to ~[.]" — only the source host ("~") is in scope.
+    let (after_may, is_optional) = opt(tag::<_, _, OracleError<'_>>("you may "))
+        .parse(body)
+        .map(|(rest, matched)| (rest, matched.is_some()))
+        .unwrap_or((body, false));
+    let (after_attach, _) = tag::<_, _, OracleError<'_>>("attach it to ")
+        .parse(after_may)
+        .ok()?;
+    let (after_source, _) = tag::<_, _, OracleError<'_>>("~").parse(after_attach).ok()?;
+    let (after_dot, _) = opt(tag::<_, _, OracleError<'_>>("."))
+        .parse(after_source)
+        .ok()?;
+    if !after_dot.trim().is_empty() {
+        return None;
+    }
+    let condition = AbilityCondition::ZoneChangedThisWay { filter };
+    let attach = Effect::Attach {
+        attachment: TargetFilter::SelfRef,
+        target: TargetFilter::ParentTarget,
+    };
+    Some((condition, attach, is_optional))
+}
+
 pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     if let Some((condition, remainder)) = parse_if_revealed_card_type_conditional(text) {
         return (Some(condition), remainder);
@@ -1465,6 +1574,136 @@ fn parse_target_type_membership_condition_text(text: &str) -> Option<AbilityCond
         .ok()
         .map(|(_, condition)| condition);
     parsed
+}
+
+/// CR 608.2c + CR 701.20a: In a top-card predicate guessing sequence, "they
+/// guessed right" means the revealed card matches the most recent opponent
+/// guess. The guess itself is lowered as `ChoiceType::CardPredicateGuess`, so
+/// this can reuse the same transient predicate filter used by "of the chosen
+/// kind" effects.
+fn parse_guessed_right_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, result) = all_consuming(parse_card_predicate_guess_result)
+        .parse(lower.as_str())
+        .ok()?;
+    match (result.subject, result.outcome) {
+        (_, CardPredicateGuessOutcome::Right) => Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![],
+            additional_filter: Some(FilterProp::MatchesLastChosenCardPredicate),
+            subtype_filter: None,
+        }),
+    }
+}
+
+pub(super) fn strip_card_predicate_guess_result_conditional(
+    text: &str,
+) -> Option<(AbilityCondition, String)> {
+    let (condition_fragment, body) = split_leading_conditional(text)?;
+    let cond_text = strip_guess_result_condition_prefix(&condition_fragment);
+
+    let condition = parse_guessed_right_condition_text(cond_text)?;
+    Some((condition, body))
+}
+
+pub(super) fn is_card_predicate_guess_result_conditional(text: &str) -> bool {
+    let Some((condition_fragment, _body)) = split_leading_conditional(text) else {
+        return false;
+    };
+    let parsed = all_consuming(parse_any_card_predicate_guess_result)
+        .parse(strip_guess_result_condition_prefix(&condition_fragment))
+        .is_ok();
+    parsed
+}
+
+fn strip_guess_result_condition_prefix(condition_fragment: &str) -> &str {
+    let condition_lower = condition_fragment.to_lowercase();
+    nom_on_lower(condition_fragment, &condition_lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("then, if "),
+                tag("then if "),
+                tag("if "),
+            )),
+        )
+        .parse(i)
+    })
+    .map(|((), rest)| rest)
+    .unwrap_or(condition_fragment)
+    .trim()
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct CardPredicateGuessResult {
+    subject: CardPredicateGuessSubject,
+    outcome: CardPredicateGuessOutcome,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CardPredicateGuessSubject {
+    They,
+    ThatPlayer,
+    ThatOpponent,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CardPredicateGuessOutcome {
+    Right,
+}
+
+fn parse_card_predicate_guess_result(input: &str) -> OracleResult<'_, CardPredicateGuessResult> {
+    let (input, subject) = parse_card_predicate_guess_subject(input)?;
+    let (input, _) = tag(" guessed ").parse(input)?;
+    let (input, outcome) = parse_card_predicate_guess_outcome(input)?;
+    Ok((input, CardPredicateGuessResult { subject, outcome }))
+}
+
+fn parse_any_card_predicate_guess_result(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = parse_any_card_predicate_guess_subject(input)?;
+    let (input, _) =
+        alt((tag::<_, _, OracleError<'_>>(" guessed "), tag(" guesses "))).parse(input)?;
+    let (input, _) = parse_any_card_predicate_guess_outcome(input)?;
+    Ok((input, ()))
+}
+
+fn parse_card_predicate_guess_subject(input: &str) -> OracleResult<'_, CardPredicateGuessSubject> {
+    alt((
+        value(CardPredicateGuessSubject::They, tag("they")),
+        value(CardPredicateGuessSubject::ThatPlayer, tag("that player")),
+        value(
+            CardPredicateGuessSubject::ThatOpponent,
+            tag("that opponent"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_any_card_predicate_guess_subject(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        map(parse_card_predicate_guess_subject, |_| ()),
+        value((), tag("target opponent")),
+        value((), tag("the player")),
+        value((), tag("your opponent")),
+        value((), tag("an opponent")),
+    ))
+    .parse(input)
+}
+
+fn parse_card_predicate_guess_outcome(input: &str) -> OracleResult<'_, CardPredicateGuessOutcome> {
+    value(CardPredicateGuessOutcome::Right, tag("right")).parse(input)
+}
+
+fn parse_any_card_predicate_guess_outcome(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("right"),
+            tag("wrong"),
+            tag("correctly"),
+            tag("incorrectly"),
+        )),
+    )
+    .parse(input)
 }
 
 /// Consume a target-anaphoric noun phrase used as the subject of an "instead"
@@ -2199,6 +2438,19 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
         return Some((Comparator::EQ, 0, counter_type, consumed));
     }
 
+    // CR 122.1 + CR 122.1a: an indefinite "a [type] counter" means one or more (>= 1).
+    // Placed before the numeric branch, whose `parse_number` fails fast on the
+    // article "a"/"an" (Oblivion's Hunger: "a +1/+1 counter on it").
+    if let Ok((rest, _)) = nom_primitives::parse_article(text) {
+        if let Ok((after_type, counter_type)) = nom_primitives::parse_counter_type_typed(rest) {
+            let after_type = after_type.trim_start();
+            if let Some(after_on) = parse_counter_on_suffix(after_type) {
+                let consumed = original_len - after_on.len();
+                return Some((Comparator::GE, 1, counter_type, consumed));
+            }
+        }
+    }
+
     let (rest, threshold) = nom_primitives::parse_number.parse(text).ok()?;
     let rest = rest.trim_start();
     type E<'a> = OracleError<'a>;
@@ -2222,11 +2474,12 @@ fn build_counter_condition(
     comparator: Comparator,
     threshold: i32,
     counter_type: CounterType,
+    scope: ObjectScope,
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
-                scope: ObjectScope::Source,
+                scope,
                 counter_type: Some(counter_type),
             },
         },
@@ -2235,33 +2488,70 @@ fn build_counter_condition(
     }
 }
 
-pub(super) fn strip_counter_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_counter_conditional(
+    text: &str,
+    in_trigger: bool,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // Leading form: "if it has [N] [type] counter[s] on it, [effect]". The
+    // subject here is ALWAYS the source ("it"); the demonstrative "that
+    // creature"/"that permanent"/"that card" is deliberately NOT offered in the
+    // leading position. A sentence-initial "If that creature has … counter …,
+    // [source] deals N … instead" belongs to the target-gated *replacement*
+    // class (Bring Low, Strider, Urdnan), whose honest counter/P-T gating is
+    // deferred to the inert `strip_target_keyword_instead` rider (see the CR
+    // 122.1b note there). Offering the demonstrative here would GATE OUT that
+    // deferral and over-accept those cards into a false-green additive
+    // `DealDamage` sibling (the "instead" is a replacement, not additive).
+    // CR 115.1's demonstrative-as-target is honored only in the trailing form
+    // below, where the leading-space needle can't collide with that class.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if it has ").parse(lower.as_str()) {
         if let Some((comparator, threshold, counter_type, consumed)) = parse_counter_threshold(rest)
         {
             let after = rest[consumed..].trim_start();
+            // allow-noncombinator: comma cleanup on the already-parsed remainder (the condition is parsed; not dispatch)
             let after = after.strip_prefix(',').unwrap_or(after).trim_start();
             let offset = text.len() - after.len();
             return (
-                Some(build_counter_condition(comparator, threshold, counter_type)),
+                Some(build_counter_condition(
+                    comparator,
+                    threshold,
+                    counter_type,
+                    ObjectScope::Source,
+                )),
                 text[offset..].to_string(),
             );
         }
     }
 
-    if let Some((before, after)) = tp.rsplit_around(" if it has ") {
-        if let Some((comparator, threshold, counter_type, consumed)) =
-            parse_counter_threshold(after.lower)
-        {
-            let remaining = after.lower[consumed..].trim();
-            if remaining.is_empty() || remaining == "." {
-                return (
-                    Some(build_counter_condition(comparator, threshold, counter_type)),
-                    before.original.trim_end_matches('.').trim().to_string(),
-                );
+    // Trailing form: "[effect] if {subject} has [N] [type] counter[s] on it".
+    // "it" is always offered; the demonstrative "that creature"/"that permanent"/
+    // "that card" only in non-trigger context (CR 115.1: the spell's target).
+    let mut subjects: Vec<(&str, ObjectScope)> = vec![(" if it has ", ObjectScope::Source)];
+    if !in_trigger {
+        subjects.push((" if that creature has ", ObjectScope::Target));
+        subjects.push((" if that permanent has ", ObjectScope::Target));
+        subjects.push((" if that card has ", ObjectScope::Target));
+    }
+    for (needle, scope) in subjects {
+        if let Some((before, after)) = tp.rsplit_around(needle) {
+            if let Some((comparator, threshold, counter_type, consumed)) =
+                parse_counter_threshold(after.lower)
+            {
+                let remaining = after.lower[consumed..].trim();
+                if remaining.is_empty() || remaining == "." {
+                    return (
+                        Some(build_counter_condition(
+                            comparator,
+                            threshold,
+                            counter_type,
+                            scope,
+                        )),
+                        before.original.trim_end_matches('.').trim().to_string(),
+                    );
+                }
             }
         }
     }
@@ -2965,6 +3255,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         return Some(condition);
     }
 
+    if let Some(condition) = parse_you_control_of_each_condition_text(text) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_controller_controlled_as_cast_condition_text(text) {
         return Some(condition);
     }
@@ -2982,6 +3276,11 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     }
 
     if let Some(condition) = parse_target_color_condition_text(text) {
+        return Some(condition);
+    }
+
+    let lower = text.to_ascii_lowercase();
+    if let Some(condition) = parse_cost_paid_object_matches_filter_condition(lower.as_str()) {
         return Some(condition);
     }
 
@@ -3041,6 +3340,128 @@ fn parse_urza_land_type(input: &str) -> super::super::oracle_nom::error::OracleR
         value("Mine".to_string(), tag("mine")),
         value("Power-Plant".to_string(), tag("power-plant")),
         value("Tower".to_string(), tag("tower")),
+    ))
+    .parse(input)
+}
+
+/// CR 305.6: The five basic land types, in canonical order. A parser-local copy
+/// (the deck-validation const is not `pub`) — do not cross-module-couple; both
+/// enumerate the same fixed CR 305.6 set.
+const BASIC_LAND_TYPES: [&str; 5] = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
+
+/// The noun a `"you control a <noun> of each <dimension>"` clause quantifies
+/// over. Typed rather than stringly so the noun→`TypedFilter` mapping is an
+/// exhaustive `match`, not a string comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfEachNoun {
+    Land,
+    Creature,
+    Permanent,
+}
+
+impl OfEachNoun {
+    /// The base `TypedFilter` (type + `You` controller) this noun contributes,
+    /// before the per-member dimension constraint is layered on. Exhaustive
+    /// `match` so a new noun forces a decision here.
+    fn base_filter(self) -> TypedFilter {
+        let typed = match self {
+            OfEachNoun::Land => TypedFilter::land(),
+            OfEachNoun::Creature => TypedFilter::creature(),
+            OfEachNoun::Permanent => TypedFilter::permanent(),
+        };
+        typed.controller(ControllerRef::You)
+    }
+}
+
+/// CR 305.6: one member filter per basic land type — "a land of each basic land
+/// type" requires a controlled land of that specific subtype.
+fn basic_land_member_filter(noun: OfEachNoun, subtype: &str) -> TargetFilter {
+    TargetFilter::Typed(noun.base_filter().subtype(subtype.to_string()))
+}
+
+/// CR 105.1: one member filter per color — "a <noun> of each color" requires a
+/// controlled object of that color. `FilterProp::HasColor` is
+/// `obj.color.contains(color)`, so a multicolored object counts for each of its
+/// colors (a Gruul creature satisfies both the red and green members).
+fn color_member_filter(noun: OfEachNoun, color: ManaColor) -> TargetFilter {
+    TargetFilter::Typed(
+        noun.base_filter()
+            .properties(vec![FilterProp::HasColor { color }]),
+    )
+}
+
+/// CR 104.2b + CR 608.2c: Recognize `"you control <clause> [and <clause>]…"`
+/// where each clause is `"a <noun> of each <dimension>"`, and expand every clause
+/// into `ControllerControlsMatching` members under one flat `AbilityCondition::And`.
+/// Two dimensions are supported:
+///   - `"a land of each basic land type"` → one member per CR 305.6 basic land
+///     type (Plains/Island/Swamp/Mountain/Forest).
+///   - `"a {creature|permanent} of each color"` → one member per CR 105.1 color
+///     (WUBRG).
+///
+/// The leading `"you control"` possessive scopes ALL clauses (CR 608.2c: read the
+/// whole sentence), so — unlike Urzatron's single-clause `" and "` list — the
+/// conjunction is bound INSIDE this recognizer rather than by the generic
+/// top-level splitter, which would strip the shared subject off the second
+/// conjunct (`"a creature of each color"` has no `"you control"` of its own).
+/// Motivating card: Coalition Victory ("You win the game if you control a land of
+/// each basic land type and a creature of each color"). `evaluate_condition`
+/// resolves the flat `And` identically to the nested form (`.all()`).
+fn parse_you_control_of_each_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    let member_filters = nom_parse_lower(&lower, |i| {
+        all_consuming(parse_you_control_of_each_condition).parse(i)
+    })?;
+    let conditions = member_filters
+        .into_iter()
+        .map(|filter| AbilityCondition::ControllerControlsMatching { filter })
+        .collect();
+    Some(AbilityCondition::And { conditions })
+}
+
+/// Parses `"you control <clause> [and <clause>]…"` into the flat list of per-member
+/// `TargetFilter`s across every clause. `all_consuming` at the call site forbids a
+/// partial match (e.g. a trailing unparsed clause).
+fn parse_you_control_of_each_condition(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
+    let (mut input, _) = tag("you control ").parse(input)?;
+    let (rest, mut filters) = parse_of_each_clause(input)?;
+    input = rest;
+    // The shared `"you control"` subject distributes over each `" and "`-joined
+    // clause (CR 608.2c).
+    while let Ok((rest, more)) =
+        preceded(tag::<_, _, OracleError<'_>>(" and "), parse_of_each_clause).parse(input)
+    {
+        filters.extend(more);
+        input = rest;
+    }
+    Ok((input, filters))
+}
+
+/// Parses one `"a <noun> of each <dimension>"` clause into its per-member
+/// `TargetFilter`s (5 for either dimension), controller-scoped to `You`.
+fn parse_of_each_clause(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
+    let (input, noun) = alt((
+        value(OfEachNoun::Land, tag::<_, _, OracleError<'_>>("a land")),
+        value(OfEachNoun::Creature, tag("a creature")),
+        value(OfEachNoun::Permanent, tag("a permanent")),
+    ))
+    .parse(input)?;
+    // CR 305.6 / CR 105.1: the dimension determines the fixed member set. Land +
+    // "basic land type" enumerates CR 305.6; any noun + "color" enumerates the
+    // CR 105.1 colors.
+    alt((
+        map(tag(" of each basic land type"), move |_| {
+            BASIC_LAND_TYPES
+                .iter()
+                .map(|subtype| basic_land_member_filter(noun, subtype))
+                .collect()
+        }),
+        map(tag(" of each color"), move |_| {
+            ManaColor::ALL
+                .iter()
+                .map(|&color| color_member_filter(noun, color))
+                .collect()
+        }),
     ))
     .parse(input)
 }
@@ -3484,12 +3905,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // CR 701.20e: Map the typed `PutCount` onto the Dig's keep_count/up_to.
     // `u32::MAX` is an unbounded parser sentinel; the Dig resolver clamps it
     // to the number of seen cards.
-    let (alt_keep_count, alt_up_to) = match alt_quantity {
-        PutCount::All => (Some(u32::MAX), false),
-        PutCount::AnyNumber => (Some(u32::MAX), true),
-        PutCount::Up(n) => (Some(n), true),
-        PutCount::Exactly(n) => (Some(n), false),
-    };
+    let (alt_keep_count, alt_keep_count_expr, alt_up_to) = alt_quantity.to_dig_keep();
 
     // CR 601.2f + CR 608.2c: a teamwork-gated "put ... from among them ...
     // instead" alternative reuses the preceding Dig's source; the base
@@ -3512,6 +3928,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         count: prev_count.clone(),
         destination: alt_destination,
         keep_count: alt_keep_count,
+        keep_count_expr: alt_keep_count_expr,
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
@@ -5261,6 +5678,9 @@ fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<Abilit
     if let Some(condition) = parse_cost_paid_object_subject_verb_form(lower) {
         return Some(condition);
     }
+    if let Some(condition) = parse_cost_paid_object_possessive_pt_comparison(lower) {
+        return Some(condition);
+    }
     parse_cost_paid_object_definite_noun_form(lower)
 }
 
@@ -5366,6 +5786,38 @@ fn parse_cost_paid_object_definite_noun_form(lower: &str) -> Option<AbilityCondi
     })
 }
 
+fn parse_cost_paid_object_possessive_pt_comparison(lower: &str) -> Option<AbilityCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the ").parse(lower).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("discarded "),
+        tag("sacrificed "),
+        tag("exiled "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, noun_filter) = parse_cost_paid_object_possessive_noun_prefix(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("'s ").parse(rest).ok()?;
+    let (rest, stat) = parse_reflexive_pt_stat(rest).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("was "), tag("is ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, (comparator, value)) = parse_threshold_with_exactly(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(noun_filter).properties(vec![
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            },
+        ])),
+    })
+}
+
 /// Predicate result for a definite-noun form's property clause. Property
 /// predicates (color-set, status such as suspected) land on
 /// `TypedFilter::properties`; type-or-subtype predicates land on
@@ -5399,6 +5851,38 @@ fn parse_cost_paid_object_noun_prefix(input: &str) -> Option<(&str, TypeFilter)>
         value(TypeFilter::Planeswalker, tag("planeswalker ")),
         value(TypeFilter::Permanent, tag("permanent ")),
         value(TypeFilter::Card, tag("card ")),
+    ))
+    .parse(input)
+    .ok()
+}
+
+/// Possessive sibling of [`parse_cost_paid_object_noun_prefix`]: matches the
+/// noun immediately before `"'s "` in forms like "the sacrificed creature's
+/// toughness was 4 or greater".
+fn parse_cost_paid_object_possessive_noun_prefix(input: &str) -> Option<(&str, TypeFilter)> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            terminated(tag::<_, _, OracleError<'_>>("creature"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Artifact,
+            terminated(tag("artifact"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Enchantment,
+            terminated(tag("enchantment"), peek(tag("'s "))),
+        ),
+        value(TypeFilter::Land, terminated(tag("land"), peek(tag("'s ")))),
+        value(
+            TypeFilter::Planeswalker,
+            terminated(tag("planeswalker"), peek(tag("'s "))),
+        ),
+        value(
+            TypeFilter::Permanent,
+            terminated(tag("permanent"), peek(tag("'s "))),
+        ),
+        value(TypeFilter::Card, terminated(tag("card"), peek(tag("'s ")))),
     ))
     .parse(input)
     .ok()
@@ -5779,12 +6263,13 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
     ))
 }
 
-/// CR 608.2c: "[effect] if at least one <filter> was <verb> this way" — the
-/// trailing (suffix) form of the prior-effect outcome gate. CR 608.2c states
-/// later text on a card may reference an earlier instruction in the same
-/// effect; here "this way" refers to the set of objects affected by the
-/// immediately-preceding instruction, and the condition fires when that set
-/// contains at least one object matching `<filter>`. Kaya, Orzhov Usurper's
+/// CR 608.2c + CR 400.7j: "[effect] if at least one <filter> was <verb> this
+/// way" — the trailing (suffix) form of the prior-effect outcome gate. Later
+/// text may reference an earlier instruction in the same effect, and objects
+/// moved to public zones remain findable. Here "this way" refers to the set of
+/// objects affected by the immediately-preceding instruction, and the condition
+/// fires when that set contains at least one object matching `<filter>`. Kaya,
+/// Orzhov Usurper's
 /// +1 ("Exile up to two target
 /// cards from a single graveyard. You gain 2 life if at least one creature
 /// card was exiled this way.") is the motivating case.
@@ -5794,9 +6279,21 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
 /// article), the type/subtype filter, both tenses, the verb set, and the
 /// negation flag (`wasn't`/`isn't`). Requiring an empty remainder keeps this
 /// matcher from firing on partial overlaps with longer condition phrases.
+///
+/// Both grammatical voices of the same event are recognized here so the leading
+/// (`if …, [effect]`) and suffix (`[effect] if …`) forms produce identical
+/// `ZoneChangedThisWay` conditions:
+///   - passive: `a Cave (is|was) put onto the battlefield this way` —
+///     `parse_zone_changed_this_way_clause`
+///   - active: `you put a Cave onto the battlefield this way` —
+///     `parse_you_put_onto_battlefield_this_way_clause` (Spelunking's ETB
+///     rider "If you put a Cave onto the battlefield this way, you gain 4 life";
+///     unlocks the whole "if you put a [type] onto the battlefield this way,
+///     [bonus]" fetch/ramp payoff class).
 fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
-    let (rest, (filter, negated)) =
-        crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(lower).ok()?;
+    let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(lower)
+        .or_else(|_| parse_you_put_onto_battlefield_this_way_clause(lower))
+        .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -6088,6 +6585,7 @@ fn parse_nth_resolution_condition(lower: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
+    use crate::parser::parse_oracle_text;
     use crate::types::counter::{CounterMatch, CounterType};
 
     /// CR 400.7 + CR 608.2c: S07 Batch 1 — the leading-"if" active-voice
@@ -7005,6 +7503,63 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 400.7j: Spelunking's ETB rider — "If you put a Cave onto
+    /// the battlefield this way, you gain 4 life." CR 400.7j lets the rider find
+    /// the Cave the preceding put-land instruction moved to the battlefield (a
+    /// public zone). The leading `if`
+    /// form of the active-voice put-onto-battlefield gate must lower through
+    /// `strip_leading_general_conditional` to `ZoneChangedThisWay { Cave }` —
+    /// not drop to `condition: null` (which fires the `Condition_If` swallow
+    /// detector and marks the whole ETB chain unsupported). Unlocks the
+    /// "if you put a [type] onto the battlefield this way, [bonus]" rider class.
+    #[test]
+    fn leading_you_put_a_cave_onto_battlefield_spelunking() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If you put a Cave onto the battlefield this way, you gain 4 life.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "you gain 4 life.");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Cave"))
+                    ),
+                    "expected Subtype Cave, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Cave filter, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: The suffix form of the same active-voice gate — "[effect] if
+    /// you put a [type] onto the battlefield this way" — routes through
+    /// `parse_outcome_this_way_condition` to the identical `ZoneChangedThisWay`
+    /// condition, so leading and trailing phrasings stay in lockstep.
+    #[test]
+    fn outcome_you_put_a_creature_onto_battlefield_active_voice() {
+        let condition =
+            parse_outcome_this_way_condition("you put a creature onto the battlefield this way")
+                .expect("active-voice put gate must lower to ZoneChangedThisWay");
+        let AbilityCondition::ZoneChangedThisWay { filter } = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Creature)),
+                    "expected Creature type filter, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Creature filter, got {other:?}"),
+        }
+    }
+
     /// CR 603.12 + CR 701.9a: "When you discard a card this way, [body]" — the
     /// reflexive gate created by a preceding "discard a card" instruction
     /// (Talion's Messenger, The Ancient One). The bare "a card" form parses to a
@@ -7306,6 +7861,62 @@ mod tests {
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                 }
             }
+        );
+    }
+
+    /// CR 608.2c: Wretched Banquet's spell-target gate carries a redundant
+    /// "or is tied for least power" tail before "among <filter>". In the
+    /// spell-target superlative form the target is itself part of the aggregate
+    /// population, so the comparison is already non-strict (LE for "least") and
+    /// the tail adds nothing — it must be consumed, not swallowed. The trailing
+    /// "on the battlefield" zone qualifier is folded into the aggregate filter.
+    #[test]
+    fn strip_superlative_target_conditional_least_power_or_tied_for_least() {
+        use crate::types::ability::{AggregateFunction, ObjectProperty};
+
+        let (condition, body) = strip_superlative_target_conditional(
+            "Destroy target creature if it has the least power or is tied for least power among creatures on the battlefield.",
+        );
+        assert_eq!(body, "Destroy target creature");
+        let Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }) = condition
+        else {
+            panic!("expected QuantityCheck, got {condition:?}");
+        };
+        // "least ... or is tied for least" stays a non-strict comparison.
+        assert_eq!(comparator, Comparator::LE);
+        assert_eq!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                }
+            }
+        );
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = rhs
+        else {
+            panic!("expected Aggregate rhs, got {rhs:?}");
+        };
+        assert_eq!(function, AggregateFunction::Min);
+        assert_eq!(property, ObjectProperty::Power);
+        // The "on the battlefield" qualifier rides the aggregate population.
+        assert!(
+            matches!(&filter, TargetFilter::Typed(tf)
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InZone { zone: Zone::Battlefield }
+            ))),
+            "aggregate filter should be creatures on the battlefield, got {filter:?}"
         );
     }
 
@@ -7977,6 +8588,65 @@ mod tests {
         let (prop, use_lki) = single_prop(&cond);
         assert_eq!(*prop, FilterProp::WasDealtDamageThisTurn);
         assert!(use_lki, "past-tense look-back must use LKI per CR 400.7");
+    }
+
+    /// Issue #4796 (CR 608.2c + CR 301.5b): "if it's a[n] <subtype>, attach it
+    /// to ~" recognizer — The Invincible Iron Man's Equipment self-attach
+    /// follow-up. Emits `ZoneChangedThisWay{Equipment}` + `Attach{SelfRef,
+    /// ParentTarget}` (moved card is the attachment, source is the host), not a
+    /// self-attach and not a wrong-subject `TargetMatchesFilter`.
+    #[test]
+    fn moved_card_subtype_attach_followup_equipment_to_source() {
+        let (cond, effect, is_optional) =
+            try_parse_moved_card_subtype_attach_followup("if it's an equipment, attach it to ~.")
+                .expect("Iron Man Equipment attach follow-up must be recognized");
+        assert!(!is_optional, "the attach itself is mandatory once gated");
+        match cond {
+            AbilityCondition::ZoneChangedThisWay { filter } => match filter {
+                TargetFilter::Typed(t) => assert!(
+                    t.type_filters.iter().any(|f| matches!(
+                        f,
+                        TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment")
+                    )),
+                    "expected Equipment subtype gate, got {:?}",
+                    t.type_filters
+                ),
+                other => panic!("expected Typed Equipment filter, got {other:?}"),
+            },
+            other => panic!("expected ZoneChangedThisWay condition, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                effect,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::ParentTarget,
+                }
+            ),
+            "moved card must be the attachment (SelfRef) and the source the host (ParentTarget), got {effect:?}"
+        );
+    }
+
+    /// The recognizer is scoped to the "attach it to ~" self-host body and to
+    /// CR 205.3 subtype gates: it declines non-attach bodies, core-type gates,
+    /// and typed (non-source) hosts so those fall through to the generic path.
+    #[test]
+    fn moved_card_subtype_attach_followup_declines_out_of_scope() {
+        // No "attach it to ~" body (reveal/scry-style follow-up).
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's an equipment, you draw a card."
+        )
+        .is_none());
+        // Core type, not a CR 205.3 subtype.
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's a creature, attach it to ~."
+        )
+        .is_none());
+        // Typed host (not the source "~") is an honest gap.
+        assert!(try_parse_moved_card_subtype_attach_followup(
+            "if it's an equipment, attach it to a creature you control."
+        )
+        .is_none());
     }
 
     /// CR 608.2c: Faller's Faithful "that creature wasn't dealt damage this turn"
@@ -8743,5 +9413,200 @@ mod tests {
             ),
             "dispatcher routes the named-subject entered-this-turn gate to the detector, got {routed:?}"
         );
+    }
+
+    // ---- "you control a <noun> of each <dimension>" (Coalition Victory) ----
+
+    /// CR 305.6: the single-clause recognizer expands "a land of each basic land
+    /// type" into one `ControllerControlsMatching{land.subtype(x).You}` per basic
+    /// land type, in canonical order.
+    #[test]
+    fn of_each_basic_land_type_expands_to_five_subtypes() {
+        let cond =
+            parse_you_control_of_each_condition_text("you control a land of each basic land type")
+                .expect("clause must parse");
+        let AbilityCondition::And { conditions } = cond else {
+            panic!("expected And, got {cond:?}");
+        };
+        let subtypes: Vec<String> = conditions
+            .iter()
+            .map(|c| match c {
+                AbilityCondition::ControllerControlsMatching {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Land)));
+                    tf.get_subtype().expect("subtype").to_string()
+                }
+                other => panic!("expected ControllerControlsMatching land, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            subtypes,
+            vec!["Plains", "Island", "Swamp", "Mountain", "Forest"]
+        );
+    }
+
+    /// CR 105.1: "a creature of each color" expands to one
+    /// `ControllerControlsMatching{creature.HasColor(c).You}` per WUBRG color.
+    #[test]
+    fn of_each_color_expands_to_five_colors() {
+        let cond = parse_you_control_of_each_condition_text("you control a creature of each color")
+            .expect("clause must parse");
+        let AbilityCondition::And { conditions } = cond else {
+            panic!("expected And, got {cond:?}");
+        };
+        let colors: Vec<ManaColor> = conditions
+            .iter()
+            .map(|c| match c {
+                AbilityCondition::ControllerControlsMatching {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)));
+                    match tf.properties.as_slice() {
+                        [FilterProp::HasColor { color }] => *color,
+                        other => panic!("expected single HasColor prop, got {other:?}"),
+                    }
+                }
+                other => panic!("expected ControllerControlsMatching creature, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 105.1: "a permanent of each color" (Spirit of Resistance's inner clause)
+    /// parses to the same 5-color permanent expansion. This exercises the
+    /// building-block for that card's dimension; note that Spirit of Resistance's
+    /// static "as long as" path resolves through a SEPARATE `ParsedCondition`
+    /// parser (`oracle_condition.rs`) and is unaffected by this recognizer.
+    #[test]
+    fn of_each_color_permanent_variant_parses() {
+        let cond =
+            parse_you_control_of_each_condition_text("you control a permanent of each color")
+                .expect("permanent clause must parse");
+        let AbilityCondition::And { conditions } = cond else {
+            panic!("expected And, got {cond:?}");
+        };
+        assert_eq!(conditions.len(), 5);
+        for c in &conditions {
+            let AbilityCondition::ControllerControlsMatching {
+                filter: TargetFilter::Typed(tf),
+            } = c
+            else {
+                panic!("expected ControllerControlsMatching, got {c:?}");
+            };
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Permanent)));
+            assert!(tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::HasColor { .. })));
+        }
+    }
+
+    /// The `"you control"` possessive scopes BOTH clauses, so the recognizer binds
+    /// the conjunction itself: "you control a land of each basic land type and a
+    /// creature of each color" → a flat `And` of all 10 members (5 lands + 5
+    /// colors). The generic top-level splitter would strip "you control" off the
+    /// second conjunct, which is why the conjunction lives inside this recognizer.
+    #[test]
+    fn of_each_recognizer_binds_the_shared_subject_conjunction() {
+        let cond = parse_you_control_of_each_condition_text(
+            "you control a land of each basic land type and a creature of each color",
+        )
+        .expect("full conjunction must parse");
+        let AbilityCondition::And { conditions } = cond else {
+            panic!("expected And, got {cond:?}");
+        };
+        assert_eq!(conditions.len(), 10, "5 basic land types + 5 colors");
+        // A bare clause with no leading subject must NOT parse (the possessive is
+        // mandatory — this is a controller-scoped condition).
+        assert!(
+            parse_you_control_of_each_condition_text("a creature of each color").is_none(),
+            "the 'you control' subject is required"
+        );
+    }
+
+    /// Isolates the trailing-if router: `strip_suffix_conditional` on Coalition
+    /// Victory's whole sentence must peel the effect and return the composed
+    /// `And{[…10 members]}` condition.
+    #[test]
+    fn strip_suffix_conditional_composes_coalition_victory() {
+        let (cond, body) = strip_suffix_conditional(
+            "You win the game if you control a land of each basic land type and a creature of each color",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "You win the game");
+        let Some(AbilityCondition::And { conditions }) = cond else {
+            panic!("expected And, got {cond:?}");
+        };
+        assert_eq!(conditions.len(), 10);
+    }
+
+    /// CR 104.2b + CR 608.2c: Coalition Victory's whole condition attaches to the
+    /// parsed ability as a flat `And{[10× ControllerControlsMatching]}` (5 basic
+    /// land subtypes + 5 colors). Revert guard: on pre-fix code `condition` is
+    /// `None` (the win-condition was dropped and the win fired unconditionally).
+    #[test]
+    fn coalition_victory_attaches_full_ten_member_condition() {
+        let parsed = parse_oracle_text(
+            "You win the game if you control a land of each basic land type and a creature of each color.",
+            "Coalition Victory",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::WinTheGame { .. }))
+            .expect("Coalition Victory must parse a WinTheGame ability");
+        let Some(AbilityCondition::And { conditions }) = ability.condition.clone() else {
+            panic!("expected And condition, got {:?}", ability.condition);
+        };
+        assert_eq!(conditions.len(), 10, "5 basic land types + 5 colors");
+        // 5 land-subtype members, controller-scoped.
+        let land_subtypes: Vec<String> = conditions
+            .iter()
+            .filter_map(|c| match c {
+                AbilityCondition::ControllerControlsMatching {
+                    filter: TargetFilter::Typed(tf),
+                } if tf.get_subtype().is_some() => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    Some(tf.get_subtype().unwrap().to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            land_subtypes,
+            vec!["Plains", "Island", "Swamp", "Mountain", "Forest"]
+        );
+        // 5 color members via HasColor, controller-scoped.
+        let colors: Vec<ManaColor> = conditions
+            .iter()
+            .filter_map(|c| match c {
+                AbilityCondition::ControllerControlsMatching {
+                    filter: TargetFilter::Typed(tf),
+                } => tf.properties.iter().find_map(|p| match p {
+                    FilterProp::HasColor { color } => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        Some(*color)
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(colors, ManaColor::ALL.to_vec());
     }
 }

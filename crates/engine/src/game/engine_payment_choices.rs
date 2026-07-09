@@ -1100,6 +1100,12 @@ pub(super) fn handle_unless_payment(
             AbilityCost::Unimplemented { .. } => {
                 payment_failed = true;
             }
+            // CR 118.9: a borrowed keyword cost is never an "unless [player] pays"
+            // cost — it is an alternative cost on a cast spell paid by the casting
+            // pipeline. Reaching here means a misrouted cost; fail the payment.
+            AbilityCost::KeywordCostOfCastSpell { .. } => {
+                payment_failed = true;
+            }
         }
 
         if !payment_failed {
@@ -1189,6 +1195,7 @@ pub(super) fn handle_unless_payment(
                         event_start,
                         &default_wf,
                         false,
+                        false,
                     )?;
                     state.waiting_for = wf;
                     return Ok(action_result(events, state.waiting_for.clone()));
@@ -1245,6 +1252,7 @@ pub(super) fn handle_unless_payment(
             events,
             event_start,
             &default_wf,
+            false,
             false,
         )?;
         state.waiting_for = wf;

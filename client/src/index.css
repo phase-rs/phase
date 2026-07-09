@@ -67,19 +67,19 @@
   --color-surface-modal: rgba(11, 16, 32, 0.96);
 
   /* ---- Radii → rounded-card/panel/row/chip/tile/badge (pill = rounded-full) ---- */
-  --radius-card: 12px;
-  --radius-panel: 20px;
-  --radius-row: 18px;
-  --radius-chip: 16px;
-  --radius-tile: 12px;
+  --radius-card: 10px;
+  --radius-panel: 14px;
+  --radius-row: 12px;
+  --radius-chip: 10px;
+  --radius-tile: 10px;
   --radius-badge: 6px;
 
   /* ---- Shadows → shadow-panel, shadow-modal, shadow-ember-glow, … ---- */
-  --shadow-panel: 0 18px 54px rgba(0, 0, 0, 0.22);
-  --shadow-modal: 0 25px 80px rgba(0, 0, 0, 0.55);
+  --shadow-panel: 0 12px 32px rgba(0, 0, 0, 0.26);
+  --shadow-modal: 0 18px 48px rgba(0, 0, 0, 0.48);
   --shadow-tile-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  --shadow-ember-glow: 0 0 16px -2px rgba(245, 158, 11, 0.45);
-  --shadow-ember-glow-strong: 0 0 25px rgba(251, 146, 60, 0.5), 0 0 50px rgba(251, 146, 60, 0.2);
+  --shadow-ember-glow: 0 0 0 1px rgba(245, 158, 11, 0.28);
+  --shadow-ember-glow-strong: 0 0 0 1px rgba(251, 146, 60, 0.38), 0 10px 22px rgba(0, 0, 0, 0.25);
 
   /* ---- Springy entrance curve → ease-spring (NOT --ease-out, which is in use) ---- */
   --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
@@ -95,9 +95,7 @@
   --text-caption: 0.75rem;     --text-caption--line-height: 1rem;
 }
 
-/* Gradient/background tokens — NOT color utilities (a gradient is a
-   background-image, not a color). Exposed as the `surface-card` and `bg-app`
-   utilities below. Tabular numerals use Tailwind's built-in `tabular-nums`. */
+/* Background tokens. Tabular numerals use Tailwind's built-in `tabular-nums`. */
 :root {
   --surface-card: linear-gradient(180deg, rgba(13, 18, 29, 0.88), rgba(9, 13, 24, 0.92));
   --bg-app: radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),

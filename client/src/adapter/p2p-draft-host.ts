@@ -1421,9 +1421,11 @@ export class P2PDraftHost {
   private async cleanupServerBackup(): Promise<void> {
     if (!this.backupEndpoint || !this.draftCode) return;
     try {
-      await fetch(`${this.backupEndpoint}/p2p-draft-backup/${this.draftCode}`, {
-        method: "DELETE",
-      });
+      const params = new URLSearchParams({ host_peer_id: this.hostPeer.id });
+      await fetch(
+        `${this.backupEndpoint}/p2p-draft-backup/${this.draftCode}?${params}`,
+        { method: "DELETE" },
+      );
     } catch {
       // Best-effort cleanup
     }

@@ -484,6 +484,24 @@ pub fn planar_ability_sentinel_id(player: PlayerId) -> ObjectId {
     ObjectId(PLANAR_ABILITY_SENTINEL_BASE + player.0 as u64)
 }
 
+/// CR 901.8: width of one synthetic-source high-byte namespace block. Dungeon
+/// sentinels occupy `0xD0_..` (`dungeon::DUNGEON_SENTINEL_BASE`), planar-ability
+/// sentinels `0xD1_..` (`PLANAR_ABILITY_SENTINEL_BASE`); each block is
+/// `0x1_0000_0000` wide and player ids are tiny (`player.0 < BLOCK` in every
+/// real game), so a `[base, base + BLOCK)` range check is exact and
+/// collision-free with the adjacent dungeon (`0xD0_..`) and next (`0xD2_..`)
+/// namespace blocks.
+const PLANAR_ABILITY_SENTINEL_BLOCK: u64 = 0x1_0000_0000;
+
+/// CR 901.8 / CR 901.9c: true when `id` is a synthetic planeswalking-ability
+/// sentinel (`PLANAR_ABILITY_SENTINEL_BASE + player.0`). Identifies planeswalks
+/// caused by rolling the planar die's Planeswalker symbol — the only planeswalk
+/// cause routed through the replacement pipeline (Fixed Point in Time).
+pub fn is_planar_ability_source(id: ObjectId) -> bool {
+    id.0 >= PLANAR_ABILITY_SENTINEL_BASE
+        && id.0 < PLANAR_ABILITY_SENTINEL_BASE + PLANAR_ABILITY_SENTINEL_BLOCK
+}
+
 /// CR 311.5 / CR 312.4 / CR 901.6: Designate `new` as the planar controller and
 /// sync the active face-up plane/phenomenon's `.controller` to match. The
 /// controller of a face-up plane or phenomenon is, by rule, the planar

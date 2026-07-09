@@ -66,6 +66,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -95,6 +96,10 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 201.5a: a granter self-ref carries no pitch-bound X.
+        | TargetFilter::GrantingObject
+        // CR 608.2c: source-relative object ref carries no pitch-bound X.
+        | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -139,6 +144,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -168,6 +174,10 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::ChosenDamageSource
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 201.5a: no pitch-bound X constraint to relax.
+        | TargetFilter::GrantingObject
+        // CR 608.2c: source-relative object ref — nothing to relax.
+        | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => filter.clone(),
     }
 }
@@ -626,6 +636,11 @@ impl AbilityCost {
             // the activation-time 601.2b gate doesn't reject the wrapper
             // unseen — actual payability is decided post-expansion.
             AbilityCost::PerCounter { .. } => true,
+            // CR 118.9 + CR 601.2g: a borrowed keyword cost resolves to a concrete
+            // `ManaCost` at cast time; like `Mana`/`ManaDynamic`, mana
+            // affordability is decided by the separate mana-payment step, not this
+            // choice-of-object gate.
+            AbilityCost::KeywordCostOfCastSpell { .. } => true,
         }
     }
 }

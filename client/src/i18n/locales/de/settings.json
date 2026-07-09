@@ -61,6 +61,11 @@
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
     "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
+    "multiplayerBoardLayout": "Mehrspieler-Boardlayout",
+    "multiplayerBoardLayoutOptions": {
+      "focused": "Fokussierter Gegner",
+      "split": "Geteilter Tisch"
+    },
     "cardPreviewDelay": "Hover-Verzögerung",
     "cardPreviewDelayInstant": "Sofort",
     "cardPreviewDelayValue": "{{ms}} ms",
@@ -179,7 +184,9 @@
     "importedWithPreferences_one": "{{count}} Deck und Einstellungen importiert.",
     "importedWithPreferences_other": "{{count}} Decks und Einstellungen importiert.",
     "skippedMalformed_one": "{{count}} fehlerhaften Eintrag übersprungen.",
-    "skippedMalformed_other": "{{count}} fehlerhafte Einträge übersprungen."
+    "skippedMalformed_other": "{{count}} fehlerhafte Einträge übersprungen.",
+    "telemetry": "Anonyme Absturz- und Nutzungsberichte senden",
+    "telemetryDescription": "Hilft, Abstürze zu beheben und die Kartenunterstützung zu priorisieren. Kein Konto, keine persönlichen Daten – nur Fehler- und Spielzusammenfassungszählungen."
   },
   "resetAll": {
     "confirm": "Alle Einstellungen auf die Standardwerte zurücksetzen? Dies löscht jede Einstellung in diesem Dialog.",

@@ -262,6 +262,7 @@ mod tests {
                 player: AI,
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                attacker_constraints: Default::default(),
             },
             candidates: Vec::new(),
         }
@@ -356,6 +357,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 damage_source: None,
+                excess: None,
             },
         );
         ability.kind = AbilityKind::Spell;
@@ -508,6 +510,7 @@ mod tests {
                 player: AI,
                 valid_attacker_ids: vec![oid],
                 valid_attack_targets: vec![],
+                attacker_constraints: Default::default(),
             },
             candidates: Vec::new(),
         };

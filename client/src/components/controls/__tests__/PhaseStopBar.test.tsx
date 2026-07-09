@@ -1,60 +1,14 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { CombatPhaseIndicator, PhaseIndicatorLeft } from "../PhaseStopBar.tsx";
-
-function createGameState(overrides: Partial<GameState> = {}): GameState {
-  return {
-    turn_number: 1,
-    active_player: 0,
-    phase: "PreCombatMain",
-    players: [
-      { id: 0, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-      { id: 1, life: 20, poison_counters: 0, mana_pool: { mana: [] }, library: [], hand: [], graveyard: [], has_drawn_this_turn: false, lands_played_this_turn: 0, turns_taken: 0 },
-    ],
-    priority_player: 0,
-    objects: {},
-    next_object_id: 1,
-    battlefield: [],
-    stack: [],
-    exile: [],
-    rng_seed: 1,
-    combat: null,
-    waiting_for: { type: "Priority", data: { player: 0 } },
-    has_pending_cast: false,
-    lands_played_this_turn: 0,
-    max_lands_per_turn: 1,
-    priority_pass_count: 0,
-    pending_replacement: null,
-    layers_dirty: false,
-    next_timestamp: 1,
-    seat_order: [0, 1],
-    format_config: {
-      format: "Standard",
-      starting_life: 20,
-      min_players: 2,
-      max_players: 2,
-      deck_size: 60,
-      singleton: false,
-      command_zone: false,
-      commander_damage_threshold: null,
-      range_of_influence: null,
-      team_based: false,
-      uses_commander: false,
-
-      allow_debug_actions: false,
-    },
-    eliminated_players: [],
-    ...overrides,
-  };
-}
 
 describe("PhaseStopBar", () => {
   beforeEach(() => {
-    useGameStore.setState({ gameState: createGameState() });
+    useGameStore.setState({ gameState: buildGameState() });
     usePreferencesStore.setState({ phaseStops: [] });
   });
 
@@ -62,7 +16,7 @@ describe("PhaseStopBar", () => {
     cleanup();
   });
 
-  it("describes HUD phase stops and toggles the selected stop", () => {
+  it("cycles the selected stop through its four scope states", () => {
     render(<PhaseIndicatorLeft />);
 
     const mainPhase = screen.getByRole("button", {
@@ -73,15 +27,58 @@ describe("PhaseStopBar", () => {
     expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("Play lands and cast spells before combat."));
     expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("No stop set: click to pause auto-pass here."));
     expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("Current phase."));
-    expect(mainPhase).toHaveAccessibleDescription(/Play lands and cast spells before combat\./);
     expect(mainPhase).toHaveAttribute("aria-pressed", "false");
 
+    // off → AllTurns
     fireEvent.click(mainPhase);
-
-    expect(usePreferencesStore.getState().phaseStops).toEqual(["PreCombatMain"]);
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "PreCombatMain", scope: "AllTurns" },
+    ]);
     expect(mainPhase).toHaveAttribute("aria-pressed", "true");
-    expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("Stop set: click to remove this auto-pass stop."));
-    expect(mainPhase).toHaveAccessibleDescription(/Stop set: click to remove this auto-pass stop\./);
+    expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("Stops on every turn."));
+
+    // AllTurns → OwnTurn
+    fireEvent.click(mainPhase);
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "PreCombatMain", scope: "OwnTurn" },
+    ]);
+    expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("Stops only on your turns."));
+
+    // OwnTurn → OpponentsTurns
+    fireEvent.click(mainPhase);
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "PreCombatMain", scope: "OpponentsTurns" },
+    ]);
+    expect(mainPhase).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("Stops only on opponents' turns."),
+    );
+
+    // OpponentsTurns → off
+    fireEvent.click(mainPhase);
+    expect(usePreferencesStore.getState().phaseStops).toEqual([]);
+    expect(mainPhase).toHaveAttribute("aria-pressed", "false");
+    expect(mainPhase).toHaveAttribute("aria-label", expect.stringContaining("No stop set: click to pause auto-pass here."));
+  });
+
+  it("cycles a stop in place, preserving array order", () => {
+    // Order matters: `usePhaseStopsSync` dedupes by positional comparison, so
+    // cycling must not move the touched stop to the end of the array. Seed two
+    // stops and cycle the first — it must stay at index 0.
+    usePreferencesStore.setState({
+      phaseStops: [
+        { phase: "Upkeep", scope: "AllTurns" },
+        { phase: "PreCombatMain", scope: "AllTurns" },
+      ],
+    });
+    render(<PhaseIndicatorLeft />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Phase stop: Upkeep step\./ }));
+
+    expect(usePreferencesStore.getState().phaseStops).toEqual([
+      { phase: "Upkeep", scope: "OwnTurn" },
+      { phase: "PreCombatMain", scope: "AllTurns" },
+    ]);
   });
 
   it("describes combat phase group stops", () => {

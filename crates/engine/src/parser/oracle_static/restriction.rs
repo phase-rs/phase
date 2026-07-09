@@ -288,9 +288,11 @@ pub(crate) fn parse_attach_only_restriction(
 pub(crate) fn parse_activation_exemption_suffix(
     input: &str,
 ) -> OracleResult<'_, ActivationExemption> {
-    let mut parser = opt(preceded(
-        tag(" unless they're "),
-        value(ActivationExemption::ManaAbilities, tag("mana abilities")),
+    // CR 605.1a: the " unless they're mana abilities" carve-out, tolerant of both
+    // the ASCII and U+2019 apostrophe via the shared suffix combinator.
+    let mut parser = opt(value(
+        ActivationExemption::ManaAbilities,
+        super::shared::parse_mana_ability_exemption_suffix,
     ));
     let (rest, exemption) = parser.parse(input)?;
     Ok((rest, exemption.unwrap_or_default()))
@@ -298,7 +300,13 @@ pub(crate) fn parse_activation_exemption_suffix(
 
 pub(crate) fn parse_cant_be_activated_exemption_in_text(lower: &str) -> ActivationExemption {
     nom_primitives::scan_preceded(lower, |i| {
-        preceded(tag("can't be activated"), parse_activation_exemption_suffix).parse(i)
+        // CR 605.1a: dual-apostrophe predicate + dual-apostrophe exemption suffix,
+        // so a U+2019 self-reference / attached line still records the carve-out.
+        preceded(
+            super::shared::parse_cant_be_activated_predicate,
+            parse_activation_exemption_suffix,
+        )
+        .parse(i)
     })
     .and_then(|(_, exemption, tail)| {
         let trimmed_tail = tail.trim_end_matches('.').trim();
@@ -352,8 +360,13 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
     ))
     .parse(rest_tp.lower)
     {
-        if let Ok((after_predicate, _)) =
-            tag::<_, _, OracleError<'_>>(" can't be activated").parse(after_source)
+        // CR 605.1a: the predicate carries either apostrophe glyph — mirror the
+        // dual-branch used everywhere else (no global apostrophe normalization).
+        if let Ok((after_predicate, _)) = alt((
+            tag::<_, _, OracleError<'_>>(" can't be activated"),
+            tag::<_, _, OracleError<'_>>(" can\u{2019}t be activated"),
+        ))
+        .parse(after_source)
         {
             // Optional "unless they're..." suffix, then the trailing period (or end-of-input).
             if let Ok((tail, exemption)) = parse_activation_exemption_suffix(after_predicate) {
@@ -374,12 +387,16 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
 
     // Otherwise fall back to the type-list + controller-suffix form (Karn, Clarion).
     // Require the predicate ending "... can't be activated[.]" at the tail.
+    // CR 605.1a: accept both apostrophe glyphs on the type-list predicate too
+    // (Karn, Clarion Conqueror) — same reason as the chosen-name branch above.
     let predicate_tp = rest_tp
         .strip_suffix(" can't be activated.") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| rest_tp.strip_suffix(" can't be activated"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                                                                   // Extract the type-list + optional controller suffix via the shared helper.
-                                                                   // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
-                                                                   // for this pattern the tail should be empty (the whole predicate IS the filter).
+        .or_else(|| rest_tp.strip_suffix(" can\u{2019}t be activated.")) // allow-noncombinator: dual-apostrophe variant of the line above.
+        .or_else(|| rest_tp.strip_suffix(" can't be activated")) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| rest_tp.strip_suffix(" can\u{2019}t be activated"))?; // allow-noncombinator: dual-apostrophe variant of the line above.
+                                                                          // Extract the type-list + optional controller suffix via the shared helper.
+                                                                          // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
+                                                                          // for this pattern the tail should be empty (the whole predicate IS the filter).
     let (source_filter, tail) = parse_type_phrase(predicate_tp.original);
     if !tail.trim().is_empty() {
         return None;
@@ -1894,6 +1911,64 @@ fn strip_graveyard_zone_anchor(branch: &str) -> Option<&str> {
         .map(|(_, (before, _))| before.trim())
 }
 
+/// Returns true when a disjunctive play/cast branch resolved to a concrete
+/// typed object filter rather than a broad parser fallback or contextual
+/// reference.
+fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(usable_disjunctive_permission_filter)
+        }
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Not { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
 /// Strip the leading article and trailing " spell"/" spells" from a single
 /// disjunctive-permission branch, then resolve it through
 /// `parse_graveyard_permission_filter`. Mirrors the cleanup the single-verb
@@ -1928,9 +2003,10 @@ fn parse_graveyard_branch_filter(branch: &str) -> Option<TargetFilter> {
     let (filter, _self_ref) = parse_graveyard_permission_filter(&cleaned);
     // Reject the unparseable fallbacks so a branch we cannot model declines the
     // whole disjunctive parse rather than silently admitting everything.
-    match &filter {
-        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
-        _ => None,
+    if usable_disjunctive_permission_filter(&filter) {
+        Some(filter)
+    } else {
+        None
     }
 }
 
@@ -2480,6 +2556,24 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
+    // CR 601.2a: Strip an optional once-per-turn frequency prefix FIRST, before
+    // the Bolas-compound and disjunctive branches, so each branch sees the bare
+    // "you may play/cast …" lead and inherits the correct frequency. "Once each
+    // turn, …" (Assemble the Players, The Fourth Doctor) and the longer "Once
+    // during each of your turns, …" synonym both lower to OncePerTurn; absence
+    // keeps the Unlimited shape (Realmwalker, Future Sight, Crystal Skull).
+    // Strip both `text` and `lower` in lockstep so downstream helpers
+    // (alt-cost rider, condition parser, description) see aligned slices from
+    // the same character offset.
+    let (text, lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
+        .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))
+    {
+        let stripped_len = lower.len() - r.len();
+        (&text[stripped_len..], r, CastFrequency::OncePerTurn)
+    } else {
+        (text, lower, CastFrequency::Unlimited)
+    };
+
     // Compound Bolas's Citadel form first — "you may play lands and cast
     // spells from the top of your library". Both halves collapse to a single
     // `Play` permission with `affected: Any`: under CR 305.1, `Play` mode
@@ -2492,8 +2586,9 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
             play_mode: CardPlayMode::Play,
-            // CR 601.2a: The Bolas's Citadel compound form has no per-turn cap.
-            frequency: CastFrequency::Unlimited,
+            // CR 601.2a: inherit the once-per-turn cap stripped above (the
+            // shipping Bolas's Citadel form has no prefix → Unlimited).
+            frequency,
             alt_cost,
         })
         .affected(TargetFilter::Any)
@@ -2505,26 +2600,16 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     }
 
     // CR 305.1 + CR 601.2a + CR 700.6: Disjunctive filtered permission —
-    // "You may play <land-filter> and cast <spell-filter> from the top of your
-    // library." (Crystal Skull, Isu Spyglass). `Play` mode covers both branches;
-    // distinct branch filters merge to `TargetFilter::Or`. Parsed after the
+    // "You may play <land-filter> and/or cast <spell-filter> from the top of
+    // your library." (Crystal Skull, Isu Spyglass, The Fourth Doctor). `Play`
+    // mode covers both branches; distinct branch filters merge to
+    // `TargetFilter::Or`. Inherits the hoisted frequency so once-per-turn
+    // disjunctive permissions keep their per-turn cap. Parsed after the
     // unfiltered Bolas compound so "play lands and cast spells" stays `Any`.
-    if let Some(def) = try_parse_disjunctive_top_of_library_cast_permission(text, lower) {
+    if let Some(def) = try_parse_disjunctive_top_of_library_cast_permission(text, lower, frequency)
+    {
         return Some(def);
     }
-
-    // CR 601.2a: Optional once-per-turn frequency prefix. "Once each turn, …"
-    // (Assemble the Players) and the longer "Once during each of your turns, …"
-    // synonym both lower to OncePerTurn; absence keeps the Unlimited shape
-    // (Realmwalker, Future Sight). After stripping the prefix, the standard
-    // "you may play/cast" verb-dispatch below is matched.
-    let (lower, frequency) = if let Some(r) = nom_tag_lower(lower, lower, "once each turn, ")
-        .or_else(|| nom_tag_lower(lower, lower, "once during each of your turns, "))
-    {
-        (r, CastFrequency::OncePerTurn)
-    } else {
-        (lower, CastFrequency::Unlimited)
-    };
 
     // Standard form: "you may [play|cast] [filter] from the top of your library".
     let (rest, play_mode) = if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
@@ -2670,14 +2755,18 @@ pub(crate) fn try_parse_top_of_library_has_plot(
 /// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive filtered top-of-
 /// library play/cast permission — "You may play <land-filter> and cast
 /// <spell-filter> from the top of your library." — into a single
-/// `TopOfLibraryCastPermission { play_mode: Play, frequency: Unlimited }`
-/// whose `affected` filter is the union of the two branch filters.
+/// `TopOfLibraryCastPermission { play_mode: Play }` whose `affected` filter is
+/// the union of the two branch filters. The `frequency` is supplied by the
+/// caller (hoisted once-per-turn prefix), so the disjunctive form covers both
+/// the unlimited (Crystal Skull) and once-per-turn (The Fourth Doctor) classes.
 ///
-/// Accepts both "and cast" (Crystal Skull) and "or cast" (mirroring the
-/// graveyard disjunctive connector) before the shared library-top anchor.
+/// Accepts both "and cast" (Crystal Skull) and "or cast" (The Fourth Doctor,
+/// mirroring the graveyard disjunctive connector) before the shared library-top
+/// anchor.
 fn try_parse_disjunctive_top_of_library_cast_permission(
     text: &str,
     lower: &str,
+    frequency: CastFrequency,
 ) -> Option<StaticDefinition> {
     let rest = nom_tag_lower(lower, lower, "you may play ")?;
 
@@ -2715,7 +2804,7 @@ fn try_parse_disjunctive_top_of_library_cast_permission(
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
         play_mode: CardPlayMode::Play,
-        frequency: CastFrequency::Unlimited,
+        frequency,
         alt_cost,
     })
     .affected(affected)

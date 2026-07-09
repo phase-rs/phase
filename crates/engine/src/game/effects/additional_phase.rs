@@ -13,16 +13,59 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target, phase, after, followed_by, count_expr) = match &ability.effect {
-        Effect::AdditionalPhase {
-            target,
-            phase,
-            after,
-            followed_by,
-            count,
-        } => (target, *phase, *after, followed_by, count),
-        _ => return Err(EffectError::MissingParam("expected AdditionalPhase".into())),
-    };
+    let (target, phase, after, followed_by, count_expr, attacker_restriction) =
+        match &ability.effect {
+            Effect::AdditionalPhase {
+                target,
+                phase,
+                after,
+                followed_by,
+                count,
+                attacker_restriction,
+            } => (
+                target,
+                *phase,
+                *after,
+                followed_by,
+                count,
+                attacker_restriction,
+            ),
+            _ => return Err(EffectError::MissingParam("expected AdditionalPhase".into())),
+        };
+
+    // CR 501.1 + CR 500.8: "there is an additional beginning phase after this
+    // phase." The beginning phase (untap/upkeep/draw, CR 501.1) is inserted after
+    // the phase this ability resolves in and the turn then resumes at that
+    // phase's natural successor. Marker: `phase == Untap` (no other AdditionalPhase
+    // producer emits `phase: Untap`).
+    //
+    // CR 500.10a's "you get" controller-restriction is limited to the "you get"
+    // wording (grep-verified) and does NOT apply to the "there is an additional …
+    // phase" wording, so this branch is placed BEFORE the CR 500.10a gate below.
+    // The phase is added to the turn in progress — the active player's turn —
+    // regardless of who controls the source. This is required by Shadow of the
+    // Second Sun (an aura on another player: the enchanted/active player gets the
+    // phase) and correct for Temple/Sphinx/Cyclonus (controller == active player).
+    if phase == Phase::Untap {
+        // Count defaults to Fixed(1); reuse the shared quantity resolver so any
+        // future "N additional beginning phases" wording is covered for free.
+        let count = resolve_quantity(state, count_expr, ability.controller, ability.source_id)
+            .max(0) as usize;
+        let anchor = crate::game::turns::last_step_of_phase(state.phase);
+        for _ in 0..count {
+            state.extra_phases.push(ExtraPhase {
+                anchor,
+                phase: Phase::Untap,
+                attacker_restriction: None,
+                attacker_restriction_source: None,
+            });
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::AdditionalPhase,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
 
     // CR 500.8: Resolve the target to a PlayerId.
     let player = match target {
@@ -77,6 +120,46 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 115.1 + CR 601.2c + CR 608.2c: "the chosen creatures" (Last Night
+    // Together) are this spell's chosen targets — the parser emits
+    // `ParentTarget`, which `resolve_ability_chain` has already propagated down
+    // to this sub-ability (`ability.targets == [obj1, obj2]`). CR 608.2h: the
+    // affected set is information determined once, at resolution — snapshot the
+    // target object IDs into a fixed tracked set so the restriction membership
+    // can't drift. `SelfRef` (Throat Wolf) resolves to the source object. All
+    // other filters (e.g. `Typed(land creature)` for Bumi) ride through
+    // unchanged and are re-evaluated continuously at each declaration
+    // (CR 611.2c, rules-modifying continuous effect).
+    let resolved_restriction: Option<TargetFilter> = match attacker_restriction {
+        // CR 608.2c + CR 608.2h: "the chosen creatures" (`ParentTarget`) and the
+        // "those creatures" sentinel (`TrackedSet { id: 0 }`, which `parse_target`
+        // emits before any runtime set exists) both refer to THIS spell's chosen
+        // targets. Snapshot the propagated target object IDs into a fresh fixed
+        // tracked set so the restriction membership can't drift.
+        Some(TargetFilter::ParentTarget)
+        | Some(TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        }) => {
+            let ids: Vec<crate::types::identifiers::ObjectId> = ability
+                .targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            let set_id = crate::game::effects::publish_fresh_tracked_set(state, ids);
+            Some(TargetFilter::TrackedSet { id: set_id })
+        }
+        Some(TargetFilter::SelfRef) => Some(TargetFilter::SpecificObject {
+            id: ability.source_id,
+        }),
+        // CR 608.2h: an already-concrete `TrackedSet`/`SpecificObject` references
+        // a set published elsewhere — pass it through unchanged rather than
+        // overwriting it with this spell's own targets.
+        other => other.clone(),
+    };
+
     // CR 500.8: Push follow-up phases before the primary phase so the
     // `advance_phase` LIFO scan consumes the primary phase first. Repeat
     // the bundle `count` times so each scheduled occurrence still fires
@@ -99,11 +182,29 @@ pub fn resolve(
             state.extra_phases.push(ExtraPhase {
                 anchor: bundle_anchor,
                 phase: follow_up,
+                attacker_restriction: None,
+                attacker_restriction_source: None,
             });
         }
+        // CR 508.1c: Only the scheduled combat phase carries the attacker
+        // restriction; follow-up main/upkeep phases never restrict attacks.
+        // CR 611.2c: Record the scheduling spell's source ObjectId so that
+        // `passes_combat_attacker_restriction` can evaluate source-relative
+        // filter predicates against the actual source rather than ObjectId(0).
+        let restriction = if phase == Phase::BeginCombat {
+            resolved_restriction.clone()
+        } else {
+            None
+        };
         state.extra_phases.push(ExtraPhase {
             anchor: bundle_anchor,
             phase,
+            attacker_restriction_source: if restriction.is_some() {
+                Some(ability.source_id)
+            } else {
+                None
+            },
+            attacker_restriction: restriction,
         });
     }
 
@@ -155,6 +256,7 @@ mod tests {
                 after,
                 followed_by,
                 count,
+                attacker_restriction: None,
             },
             controller,
             original_controller: None,
@@ -162,6 +264,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             source_incarnation: None,
+            source_card_id: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -181,6 +284,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
+            amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
@@ -193,10 +297,22 @@ mod tests {
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
             repeat_until: None,
+            replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
             dig_found_nothing_for_parent_target: false,
+            choose_from_zone_found_nothing_for_parent_target: false,
+        }
+    }
+
+    /// Test helper: an ordinary (unrestricted) `ExtraPhase`.
+    fn ep(anchor: Phase, phase: Phase) -> ExtraPhase {
+        ExtraPhase {
+            anchor,
+            phase,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
         }
     }
 
@@ -223,14 +339,8 @@ mod tests {
         assert_eq!(
             state.extra_phases,
             vec![
-                ExtraPhase {
-                    anchor: Phase::PostCombatMain,
-                    phase: Phase::BeginCombat,
-                },
-                ExtraPhase {
-                    anchor: Phase::EndCombat,
-                    phase: Phase::BeginCombat,
-                },
+                ep(Phase::PostCombatMain, Phase::BeginCombat),
+                ep(Phase::EndCombat, Phase::BeginCombat),
             ]
         );
     }
@@ -256,10 +366,7 @@ mod tests {
         // current combat phase ends (not mid-combat).
         assert_eq!(
             state.extra_phases,
-            vec![ExtraPhase {
-                anchor: Phase::EndCombat,
-                phase: Phase::BeginCombat,
-            }]
+            vec![ep(Phase::EndCombat, Phase::BeginCombat)]
         );
     }
 
@@ -286,14 +393,8 @@ mod tests {
         assert_eq!(
             state.extra_phases,
             vec![
-                ExtraPhase {
-                    anchor: Phase::EndCombat,
-                    phase: Phase::PostCombatMain,
-                },
-                ExtraPhase {
-                    anchor: Phase::EndCombat,
-                    phase: Phase::BeginCombat,
-                },
+                ep(Phase::EndCombat, Phase::PostCombatMain),
+                ep(Phase::EndCombat, Phase::BeginCombat),
             ]
         );
     }
@@ -326,17 +427,20 @@ mod tests {
         );
         resolve(&mut state, &ability2, &mut events).unwrap();
 
-        let begin_combat_after_end = ExtraPhase {
-            anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
-        };
+        let begin_combat_after_end = ep(Phase::EndCombat, Phase::BeginCombat);
         assert_eq!(
             state.extra_phases,
-            vec![begin_combat_after_end, begin_combat_after_end]
+            vec![
+                begin_combat_after_end.clone(),
+                begin_combat_after_end.clone()
+            ]
         );
 
         // CR 500.8: Pop from end → most recent first
-        assert_eq!(state.extra_phases.pop(), Some(begin_combat_after_end));
+        assert_eq!(
+            state.extra_phases.pop(),
+            Some(begin_combat_after_end.clone())
+        );
         assert_eq!(state.extra_phases.pop(), Some(begin_combat_after_end));
     }
 
@@ -382,13 +486,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(
-            state.extra_phases,
-            vec![ExtraPhase {
-                anchor: Phase::Upkeep,
-                phase: Phase::Upkeep,
-            }]
-        );
+        assert_eq!(state.extra_phases, vec![ep(Phase::Upkeep, Phase::Upkeep)]);
     }
 
     /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
@@ -424,13 +522,16 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let expected = ExtraPhase {
-            anchor: Phase::Upkeep,
-            phase: Phase::Upkeep,
-        };
+        let expected = ep(Phase::Upkeep, Phase::Upkeep);
         assert_eq!(
             state.extra_phases,
-            vec![expected, expected, expected, expected, expected],
+            vec![
+                expected.clone(),
+                expected.clone(),
+                expected.clone(),
+                expected.clone(),
+                expected
+            ],
             "5 combat damage should schedule 5 additional upkeep steps"
         );
     }
@@ -460,16 +561,108 @@ mod tests {
         assert_eq!(
             state.extra_phases,
             vec![
-                ExtraPhase {
-                    anchor: Phase::PreCombatMain,
-                    phase: Phase::BeginCombat,
-                },
-                ExtraPhase {
-                    anchor: Phase::EndCombat,
-                    phase: Phase::BeginCombat,
-                },
+                ep(Phase::PreCombatMain, Phase::BeginCombat),
+                ep(Phase::EndCombat, Phase::BeginCombat),
             ]
         );
+    }
+
+    /// CR 501.1 + CR 500.8: an inserted beginning phase runs untap → upkeep →
+    /// draw, then the turn resumes at the anchor's natural successor. The anchor
+    /// phase (PostCombatMain) is never re-entered, so its beginning-of-phase
+    /// trigger does not re-fire, and `extra_phase_resume` empties.
+    #[test]
+    fn additional_beginning_phase_runs_then_resumes_after_anchor() {
+        use crate::game::turns::advance_phase;
+
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PostCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::Untap,
+            Phase::PostCombatMain,
+            vec![],
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.extra_phases.len(), 1);
+
+        // Leaving PostCombatMain enters the inserted beginning phase.
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::Untap, "inserted beginning phase starts");
+        assert_eq!(
+            state.extra_phase_resume,
+            vec![Phase::PostCombatMain],
+            "resume anchor recorded"
+        );
+
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::Upkeep);
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::Draw);
+
+        // Leaving the inserted draw step resumes after PostCombatMain → End.
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::End, "resumes after the anchor phase");
+        assert!(
+            state.extra_phase_resume.is_empty(),
+            "resume stack empties once the inserted phase completes"
+        );
+        assert!(state.extra_phases.is_empty());
+    }
+
+    /// CR 500.8: two "additional beginning phase" effects after the same anchor
+    /// run two full beginning phases in succession before the turn resumes.
+    #[test]
+    fn two_additional_beginning_phases_run_in_succession() {
+        use crate::game::turns::advance_phase;
+
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PostCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::Untap,
+            Phase::PostCombatMain,
+            vec![],
+            PlayerId(0),
+        );
+        // Two separate resolutions (e.g. two Sphinxes of the Second Sun).
+        resolve(&mut state, &ability, &mut events).unwrap();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.extra_phases.len(), 2);
+
+        let mut sequence = Vec::new();
+        // Drive to the resumed End step, recording each phase entered.
+        for _ in 0..8 {
+            advance_phase(&mut state, &mut events);
+            sequence.push(state.phase);
+            if state.phase == Phase::End {
+                break;
+            }
+        }
+        assert_eq!(
+            sequence,
+            vec![
+                Phase::Untap,
+                Phase::Upkeep,
+                Phase::Draw,
+                Phase::Untap,
+                Phase::Upkeep,
+                Phase::Draw,
+                Phase::End,
+            ],
+            "two full beginning phases then resume after the anchor"
+        );
+        assert!(state.extra_phase_resume.is_empty());
+        assert!(state.extra_phases.is_empty());
     }
 
     #[test]
@@ -507,5 +700,138 @@ mod tests {
         advance_phase(&mut state, &mut events);
         assert_eq!(state.phase, Phase::PostCombatMain);
         assert!(state.extra_phases.is_empty());
+    }
+
+    /// CR 501.1 + CR 500.8: "additional beginning phase after this phase"
+    /// resolving in a postcombat main phase schedules a beginning phase
+    /// (`phase: Untap`) anchored to that main phase (`last_step_of_phase`).
+    #[test]
+    fn additional_beginning_phase_anchors_to_resolving_main_phase() {
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PostCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::Untap,
+            // `after`/`followed_by` are don't-cares for the beginning-phase shape.
+            Phase::PostCombatMain,
+            vec![],
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.extra_phases,
+            vec![ep(Phase::PostCombatMain, Phase::Untap)]
+        );
+    }
+
+    /// CR 501.1 + CR 500.8: Cyclonus resolves during the combat damage step, so
+    /// the inserted beginning phase anchors to `EndCombat`
+    /// (`last_step_of_phase(CombatDamage)`).
+    #[test]
+    fn additional_beginning_phase_from_combat_anchors_to_end_combat() {
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::CombatDamage,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::Untap,
+            Phase::PostCombatMain,
+            vec![],
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.extra_phases, vec![ep(Phase::EndCombat, Phase::Untap)]);
+    }
+
+    /// CR 500.10a: the "you get" controller-restriction does NOT gate the "there
+    /// is an additional … phase" wording. Shadow of the Second Sun enchants
+    /// another player, so its controller differs from the active player, yet the
+    /// beginning phase is still added to the active player's turn in progress.
+    #[test]
+    fn additional_beginning_phase_ignores_cr_500_10a_controller_gate() {
+        let mut state = GameState {
+            active_player: PlayerId(1),
+            phase: Phase::PostCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        // Controller (0) != active player (1) — the CR 500.10a gate would drop an
+        // ordinary "you get" phase, but the beginning-phase branch schedules it.
+        let ability = make_ability(
+            TargetFilter::Controller,
+            Phase::Untap,
+            Phase::PostCombatMain,
+            vec![],
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.extra_phases,
+            vec![ep(Phase::PostCombatMain, Phase::Untap)]
+        );
+    }
+
+    /// CR 608.2h + CR 611.2c: Last Night Together — "Only the chosen creatures
+    /// can attack during that combat phase." The parser emits `ParentTarget`;
+    /// the resolver must snapshot the spell's chosen targets into a fixed
+    /// tracked set and stamp it onto the scheduled BeginCombat ExtraPhase.
+    #[test]
+    fn restricted_combat_concretizes_parent_target_to_tracked_set() {
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            phase: Phase::PreCombatMain,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+
+        let mut ability = make_ability(
+            TargetFilter::Controller,
+            Phase::BeginCombat,
+            Phase::PreCombatMain,
+            vec![],
+            PlayerId(0),
+        );
+        // Stamp the restriction + chosen targets exactly as the parser fold and
+        // `resolve_ability_chain` propagation would produce them.
+        ability.effect = Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::BeginCombat,
+            after: Phase::PreCombatMain,
+            followed_by: vec![],
+            count: QuantityExpr::Fixed { value: 1 },
+            attacker_restriction: Some(TargetFilter::ParentTarget),
+        };
+        ability.targets = vec![
+            TargetRef::Object(ObjectId(11)),
+            TargetRef::Object(ObjectId(22)),
+        ];
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.extra_phases.len(), 1);
+        let scheduled = &state.extra_phases[0];
+        assert_eq!(scheduled.phase, Phase::BeginCombat);
+        let set_id = match &scheduled.attacker_restriction {
+            Some(TargetFilter::TrackedSet { id }) => *id,
+            other => panic!("expected concretized TrackedSet restriction, got {other:?}"),
+        };
+        let members = state
+            .tracked_object_sets
+            .get(&set_id)
+            .expect("tracked set published at resolution");
+        assert_eq!(members, &vec![ObjectId(11), ObjectId(22)]);
     }
 }

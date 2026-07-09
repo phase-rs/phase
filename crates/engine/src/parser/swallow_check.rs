@@ -1101,6 +1101,23 @@ fn any_ability_has_instead_condition(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
+    // CR 609.4b + CR 608.2c: "if you cast a spell this way, you may spend mana as
+    // though it were mana of any type/color to cast it" folds onto the preceding
+    // `PlayFromExile` grant as `mana_spend_permission` (Outrageous Robbery,
+    // Brainstealer Dragon). The leading "if you cast a spell this way" is the
+    // back-reference scoping the concession to spells cast via that grant —
+    // represented by the field, not a swallowed condition.
+    if let Effect::GrantCastingPermission {
+        permission:
+            crate::types::ability::CastingPermission::PlayFromExile {
+                mana_spend_permission: Some(_),
+                ..
+            },
+        ..
+    } = &*def.effect
+    {
+        return true;
+    }
     if let Effect::Mana { grants, .. } = &*def.effect {
         if grants.iter().any(|grant| {
             matches!(
@@ -1648,6 +1665,14 @@ fn detect_dynamic_qty(
         // `SelfManaCost` precedent for Flashback/Scavenge "cost equal to its mana
         // cost" (Fblthp, Lost on the Range).
         "TopOfLibraryHasPlot",
+        // CR 702.143d: "Its foretell cost is equal to its mana cost reduced by
+        // {N}" — the derived cost is intrinsic to the granted keyword and is
+        // computed per recipient by `CostDerivation` (no stored `QuantityExpr`),
+        // so the `AddKeywordWithDerivedCost` continuous-modification variant is
+        // itself the coverage marker. Mirrors the `SelfManaCost` /
+        // `TopOfLibraryHasPlot` "cost equal to its mana cost" precedents.
+        // Singing Towers of Darillium class.
+        "AddKeywordWithDerivedCost",
         // CR 702.20a: "assigns combat damage equal to its toughness
         // rather than its power" — Brontodon class. Encoded as a typed
         // continuous-modification variant, not a quantity expression.
@@ -1675,6 +1700,13 @@ fn detect_dynamic_qty(
         // bodies are captured by `PlayerFilter::VotedFor`, which resolves
         // against the vote ballot ledger rather than a QuantityExpr.
         "VotedFor",
+        // CR 122.1 + CR 208.1: "puts a number of +1/+1 counters ... equal to the
+        // power of the second creature they chose" (Human—Time Lord Meta-Crisis)
+        // is captured whole by `Effect::EachPlayerCopyChosen`'s `scale` clause
+        // (`scale_property` read live at placement), not a stored `QuantityExpr`.
+        // The variant name is the coverage marker, mirroring
+        // `EachDealsDamageEqualToPower`.
+        "EachPlayerCopyChosen",
     ];
     if json_has_any(ast_json, dynamic_markers) {
         return;
@@ -2525,12 +2557,25 @@ fn detect_condition_if(
         // CR 614.1a: AddTargetReplacement encodes the "if [target] would die"
         // gate via the carried ReplacementDefinition's event/destination_zone.
         "AddTargetReplacement",
+        // CR 614.1a + CR 901.9c: CreatePlaneswalkReplacement encodes the "if a
+        // player would planeswalk as a result of rolling the planar die,
+        // [effect] instead" gate (Fixed Point in Time). Its presence IS the
+        // conditional-replacement representation — the leading "if" is a marker,
+        // not a swallowed condition.
+        "\"type\":\"CreatePlaneswalkReplacement\"",
         // CR 508.1d / CR 509.1c / CR 506.6: must-attack and must-block "if able"
         // riders are encoded as static-mode constraints or as
         // `ForceBlock`/`ForceAttack` effects, not conditional gates.
         "\"mode\":\"MustAttack\"",
         "\"mode\":\"MustBlock\"",
-        "\"mode\":\"MustBeBlocked\"",
+        // `MustBeBlocked` is data-carrying (`MustBeBlocked { by: Option<_> }`).
+        // The `by` field has no `skip_serializing_if`, so serde emits the object
+        // form `{"MustBeBlocked":{"by":...}}` for BOTH shapes: `{"by":null}` for
+        // the bare "must be blocked if able" rider (`by: None`) and
+        // `{"by":{...}}` for typed riders (Ace's Baseball Bat, Slayer's Cleaver).
+        // Match the quoted variant key `"MustBeBlocked"`, which is common to both
+        // serializations, so both suppress the "if able" Condition_If marker.
+        "\"MustBeBlocked\"",
         "\"type\":\"ForceBlock\"",
         "\"type\":\"ForceAttack\"",
         // CR 305.9: "as ~ enters, you may pay X. If you don't, it enters
@@ -2770,6 +2815,19 @@ fn detect_condition_unless(
         // — the `unless_payment` marker has been retired.
     ];
     if json_has_any(ast_json, markers) {
+        return;
+    }
+    // CR 508.1f + CR 701.26a: "... can't become tapped unless [they're/it's]
+    // being declared as attackers." The attacker-declaration exemption is
+    // inherent to the tap keyword action — CR 508.1f states that tapping a
+    // creature as it's declared an attacker isn't a cost, so a modeled
+    // `StaticMode::CantTap` restriction already permits that tap with no extra
+    // AST slot. The unless clause is therefore fully modeled, not swallowed.
+    // Class-general: recognizes any goad-lock printing of this exemption whose
+    // tap restriction lowered to a `CantTap` static (Ood Sphere's Red-Eye).
+    let declared_as_attacker_exemption = cleaned.contains("declared as an attacker") // allow-noncombinator: swallow detector marker scan on classified text
+        || cleaned.contains("declared as attackers"); // allow-noncombinator: swallow detector marker scan on classified text
+    if declared_as_attacker_exemption && json_has_any(ast_json, &["\"CantTap\""]) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
@@ -3132,7 +3190,7 @@ fn detect_duration_this_turn(
         // intervening-if condition consumes the "this turn" scope (Avatar Aang).
         "BendTypesThisTurn",
         "OpponentLostLife",
-        "OpponentDealtCombatDamage",
+        "OpponentDealtDamage",
         // CR 611.3: a condition slot serialized as the typed `Unrecognized`
         // marker means the parser routed the "as long as ... this turn" clause
         // INTO a condition slot (and explicitly recorded that it could not
@@ -3440,8 +3498,8 @@ fn effect_name(effect: &Effect) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_swallowed_clauses, def_tree_has_optional, def_tree_has_unimplemented,
-        trigger_tree_has_optional,
+        any_ability_has_unimplemented, check_swallowed_clauses, def_tree_has_optional,
+        def_tree_has_unimplemented, trigger_tree_has_optional,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -4466,6 +4524,54 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
     }
 
+    /// CR 509.1c: "must be blocked if able" riders are represented by
+    /// `StaticMode::MustBeBlocked { by }`, so the trailing "if able" must not be
+    /// reported as a swallowed `Condition_If`. The `by` field has no
+    /// `skip_serializing_if`, so serde emits the object form for BOTH shapes:
+    /// `{"MustBeBlocked":{"by":null}}` for the bare rider (`by: None`, Gaea's
+    /// Protector) and `{"MustBeBlocked":{"by":{...}}}` for the typed form
+    /// (`by: Some(filter)`, Slayer's Cleaver). The suppression marker matches the
+    /// quoted variant key `"MustBeBlocked"` common to both serializations.
+    #[test]
+    fn condition_if_accepts_must_be_blocked_rider() {
+        let bare = parse_named(
+            "This creature must be blocked if able.",
+            "Gaea's Protector",
+            &["Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&bare, "Condition_If"),
+            "bare must-be-blocked static must not report Condition_If: {:?}",
+            bare.parse_warnings
+        );
+        assert!(
+            bare.statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::MustBeBlocked { by: None })),
+            "expected bare MustBeBlocked static, got {:?}",
+            bare.statics
+        );
+
+        let typed = parse_named(
+            "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.\nEquip {4}",
+            "Slayer's Cleaver",
+            &["Artifact"],
+        );
+        assert!(
+            !has_swallowed_detector(&typed, "Condition_If"),
+            "typed must-be-blocked static must not report Condition_If: {:?}",
+            typed.parse_warnings
+        );
+        assert!(
+            typed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::MustBeBlocked { by: Some(_) })),
+            "expected typed MustBeBlocked static, got {:?}",
+            typed.statics
+        );
+    }
+
     #[test]
     fn condition_if_accepts_tiered_enters_with_counter_static() {
         let parsed = parse_named(
@@ -5206,6 +5312,31 @@ mod tests {
         }
     }
 
+    /// CR 508.1f + CR 701.26a (Ood Sphere Red-Eye): "... can't become tapped
+    /// unless they're being declared as attackers." The attacker-declaration
+    /// exemption is inherent to a modeled `CantTap` static, so the unless clause
+    /// is fully represented and must NOT flag Condition_Unless. Guard against a
+    /// suppression false-positive: the card must have zero Unimplemented so the
+    /// detector actually runs (not skipped via `any_ability_has_unimplemented`).
+    #[test]
+    fn condition_unless_accepts_declared_as_attackers_cant_tap_exemption() {
+        let parsed = parse_named(
+            "Whenever chaos ensues, for each opponent, goad up to one target creature that opponent controls. Until your next turn, those creatures can't become tapped unless they're being declared as attackers.",
+            "Red-Eye",
+            &["Plane"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "Red-Eye must fully parse for the detector to run: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_Unless"),
+            "declared-as-attackers CantTap exemption must not flag Condition_Unless: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     /// CR 701.20a + CR 604.3: Reveal-until chosen-type and shares-a-type filters
     /// must parse without any swallowed-clause warnings (Riptide Shapeshifter,
     /// Heirloom Blade).
@@ -5618,6 +5749,29 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
              You may plot nonland cards from the top of your library.",
             "Fblthp, Lost on the Range",
             &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.143d: Singing Towers of Darillium grants foretell whose cost is
+    /// "equal to its mana cost reduced by {2}". That derived cost is intrinsic to
+    /// the `AddKeywordWithDerivedCost` continuous modification (computed per
+    /// recipient via `CostDerivation`, no stored `QuantityExpr`), so the
+    /// " equal to " marker must NOT raise a DynamicQty swallow warning — the
+    /// modification's presence is the carrier (mirrors the `SelfManaCost` /
+    /// `TopOfLibraryHasPlot` precedents). Reverting the marker re-reds this card.
+    #[test]
+    fn dynamic_qty_accepts_foretell_cost_equal_to_mana_cost_reduced() {
+        let parsed = parse_named(
+            "Each nonland card in your hand without foretell has foretell. \
+             Its foretell cost is equal to its mana cost reduced by {2}. \
+             (During your turn, you may pay {2} and exile it from your hand \
+             face down. Cast it on a later turn for its foretell cost.)\n\
+             Whenever chaos ensues, you may cast a foretold card you own from \
+             exile without paying its mana cost this turn.",
+            "Singing Towers of Darillium",
+            &["Plane"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
